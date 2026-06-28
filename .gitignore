@@ -18,6 +18,8 @@ venv/
 env/
 .uv/
 
+.agents/skills/
+
 build/
 dist/
 *.egg-info/
