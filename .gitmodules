@@ -1,0 +1,9 @@
+[submodule "train/rwkv-lm"]
+	path = train/rwkv-lm
+	url = https://github.com/rwkv-rs/rwkv-lm
+[submodule "train/verl-rwkv"]
+	path = train/verl-rwkv
+	url = https://github.com/rwkv-rs/verl-rwkv.git
+[submodule "infer/vllm-rwkv"]
+	path = infer/vllm-rwkv
+	url = https://github.com/rwkv-rs/vllm-rwkv
