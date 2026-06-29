@@ -1,0 +1,10 @@
+# See https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+* @Cai-z-us
+
+/.github/ @Cai-z-us
+/scripts/ @Cai-z-us
+/src/ @Cai-z-us
+/tests/ @Cai-z-us
+/configs/ @Cai-z-us
+/pyproject.toml @Cai-z-us
