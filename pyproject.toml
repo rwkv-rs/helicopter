@@ -106,6 +106,7 @@ rwkv = [
   "torchdata",
   "torchvision==0.26.0",
   "tqdm",
+  "transferqueue==0.1.8",
   "transformers>=5.5.3,!=5.6.0",
   "typing-extensions>=4.10",
   "uvicorn",
@@ -120,7 +121,6 @@ full = [
   "liger-kernel",
   "math-verify",
   "pre-commit",
-  "transferqueue==0.1.8",
 ]
 
 [tool.uv]
