@@ -41,11 +41,6 @@ run() {
   [[ "${DRY_RUN:-0}" == "1" ]] || "$@"
 }
 
-try_run() {
-  print_cmd "$@"
-  [[ "${DRY_RUN:-0}" == "1" ]] || "$@"
-}
-
 have() {
   command -v "$1" >/dev/null 2>&1
 }
@@ -97,7 +92,7 @@ ensure_uv() {
   fi
 
   if [[ "$UPDATE_UV" == "1" ]]; then
-    try_run "$UV" self update || warn "uv self update failed; continuing with installed uv"
+    run "$UV" self update || warn "uv self update failed; continuing with installed uv"
   fi
 }
 
@@ -267,12 +262,6 @@ install_verl_package() {
   run "${pip[@]}" --no-deps -e "$VERL"
 }
 
-install_local_packages() {
-  install_vllm_package
-  install_rwkv_lm_package
-  install_verl_package
-}
-
 configure_network
 configure_build_dirs
 ensure_uv
@@ -280,7 +269,9 @@ check_compiler_env
 sync_uv_env
 check_native_env
 check_cuda_env
-install_local_packages
+install_vllm_package
+install_rwkv_lm_package
+install_verl_package
 
 if [[ "$RUN_PIP_CHECK" == "1" ]]; then
   run "$UV" pip check --project "$ROOT" --python "$VENV/bin/python"
