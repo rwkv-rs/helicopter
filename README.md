@@ -134,7 +134,8 @@ Start the server:
 helicopter infer --config configs/example.toml g1g-1.5b
 ```
 
-Override serving parameters from the CLI:
+Override serving parameters from the CLI when an experiment explicitly needs
+them:
 
 ```bash
 helicopter infer g1g-7.2b \
@@ -146,13 +147,12 @@ helicopter infer g1g-7.2b \
   --max-num-batched-tokens 65536
 ```
 
-RWKV vLLM environment defaults can come from `.env.local`, `.env.remote`, or the
-command environment:
+RWKV vLLM uses upstream defaults by default. For RWKV7, set only WKV mode unless
+you are debugging a specific vLLM issue. GRPO `takeoff` keeps embedding
+preprocessing on GPU with `HELICOPTER_TAKEOFF_EMB_DEVICE=gpu`:
 
 ```bash
-VLLM_RWKV7_WKV_MODE=fp16 \
-VLLM_RWKV7_EMB_DEVICE=gpu \
-helicopter infer g1g-1.5b
+VLLM_RWKV7_WKV_MODE=fp32io16 helicopter infer g1g-1.5b
 ```
 
 ### Start GRPO takeoff training
@@ -176,7 +176,7 @@ helicopter takeoff \
   g1g-1.5b grpo
 ```
 
-Pass extra Hydra overrides to the underlying verl script:
+Pass extra Hydra overrides to the underlying verl entrypoint:
 
 ```bash
 helicopter takeoff g1g-1.5b grpo \
@@ -201,14 +201,8 @@ WEIGHT_PATH=/workspace/Weights/RWKV
 DATASETS_PATH=/workspace/Datasets
 HELICOPTER_NUM_NODES=1
 HELICOPTER_NUM_DEVICES=8
-HELICOPTER_INFER_WKV_MODE=fp16
-HELICOPTER_INFER_EMB_DEVICE=gpu
 HELICOPTER_TAKEOFF_WKV_MODE=fp32io16
-HELICOPTER_TAKEOFF_EMB_DEVICE=cpu
-VLLM_USE_V2_MODEL_RUNNER=1
-VLLM_RWKV7_RKV_MODE=off
-VLLM_RWKV7_CMIX_SPARSE=no-fc
-VLLM_RWKV7_LOW_RANK_WEIGHT=both
+HELICOPTER_TAKEOFF_EMB_DEVICE=gpu
 ```
 
 Keep checkpoint files, datasets, `.env.local`, `.env.remote`, and machine-local
