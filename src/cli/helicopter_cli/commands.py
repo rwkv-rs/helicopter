@@ -18,6 +18,7 @@ VLLM_INFER_RUNTIME_ENV_KEYS = frozenset(
     {
         "VLLM_ENABLE_V1_MULTIPROCESSING",
         "VLLM_USE_V2_MODEL_RUNNER",
+        "VLLM_WSL2_ENABLE_PIN_MEMORY",
     }
 )
 
