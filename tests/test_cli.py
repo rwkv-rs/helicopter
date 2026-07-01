@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import importlib
 import json
 import os
+import sys
 import tempfile
 import unittest
 from argparse import Namespace
@@ -187,6 +189,30 @@ class DotenvTests(unittest.TestCase):
 
             self.assertEqual(path, root / ".env.local")
             self.assertEqual(loaded_env["WEIGHT_PATH"], "/from-env")
+
+
+class ScoreboardImportTests(unittest.TestCase):
+    def test_scoreboard_db_import_does_not_require_fastapi(self) -> None:
+        scoreboard_root = str(ROOT / "src/scoreboard-server")
+        original_path = list(sys.path)
+        old_modules = {
+            name: module
+            for name, module in sys.modules.items()
+            if name == "scoreboard_server" or name.startswith("scoreboard_server.")
+        }
+        for name in old_modules:
+            sys.modules.pop(name, None)
+        sys.path.insert(0, scoreboard_root)
+        try:
+            with mock.patch.dict(sys.modules, {"fastapi": None}):
+                module = importlib.import_module("scoreboard_server.db.connection")
+            self.assertTrue(hasattr(module, "init_db"))
+        finally:
+            for name in list(sys.modules):
+                if name == "scoreboard_server" or name.startswith("scoreboard_server."):
+                    sys.modules.pop(name, None)
+            sys.modules.update(old_modules)
+            sys.path[:] = original_path
 
 
 class ConfigResolutionTests(unittest.TestCase):
