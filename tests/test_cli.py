@@ -26,6 +26,7 @@ from helicopter_eval import (
     instruction_following,
     longbench,
     longcodeqa,
+    mcp_bench,
     multiple_choice,
     toolalpaca,
     translation,
@@ -572,6 +573,10 @@ class CommandPlanTests(unittest.TestCase):
                 "longbench_qa_balanced",
                 "agentbench_db",
                 "agentbench_kg",
+                "mcp_bench",
+                "mcp_bench_single",
+                "mcp_bench_multi_2server",
+                "mcp_bench_multi_3server",
                 "browsecomp",
                 "browsecomp_zh",
                 "apibank_l1",
@@ -626,6 +631,11 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(specs["agentbench_db"].kind, "agentbench")
         self.assertEqual(specs["agentbench_db"].source_type, "agentbench_official")
         self.assertEqual(specs["agentbench_kg"].dataset_name, "agentbench_kg")
+        self.assertEqual(specs["mcp_bench"].kind, "mcp_bench")
+        self.assertEqual(specs["mcp_bench"].source_type, "mcp_bench_official")
+        self.assertEqual(specs["mcp_bench_single"].dataset_name, "mcp_bench_single")
+        self.assertEqual(specs["mcp_bench_multi_2server"].dataset_name, "mcp_bench_multi_2server")
+        self.assertEqual(specs["mcp_bench_multi_3server"].dataset_name, "mcp_bench_multi_3server")
         self.assertEqual(specs["browsecomp"].kind, "browsecomp")
         self.assertEqual(specs["browsecomp"].source_type, "browsecomp_csv")
         self.assertEqual(specs["browsecomp_zh"].source_type, "browsecomp_zh_xlsx")
@@ -683,10 +693,10 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         payload = print_json.call_args.args[0]
         self.assertEqual(payload["count"], 95)
-        self.assertEqual(payload["status_counts"]["implemented"], 72)
+        self.assertEqual(payload["status_counts"]["implemented"], 76)
         self.assertEqual(payload["status_counts"].get("needs_dataset_adapter", 0), 0)
         self.assertEqual(payload["status_counts"]["needs_dataset_access"], 2)
-        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 21)
+        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 17)
 
     def test_run_catalog_human_eval_dry_run_uses_code_generation_runner(self) -> None:
         args = Namespace(
@@ -1082,6 +1092,60 @@ class CommandPlanTests(unittest.TestCase):
 
         self.assertIn("final_answer", prompt)
         self.assertEqual(message, {"role": "assistant", "content": "Final Answer: #42"})
+
+    def test_mcp_bench_loads_manifest_for_dry_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "test.jsonl"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "task_id": "task-1",
+                        "instruction": "Use a tool.",
+                        "task_file": "mcpbench_tasks_single_runner_format.json",
+                        "server_name": "Demo Server",
+                        "combination_name": "Single Server: Demo",
+                        "combination_type": "single_server",
+                        "servers": ["Demo Server"],
+                        "runtime_root": str(root),
+                        "tasks_root": str(root / "tasks"),
+                        "task": {
+                            "task_id": "task-1",
+                            "task_description": "Use a tool.",
+                            "fuzzy_description": "Please use a tool.",
+                            "dependency_analysis": "",
+                            "distraction_servers": [],
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            config = mcp_bench.McpBenchRunConfig(
+                base_url="http://127.0.0.1:29082",
+                model="rwkv7-g1d-0.4b-20260210-ctx8192",
+                benchmark="mcp_bench_single",
+                dataset_name="mcp_bench_single",
+                source_path=str(manifest),
+                runtime_root=str(root),
+            )
+
+            payload = mcp_bench.dry_run_summary(config)
+
+        self.assertEqual(payload["available_samples"], 1)
+        self.assertEqual(payload["scoreboard_dataset"], "mcp_bench_single_test")
+        self.assertFalse(payload["runtime_ready"])
+        self.assertIn("Demo Server", payload["checked_servers"])
+
+    def test_mcp_bench_parses_tool_and_final_answer_decisions(self) -> None:
+        tool_decision = mcp_bench.parse_planning_decision('{"name":"Demo Server:lookup","arguments":{"q":"x"}}')
+        final_decision = mcp_bench.parse_planning_decision('{"name":"final_answer","arguments":{"answer":"done"}}')
+
+        self.assertTrue(tool_decision.should_continue)
+        self.assertEqual(tool_decision.tool_calls[0].server, "Demo Server")
+        self.assertEqual(tool_decision.tool_calls[0].tool, "lookup")
+        self.assertFalse(final_decision.should_continue)
+        self.assertEqual(final_decision.final_answer, "done")
 
     def test_toolalpaca_loads_official_source_and_scores_request(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

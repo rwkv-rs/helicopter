@@ -14,6 +14,7 @@ RunKind = Literal[
     "longbench",
     "arena_hard",
     "agentbench",
+    "mcp_bench",
     "browsecomp",
     "browsecomp_plus",
     "apibank",
@@ -314,6 +315,38 @@ _DIRECT_HF_SPECS: dict[str, dict[str, Any]] = {
         "job_name": "function_longbench",
         "max_tokens": 128,
         "reason": "hf_longbench_qa_round_robin_em_f1",
+    },
+    "mcp_bench": {
+        "kind": "mcp_bench",
+        "source_type": "mcp_bench_official",
+        "dataset_name": "mcp_bench",
+        "job_name": "function_mcp_bench",
+        "max_tokens": 1024,
+        "reason": "official_mcp_bench_runtime_judged",
+    },
+    "mcp_bench_single": {
+        "kind": "mcp_bench",
+        "source_type": "mcp_bench_official",
+        "dataset_name": "mcp_bench_single",
+        "job_name": "function_mcp_bench",
+        "max_tokens": 1024,
+        "reason": "official_mcp_bench_runtime_judged",
+    },
+    "mcp_bench_multi_2server": {
+        "kind": "mcp_bench",
+        "source_type": "mcp_bench_official",
+        "dataset_name": "mcp_bench_multi_2server",
+        "job_name": "function_mcp_bench",
+        "max_tokens": 1024,
+        "reason": "official_mcp_bench_runtime_judged",
+    },
+    "mcp_bench_multi_3server": {
+        "kind": "mcp_bench",
+        "source_type": "mcp_bench_official",
+        "dataset_name": "mcp_bench_multi_3server",
+        "job_name": "function_mcp_bench",
+        "max_tokens": 1024,
+        "reason": "official_mcp_bench_runtime_judged",
     },
     "browsecomp": {
         "kind": "browsecomp",
@@ -895,6 +928,12 @@ def dry_run_catalog_spec(
     model: str,
     limit: int | None,
     agentbench_controller_url: str | None = None,
+    mcp_runtime_root: str | None = None,
+    mcp_worker_script: str | None = None,
+    mcp_max_rounds: int | None = None,
+    judge_base_url: str | None = None,
+    judge_model: str | None = None,
+    judge_api_key: str | None = None,
 ) -> dict[str, Any]:
     if spec.status != "implemented" or spec.kind is None:
         raise RuntimeError(f"{spec.benchmark} is not runnable yet: {spec.reason}")
@@ -904,6 +943,12 @@ def dry_run_catalog_spec(
         model=model,
         limit=limit,
         agentbench_controller_url=agentbench_controller_url,
+        mcp_runtime_root=mcp_runtime_root,
+        mcp_worker_script=mcp_worker_script,
+        mcp_max_rounds=mcp_max_rounds,
+        judge_base_url=judge_base_url,
+        judge_model=judge_model,
+        judge_api_key=judge_api_key,
     )
     if spec.kind == "free_response":
         from .free_response import dry_run_summary
@@ -931,6 +976,10 @@ def dry_run_catalog_spec(
         return dry_run_summary(config)
     if spec.kind == "agentbench":
         from .agentbench import dry_run_summary
+
+        return dry_run_summary(config)
+    if spec.kind == "mcp_bench":
+        from .mcp_bench import dry_run_summary
 
         return dry_run_summary(config)
     if spec.kind == "browsecomp":
@@ -982,6 +1031,12 @@ def run_catalog_spec(
     limit: int | None,
     repo_root: Path,
     agentbench_controller_url: str | None = None,
+    mcp_runtime_root: str | None = None,
+    mcp_worker_script: str | None = None,
+    mcp_max_rounds: int | None = None,
+    judge_base_url: str | None = None,
+    judge_model: str | None = None,
+    judge_api_key: str | None = None,
 ) -> dict[str, Any]:
     if spec.status != "implemented" or spec.kind is None:
         raise RuntimeError(f"{spec.benchmark} is not runnable yet: {spec.reason}")
@@ -991,6 +1046,12 @@ def run_catalog_spec(
         model=model,
         limit=limit,
         agentbench_controller_url=agentbench_controller_url,
+        mcp_runtime_root=mcp_runtime_root,
+        mcp_worker_script=mcp_worker_script,
+        mcp_max_rounds=mcp_max_rounds,
+        judge_base_url=judge_base_url,
+        judge_model=judge_model,
+        judge_api_key=judge_api_key,
     )
     if spec.kind == "free_response":
         from .free_response import run_free_response
@@ -1020,6 +1081,10 @@ def run_catalog_spec(
         from .agentbench import run_agentbench
 
         return run_agentbench(config, repo_root=repo_root)
+    if spec.kind == "mcp_bench":
+        from .mcp_bench import run_mcp_bench
+
+        return run_mcp_bench(config, repo_root=repo_root)
     if spec.kind == "browsecomp":
         from .browsecomp import run_browsecomp
 
@@ -1068,6 +1133,12 @@ def _run_config(
     model: str,
     limit: int | None,
     agentbench_controller_url: str | None = None,
+    mcp_runtime_root: str | None = None,
+    mcp_worker_script: str | None = None,
+    mcp_max_rounds: int | None = None,
+    judge_base_url: str | None = None,
+    judge_model: str | None = None,
+    judge_api_key: str | None = None,
 ) -> Any:
     if spec.kind == "free_response":
         from .free_response import FreeResponseRunConfig
@@ -1229,6 +1300,29 @@ def _run_config(
             max_tokens=int(spec.max_tokens or 1024),
             scoreboard_dataset=spec.dataset_slug,
             job_name=spec.job_name or "function_agentbench",
+            job_id=f"helicopter-{spec.benchmark}",
+            runner="helicopter_eval.catalog_runner",
+        )
+    if spec.kind == "mcp_bench":
+        from .mcp_bench import McpBenchRunConfig
+
+        return McpBenchRunConfig(
+            base_url=base_url,
+            model=model,
+            benchmark=spec.benchmark,
+            dataset_name=str(spec.dataset_name),
+            limit=limit,
+            split=str(spec.source_split),
+            runtime_root=mcp_runtime_root,
+            worker_script=mcp_worker_script,
+            judge_base_url=judge_base_url,
+            judge_model=judge_model,
+            judge_api_key=judge_api_key,
+            max_rounds=int(mcp_max_rounds or 8),
+            decision_max_tokens=int(spec.max_tokens or 1024),
+            final_max_tokens=int(spec.max_tokens or 1024),
+            scoreboard_dataset=spec.dataset_slug,
+            job_name=spec.job_name or "function_mcp_bench",
             job_id=f"helicopter-{spec.benchmark}",
             runner="helicopter_eval.catalog_runner",
         )

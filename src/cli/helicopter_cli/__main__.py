@@ -194,6 +194,12 @@ def handle_eval_run_catalog(args: argparse.Namespace, *, root: Any, **_: Any) ->
         "model": str(args.model or defaults.model_name),
         "limit": args.limit,
         "agentbench_controller_url": getattr(args, "agentbench_controller_url", None),
+        "mcp_runtime_root": getattr(args, "mcp_runtime_root", None),
+        "mcp_worker_script": getattr(args, "mcp_worker_script", None),
+        "mcp_max_rounds": getattr(args, "mcp_max_rounds", None),
+        "judge_base_url": getattr(args, "judge_base_url", None),
+        "judge_model": getattr(args, "judge_model", None),
+        "judge_api_key": getattr(args, "judge_api_key", None),
     }
     payload = (
         dry_run_catalog_spec(spec, **kwargs)
@@ -343,6 +349,12 @@ def build_parser() -> argparse.ArgumentParser:
     eval_run_catalog.add_argument("--model", help="served model name")
     eval_run_catalog.add_argument("--limit", type=int)
     eval_run_catalog.add_argument("--agentbench-controller-url", help="AgentBench controller API URL")
+    eval_run_catalog.add_argument("--mcp-runtime-root", help="MCP-Bench official runtime root")
+    eval_run_catalog.add_argument("--mcp-worker-script", help="MCP-Bench worker script path")
+    eval_run_catalog.add_argument("--mcp-max-rounds", type=int, help="maximum MCP planning rounds")
+    eval_run_catalog.add_argument("--judge-base-url", help="OpenAI-compatible judge base URL")
+    eval_run_catalog.add_argument("--judge-model", help="judge model name")
+    eval_run_catalog.add_argument("--judge-api-key", help="judge API key")
     eval_run_catalog.set_defaults(handler=handle_eval_run_catalog)
 
     eval_run_free_response = eval_subparsers.add_parser(
