@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -22,6 +23,7 @@ from helicopter_eval import (
     longbench,
     longcodeqa,
     multiple_choice,
+    toolalpaca,
 )
 
 
@@ -569,6 +571,8 @@ class CommandPlanTests(unittest.TestCase):
                 "bfcl_exec_multiple_ast",
                 "bfcl_exec_simple",
                 "bfcl_exec_parallel_multiple",
+                "toolalpaca_eval_simulated",
+                "toolalpaca_eval_real",
             )
         }
 
@@ -616,6 +620,9 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(specs["bfcl_exec_simple"].kind, "bfcl_exec")
         self.assertEqual(specs["bfcl_exec_simple"].row_adapter, "exec_simple")
         self.assertEqual(specs["bfcl_exec_parallel_multiple"].row_adapter, "exec_parallel_multiple")
+        self.assertEqual(specs["toolalpaca_eval_simulated"].kind, "toolalpaca")
+        self.assertEqual(specs["toolalpaca_eval_simulated"].source_type, "toolalpaca_git")
+        self.assertEqual(specs["toolalpaca_eval_real"].row_adapter, "eval_real")
 
     def test_run_catalog_gsm8k_dry_run_uses_rwkv_dataset_slug(self) -> None:
         args = Namespace(
@@ -655,10 +662,10 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         payload = print_json.call_args.args[0]
         self.assertEqual(payload["count"], 95)
-        self.assertEqual(payload["status_counts"]["implemented"], 62)
+        self.assertEqual(payload["status_counts"]["implemented"], 64)
         self.assertEqual(payload["status_counts"].get("needs_dataset_adapter", 0), 0)
         self.assertEqual(payload["status_counts"]["needs_dataset_access"], 1)
-        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 32)
+        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 30)
 
     def test_run_catalog_human_eval_dry_run_uses_code_generation_runner(self) -> None:
         args = Namespace(
@@ -982,6 +989,84 @@ class CommandPlanTests(unittest.TestCase):
                 ),
             )[:2],
             (True, ""),
+        )
+
+    def test_run_catalog_toolalpaca_dry_run_uses_runner(self) -> None:
+        args = Namespace(
+            dry_run=True,
+            benchmark="toolalpaca_eval_simulated",
+            base_url=None,
+            model=None,
+            limit=2,
+        )
+
+        with mock.patch.object(cli_main, "print_json") as print_json:
+            rc = cli_main.handle_eval_run_catalog(args, root=ROOT)
+
+        self.assertEqual(rc, 0)
+        payload = print_json.call_args.args[0]
+        self.assertEqual(payload["benchmark"], "toolalpaca_eval_simulated")
+        self.assertEqual(payload["source_dataset"], "toolalpaca_eval_simulated")
+        self.assertEqual(payload["scoreboard_dataset"], "toolalpaca_eval_simulated_test_limit2")
+        self.assertEqual(payload["job_name"], "function_toolalpaca")
+
+    def test_toolalpaca_loads_official_source_and_scores_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source_root = Path(tmp)
+            payload = [
+                {
+                    "Name": "DemoAPI",
+                    "Documentation": json.dumps(
+                        {
+                            "servers": [{"url": "https://example.test"}],
+                            "paths": {
+                                "/lookup": {
+                                    "get": {
+                                        "parameters": [
+                                            {
+                                                "name": "query",
+                                                "in": "query",
+                                                "required": True,
+                                                "schema": {"type": "string"},
+                                            }
+                                        ]
+                                    }
+                                }
+                            },
+                        }
+                    ),
+                    "Function_Description": {
+                        "lookup": (
+                            "Lookup a value.\n"
+                            'Parameters: {"query": "Required. String. Search query."}\n'
+                            "Output: object"
+                        )
+                    },
+                    "Function_Projection": {"lookup": ["/lookup", "get"]},
+                    "Instructions": ["Look up alpha"],
+                    "Golden_Answers": [[{"Action": "lookup", "Action_Input": '{"query":"alpha"}'}]],
+                }
+            ]
+            (source_root / "eval_simulated.json").write_text(json.dumps(payload), encoding="utf-8")
+            (source_root / "eval_real.json").write_text(json.dumps(payload), encoding="utf-8")
+            config = toolalpaca.ToolAlpacaRunConfig(
+                base_url="http://127.0.0.1:29082",
+                model="rwkv7-g1d-0.4b-20260210-ctx8192",
+                benchmark="toolalpaca_eval_simulated",
+                dataset_name="toolalpaca_eval_simulated",
+                source_root=str(source_root),
+            )
+
+            sample = toolalpaca.load_samples(config)[0]
+
+        self.assertEqual(sample.task_id, "toolalpaca_eval_simulated__demoapi_000")
+        self.assertEqual(
+            toolalpaca.evaluate_completion(sample, '[{"name":"lookup","arguments":{"query":"alpha"}}]')[:2],
+            (True, ""),
+        )
+        self.assertEqual(
+            toolalpaca.evaluate_completion(sample, '[{"name":"lookup","arguments":{"query":"beta"}}]')[:1],
+            (False,),
         )
 
     def test_multiple_choice_normalizes_list_and_arc_choices(self) -> None:

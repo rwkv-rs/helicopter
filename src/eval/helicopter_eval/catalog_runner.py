@@ -16,6 +16,7 @@ RunKind = Literal[
     "apibank",
     "bfcl_ast",
     "bfcl_exec",
+    "toolalpaca",
 ]
 
 
@@ -417,6 +418,24 @@ _DIRECT_HF_SPECS: dict[str, dict[str, Any]] = {
         "job_name": "function_bfcl_exec",
         "max_tokens": 768,
         "reason": "official_bfcl_v4_exec",
+    },
+    "toolalpaca_eval_simulated": {
+        "kind": "toolalpaca",
+        "source_type": "toolalpaca_git",
+        "dataset_name": "toolalpaca_eval_simulated",
+        "row_adapter": "eval_simulated",
+        "job_name": "function_toolalpaca",
+        "max_tokens": 1024,
+        "reason": "official_toolalpaca_request_execution",
+    },
+    "toolalpaca_eval_real": {
+        "kind": "toolalpaca",
+        "source_type": "toolalpaca_git",
+        "dataset_name": "toolalpaca_eval_real",
+        "row_adapter": "eval_real",
+        "job_name": "function_toolalpaca",
+        "max_tokens": 1024,
+        "reason": "official_toolalpaca_request_execution",
     },
     "amc23": {
         "kind": "free_response",
@@ -830,6 +849,10 @@ def dry_run_catalog_spec(
         from .bfcl_exec import dry_run_summary
 
         return dry_run_summary(config)
+    if spec.kind == "toolalpaca":
+        from .toolalpaca import dry_run_summary
+
+        return dry_run_summary(config)
     from .multiple_choice import dry_run_summary
 
     return dry_run_summary(config)
@@ -882,6 +905,10 @@ def run_catalog_spec(
         from .bfcl_exec import run_bfcl_exec
 
         return run_bfcl_exec(config, repo_root=repo_root)
+    if spec.kind == "toolalpaca":
+        from .toolalpaca import run_toolalpaca
+
+        return run_toolalpaca(config, repo_root=repo_root)
     from .multiple_choice import run_multiple_choice
 
     return run_multiple_choice(config, repo_root=repo_root)
@@ -1081,6 +1108,22 @@ def _run_config(spec: CatalogRunSpec, *, base_url: str, model: str, limit: int |
             max_tokens=int(spec.max_tokens or 768),
             scoreboard_dataset=spec.dataset_slug,
             job_name=spec.job_name or "function_bfcl_exec",
+            job_id=f"helicopter-{spec.benchmark}",
+            runner="helicopter_eval.catalog_runner",
+        )
+    if spec.kind == "toolalpaca":
+        from .toolalpaca import ToolAlpacaRunConfig
+
+        return ToolAlpacaRunConfig(
+            base_url=base_url,
+            model=model,
+            benchmark=spec.benchmark,
+            dataset_name=str(spec.dataset_name),
+            limit=limit,
+            split=str(spec.source_split),
+            max_tokens=int(spec.max_tokens or 1024),
+            scoreboard_dataset=spec.dataset_slug,
+            job_name=spec.job_name or "function_toolalpaca",
             job_id=f"helicopter-{spec.benchmark}",
             runner="helicopter_eval.catalog_runner",
         )
