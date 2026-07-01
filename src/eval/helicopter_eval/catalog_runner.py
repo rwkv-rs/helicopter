@@ -12,6 +12,7 @@ RunKind = Literal[
     "code_generation",
     "longcodeqa",
     "longbench",
+    "arena_hard",
     "browsecomp",
     "browsecomp_plus",
     "apibank",
@@ -342,6 +343,16 @@ _DIRECT_HF_SPECS: dict[str, dict[str, Any]] = {
         "job_name": "function_browsecomp_plus",
         "max_tokens": 1024,
         "reason": "official_browsecomp_plus_tool_loop",
+    },
+    "arena_hard_v2": {
+        "kind": "arena_hard",
+        "source_type": "arena_hard_url",
+        "dataset_name": "arena_hard",
+        "source_url": "https://raw.githubusercontent.com/lm-sys/arena-hard-auto/main/data/arena-hard-v0.1/question.jsonl",
+        "source_split": "test",
+        "job_name": "instruction_arena_hard",
+        "max_tokens": 2048,
+        "reason": "arena_hard_pairwise_judged",
     },
     "apibank_l1": {
         "kind": "apibank",
@@ -890,6 +901,10 @@ def dry_run_catalog_spec(
         from .longbench import dry_run_summary
 
         return dry_run_summary(config)
+    if spec.kind == "arena_hard":
+        from .arena_hard import dry_run_summary
+
+        return dry_run_summary(config)
     if spec.kind == "browsecomp":
         from .browsecomp import dry_run_summary
 
@@ -962,6 +977,10 @@ def run_catalog_spec(
         from .longbench import run_longbench
 
         return run_longbench(config, repo_root=repo_root)
+    if spec.kind == "arena_hard":
+        from .arena_hard import run_arena_hard
+
+        return run_arena_hard(config, repo_root=repo_root)
     if spec.kind == "browsecomp":
         from .browsecomp import run_browsecomp
 
@@ -1130,6 +1149,23 @@ def _run_config(spec: CatalogRunSpec, *, base_url: str, model: str, limit: int |
             max_tokens=int(spec.max_tokens or 128),
             scoreboard_dataset=spec.dataset_slug,
             job_name=spec.job_name or "function_longbench",
+            job_id=f"helicopter-{spec.benchmark}",
+            runner="helicopter_eval.catalog_runner",
+        )
+    if spec.kind == "arena_hard":
+        from .arena_hard import ARENA_HARD_BASELINE_URL, ArenaHardRunConfig
+
+        return ArenaHardRunConfig(
+            base_url=base_url,
+            model=model,
+            benchmark=spec.benchmark,
+            source_url=str(spec.source_url),
+            baseline_url=ARENA_HARD_BASELINE_URL,
+            limit=limit,
+            split=str(spec.source_split),
+            max_tokens=int(spec.max_tokens or 2048),
+            scoreboard_dataset=spec.dataset_slug,
+            job_name=spec.job_name or "instruction_arena_hard",
             job_id=f"helicopter-{spec.benchmark}",
             runner="helicopter_eval.catalog_runner",
         )
