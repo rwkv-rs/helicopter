@@ -13,6 +13,7 @@ RunKind = Literal[
     "longcodeqa",
     "longbench",
     "browsecomp",
+    "browsecomp_plus",
     "apibank",
     "bfcl_ast",
     "bfcl_exec",
@@ -332,6 +333,15 @@ _DIRECT_HF_SPECS: dict[str, dict[str, Any]] = {
         "job_name": "function_browsecomp",
         "max_tokens": 2048,
         "reason": "url_xlsx_encrypted_two_stage_judged",
+    },
+    "browsecomp_plus": {
+        "kind": "browsecomp_plus",
+        "source_type": "browsecomp_plus_hf",
+        "dataset_name": "texttron/BrowseComp-Plus",
+        "source_split": "test",
+        "job_name": "function_browsecomp_plus",
+        "max_tokens": 1024,
+        "reason": "official_browsecomp_plus_tool_loop",
     },
     "apibank_l1": {
         "kind": "apibank",
@@ -884,6 +894,10 @@ def dry_run_catalog_spec(
         from .browsecomp import dry_run_summary
 
         return dry_run_summary(config)
+    if spec.kind == "browsecomp_plus":
+        from .browsecomp_plus import dry_run_summary
+
+        return dry_run_summary(config)
     if spec.kind == "apibank":
         from .apibank import dry_run_summary
 
@@ -952,6 +966,10 @@ def run_catalog_spec(
         from .browsecomp import run_browsecomp
 
         return run_browsecomp(config, repo_root=repo_root)
+    if spec.kind == "browsecomp_plus":
+        from .browsecomp_plus import run_browsecomp_plus
+
+        return run_browsecomp_plus(config, repo_root=repo_root)
     if spec.kind == "apibank":
         from .apibank import run_apibank
 
@@ -1130,6 +1148,21 @@ def _run_config(spec: CatalogRunSpec, *, base_url: str, model: str, limit: int |
             answer_max_tokens=1024,
             scoreboard_dataset=spec.dataset_slug,
             job_name=spec.job_name or "function_browsecomp",
+            job_id=f"helicopter-{spec.benchmark}",
+            runner="helicopter_eval.catalog_runner",
+        )
+    if spec.kind == "browsecomp_plus":
+        from .browsecomp_plus import BrowseCompPlusRunConfig
+
+        return BrowseCompPlusRunConfig(
+            base_url=base_url,
+            model=model,
+            benchmark=spec.benchmark,
+            limit=limit,
+            split=str(spec.source_split),
+            max_tokens=int(spec.max_tokens or 1024),
+            scoreboard_dataset=spec.dataset_slug,
+            job_name=spec.job_name or "function_browsecomp_plus",
             job_id=f"helicopter-{spec.benchmark}",
             runner="helicopter_eval.catalog_runner",
         )

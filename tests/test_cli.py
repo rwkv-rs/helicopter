@@ -14,6 +14,7 @@ from helicopter_eval import (
     apibank,
     bfcl_ast,
     bfcl_exec,
+    browsecomp_plus,
     browsecomp,
     catalog_runner,
     code_generation,
@@ -675,10 +676,10 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         payload = print_json.call_args.args[0]
         self.assertEqual(payload["count"], 95)
-        self.assertEqual(payload["status_counts"]["implemented"], 68)
+        self.assertEqual(payload["status_counts"]["implemented"], 69)
         self.assertEqual(payload["status_counts"].get("needs_dataset_adapter", 0), 0)
         self.assertEqual(payload["status_counts"]["needs_dataset_access"], 2)
-        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 25)
+        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 24)
 
     def test_run_catalog_human_eval_dry_run_uses_code_generation_runner(self) -> None:
         args = Namespace(
