@@ -7,6 +7,16 @@ from typing import Any
 from . import free_response
 
 
+REFERENCE_ANSWER_FIXES = {
+    (
+        "Mr. Finnegan has 3 tanks with a capacity of 7000 gallons, 5000 gallons, "
+        "and 3000 gallons, respectively. If he fills the first tank up to 3/4 full, "
+        "the second tank with water up to 4/5 of its capacity, and the third tank "
+        "up to half of its capacity, how many gallons in total are in the tanks?"
+    ): "10750",
+}
+
+
 @dataclass(frozen=True, slots=True)
 class Gsm8kRunConfig:
     base_url: str
@@ -46,6 +56,7 @@ def _free_response_config(config: Gsm8kRunConfig) -> free_response.FreeResponseR
         max_tokens=config.max_tokens,
         timeout_s=config.timeout_s,
         answer_marker=config.answer_marker,
+        reference_answer_overrides=REFERENCE_ANSWER_FIXES,
         job_name=config.job_name,
         job_id=config.job_id,
         runner="helicopter_eval.gsm8k",

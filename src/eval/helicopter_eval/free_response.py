@@ -4,7 +4,7 @@ import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 import re
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from .openai_client import chat_completion
 from .scoreboard import ScoreboardEvalResult, ScoreboardWriteConfig, write_scoreboard_results
@@ -59,6 +59,7 @@ class FreeResponseRunConfig:
     max_tokens: int = 512
     timeout_s: float = 600.0
     answer_marker: str | None = "####"
+    reference_answer_overrides: Mapping[str, str] | None = None
     prompt_template: str = "Question: {question}\nAnswer:"
     scoreboard_dataset: str | None = None
     job_name: str = "free_response_judge"
@@ -92,9 +93,7 @@ def completion_answer(completion: str, *, marker: str | None = "####") -> str:
 
 
 def scoreboard_dataset_name(config: FreeResponseRunConfig) -> str:
-    if config.scoreboard_dataset:
-        return config.scoreboard_dataset
-    dataset = f"{config.benchmark}_{config.split}"
+    dataset = config.scoreboard_dataset or f"{config.benchmark}_{config.split}"
     if config.limit is not None:
         dataset = f"{dataset}_limit{int(config.limit)}"
     return dataset
@@ -135,11 +134,15 @@ def load_samples(config: FreeResponseRunConfig) -> list[FreeResponseSample]:
     limit = len(dataset) if config.limit is None else min(int(config.limit), len(dataset))
     samples: list[FreeResponseSample] = []
     for index, item in enumerate(dataset.select(range(limit))):
+        question = str(item[config.question_field])
+        reference = extract_marked_answer(str(item[config.answer_field]), config.answer_marker)
+        if config.reference_answer_overrides and question in config.reference_answer_overrides:
+            reference = str(config.reference_answer_overrides[question])
         samples.append(
             FreeResponseSample(
                 sample_index=index,
-                question=str(item[config.question_field]),
-                reference_answer=extract_marked_answer(str(item[config.answer_field]), config.answer_marker),
+                question=question,
+                reference_answer=reference,
             )
         )
     return samples

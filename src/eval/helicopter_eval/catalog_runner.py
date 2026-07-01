@@ -1,0 +1,220 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Literal
+
+
+RunKind = Literal["free_response", "multiple_choice"]
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogRunSpec:
+    benchmark: str
+    field: str
+    dataset_slug: str
+    status: str
+    kind: RunKind | None
+    reason: str
+    dataset_name: str | None = None
+    dataset_config: str | None = None
+    source_split: str | None = None
+    question_field: str = "question"
+    answer_field: str = "answer"
+    choices_field: str = "choices"
+    choice_fields: tuple[str, ...] = ()
+    choice_labels: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    answer_marker: str | None = "####"
+    job_name: str | None = None
+    max_tokens: int | None = None
+
+
+_DIRECT_HF_SPECS: dict[str, dict[str, Any]] = {
+    "gsm8k": {
+        "kind": "free_response",
+        "dataset_name": "openai/gsm8k",
+        "dataset_config": "main",
+        "question_field": "question",
+        "answer_field": "answer",
+        "answer_marker": "####",
+        "job_name": "free_response_judge",
+        "max_tokens": 512,
+    },
+    "mmlu": {
+        "kind": "multiple_choice",
+        "dataset_name": "cais/mmlu",
+        "dataset_config": "all",
+        "question_field": "question",
+        "choices_field": "choices",
+        "answer_field": "answer",
+        "choice_labels": "ABCD",
+        "job_name": "multi_choice_plain",
+        "max_tokens": 32,
+    },
+    "mmlu_pro": {
+        "kind": "multiple_choice",
+        "dataset_name": "TIGER-Lab/MMLU-Pro",
+        "dataset_config": None,
+        "question_field": "question",
+        "choices_field": "options",
+        "answer_field": "answer",
+        "choice_labels": "ABCDEFGHIJ",
+        "job_name": "multi_choice_plain",
+        "max_tokens": 32,
+    },
+    "ceval": {
+        "kind": "multiple_choice",
+        "dataset_name": "ceval/ceval-exam",
+        "dataset_config": "*",
+        "question_field": "question",
+        "choice_fields": ("A", "B", "C", "D"),
+        "answer_field": "answer",
+        "choice_labels": "ABCD",
+        "job_name": "multi_choice_plain",
+        "max_tokens": 32,
+    },
+}
+
+
+def resolve_catalog_run_spec(benchmark: Any) -> CatalogRunSpec:
+    raw = _DIRECT_HF_SPECS.get(str(benchmark.name))
+    dataset_slug = str(benchmark.dataset_slug)
+    if raw:
+        return CatalogRunSpec(
+            benchmark=str(benchmark.name),
+            field=str(benchmark.field),
+            dataset_slug=dataset_slug,
+            status="implemented",
+            kind=raw["kind"],
+            reason="direct_hf",
+            dataset_name=raw["dataset_name"],
+            dataset_config=raw.get("dataset_config"),
+            source_split=str(raw.get("source_split") or benchmark.default_split),
+            question_field=str(raw.get("question_field", "question")),
+            answer_field=str(raw.get("answer_field", "answer")),
+            choices_field=str(raw.get("choices_field", "choices")),
+            choice_fields=tuple(str(item) for item in raw.get("choice_fields", ())),
+            choice_labels=str(raw.get("choice_labels", "ABCDEFGHIJKLMNOPQRSTUVWXYZ")),
+            answer_marker=raw.get("answer_marker"),
+            job_name=str(raw.get("job_name") or ""),
+            max_tokens=int(raw.get("max_tokens") or 512),
+        )
+
+    if str(benchmark.field) in {"knowledge", "maths"}:
+        return CatalogRunSpec(
+            benchmark=str(benchmark.name),
+            field=str(benchmark.field),
+            dataset_slug=dataset_slug,
+            status="needs_dataset_adapter",
+            kind=None,
+            reason="dataset requires rwkv-skills-specific materialization or answer normalization",
+        )
+    return CatalogRunSpec(
+        benchmark=str(benchmark.name),
+        field=str(benchmark.field),
+        dataset_slug=dataset_slug,
+        status="needs_specialized_runner",
+        kind=None,
+        reason=f"{benchmark.field} is not covered by generic HF free-response/multiple-choice runners",
+    )
+
+
+def catalog_run_spec_to_dict(spec: CatalogRunSpec) -> dict[str, Any]:
+    return {
+        "benchmark": spec.benchmark,
+        "field": spec.field,
+        "dataset_slug": spec.dataset_slug,
+        "status": spec.status,
+        "kind": spec.kind,
+        "reason": spec.reason,
+        "hf_dataset": spec.dataset_name,
+        "hf_config": spec.dataset_config,
+        "source_split": spec.source_split,
+    }
+
+
+def dry_run_catalog_spec(
+    spec: CatalogRunSpec,
+    *,
+    base_url: str,
+    model: str,
+    limit: int | None,
+) -> dict[str, Any]:
+    if spec.status != "implemented" or spec.kind is None:
+        raise RuntimeError(f"{spec.benchmark} is not runnable yet: {spec.reason}")
+    config = _run_config(spec, base_url=base_url, model=model, limit=limit)
+    if spec.kind == "free_response":
+        from .free_response import dry_run_summary
+
+        return dry_run_summary(config)
+    from .multiple_choice import dry_run_summary
+
+    return dry_run_summary(config)
+
+
+def run_catalog_spec(
+    spec: CatalogRunSpec,
+    *,
+    base_url: str,
+    model: str,
+    limit: int | None,
+    repo_root: Path,
+) -> dict[str, Any]:
+    if spec.status != "implemented" or spec.kind is None:
+        raise RuntimeError(f"{spec.benchmark} is not runnable yet: {spec.reason}")
+    config = _run_config(spec, base_url=base_url, model=model, limit=limit)
+    if spec.kind == "free_response":
+        from .free_response import run_free_response
+
+        return run_free_response(config, repo_root=repo_root)
+    from .multiple_choice import run_multiple_choice
+
+    return run_multiple_choice(config, repo_root=repo_root)
+
+
+def _run_config(spec: CatalogRunSpec, *, base_url: str, model: str, limit: int | None) -> Any:
+    if spec.kind == "free_response":
+        from .free_response import FreeResponseRunConfig
+        from .gsm8k import REFERENCE_ANSWER_FIXES
+
+        return FreeResponseRunConfig(
+            base_url=base_url,
+            model=model,
+            benchmark=spec.benchmark,
+            dataset_name=str(spec.dataset_name),
+            dataset_config=spec.dataset_config,
+            question_field=spec.question_field,
+            answer_field=spec.answer_field,
+            limit=limit,
+            split=str(spec.source_split),
+            max_tokens=int(spec.max_tokens or 512),
+            answer_marker=spec.answer_marker,
+            reference_answer_overrides=REFERENCE_ANSWER_FIXES if spec.benchmark == "gsm8k" else None,
+            scoreboard_dataset=spec.dataset_slug,
+            job_name=spec.job_name or "free_response_judge",
+            job_id=f"helicopter-{spec.benchmark}",
+            runner="helicopter_eval.catalog_runner",
+        )
+    if spec.kind == "multiple_choice":
+        from .multiple_choice import MultipleChoiceRunConfig
+
+        return MultipleChoiceRunConfig(
+            base_url=base_url,
+            model=model,
+            benchmark=spec.benchmark,
+            dataset_name=str(spec.dataset_name),
+            dataset_config=spec.dataset_config,
+            question_field=spec.question_field,
+            choices_field=spec.choices_field,
+            answer_field=spec.answer_field,
+            limit=limit,
+            choice_fields=spec.choice_fields,
+            split=str(spec.source_split),
+            max_tokens=int(spec.max_tokens or 32),
+            choice_labels=spec.choice_labels,
+            scoreboard_dataset=spec.dataset_slug,
+            job_name=spec.job_name or "multi_choice_plain",
+            job_id=f"helicopter-{spec.benchmark}",
+            runner="helicopter_eval.catalog_runner",
+        )
+    raise RuntimeError(f"{spec.benchmark} is not runnable yet: {spec.reason}")

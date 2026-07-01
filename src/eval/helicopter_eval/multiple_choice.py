@@ -61,6 +61,7 @@ class MultipleChoiceRunConfig:
     answer_field: str
     limit: int | None = None
     dataset_config: str | None = None
+    choice_fields: tuple[str, ...] = ()
     split: str = "test"
     temperature: float = 0.0
     top_p: float = 1.0
@@ -141,9 +142,7 @@ def completion_answer(completion: str, labels: Sequence[str]) -> str:
 
 
 def scoreboard_dataset_name(config: MultipleChoiceRunConfig) -> str:
-    if config.scoreboard_dataset:
-        return config.scoreboard_dataset
-    dataset = f"{config.benchmark}_{config.split}"
+    dataset = config.scoreboard_dataset or f"{config.benchmark}_{config.split}"
     if config.limit is not None:
         dataset = f"{dataset}_limit{int(config.limit)}"
     return dataset
@@ -172,19 +171,40 @@ def task_sampling_config(config: MultipleChoiceRunConfig) -> dict[str, Any]:
     }
 
 
-def load_samples(config: MultipleChoiceRunConfig) -> list[MultipleChoiceSample]:
+def _iter_hf_rows(config: MultipleChoiceRunConfig):
     try:
-        from datasets import load_dataset
+        from datasets import get_dataset_config_names, load_dataset
     except ImportError as exc:  # pragma: no cover - exercised in integration environments
         raise SystemExit("multiple-choice eval requires the `datasets` package; install the rwkv dependency group.") from exc
 
+    if config.dataset_config == "*":
+        config_names = tuple(name for name in get_dataset_config_names(config.dataset_name) if name and name != "default")
+    else:
+        config_names = (config.dataset_config,)
+    for config_name in config_names:
+        if config_name is None:
+            dataset = load_dataset(config.dataset_name, split=config.split)
+        else:
+            dataset = load_dataset(config.dataset_name, config_name, split=config.split)
+        for item in dataset:
+            yield item
+
+
+def _row_choices(item: Any, config: MultipleChoiceRunConfig) -> ChoiceSet:
+    if config.choice_fields:
+        return normalize_choices([item[field] for field in config.choice_fields], fallback_labels=config.choice_labels)
+    return normalize_choices(item[config.choices_field], fallback_labels=config.choice_labels)
+
+
+def load_samples(config: MultipleChoiceRunConfig) -> list[MultipleChoiceSample]:
     if config.limit is not None and int(config.limit) < 0:
         raise ValueError("limit must be non-negative")
-    dataset = load_dataset(config.dataset_name, config.dataset_config, split=config.split)
-    limit = len(dataset) if config.limit is None else min(int(config.limit), len(dataset))
+    limit = None if config.limit is None else int(config.limit)
     samples: list[MultipleChoiceSample] = []
-    for index, item in enumerate(dataset.select(range(limit))):
-        choices = normalize_choices(item[config.choices_field], fallback_labels=config.choice_labels)
+    for index, item in enumerate(_iter_hf_rows(config)):
+        if limit is not None and index >= limit:
+            break
+        choices = _row_choices(item, config)
         samples.append(
             MultipleChoiceSample(
                 sample_index=index,

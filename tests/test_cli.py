@@ -9,7 +9,7 @@ from unittest import mock
 
 from helicopter_cli import __main__ as cli_main
 from helicopter_cli import commands, config, env, eval_catalog
-from helicopter_eval import free_response, gsm8k, multiple_choice
+from helicopter_eval import catalog_runner, free_response, gsm8k, multiple_choice
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -500,6 +500,61 @@ class CommandPlanTests(unittest.TestCase):
             },
         )
 
+    def test_catalog_runner_marks_direct_hf_specs(self) -> None:
+        catalog = eval_catalog.load_rwkv_skills_catalog()
+        specs = {
+            name: catalog_runner.resolve_catalog_run_spec(catalog.benchmarks_by_name[name])
+            for name in ("gsm8k", "mmlu", "mmlu_pro", "ceval", "human_eval")
+        }
+
+        self.assertEqual(specs["gsm8k"].status, "implemented")
+        self.assertEqual(specs["gsm8k"].dataset_name, "openai/gsm8k")
+        self.assertEqual(specs["mmlu"].dataset_config, "all")
+        self.assertEqual(specs["ceval"].dataset_config, "*")
+        self.assertEqual(specs["ceval"].choice_fields, ("A", "B", "C", "D"))
+        self.assertEqual(specs["human_eval"].status, "needs_specialized_runner")
+
+    def test_run_catalog_gsm8k_dry_run_uses_rwkv_dataset_slug(self) -> None:
+        args = Namespace(
+            dry_run=True,
+            benchmark="gsm8k",
+            base_url=None,
+            model=None,
+            limit=2,
+        )
+
+        with mock.patch.object(cli_main, "print_json") as print_json:
+            rc = cli_main.handle_eval_run_catalog(args, root=ROOT)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            print_json.call_args.args[0],
+            {
+                "benchmark": "gsm8k",
+                "hf_dataset": "openai/gsm8k",
+                "hf_config": "main",
+                "split": "test",
+                "limit": 2,
+                "base_url": "http://127.0.0.1:29082",
+                "model": "rwkv7-g1d-0.4b-20260210-ctx8192",
+                "scoreboard_dataset": "gsm8k_test_limit2",
+                "job_name": "free_response_judge",
+                "job_id": "helicopter-gsm8k",
+            },
+        )
+
+    def test_runnable_catalog_counts_implemented_specs(self) -> None:
+        args = Namespace(benchmark=("all",), field=None, json=True)
+
+        with mock.patch.object(cli_main, "print_json") as print_json:
+            rc = cli_main.handle_eval_runnable(args)
+
+        self.assertEqual(rc, 0)
+        payload = print_json.call_args.args[0]
+        self.assertEqual(payload["count"], 95)
+        self.assertEqual(payload["status_counts"]["implemented"], 4)
+        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 59)
+
     def test_multiple_choice_normalizes_list_and_arc_choices(self) -> None:
         list_choices = multiple_choice.normalize_choices(["red", "blue"])
         arc_choices = multiple_choice.normalize_choices({"label": ["A", "B"], "text": ["cat", "dog"]})
@@ -519,6 +574,7 @@ class CommandPlanTests(unittest.TestCase):
             dataset_config="abstract_algebra",
             question_field="question",
             choices_field="choices",
+            choice_field=None,
             answer_field="answer",
             choice_labels="ABCD",
             base_url=None,

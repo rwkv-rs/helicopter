@@ -127,6 +127,34 @@ def handle_eval_plan(args: argparse.Namespace, **_: Any) -> int:
     return 0
 
 
+def handle_eval_runnable(args: argparse.Namespace, **_: Any) -> int:
+    from helicopter_eval.catalog_runner import catalog_run_spec_to_dict, resolve_catalog_run_spec
+
+    catalog = load_rwkv_skills_catalog()
+    specs = tuple(
+        resolve_catalog_run_spec(benchmark)
+        for benchmark in catalog.select_benchmarks(names=args.benchmark, fields=args.field)
+    )
+    status_counts: dict[str, int] = {}
+    for spec in specs:
+        status_counts[spec.status] = status_counts.get(spec.status, 0) + 1
+    if args.json:
+        print_json(
+            {
+                "count": len(specs),
+                "status_counts": dict(sorted(status_counts.items())),
+                "runnable": [catalog_run_spec_to_dict(spec) for spec in specs],
+            }
+        )
+        return 0
+
+    print(f"rwkv-skills runnable catalog: {len(specs)} selected, statuses={dict(sorted(status_counts.items()))}")
+    for spec in specs:
+        kind = spec.kind or "-"
+        print(f"{spec.status}\t{spec.benchmark}\t{spec.field}\t{spec.dataset_slug}\t{kind}\t{spec.reason}")
+    return 0
+
+
 def handle_eval_run(args: argparse.Namespace, *, root: Any, **_: Any) -> int:
     if args.benchmark != "gsm8k":
         raise SystemExit("only gsm8k is implemented for eval run in this stage")
@@ -145,6 +173,32 @@ def handle_eval_run(args: argparse.Namespace, *, root: Any, **_: Any) -> int:
         job_id=str(args.job_id),
     )
     payload = dry_run_summary(run_config) if args.dry_run else run_gsm8k(run_config, repo_root=root)
+    print_json(payload)
+    return 0
+
+
+def handle_eval_run_catalog(args: argparse.Namespace, *, root: Any, **_: Any) -> int:
+    from helicopter_eval.catalog_runner import dry_run_catalog_spec, resolve_catalog_run_spec, run_catalog_spec
+
+    catalog = load_rwkv_skills_catalog()
+    try:
+        benchmark = catalog.benchmarks_by_name[str(args.benchmark)]
+    except KeyError as exc:
+        raise SystemExit(f"unknown benchmark: {args.benchmark}") from exc
+    spec = resolve_catalog_run_spec(benchmark)
+    if spec.status != "implemented":
+        raise SystemExit(f"{spec.benchmark} is not runnable yet: {spec.reason}")
+    defaults = catalog.inference_defaults
+    kwargs = {
+        "base_url": str(args.base_url or defaults.base_url),
+        "model": str(args.model or defaults.model_name),
+        "limit": args.limit,
+    }
+    payload = (
+        dry_run_catalog_spec(spec, **kwargs)
+        if args.dry_run
+        else run_catalog_spec(spec, repo_root=root, **kwargs)
+    )
     print_json(payload)
     return 0
 
@@ -191,6 +245,7 @@ def handle_eval_run_multiple_choice(args: argparse.Namespace, *, root: Any, **_:
         answer_field=str(args.answer_field),
         limit=args.limit,
         split=str(args.split),
+        choice_fields=tuple(args.choice_field or ()),
         temperature=float(args.temperature),
         top_p=float(args.top_p),
         max_tokens=int(args.max_tokens),
@@ -257,6 +312,12 @@ def build_parser() -> argparse.ArgumentParser:
     eval_plan.add_argument("--json", action="store_true")
     eval_plan.set_defaults(handler=handle_eval_plan)
 
+    eval_runnable = eval_subparsers.add_parser("runnable", help="show catalog benchmarks implemented in helicopter")
+    eval_runnable.add_argument("benchmark", nargs="*", default=("all",), help="benchmark names or aliases; default: all")
+    eval_runnable.add_argument("--field", action="append", help="filter by benchmark field")
+    eval_runnable.add_argument("--json", action="store_true")
+    eval_runnable.set_defaults(handler=handle_eval_runnable)
+
     eval_run = eval_subparsers.add_parser("run", help="run a implemented benchmark and write scoreboard DB rows")
     add_common_options(eval_run)
     eval_run.add_argument("benchmark", choices=("gsm8k",))
@@ -270,6 +331,17 @@ def build_parser() -> argparse.ArgumentParser:
     eval_run.add_argument("--timeout-s", type=float, default=600.0)
     eval_run.add_argument("--job-id", default="helicopter-gsm8k")
     eval_run.set_defaults(handler=handle_eval_run)
+
+    eval_run_catalog = eval_subparsers.add_parser(
+        "run-catalog",
+        help="run an implemented rwkv-skills catalog benchmark",
+    )
+    add_common_options(eval_run_catalog)
+    eval_run_catalog.add_argument("benchmark", help="rwkv-skills benchmark name")
+    eval_run_catalog.add_argument("--base-url", help="OpenAI-compatible vLLM base URL")
+    eval_run_catalog.add_argument("--model", help="served model name")
+    eval_run_catalog.add_argument("--limit", type=int)
+    eval_run_catalog.set_defaults(handler=handle_eval_run_catalog)
 
     eval_run_free_response = eval_subparsers.add_parser(
         "run-free-response",
@@ -304,6 +376,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_run_multiple_choice.add_argument("--dataset-config", help="HF dataset config/name")
     eval_run_multiple_choice.add_argument("--question-field", default="question")
     eval_run_multiple_choice.add_argument("--choices-field", default="choices")
+    eval_run_multiple_choice.add_argument("--choice-field", action="append", help="repeat for A/B/C/D style option columns")
     eval_run_multiple_choice.add_argument("--answer-field", default="answer")
     eval_run_multiple_choice.add_argument("--choice-labels", default="ABCDEFGHIJKLMNOPQRSTUVWXYZ")
     eval_run_multiple_choice.add_argument("--base-url", help="OpenAI-compatible vLLM base URL")
