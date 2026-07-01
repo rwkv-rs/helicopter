@@ -24,6 +24,7 @@ from helicopter_eval import (
     longcodeqa,
     multiple_choice,
     toolalpaca,
+    translation,
 )
 
 
@@ -549,6 +550,8 @@ class CommandPlanTests(unittest.TestCase):
                 "supergpqa",
                 "ifeval",
                 "ifbench",
+                "flores200",
+                "wmt24pp",
                 "aime24",
                 "algebra222",
                 "hendrycks_math",
@@ -588,6 +591,10 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(specs["ifeval"].kind, "instruction_following")
         self.assertTrue(specs["ifeval"].strict)
         self.assertFalse(specs["ifbench"].strict)
+        self.assertEqual(specs["flores200"].kind, "translation")
+        self.assertEqual(specs["flores200"].status, "needs_dataset_access")
+        self.assertEqual(specs["flores200"].source_type, "hf_flores200")
+        self.assertEqual(specs["wmt24pp"].source_type, "hf_wmt24pp")
         self.assertEqual(specs["aime24"].source_type, "package_jsonl")
         self.assertEqual(specs["algebra222"].source_type, "url_csv")
         self.assertEqual(specs["hendrycks_math"].source_type, "qwen_math")
@@ -662,10 +669,10 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         payload = print_json.call_args.args[0]
         self.assertEqual(payload["count"], 95)
-        self.assertEqual(payload["status_counts"]["implemented"], 64)
+        self.assertEqual(payload["status_counts"]["implemented"], 65)
         self.assertEqual(payload["status_counts"].get("needs_dataset_adapter", 0), 0)
-        self.assertEqual(payload["status_counts"]["needs_dataset_access"], 1)
-        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 30)
+        self.assertEqual(payload["status_counts"]["needs_dataset_access"], 2)
+        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 28)
 
     def test_run_catalog_human_eval_dry_run_uses_code_generation_runner(self) -> None:
         args = Namespace(
@@ -1067,6 +1074,38 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(
             toolalpaca.evaluate_completion(sample, '[{"name":"lookup","arguments":{"query":"beta"}}]')[:1],
             (False,),
+        )
+
+    def test_run_catalog_wmt24pp_dry_run_uses_translation_runner(self) -> None:
+        args = Namespace(
+            dry_run=True,
+            benchmark="wmt24pp",
+            base_url=None,
+            model=None,
+            limit=2,
+        )
+
+        with mock.patch.object(cli_main, "print_json") as print_json:
+            rc = cli_main.handle_eval_run_catalog(args, root=ROOT)
+
+        self.assertEqual(rc, 0)
+        payload = print_json.call_args.args[0]
+        self.assertEqual(payload["benchmark"], "wmt24pp")
+        self.assertEqual(payload["hf_dataset"], "google/wmt24pp")
+        self.assertEqual(payload["source_type"], "hf_wmt24pp")
+        self.assertEqual(payload["scoreboard_dataset"], "wmt24pp_test_limit2")
+        self.assertEqual(payload["job_name"], "translation_chrf")
+        self.assertEqual(payload["metric"], "chrf")
+
+    def test_translation_chrf_scores_exact_match_higher(self) -> None:
+        exact = translation.chrf_score("Bonjour le monde", "Bonjour le monde")
+        partial = translation.chrf_score("Salut", "Bonjour le monde")
+
+        self.assertEqual(exact, 1.0)
+        self.assertLess(partial, exact)
+        self.assertEqual(
+            translation.score_completion("Translation: Bonjour le monde", "Bonjour le monde")[:2],
+            (1.0, True),
         )
 
     def test_multiple_choice_normalizes_list_and_arc_choices(self) -> None:

@@ -17,6 +17,7 @@ RunKind = Literal[
     "bfcl_ast",
     "bfcl_exec",
     "toolalpaca",
+    "translation",
 ]
 
 
@@ -194,6 +195,25 @@ _DIRECT_HF_SPECS: dict[str, dict[str, Any]] = {
         "max_tokens": 1024,
         "strict": False,
         "reason": "url_jsonl_rule_scored",
+    },
+    "flores200": {
+        "status": "needs_dataset_access",
+        "kind": "translation",
+        "source_type": "hf_flores200",
+        "dataset_name": "openlanguagedata/flores_plus",
+        "source_split": "devtest",
+        "job_name": "translation_chrf",
+        "max_tokens": 512,
+        "reason": "openlanguagedata/flores_plus is gated on Hugging Face and requires dataset access",
+    },
+    "wmt24pp": {
+        "kind": "translation",
+        "source_type": "hf_wmt24pp",
+        "dataset_name": "google/wmt24pp",
+        "source_split": "test",
+        "job_name": "translation_chrf",
+        "max_tokens": 512,
+        "reason": "hf_translation_chrf",
     },
     "human_eval": {
         "kind": "code_generation",
@@ -853,6 +873,10 @@ def dry_run_catalog_spec(
         from .toolalpaca import dry_run_summary
 
         return dry_run_summary(config)
+    if spec.kind == "translation":
+        from .translation import dry_run_summary
+
+        return dry_run_summary(config)
     from .multiple_choice import dry_run_summary
 
     return dry_run_summary(config)
@@ -909,6 +933,10 @@ def run_catalog_spec(
         from .toolalpaca import run_toolalpaca
 
         return run_toolalpaca(config, repo_root=repo_root)
+    if spec.kind == "translation":
+        from .translation import run_translation
+
+        return run_translation(config, repo_root=repo_root)
     from .multiple_choice import run_multiple_choice
 
     return run_multiple_choice(config, repo_root=repo_root)
@@ -1124,6 +1152,29 @@ def _run_config(spec: CatalogRunSpec, *, base_url: str, model: str, limit: int |
             max_tokens=int(spec.max_tokens or 1024),
             scoreboard_dataset=spec.dataset_slug,
             job_name=spec.job_name or "function_toolalpaca",
+            job_id=f"helicopter-{spec.benchmark}",
+            runner="helicopter_eval.catalog_runner",
+        )
+    if spec.kind == "translation":
+        from .translation import DEFAULT_WMT24PP_TARGET_LANGUAGES, TranslationRunConfig
+
+        target_languages = (
+            tuple(DEFAULT_WMT24PP_TARGET_LANGUAGES)
+            if spec.source_type == "hf_wmt24pp"
+            else ("en", "de", "es", "fr", "it", "ja")
+        )
+        return TranslationRunConfig(
+            base_url=base_url,
+            model=model,
+            benchmark=spec.benchmark,
+            source_type=spec.source_type,
+            dataset_name=str(spec.dataset_name),
+            limit=limit,
+            split=str(spec.source_split),
+            target_languages=target_languages,
+            max_tokens=int(spec.max_tokens or 512),
+            scoreboard_dataset=spec.dataset_slug,
+            job_name=spec.job_name or "translation_chrf",
             job_id=f"helicopter-{spec.benchmark}",
             runner="helicopter_eval.catalog_runner",
         )
