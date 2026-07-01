@@ -675,10 +675,10 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         payload = print_json.call_args.args[0]
         self.assertEqual(payload["count"], 95)
-        self.assertEqual(payload["status_counts"]["implemented"], 67)
+        self.assertEqual(payload["status_counts"]["implemented"], 68)
         self.assertEqual(payload["status_counts"].get("needs_dataset_adapter", 0), 0)
         self.assertEqual(payload["status_counts"]["needs_dataset_access"], 2)
-        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 26)
+        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 25)
 
     def test_run_catalog_human_eval_dry_run_uses_code_generation_runner(self) -> None:
         args = Namespace(

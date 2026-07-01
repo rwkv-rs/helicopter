@@ -16,6 +16,7 @@ RunKind = Literal[
     "apibank",
     "bfcl_ast",
     "bfcl_exec",
+    "bfcl_v3",
     "toolalpaca",
     "translation",
     "complexfuncbench",
@@ -439,6 +440,15 @@ _DIRECT_HF_SPECS: dict[str, dict[str, Any]] = {
         "job_name": "function_bfcl_exec",
         "max_tokens": 768,
         "reason": "official_bfcl_v4_exec",
+    },
+    "bfcl_v3": {
+        "kind": "bfcl_v3",
+        "source_type": "bfcl_v3_official",
+        "dataset_name": "ShishirPatil/gorilla/bfcl_v3",
+        "source_split": "test",
+        "job_name": "function_bfcl_v3",
+        "max_tokens": 1024,
+        "reason": "official_bfcl_v3_multi_turn",
     },
     "toolalpaca_eval_simulated": {
         "kind": "toolalpaca",
@@ -886,6 +896,10 @@ def dry_run_catalog_spec(
         from .bfcl_exec import dry_run_summary
 
         return dry_run_summary(config)
+    if spec.kind == "bfcl_v3":
+        from .bfcl_v3 import dry_run_summary
+
+        return dry_run_summary(config)
     if spec.kind == "toolalpaca":
         from .toolalpaca import dry_run_summary
 
@@ -950,6 +964,10 @@ def run_catalog_spec(
         from .bfcl_exec import run_bfcl_exec
 
         return run_bfcl_exec(config, repo_root=repo_root)
+    if spec.kind == "bfcl_v3":
+        from .bfcl_v3 import run_bfcl_v3
+
+        return run_bfcl_v3(config, repo_root=repo_root)
     if spec.kind == "toolalpaca":
         from .toolalpaca import run_toolalpaca
 
@@ -1161,6 +1179,21 @@ def _run_config(spec: CatalogRunSpec, *, base_url: str, model: str, limit: int |
             max_tokens=int(spec.max_tokens or 768),
             scoreboard_dataset=spec.dataset_slug,
             job_name=spec.job_name or "function_bfcl_exec",
+            job_id=f"helicopter-{spec.benchmark}",
+            runner="helicopter_eval.catalog_runner",
+        )
+    if spec.kind == "bfcl_v3":
+        from .bfcl_v3 import BfclV3RunConfig
+
+        return BfclV3RunConfig(
+            base_url=base_url,
+            model=model,
+            benchmark=spec.benchmark,
+            limit=limit,
+            split=str(spec.source_split),
+            max_tokens=int(spec.max_tokens or 1024),
+            scoreboard_dataset=spec.dataset_slug,
+            job_name=spec.job_name or "function_bfcl_v3",
             job_id=f"helicopter-{spec.benchmark}",
             runner="helicopter_eval.catalog_runner",
         )
