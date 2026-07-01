@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 
-RunKind = Literal["free_response", "multiple_choice", "instruction_following"]
+RunKind = Literal["free_response", "multiple_choice", "instruction_following", "code_generation"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +182,57 @@ _DIRECT_HF_SPECS: dict[str, dict[str, Any]] = {
         "max_tokens": 1024,
         "strict": False,
         "reason": "url_jsonl_rule_scored",
+    },
+    "human_eval": {
+        "kind": "code_generation",
+        "source_type": "human_eval_url_gzip",
+        "source_url": "https://github.com/openai/human-eval/raw/master/data/HumanEval.jsonl.gz",
+        "dataset_name": "human_eval",
+        "job_name": "code_human_eval",
+        "max_tokens": 512,
+        "reason": "url_gzip_jsonl_code_execution",
+    },
+    "human_eval_cn": {
+        "kind": "code_generation",
+        "source_type": "human_eval_cn_url",
+        "source_url": "https://hf-mirror.com/datasets/zai-org/humaneval-x/resolve/main/data/python/data/humaneval.jsonl",
+        "dataset_name": "human_eval_cn",
+        "job_name": "code_human_eval",
+        "max_tokens": 512,
+        "reason": "url_jsonl_code_execution",
+    },
+    "human_eval_fix": {
+        "kind": "code_generation",
+        "source_type": "human_eval_fix_hf",
+        "dataset_name": "bigcode/humanevalpack",
+        "dataset_config": "python",
+        "job_name": "code_human_eval",
+        "max_tokens": 512,
+        "reason": "hf_code_execution",
+    },
+    "human_eval_plus": {
+        "kind": "code_generation",
+        "source_type": "human_eval_plus_evalplus",
+        "dataset_name": "evalplus/human_eval_plus",
+        "job_name": "code_human_eval",
+        "max_tokens": 512,
+        "reason": "evalplus_code_execution",
+    },
+    "mbpp": {
+        "kind": "code_generation",
+        "source_type": "mbpp_evalplus",
+        "dataset_name": "evalplus/mbpp_plus",
+        "job_name": "code_mbpp",
+        "max_tokens": 512,
+        "reason": "evalplus_assertion_code_execution",
+    },
+    "mbpp_plus": {
+        "kind": "code_generation",
+        "source_type": "mbpp_evalplus",
+        "dataset_name": "evalplus/mbpp_plus",
+        "job_name": "code_mbpp",
+        "max_tokens": 512,
+        "reason": "evalplus_base_plus_code_execution",
     },
     "amc23": {
         "kind": "free_response",
@@ -567,6 +618,10 @@ def dry_run_catalog_spec(
         from .instruction_following import dry_run_summary
 
         return dry_run_summary(config)
+    if spec.kind == "code_generation":
+        from .code_generation import dry_run_summary
+
+        return dry_run_summary(config)
     from .multiple_choice import dry_run_summary
 
     return dry_run_summary(config)
@@ -591,6 +646,10 @@ def run_catalog_spec(
         from .instruction_following import run_instruction_following
 
         return run_instruction_following(config, repo_root=repo_root)
+    if spec.kind == "code_generation":
+        from .code_generation import run_code_generation
+
+        return run_code_generation(config, repo_root=repo_root)
     from .multiple_choice import run_multiple_choice
 
     return run_multiple_choice(config, repo_root=repo_root)
@@ -665,6 +724,24 @@ def _run_config(spec: CatalogRunSpec, *, base_url: str, model: str, limit: int |
             strict=spec.strict,
             scoreboard_dataset=spec.dataset_slug,
             job_name=spec.job_name or "instruction_following",
+            job_id=f"helicopter-{spec.benchmark}",
+            runner="helicopter_eval.catalog_runner",
+        )
+    if spec.kind == "code_generation":
+        from .code_generation import CodeGenerationRunConfig
+
+        return CodeGenerationRunConfig(
+            base_url=base_url,
+            model=model,
+            benchmark=spec.benchmark,
+            dataset_name=str(spec.dataset_name),
+            source_type=spec.source_type,
+            source_url=spec.source_url,
+            limit=limit,
+            split=str(spec.source_split),
+            max_tokens=int(spec.max_tokens or 512),
+            scoreboard_dataset=spec.dataset_slug,
+            job_name=spec.job_name or "code_human_eval",
             job_id=f"helicopter-{spec.benchmark}",
             runner="helicopter_eval.catalog_runner",
         )

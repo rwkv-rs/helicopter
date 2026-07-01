@@ -9,7 +9,7 @@ from unittest import mock
 
 from helicopter_cli import __main__ as cli_main
 from helicopter_cli import commands, config, env, eval_catalog
-from helicopter_eval import catalog_runner, free_response, gsm8k, instruction_following, multiple_choice
+from helicopter_eval import catalog_runner, code_generation, free_response, gsm8k, instruction_following, multiple_choice
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -541,6 +541,8 @@ class CommandPlanTests(unittest.TestCase):
                 "math_500",
                 "polymath",
                 "human_eval",
+                "human_eval_plus",
+                "mbpp",
             )
         }
 
@@ -564,7 +566,11 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(specs["math_500"].source_type, "url_jsonl")
         self.assertEqual(specs["math_500"].row_adapter, "answer_solution")
         self.assertEqual(specs["polymath"].source_type, "polymath")
-        self.assertEqual(specs["human_eval"].status, "needs_specialized_runner")
+        self.assertEqual(specs["human_eval"].status, "implemented")
+        self.assertEqual(specs["human_eval"].kind, "code_generation")
+        self.assertEqual(specs["human_eval"].source_type, "human_eval_url_gzip")
+        self.assertEqual(specs["human_eval_plus"].source_type, "human_eval_plus_evalplus")
+        self.assertEqual(specs["mbpp"].source_type, "mbpp_evalplus")
 
     def test_run_catalog_gsm8k_dry_run_uses_rwkv_dataset_slug(self) -> None:
         args = Namespace(
@@ -604,10 +610,47 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         payload = print_json.call_args.args[0]
         self.assertEqual(payload["count"], 95)
-        self.assertEqual(payload["status_counts"]["implemented"], 37)
+        self.assertEqual(payload["status_counts"]["implemented"], 43)
         self.assertEqual(payload["status_counts"].get("needs_dataset_adapter", 0), 0)
         self.assertEqual(payload["status_counts"]["needs_dataset_access"], 1)
-        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 57)
+        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 51)
+
+    def test_run_catalog_human_eval_dry_run_uses_code_generation_runner(self) -> None:
+        args = Namespace(
+            dry_run=True,
+            benchmark="human_eval",
+            base_url=None,
+            model=None,
+            limit=2,
+        )
+
+        with mock.patch.object(cli_main, "print_json") as print_json:
+            rc = cli_main.handle_eval_run_catalog(args, root=ROOT)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            print_json.call_args.args[0],
+            {
+                "benchmark": "human_eval",
+                "dataset_name": "human_eval",
+                "source_type": "human_eval_url_gzip",
+                "split": "test",
+                "limit": 2,
+                "base_url": "http://127.0.0.1:29082",
+                "model": "rwkv7-g1d-0.4b-20260210-ctx8192",
+                "scoreboard_dataset": "human_eval_test_limit2",
+                "job_name": "code_human_eval",
+                "job_id": "helicopter-human_eval",
+            },
+        )
+
+    def test_code_generation_extracts_last_python_fence(self) -> None:
+        text = "<think>draft</think>\n```text\nignore\n```\n```python\ndef add(a, b):\n    return a + b\n```"
+
+        self.assertEqual(
+            code_generation.extract_code_completion(text),
+            "def add(a, b):\n    return a + b",
+        )
 
     def test_multiple_choice_normalizes_list_and_arc_choices(self) -> None:
         list_choices = multiple_choice.normalize_choices(["red", "blue"])

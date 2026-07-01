@@ -30,6 +30,7 @@ rwkv = [
   "depyf==0.20.0",
   "dill",
   "einops",
+  "evalplus @ git+https://github.com/evalplus/evalplus@c91370f",
   "fastapi[standard]>=0.133.0,<0.137.0",
   "fastsafetensors>=0.3.2",
   "filelock>=3.16.1",
