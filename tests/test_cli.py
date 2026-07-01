@@ -28,6 +28,7 @@ from helicopter_eval import (
     longcodeqa,
     mcp_bench,
     multiple_choice,
+    swe_bench,
     toolalpaca,
     translation,
 )
@@ -567,6 +568,11 @@ class CommandPlanTests(unittest.TestCase):
                 "human_eval_plus",
                 "mbpp",
                 "livecodebench",
+                "swe_bench",
+                "swe_bench_lite",
+                "swe_bench_verified",
+                "swe_bench_lite_oracle",
+                "swe_bench_lite_bm25_13k",
                 "longcodeqa",
                 "longbench",
                 "longbench_qa",
@@ -623,6 +629,12 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(specs["mbpp"].source_type, "mbpp_evalplus")
         self.assertEqual(specs["livecodebench"].source_type, "livecodebench_hf")
         self.assertEqual(specs["livecodebench"].job_name, "code_livecodebench")
+        self.assertEqual(specs["swe_bench"].kind, "swe_bench")
+        self.assertEqual(specs["swe_bench"].dataset_name, "princeton-nlp/SWE-bench")
+        self.assertEqual(specs["swe_bench_lite"].row_adapter, "swe_bench_lite")
+        self.assertEqual(specs["swe_bench_verified"].dataset_name, "princeton-nlp/SWE-bench_Verified")
+        self.assertEqual(specs["swe_bench_lite_oracle"].row_adapter, "swe_bench_lite_oracle")
+        self.assertEqual(specs["swe_bench_lite_bm25_13k"].row_adapter, "swe_bench_lite_bm25_13k")
         self.assertEqual(specs["longcodeqa"].kind, "longcodeqa")
         self.assertEqual(specs["longcodeqa"].source_type, "hf_zip")
         self.assertEqual(specs["longbench"].kind, "longbench")
@@ -693,10 +705,10 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         payload = print_json.call_args.args[0]
         self.assertEqual(payload["count"], 95)
-        self.assertEqual(payload["status_counts"]["implemented"], 76)
+        self.assertEqual(payload["status_counts"]["implemented"], 81)
         self.assertEqual(payload["status_counts"].get("needs_dataset_adapter", 0), 0)
         self.assertEqual(payload["status_counts"]["needs_dataset_access"], 2)
-        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 17)
+        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 12)
 
     def test_run_catalog_human_eval_dry_run_uses_code_generation_runner(self) -> None:
         args = Namespace(
@@ -780,6 +792,37 @@ class CommandPlanTests(unittest.TestCase):
             code_generation.score_completion(sample, "def add(a, b):\n    return a + b", config),
             (True, "passed", None),
         )
+
+    def test_swe_bench_loads_manifest_for_dry_run(self) -> None:
+        row = {
+            "instance_id": "repo__project-1",
+            "repo": "repo/project",
+            "base_commit": "abc123",
+            "problem_statement": "Fix the failing test.",
+            "patch": "diff --git a/test.py b/test.py\n",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "test.jsonl"
+            manifest.write_text(json.dumps(row) + "\n", encoding="utf-8")
+            config = swe_bench.SweBenchRunConfig(
+                base_url="http://127.0.0.1:29082",
+                model="rwkv7-g1d-0.4b-20260210-ctx8192",
+                benchmark="swe_bench_lite",
+                dataset_name="swe_bench_lite",
+                limit=1,
+                source_path=str(manifest),
+            )
+
+            summary = swe_bench.dry_run_summary(config)
+
+        self.assertEqual(summary["available_samples"], 1)
+        self.assertEqual(summary["harness_dataset"], "princeton-nlp/SWE-bench_Lite")
+        self.assertFalse(summary["run_harness"])
+
+    def test_swe_bench_extracts_patch_from_fence(self) -> None:
+        text = "Here is the fix:\n```diff\ndiff --git a/file.py b/file.py\n--- a/file.py\n+++ b/file.py\n@@\n-pass\n+return 1\n```"
+
+        self.assertTrue(swe_bench.extract_swebench_patch(text).startswith("diff --git a/file.py"))
 
     def test_run_catalog_longcodeqa_dry_run_uses_runner(self) -> None:
         args = Namespace(

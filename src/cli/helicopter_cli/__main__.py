@@ -200,6 +200,14 @@ def handle_eval_run_catalog(args: argparse.Namespace, *, root: Any, **_: Any) ->
         "judge_base_url": getattr(args, "judge_base_url", None),
         "judge_model": getattr(args, "judge_model", None),
         "judge_api_key": getattr(args, "judge_api_key", None),
+        "swebench_run_harness": getattr(args, "swebench_run_harness", False),
+        "swebench_predictions_dir": getattr(args, "swebench_predictions_dir", None),
+        "swebench_harness_run_id": getattr(args, "swebench_harness_run_id", None),
+        "swebench_max_workers": getattr(args, "swebench_max_workers", None),
+        "swebench_cache_level": getattr(args, "swebench_cache_level", None),
+        "swebench_clean": getattr(args, "swebench_clean", False),
+        "swebench_timeout_s": getattr(args, "swebench_timeout_s", None),
+        "swebench_max_context_chars": getattr(args, "swebench_max_context_chars", None),
     }
     payload = (
         dry_run_catalog_spec(spec, **kwargs)
@@ -355,6 +363,14 @@ def build_parser() -> argparse.ArgumentParser:
     eval_run_catalog.add_argument("--judge-base-url", help="OpenAI-compatible judge base URL")
     eval_run_catalog.add_argument("--judge-model", help="judge model name")
     eval_run_catalog.add_argument("--judge-api-key", help="judge API key")
+    eval_run_catalog.add_argument("--swebench-run-harness", action="store_true", help="run official SWE-Bench harness")
+    eval_run_catalog.add_argument("--swebench-predictions-dir", help="directory for SWE-Bench predictions JSONL")
+    eval_run_catalog.add_argument("--swebench-harness-run-id", help="SWE-Bench harness run id")
+    eval_run_catalog.add_argument("--swebench-max-workers", type=int, help="SWE-Bench harness worker count")
+    eval_run_catalog.add_argument("--swebench-cache-level", help="SWE-Bench harness cache level")
+    eval_run_catalog.add_argument("--swebench-clean", action="store_true", help="pass --clean True to SWE-Bench harness")
+    eval_run_catalog.add_argument("--swebench-timeout-s", type=float, help="SWE-Bench harness timeout in seconds")
+    eval_run_catalog.add_argument("--swebench-max-context-chars", type=int, help="truncate retrieved SWE context")
     eval_run_catalog.set_defaults(handler=handle_eval_run_catalog)
 
     eval_run_free_response = eval_subparsers.add_parser(

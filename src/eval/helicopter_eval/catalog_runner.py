@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Any, Literal
 
@@ -10,6 +11,7 @@ RunKind = Literal[
     "multiple_choice",
     "instruction_following",
     "code_generation",
+    "swe_bench",
     "longcodeqa",
     "longbench",
     "arena_hard",
@@ -280,6 +282,51 @@ _DIRECT_HF_SPECS: dict[str, dict[str, Any]] = {
         "job_name": "code_livecodebench",
         "max_tokens": 1024,
         "reason": "hf_livecodebench_code_execution",
+    },
+    "swe_bench": {
+        "kind": "swe_bench",
+        "source_type": "swe_bench_hf",
+        "dataset_name": "princeton-nlp/SWE-bench",
+        "row_adapter": "swe_bench",
+        "job_name": "code_swe_bench",
+        "max_tokens": 2048,
+        "reason": "swebench_patch_generation_official_harness",
+    },
+    "swe_bench_lite": {
+        "kind": "swe_bench",
+        "source_type": "swe_bench_hf",
+        "dataset_name": "princeton-nlp/SWE-bench_Lite",
+        "row_adapter": "swe_bench_lite",
+        "job_name": "code_swe_bench",
+        "max_tokens": 2048,
+        "reason": "swebench_patch_generation_official_harness",
+    },
+    "swe_bench_verified": {
+        "kind": "swe_bench",
+        "source_type": "swe_bench_hf",
+        "dataset_name": "princeton-nlp/SWE-bench_Verified",
+        "row_adapter": "swe_bench_verified",
+        "job_name": "code_swe_bench",
+        "max_tokens": 2048,
+        "reason": "swebench_patch_generation_official_harness",
+    },
+    "swe_bench_lite_oracle": {
+        "kind": "swe_bench",
+        "source_type": "swe_bench_hf",
+        "dataset_name": "princeton-nlp/SWE-bench_Lite_oracle",
+        "row_adapter": "swe_bench_lite_oracle",
+        "job_name": "code_swe_bench",
+        "max_tokens": 2048,
+        "reason": "swebench_patch_generation_official_harness",
+    },
+    "swe_bench_lite_bm25_13k": {
+        "kind": "swe_bench",
+        "source_type": "swe_bench_hf",
+        "dataset_name": "princeton-nlp/SWE-bench_Lite_bm25_13K",
+        "row_adapter": "swe_bench_lite_bm25_13k",
+        "job_name": "code_swe_bench",
+        "max_tokens": 2048,
+        "reason": "swebench_patch_generation_official_harness",
     },
     "longcodeqa": {
         "kind": "longcodeqa",
@@ -934,6 +981,14 @@ def dry_run_catalog_spec(
     judge_base_url: str | None = None,
     judge_model: str | None = None,
     judge_api_key: str | None = None,
+    swebench_run_harness: bool = False,
+    swebench_predictions_dir: str | None = None,
+    swebench_harness_run_id: str | None = None,
+    swebench_max_workers: int | None = None,
+    swebench_cache_level: str | None = None,
+    swebench_clean: bool = False,
+    swebench_timeout_s: float | None = None,
+    swebench_max_context_chars: int | None = None,
 ) -> dict[str, Any]:
     if spec.status != "implemented" or spec.kind is None:
         raise RuntimeError(f"{spec.benchmark} is not runnable yet: {spec.reason}")
@@ -949,6 +1004,14 @@ def dry_run_catalog_spec(
         judge_base_url=judge_base_url,
         judge_model=judge_model,
         judge_api_key=judge_api_key,
+        swebench_run_harness=swebench_run_harness,
+        swebench_predictions_dir=swebench_predictions_dir,
+        swebench_harness_run_id=swebench_harness_run_id,
+        swebench_max_workers=swebench_max_workers,
+        swebench_cache_level=swebench_cache_level,
+        swebench_clean=swebench_clean,
+        swebench_timeout_s=swebench_timeout_s,
+        swebench_max_context_chars=swebench_max_context_chars,
     )
     if spec.kind == "free_response":
         from .free_response import dry_run_summary
@@ -960,6 +1023,10 @@ def dry_run_catalog_spec(
         return dry_run_summary(config)
     if spec.kind == "code_generation":
         from .code_generation import dry_run_summary
+
+        return dry_run_summary(config)
+    if spec.kind == "swe_bench":
+        from .swe_bench import dry_run_summary
 
         return dry_run_summary(config)
     if spec.kind == "longcodeqa":
@@ -1037,6 +1104,14 @@ def run_catalog_spec(
     judge_base_url: str | None = None,
     judge_model: str | None = None,
     judge_api_key: str | None = None,
+    swebench_run_harness: bool = False,
+    swebench_predictions_dir: str | None = None,
+    swebench_harness_run_id: str | None = None,
+    swebench_max_workers: int | None = None,
+    swebench_cache_level: str | None = None,
+    swebench_clean: bool = False,
+    swebench_timeout_s: float | None = None,
+    swebench_max_context_chars: int | None = None,
 ) -> dict[str, Any]:
     if spec.status != "implemented" or spec.kind is None:
         raise RuntimeError(f"{spec.benchmark} is not runnable yet: {spec.reason}")
@@ -1052,6 +1127,14 @@ def run_catalog_spec(
         judge_base_url=judge_base_url,
         judge_model=judge_model,
         judge_api_key=judge_api_key,
+        swebench_run_harness=swebench_run_harness,
+        swebench_predictions_dir=swebench_predictions_dir,
+        swebench_harness_run_id=swebench_harness_run_id,
+        swebench_max_workers=swebench_max_workers,
+        swebench_cache_level=swebench_cache_level,
+        swebench_clean=swebench_clean,
+        swebench_timeout_s=swebench_timeout_s,
+        swebench_max_context_chars=swebench_max_context_chars,
     )
     if spec.kind == "free_response":
         from .free_response import run_free_response
@@ -1065,6 +1148,10 @@ def run_catalog_spec(
         from .code_generation import run_code_generation
 
         return run_code_generation(config, repo_root=repo_root)
+    if spec.kind == "swe_bench":
+        from .swe_bench import run_swe_bench
+
+        return run_swe_bench(config, repo_root=repo_root)
     if spec.kind == "longcodeqa":
         from .longcodeqa import run_longcodeqa
 
@@ -1139,6 +1226,14 @@ def _run_config(
     judge_base_url: str | None = None,
     judge_model: str | None = None,
     judge_api_key: str | None = None,
+    swebench_run_harness: bool = False,
+    swebench_predictions_dir: str | None = None,
+    swebench_harness_run_id: str | None = None,
+    swebench_max_workers: int | None = None,
+    swebench_cache_level: str | None = None,
+    swebench_clean: bool = False,
+    swebench_timeout_s: float | None = None,
+    swebench_max_context_chars: int | None = None,
 ) -> Any:
     if spec.kind == "free_response":
         from .free_response import FreeResponseRunConfig
@@ -1229,6 +1324,32 @@ def _run_config(
             job_id=f"helicopter-{spec.benchmark}",
             runner="helicopter_eval.catalog_runner",
             cot_mode="CoT" if spec.benchmark == "livecodebench" else "NoCoT",
+        )
+    if spec.kind == "swe_bench":
+        from .swe_bench import SweBenchRunConfig
+
+        env_run_harness = os.getenv("HELICOPTER_SWEBENCH_RUN_HARNESS", "").strip().lower()
+        run_harness = bool(swebench_run_harness or env_run_harness in {"1", "true", "yes", "on"})
+        return SweBenchRunConfig(
+            base_url=base_url,
+            model=model,
+            benchmark=spec.benchmark,
+            dataset_name=str(spec.row_adapter or spec.benchmark),
+            limit=limit,
+            split=str(spec.source_split),
+            run_harness=run_harness,
+            predictions_dir=swebench_predictions_dir,
+            harness_run_id=swebench_harness_run_id,
+            harness_max_workers=int(swebench_max_workers or 1),
+            harness_cache_level=swebench_cache_level,
+            harness_clean=bool(swebench_clean),
+            harness_timeout_s=swebench_timeout_s,
+            max_context_chars=int(swebench_max_context_chars or 24000),
+            max_tokens=int(spec.max_tokens or 2048),
+            scoreboard_dataset=spec.dataset_slug,
+            job_name=spec.job_name or "code_swe_bench",
+            job_id=f"helicopter-{spec.benchmark}",
+            runner="helicopter_eval.catalog_runner",
         )
     if spec.kind == "longcodeqa":
         from .longcodeqa import LongCodeQARunConfig
