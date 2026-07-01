@@ -11,6 +11,7 @@ from helicopter_cli import __main__ as cli_main
 from helicopter_cli import commands, config, env, eval_catalog
 from helicopter_eval import (
     apibank,
+    bfcl_ast,
     browsecomp,
     catalog_runner,
     code_generation,
@@ -563,6 +564,8 @@ class CommandPlanTests(unittest.TestCase):
                 "browsecomp_zh",
                 "apibank_l1",
                 "apibank_level2",
+                "bfcl_simple_python",
+                "bfcl_exec_multiple_ast",
             )
         }
 
@@ -604,6 +607,9 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(specs["apibank_l1"].kind, "apibank")
         self.assertEqual(specs["apibank_l1"].row_adapter, "apibank_level1")
         self.assertEqual(specs["apibank_level2"].row_adapter, "apibank_level2")
+        self.assertEqual(specs["bfcl_simple_python"].kind, "bfcl_ast")
+        self.assertEqual(specs["bfcl_simple_python"].row_adapter, "simple_python")
+        self.assertEqual(specs["bfcl_exec_multiple_ast"].row_adapter, "exec_multiple")
 
     def test_run_catalog_gsm8k_dry_run_uses_rwkv_dataset_slug(self) -> None:
         args = Namespace(
@@ -643,10 +649,10 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         payload = print_json.call_args.args[0]
         self.assertEqual(payload["count"], 95)
-        self.assertEqual(payload["status_counts"]["implemented"], 54)
+        self.assertEqual(payload["status_counts"]["implemented"], 58)
         self.assertEqual(payload["status_counts"].get("needs_dataset_adapter", 0), 0)
         self.assertEqual(payload["status_counts"]["needs_dataset_access"], 1)
-        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 40)
+        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 36)
 
     def test_run_catalog_human_eval_dry_run_uses_code_generation_runner(self) -> None:
         args = Namespace(
@@ -856,6 +862,49 @@ class CommandPlanTests(unittest.TestCase):
         )
 
         self.assertEqual(decoded, [{"name": "Search", "arguments": {"query": "rwkv"}}])
+
+    def test_run_catalog_bfcl_ast_dry_run_uses_runner(self) -> None:
+        args = Namespace(
+            dry_run=True,
+            benchmark="bfcl_simple_python",
+            base_url=None,
+            model=None,
+            limit=2,
+        )
+
+        with mock.patch.object(cli_main, "print_json") as print_json:
+            rc = cli_main.handle_eval_run_catalog(args, root=ROOT)
+
+        self.assertEqual(rc, 0)
+        payload = print_json.call_args.args[0]
+        self.assertEqual(payload["benchmark"], "bfcl_simple_python")
+        self.assertEqual(payload["category"], "simple_python")
+        self.assertEqual(payload["scoreboard_dataset"], "bfcl_simple_python_test_limit2")
+        self.assertEqual(payload["job_name"], "function_bfcl_ast")
+
+    def test_bfcl_ast_scores_ground_truth_call_options(self) -> None:
+        sample = bfcl_ast.BfclAstSample(
+            sample_index=0,
+            task_id="toy",
+            instruction="Find triangle area.",
+            tools=(),
+            expected_tool_calls=(
+                bfcl_ast.ToolCallExpectation(
+                    name="calculate_triangle_area",
+                    arguments={"base": 10, "height": 5},
+                    argument_options={"base": (10,), "height": (5,), "unit": ("units", "")},
+                ),
+            ),
+            category="simple_python",
+        )
+
+        self.assertEqual(
+            bfcl_ast.evaluate_completion(
+                sample,
+                '{"name":"calculate_triangle_area","arguments":{"base":10,"height":5}}',
+            )[:2],
+            (True, ""),
+        )
 
     def test_multiple_choice_normalizes_list_and_arc_choices(self) -> None:
         list_choices = multiple_choice.normalize_choices(["red", "blue"])
