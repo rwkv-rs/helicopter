@@ -176,6 +176,34 @@ def handle_eval_run_free_response(args: argparse.Namespace, *, root: Any, **_: A
     return 0
 
 
+def handle_eval_run_multiple_choice(args: argparse.Namespace, *, root: Any, **_: Any) -> int:
+    from helicopter_eval.multiple_choice import MultipleChoiceRunConfig, dry_run_summary, run_multiple_choice
+
+    defaults = load_rwkv_skills_catalog().inference_defaults
+    run_config = MultipleChoiceRunConfig(
+        base_url=str(args.base_url or defaults.base_url),
+        model=str(args.model or defaults.model_name),
+        benchmark=str(args.benchmark),
+        dataset_name=str(args.dataset),
+        dataset_config=str(args.dataset_config) if args.dataset_config is not None else None,
+        question_field=str(args.question_field),
+        choices_field=str(args.choices_field),
+        answer_field=str(args.answer_field),
+        limit=args.limit,
+        split=str(args.split),
+        temperature=float(args.temperature),
+        top_p=float(args.top_p),
+        max_tokens=int(args.max_tokens),
+        timeout_s=float(args.timeout_s),
+        choice_labels=str(args.choice_labels),
+        job_name=str(args.job_name),
+        job_id=str(args.job_id) if args.job_id else None,
+    )
+    payload = dry_run_summary(run_config) if args.dry_run else run_multiple_choice(run_config, repo_root=root)
+    print_json(payload)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="helicopter")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -265,6 +293,30 @@ def build_parser() -> argparse.ArgumentParser:
     eval_run_free_response.add_argument("--job-name", default="free_response_judge")
     eval_run_free_response.add_argument("--job-id")
     eval_run_free_response.set_defaults(handler=handle_eval_run_free_response)
+
+    eval_run_multiple_choice = eval_subparsers.add_parser(
+        "run-multiple-choice",
+        help="run a HF multiple-choice benchmark and write scoreboard DB rows",
+    )
+    add_common_options(eval_run_multiple_choice)
+    eval_run_multiple_choice.add_argument("benchmark", help="scoreboard benchmark name")
+    eval_run_multiple_choice.add_argument("--dataset", required=True, help="HF dataset path")
+    eval_run_multiple_choice.add_argument("--dataset-config", help="HF dataset config/name")
+    eval_run_multiple_choice.add_argument("--question-field", default="question")
+    eval_run_multiple_choice.add_argument("--choices-field", default="choices")
+    eval_run_multiple_choice.add_argument("--answer-field", default="answer")
+    eval_run_multiple_choice.add_argument("--choice-labels", default="ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+    eval_run_multiple_choice.add_argument("--base-url", help="OpenAI-compatible vLLM base URL")
+    eval_run_multiple_choice.add_argument("--model", help="served model name")
+    eval_run_multiple_choice.add_argument("--limit", type=int)
+    eval_run_multiple_choice.add_argument("--split", default="test")
+    eval_run_multiple_choice.add_argument("--temperature", type=float, default=0.0)
+    eval_run_multiple_choice.add_argument("--top-p", type=float, default=1.0)
+    eval_run_multiple_choice.add_argument("--max-tokens", type=int, default=32)
+    eval_run_multiple_choice.add_argument("--timeout-s", type=float, default=600.0)
+    eval_run_multiple_choice.add_argument("--job-name", default="multi_choice_plain")
+    eval_run_multiple_choice.add_argument("--job-id")
+    eval_run_multiple_choice.set_defaults(handler=handle_eval_run_multiple_choice)
 
     eval_infer = eval_subparsers.add_parser("infer", help="start the default local 0.4B vLLM-RWKV service")
     add_common_options(eval_infer)

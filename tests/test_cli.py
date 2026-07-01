@@ -9,7 +9,7 @@ from unittest import mock
 
 from helicopter_cli import __main__ as cli_main
 from helicopter_cli import commands, config, env, eval_catalog
-from helicopter_eval import free_response, gsm8k
+from helicopter_eval import free_response, gsm8k, multiple_choice
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -497,6 +497,59 @@ class CommandPlanTests(unittest.TestCase):
                 "pass_ks": [1],
                 "prompt_profile": "helicopter",
                 "sampling_config": {"answer": {"temperature": 0.0, "top_p": 1.0, "max_new_tokens": 64}},
+            },
+        )
+
+    def test_multiple_choice_normalizes_list_and_arc_choices(self) -> None:
+        list_choices = multiple_choice.normalize_choices(["red", "blue"])
+        arc_choices = multiple_choice.normalize_choices({"label": ["A", "B"], "text": ["cat", "dog"]})
+        numeric_choices = multiple_choice.normalize_choices(["one", "two"], fallback_labels="12")
+
+        self.assertEqual(list_choices.labels, ("A", "B"))
+        self.assertEqual(multiple_choice.reference_answer(1, list_choices), "B")
+        self.assertEqual(multiple_choice.reference_answer("dog", arc_choices), "B")
+        self.assertEqual(multiple_choice.reference_answer("1", numeric_choices), "1")
+        self.assertEqual(multiple_choice.completion_answer("I think the answer is B.", arc_choices.labels), "B")
+
+    def test_generic_multiple_choice_dry_run_uses_hf_dataset_config(self) -> None:
+        args = Namespace(
+            dry_run=True,
+            benchmark="mmlu",
+            dataset="cais/mmlu",
+            dataset_config="abstract_algebra",
+            question_field="question",
+            choices_field="choices",
+            answer_field="answer",
+            choice_labels="ABCD",
+            base_url=None,
+            model=None,
+            limit=10,
+            split="test",
+            temperature=0.0,
+            top_p=1.0,
+            max_tokens=8,
+            timeout_s=30.0,
+            job_name="multi_choice_plain",
+            job_id=None,
+        )
+
+        with mock.patch.object(cli_main, "print_json") as print_json:
+            rc = cli_main.handle_eval_run_multiple_choice(args, root=ROOT)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            print_json.call_args.args[0],
+            {
+                "benchmark": "mmlu",
+                "hf_dataset": "cais/mmlu",
+                "hf_config": "abstract_algebra",
+                "split": "test",
+                "limit": 10,
+                "base_url": "http://127.0.0.1:29082",
+                "model": "rwkv7-g1d-0.4b-20260210-ctx8192",
+                "scoreboard_dataset": "mmlu_test_limit10",
+                "job_name": "multi_choice_plain",
+                "job_id": "helicopter-mmlu",
             },
         )
 
