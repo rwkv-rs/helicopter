@@ -7,7 +7,7 @@ from argparse import Namespace
 from pathlib import Path
 from unittest import mock
 
-from helicopter_cli import commands, config, env
+from helicopter_cli import commands, config, env, eval_catalog
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,6 +50,25 @@ def takeoff_args(**overrides: object) -> Namespace:
         "num_nodes": None,
         "num_devices": None,
         "override": None,
+    }
+    values.update(overrides)
+    return Namespace(**values)
+
+
+def eval_infer_args(**overrides: object) -> Namespace:
+    values = {
+        "dry_run": True,
+        "model_path": None,
+        "served_model_name": None,
+        "host": None,
+        "port": None,
+        "wkv_mode": None,
+        "emb_device": None,
+        "tensor_parallel_size": None,
+        "gpu_memory_utilization": None,
+        "max_model_len": None,
+        "max_num_seqs": None,
+        "max_num_batched_tokens": None,
     }
     values.update(overrides)
     return Namespace(**values)
@@ -198,7 +217,8 @@ class CommandPlanTests(unittest.TestCase):
             },
         )
         self.assertEqual(plan.cwd, ROOT)
-        self.assertEqual(plan.shown_env, {})
+        self.assertEqual(plan.shown_env, {"PYTHONPATH": str(ROOT / "src/infer/vllm-rwkv")})
+        self.assertEqual(plan.env["PYTHONPATH"], str(ROOT / "src/infer/vllm-rwkv"))
         self.assertEqual({key for key in plan.env if key.startswith("VLLM_")}, set())
 
     def test_takeoff_plan_uses_verl_module_entrypoint_and_default_overrides(self) -> None:
@@ -309,8 +329,73 @@ class CommandPlanTests(unittest.TestCase):
         forbidden_option_keys = {"--gpu-memory-utilization", "--max-num-seqs"}
 
         self.assertEqual(plan.env["VLLM_RWKV7_WKV_MODE"], "fp32io16")
+        self.assertEqual(plan.env["PYTHONPATH"], str(ROOT / "src/infer/vllm-rwkv"))
         self.assertEqual(forbidden_env_keys & plan.env.keys(), set())
         self.assertEqual(forbidden_option_keys & options.keys(), set())
+
+    def test_eval_catalog_matches_rwkv_skills_registry_shape(self) -> None:
+        catalog = eval_catalog.load_rwkv_skills_catalog()
+        plan = catalog.build_job_plan(names=("all",), fields=None)
+
+        self.assertEqual(len(catalog.benchmarks), 95)
+        self.assertEqual(len(catalog.runners), 36)
+        self.assertEqual(
+            catalog.field_counts(),
+            {
+                "coding": 12,
+                "function_calling": 42,
+                "instruction_following": 5,
+                "knowledge": 11,
+                "maths": 25,
+            },
+        )
+        self.assertEqual(catalog.inference_defaults.engine, "vllm-rwkv")
+        self.assertEqual(catalog.inference_defaults.protocol, "vllm")
+        self.assertEqual(
+            catalog.inference_defaults.model_path,
+            "/home/chase/GitHub/rwkv-rs/pth/rwkv7-g1d-0.4b-20260210-ctx8192.pth",
+        )
+        self.assertGreater(len([row for row in plan if row.status == "ready"]), 0)
+        self.assertEqual([row.status for row in plan if row.benchmark == "arena_hard_v2"], ["no_scheduler_job_in_rwkv_skills"])
+
+    def test_eval_infer_plan_uses_local_04_vllm_rwkv_defaults(self) -> None:
+        loaded_config = load_example_config()
+
+        plan = commands.build_eval_infer_plan(
+            eval_infer_args(),
+            root=ROOT,
+            env={},
+            config=loaded_config,
+        )
+
+        self.assertEqual(
+            plan.command[:3],
+            [
+                "vllm",
+                "serve",
+                "/home/chase/GitHub/rwkv-rs/pth/rwkv7-g1d-0.4b-20260210-ctx8192.pth",
+            ],
+        )
+        self.assertEqual(
+            command_options(plan.command),
+            {
+                "--host": "127.0.0.1",
+                "--port": "29082",
+                "--tokenizer-mode": "rwkv",
+                "--load-format": "auto",
+                "--served-model-name": "rwkv7-g1d-0.4b-20260210-ctx8192",
+                "--max-model-len": "8192",
+                "--tensor-parallel-size": "1",
+            },
+        )
+        self.assertEqual(
+            plan.shown_env,
+            {
+                "PYTHONPATH": str(ROOT / "src/infer/vllm-rwkv"),
+                "VLLM_RWKV7_EMB_DEVICE": "gpu",
+                "VLLM_RWKV7_WKV_MODE": "fp16",
+            },
+        )
 
     def test_takeoff_config_adv_estimator_becomes_hydra_overrides(self) -> None:
         loaded_config = load_example_config()

@@ -1,0 +1,2559 @@
+{
+  "aliases": {
+    "apibank": [
+      "apibank_l1",
+      "apibank_l2",
+      "apibank_level1",
+      "apibank_level2"
+    ],
+    "arena_hard": [
+      "arena_hard_v2"
+    ],
+    "gpqa": [
+      "gpqa_main",
+      "gpqa_extended",
+      "gpqa_diamond"
+    ],
+    "longcodebench": [
+      "longcodeqa"
+    ],
+    "tau2_bench": [
+      "tau2_bench_retail",
+      "tau2_bench_airline",
+      "tau2_bench_telecom"
+    ],
+    "tau3_bench": [
+      "tau3_bench_retail",
+      "tau3_bench_airline",
+      "tau3_bench_telecom",
+      "tau3_bench_banking_knowledge",
+      "tau3_bench_mock",
+      "tau3_bench_mock_long_context"
+    ],
+    "tau_bench": [
+      "tau_bench_retail",
+      "tau_bench_airline",
+      "tau_bench_telecom"
+    ]
+  },
+  "benchmarks": [
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "no_cot"
+      ],
+      "dataset": "human_eval",
+      "default_split": "test",
+      "field": "coding",
+      "n_shots": [
+        0
+      ],
+      "name": "human_eval",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "code_human_eval",
+        "code_human_eval_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "no_cot"
+      ],
+      "dataset": "human_eval_cn",
+      "default_split": "test",
+      "field": "coding",
+      "n_shots": [
+        0
+      ],
+      "name": "human_eval_cn",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "code_human_eval",
+        "code_human_eval_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "no_cot"
+      ],
+      "dataset": "human_eval_fix",
+      "default_split": "test",
+      "field": "coding",
+      "n_shots": [
+        0
+      ],
+      "name": "human_eval_fix",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "code_human_eval",
+        "code_human_eval_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "no_cot"
+      ],
+      "dataset": "human_eval_plus",
+      "default_split": "test",
+      "field": "coding",
+      "n_shots": [
+        0
+      ],
+      "name": "human_eval_plus",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "code_human_eval",
+        "code_human_eval_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "livecodebench",
+      "default_split": "test",
+      "field": "coding",
+      "n_shots": [
+        0
+      ],
+      "name": "livecodebench",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "code_livecodebench",
+        "code_livecodebench_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "no_cot"
+      ],
+      "dataset": "mbpp",
+      "default_split": "test",
+      "field": "coding",
+      "n_shots": [
+        0
+      ],
+      "name": "mbpp",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "code_mbpp",
+        "code_mbpp_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "no_cot"
+      ],
+      "dataset": "mbpp_plus",
+      "default_split": "test",
+      "field": "coding",
+      "n_shots": [
+        0
+      ],
+      "name": "mbpp_plus",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "code_mbpp",
+        "code_mbpp_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "swe_bench",
+      "default_split": "test",
+      "field": "coding",
+      "n_shots": [
+        0
+      ],
+      "name": "swe_bench",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "code_swe_bench",
+        "code_swe_bench_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "swe_bench_lite",
+      "default_split": "test",
+      "field": "coding",
+      "n_shots": [
+        0
+      ],
+      "name": "swe_bench_lite",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "code_swe_bench",
+        "code_swe_bench_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "swe_bench_lite_bm25_13k",
+      "default_split": "test",
+      "field": "coding",
+      "n_shots": [
+        0
+      ],
+      "name": "swe_bench_lite_bm25_13k",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "code_swe_bench",
+        "code_swe_bench_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "swe_bench_lite_oracle",
+      "default_split": "test",
+      "field": "coding",
+      "n_shots": [
+        0
+      ],
+      "name": "swe_bench_lite_oracle",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "code_swe_bench",
+        "code_swe_bench_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "swe_bench_verified",
+      "default_split": "test",
+      "field": "coding",
+      "n_shots": [
+        0
+      ],
+      "name": "swe_bench_verified",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "code_swe_bench",
+        "code_swe_bench_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "agentbench_db",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "agentbench_db",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_agentbench"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "agentbench_kg",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "agentbench_kg",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_agentbench"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "apibank_l1",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "apibank_l1",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_api_bank"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "apibank_l2",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "apibank_l2",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_api_bank"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "apibank_level1",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "apibank_level1",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_api_bank"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "apibank_level2",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "apibank_level2",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_api_bank"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "bfcl_exec_multiple",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "bfcl_exec_multiple",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_bfcl_exec"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "bfcl_exec_multiple_ast",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "bfcl_exec_multiple_ast",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_bfcl_ast"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "bfcl_exec_parallel",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "bfcl_exec_parallel",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_bfcl_exec"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "bfcl_exec_parallel_multiple",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "bfcl_exec_parallel_multiple",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_bfcl_exec"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "bfcl_exec_simple",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "bfcl_exec_simple",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_bfcl_exec"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "bfcl_exec_simple_ast",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "bfcl_exec_simple_ast",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_bfcl_ast"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "bfcl_multiple",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "bfcl_multiple",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_bfcl_ast"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "bfcl_simple_python",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "bfcl_simple_python",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_bfcl_ast"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "bfcl_v3",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "bfcl_v3",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_bfcl_v3"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "browsecomp",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "browsecomp",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_browsecomp"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "browsecomp_plus",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "browsecomp_plus",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_browsecomp_plus"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "browsecomp_zh",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "browsecomp_zh",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_browsecomp"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "complexfuncbench_official",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "complexfuncbench_official",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_complexfuncbench"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "complexfuncbench_subset",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "complexfuncbench_subset",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_complexfuncbench"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "longbench",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "longbench",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_longbench"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "longbench_qa",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "longbench_qa",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_longbench"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "longbench_qa_balanced",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "longbench_qa_balanced",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_longbench"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "longcodeqa",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "longcodeqa",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_longcodebench"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "mcp_bench",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "mcp_bench",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_mcp_bench"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "mcp_bench_multi_2server",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "mcp_bench_multi_2server",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_mcp_bench"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "mcp_bench_multi_3server",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "mcp_bench_multi_3server",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_mcp_bench"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "mcp_bench_single",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "mcp_bench_single",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_mcp_bench"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "tau2_bench_airline",
+      "default_split": "base",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "tau2_bench_airline",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_tau2_bench"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "tau2_bench_retail",
+      "default_split": "base",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "tau2_bench_retail",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_tau2_bench"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "tau2_bench_telecom",
+      "default_split": "base",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "tau2_bench_telecom",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_tau2_bench"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "tau3_bench_airline",
+      "default_split": "base",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "tau3_bench_airline",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_tau3_bench"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "tau3_bench_banking_knowledge",
+      "default_split": "base",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "tau3_bench_banking_knowledge",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_tau3_bench"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "tau3_bench_mock",
+      "default_split": "base",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "tau3_bench_mock",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_tau3_bench"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "tau3_bench_mock_long_context",
+      "default_split": "base",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "tau3_bench_mock_long_context",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_tau3_bench"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "tau3_bench_retail",
+      "default_split": "base",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "tau3_bench_retail",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_tau3_bench"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "tau3_bench_telecom",
+      "default_split": "base",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "tau3_bench_telecom",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_tau3_bench"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "tau_bench_airline",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "tau_bench_airline",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_tau_bench"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "tau_bench_retail",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "tau_bench_retail",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_tau_bench"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "tau_bench_telecom",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "tau_bench_telecom",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_tau_bench"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "toolalpaca_eval_real",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "toolalpaca_eval_real",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_toolalpaca"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "toolalpaca_eval_simulated",
+      "default_split": "test",
+      "field": "function_calling",
+      "n_shots": [
+        0
+      ],
+      "name": "toolalpaca_eval_simulated",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "function_toolalpaca"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "no_cot"
+      ],
+      "dataset": "arena_hard",
+      "default_split": "test",
+      "field": "instruction_following",
+      "n_shots": [
+        0
+      ],
+      "name": "arena_hard_v2",
+      "pass_ks": [],
+      "scheduler_jobs": [],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "no_cot"
+      ],
+      "dataset": "flores200",
+      "default_split": "devtest",
+      "field": "instruction_following",
+      "n_shots": [
+        0
+      ],
+      "name": "flores200",
+      "pass_ks": [],
+      "scheduler_jobs": [],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "no_cot"
+      ],
+      "dataset": "ifbench",
+      "default_split": "test",
+      "field": "instruction_following",
+      "n_shots": [
+        0
+      ],
+      "name": "ifbench",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "instruction_following",
+        "instruction_following_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "no_cot"
+      ],
+      "dataset": "ifeval",
+      "default_split": "test",
+      "field": "instruction_following",
+      "n_shots": [
+        0
+      ],
+      "name": "ifeval",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "instruction_following",
+        "instruction_following_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "no_cot"
+      ],
+      "dataset": "wmt24pp",
+      "default_split": "test",
+      "field": "instruction_following",
+      "n_shots": [
+        0
+      ],
+      "name": "wmt24pp",
+      "pass_ks": [],
+      "scheduler_jobs": [],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "no_cot",
+        "cot"
+      ],
+      "dataset": "ceval",
+      "default_split": "test",
+      "field": "knowledge",
+      "n_shots": [
+        0
+      ],
+      "name": "ceval",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "multi_choice_plain",
+        "multi_choice_cot",
+        "multi_choice_plain_naive",
+        "multi_choice_cot_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "no_cot",
+        "cot"
+      ],
+      "dataset": "cmmlu",
+      "default_split": "test",
+      "field": "knowledge",
+      "n_shots": [
+        0
+      ],
+      "name": "cmmlu",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "multi_choice_plain",
+        "multi_choice_cot",
+        "multi_choice_plain_naive",
+        "multi_choice_cot_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "no_cot",
+        "cot"
+      ],
+      "dataset": "gpqa",
+      "default_split": "diamond",
+      "field": "knowledge",
+      "n_shots": [
+        0
+      ],
+      "name": "gpqa_diamond",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "multi_choice_plain",
+        "multi_choice_cot",
+        "multi_choice_plain_naive",
+        "multi_choice_cot_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "no_cot",
+        "cot"
+      ],
+      "dataset": "gpqa",
+      "default_split": "extended",
+      "field": "knowledge",
+      "n_shots": [
+        0
+      ],
+      "name": "gpqa_extended",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "multi_choice_plain",
+        "multi_choice_cot",
+        "multi_choice_plain_naive",
+        "multi_choice_cot_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "no_cot",
+        "cot"
+      ],
+      "dataset": "gpqa",
+      "default_split": "main",
+      "field": "knowledge",
+      "n_shots": [
+        0
+      ],
+      "name": "gpqa_main",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "multi_choice_plain",
+        "multi_choice_cot",
+        "multi_choice_plain_naive",
+        "multi_choice_cot_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "no_cot",
+        "cot"
+      ],
+      "dataset": "include",
+      "default_split": "test",
+      "field": "knowledge",
+      "n_shots": [
+        0
+      ],
+      "name": "include",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "multi_choice_plain",
+        "multi_choice_cot",
+        "multi_choice_plain_naive",
+        "multi_choice_cot_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "no_cot",
+        "cot"
+      ],
+      "dataset": "mmlu",
+      "default_split": "test",
+      "field": "knowledge",
+      "n_shots": [
+        0
+      ],
+      "name": "mmlu",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "multi_choice_plain",
+        "multi_choice_cot",
+        "multi_choice_plain_naive",
+        "multi_choice_cot_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "no_cot",
+        "cot"
+      ],
+      "dataset": "mmlu_pro",
+      "default_split": "test",
+      "field": "knowledge",
+      "n_shots": [
+        0
+      ],
+      "name": "mmlu_pro",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "multi_choice_plain",
+        "multi_choice_cot",
+        "multi_choice_plain_naive",
+        "multi_choice_cot_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "no_cot",
+        "cot"
+      ],
+      "dataset": "mmlu_redux",
+      "default_split": "test",
+      "field": "knowledge",
+      "n_shots": [
+        0
+      ],
+      "name": "mmlu_redux",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "multi_choice_plain",
+        "multi_choice_cot",
+        "multi_choice_plain_naive",
+        "multi_choice_cot_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "no_cot",
+        "cot"
+      ],
+      "dataset": "mmmlu",
+      "default_split": "test",
+      "field": "knowledge",
+      "n_shots": [
+        0
+      ],
+      "name": "mmmlu",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "multi_choice_plain",
+        "multi_choice_cot",
+        "multi_choice_plain_naive",
+        "multi_choice_cot_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "no_cot",
+        "cot"
+      ],
+      "dataset": "supergpqa",
+      "default_split": "test",
+      "field": "knowledge",
+      "n_shots": [
+        0
+      ],
+      "name": "supergpqa",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "multi_choice_plain",
+        "multi_choice_cot",
+        "multi_choice_plain_naive",
+        "multi_choice_cot_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "aime24",
+      "default_split": "test",
+      "field": "maths",
+      "n_shots": [
+        0
+      ],
+      "name": "aime24",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "free_response",
+        "free_response_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "aime25",
+      "default_split": "test",
+      "field": "maths",
+      "n_shots": [
+        0
+      ],
+      "name": "aime25",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "free_response",
+        "free_response_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "algebra222",
+      "default_split": "test",
+      "field": "maths",
+      "n_shots": [
+        0
+      ],
+      "name": "algebra222",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "free_response",
+        "free_response_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "amc23",
+      "default_split": "test",
+      "field": "maths",
+      "n_shots": [
+        0
+      ],
+      "name": "amc23",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "free_response_judge",
+        "free_response_judge_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "answer_judge",
+      "default_split": "test",
+      "field": "maths",
+      "n_shots": [
+        0
+      ],
+      "name": "answer_judge",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "free_response",
+        "free_response_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "asdiv",
+      "default_split": "test",
+      "field": "maths",
+      "n_shots": [
+        0
+      ],
+      "name": "asdiv",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "free_response",
+        "free_response_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "beyond_aime",
+      "default_split": "test",
+      "field": "maths",
+      "n_shots": [
+        0
+      ],
+      "name": "beyond_aime",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "free_response",
+        "free_response_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "brumo25",
+      "default_split": "test",
+      "field": "maths",
+      "n_shots": [
+        0
+      ],
+      "name": "brumo25",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "free_response",
+        "free_response_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "college_math",
+      "default_split": "test",
+      "field": "maths",
+      "n_shots": [
+        0
+      ],
+      "name": "college_math",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "free_response",
+        "free_response_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "comp_math_24_25",
+      "default_split": "test",
+      "field": "maths",
+      "n_shots": [
+        0
+      ],
+      "name": "comp_math_24_25",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "free_response_judge",
+        "free_response_judge_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "gaokao2023en",
+      "default_split": "test",
+      "field": "maths",
+      "n_shots": [
+        0
+      ],
+      "name": "gaokao2023en",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "free_response_judge",
+        "free_response_judge_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "gsm8k",
+      "default_split": "test",
+      "field": "maths",
+      "n_shots": [
+        0
+      ],
+      "name": "gsm8k",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "free_response_judge",
+        "free_response_judge_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "gsm_plus",
+      "default_split": "test",
+      "field": "maths",
+      "n_shots": [
+        0
+      ],
+      "name": "gsm_plus",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "free_response",
+        "free_response_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "hendrycks_math",
+      "default_split": "test",
+      "field": "maths",
+      "n_shots": [
+        0
+      ],
+      "name": "hendrycks_math",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "free_response",
+        "free_response_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "hle",
+      "default_split": "all",
+      "field": "maths",
+      "n_shots": [
+        0
+      ],
+      "name": "hle",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "free_response",
+        "free_response_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "hmmt_feb25",
+      "default_split": "test",
+      "field": "maths",
+      "n_shots": [
+        0
+      ],
+      "name": "hmmt_feb25",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "free_response",
+        "free_response_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "math_500",
+      "default_split": "test",
+      "field": "maths",
+      "n_shots": [
+        0
+      ],
+      "name": "math_500",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "free_response_judge",
+        "free_response_judge_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "math_odyssey",
+      "default_split": "test",
+      "field": "maths",
+      "n_shots": [
+        0
+      ],
+      "name": "math_odyssey",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "free_response",
+        "free_response_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "mawps",
+      "default_split": "test",
+      "field": "maths",
+      "n_shots": [
+        0
+      ],
+      "name": "mawps",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "free_response",
+        "free_response_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "minerva_math",
+      "default_split": "test",
+      "field": "maths",
+      "n_shots": [
+        0
+      ],
+      "name": "minerva_math",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "free_response_judge",
+        "free_response_judge_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "olympiadbench",
+      "default_split": "test",
+      "field": "maths",
+      "n_shots": [
+        0
+      ],
+      "name": "olympiadbench",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "free_response_judge",
+        "free_response_judge_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "omni_math",
+      "default_split": "test",
+      "field": "maths",
+      "n_shots": [
+        0
+      ],
+      "name": "omni_math",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "free_response",
+        "free_response_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "polymath",
+      "default_split": "all",
+      "field": "maths",
+      "n_shots": [
+        0
+      ],
+      "name": "polymath",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "free_response",
+        "free_response_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "simpleqa",
+      "default_split": "verified",
+      "field": "maths",
+      "n_shots": [
+        0
+      ],
+      "name": "simpleqa",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "free_response",
+        "free_response_naive"
+      ],
+      "target_eval_attempts": 5000
+    },
+    {
+      "avg_ks": [],
+      "cot_modes": [
+        "cot"
+      ],
+      "dataset": "svamp",
+      "default_split": "test",
+      "field": "maths",
+      "n_shots": [
+        0
+      ],
+      "name": "svamp",
+      "pass_ks": [],
+      "scheduler_jobs": [
+        "free_response",
+        "free_response_naive"
+      ],
+      "target_eval_attempts": 5000
+    }
+  ],
+  "inference_defaults": {
+    "base_url": "http://127.0.0.1:29082",
+    "emb_device": "gpu",
+    "engine": "vllm-rwkv",
+    "host": "127.0.0.1",
+    "max_model_len": 8192,
+    "model_name": "rwkv7-g1d-0.4b-20260210-ctx8192",
+    "model_path": "/home/chase/GitHub/rwkv-rs/pth/rwkv7-g1d-0.4b-20260210-ctx8192.pth",
+    "port": 29082,
+    "protocol": "vllm",
+    "tensor_parallel_size": 1,
+    "wkv_mode": "fp16"
+  },
+  "runners": [
+    {
+      "batch_flag": "--batch-size",
+      "extra_args": [
+        "--cot-mode",
+        "no_cot"
+      ],
+      "fallback_dataset_slugs": [],
+      "group": "knowledge",
+      "is_cot": false,
+      "module": "src.eval.knowledge.runner",
+      "name": "multi_choice_plain",
+      "probe_dataset_required": false,
+      "probe_extra_args": [],
+      "probe_flag": null,
+      "probe_max_generate_flag": null,
+      "probe_question_floor": 5000,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "multi_choice"
+    },
+    {
+      "batch_flag": "--batch-size",
+      "extra_args": [
+        "--cot-mode",
+        "no_cot",
+        "--prompt-profile",
+        "naive"
+      ],
+      "fallback_dataset_slugs": [],
+      "group": "knowledge",
+      "is_cot": false,
+      "module": "src.eval.knowledge.runner",
+      "name": "multi_choice_plain_naive",
+      "probe_dataset_required": false,
+      "probe_extra_args": [],
+      "probe_flag": null,
+      "probe_max_generate_flag": null,
+      "probe_question_floor": 5000,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "multi_choice"
+    },
+    {
+      "batch_flag": "--batch-size",
+      "extra_args": [
+        "--cot-mode",
+        "cot"
+      ],
+      "fallback_dataset_slugs": [],
+      "group": "knowledge",
+      "is_cot": true,
+      "module": "src.eval.knowledge.runner",
+      "name": "multi_choice_cot",
+      "probe_dataset_required": true,
+      "probe_extra_args": [],
+      "probe_flag": "--probe-only",
+      "probe_max_generate_flag": null,
+      "probe_question_floor": 5000,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "multi_choice"
+    },
+    {
+      "batch_flag": "--batch-size",
+      "extra_args": [
+        "--cot-mode",
+        "cot",
+        "--prompt-profile",
+        "naive"
+      ],
+      "fallback_dataset_slugs": [],
+      "group": "knowledge",
+      "is_cot": true,
+      "module": "src.eval.knowledge.runner",
+      "name": "multi_choice_cot_naive",
+      "probe_dataset_required": true,
+      "probe_extra_args": [],
+      "probe_flag": "--probe-only",
+      "probe_max_generate_flag": null,
+      "probe_question_floor": 5000,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "multi_choice"
+    },
+    {
+      "batch_flag": "--batch-size",
+      "extra_args": [
+        "--judge-mode",
+        "exact"
+      ],
+      "fallback_dataset_slugs": [],
+      "group": "maths",
+      "is_cot": true,
+      "module": "src.eval.maths.runner",
+      "name": "free_response",
+      "probe_dataset_required": true,
+      "probe_extra_args": [],
+      "probe_flag": "--probe-only",
+      "probe_max_generate_flag": null,
+      "probe_question_floor": 5000,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "free_response"
+    },
+    {
+      "batch_flag": "--batch-size",
+      "extra_args": [
+        "--judge-mode",
+        "exact",
+        "--prompt-profile",
+        "naive"
+      ],
+      "fallback_dataset_slugs": [],
+      "group": "maths",
+      "is_cot": true,
+      "module": "src.eval.maths.runner",
+      "name": "free_response_naive",
+      "probe_dataset_required": true,
+      "probe_extra_args": [],
+      "probe_flag": "--probe-only",
+      "probe_max_generate_flag": null,
+      "probe_question_floor": 5000,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "free_response"
+    },
+    {
+      "batch_flag": "--batch-size",
+      "extra_args": [
+        "--judge-mode",
+        "llm"
+      ],
+      "fallback_dataset_slugs": [],
+      "group": "maths",
+      "is_cot": true,
+      "module": "src.eval.maths.runner",
+      "name": "free_response_judge",
+      "probe_dataset_required": true,
+      "probe_extra_args": [],
+      "probe_flag": "--probe-only",
+      "probe_max_generate_flag": null,
+      "probe_question_floor": 5000,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "free_response"
+    },
+    {
+      "batch_flag": "--batch-size",
+      "extra_args": [
+        "--judge-mode",
+        "llm",
+        "--prompt-profile",
+        "naive"
+      ],
+      "fallback_dataset_slugs": [],
+      "group": "maths",
+      "is_cot": true,
+      "module": "src.eval.maths.runner",
+      "name": "free_response_judge_naive",
+      "probe_dataset_required": true,
+      "probe_extra_args": [],
+      "probe_flag": "--probe-only",
+      "probe_max_generate_flag": null,
+      "probe_question_floor": 5000,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "free_response"
+    },
+    {
+      "batch_flag": "--batch-size",
+      "extra_args": [],
+      "fallback_dataset_slugs": [
+        "math_500_test"
+      ],
+      "group": "param_search",
+      "is_cot": true,
+      "module": "src.bin.param_search_free_response",
+      "name": "param_search_free_response",
+      "probe_dataset_required": true,
+      "probe_extra_args": [],
+      "probe_flag": "--probe-only",
+      "probe_max_generate_flag": null,
+      "probe_question_floor": 0,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "param_search"
+    },
+    {
+      "batch_flag": "--batch-size",
+      "extra_args": [],
+      "fallback_dataset_slugs": [
+        "gsm8k_test"
+      ],
+      "group": "param_search",
+      "is_cot": true,
+      "module": "src.bin.param_search_free_response_judge",
+      "name": "param_search_free_response_judge",
+      "probe_dataset_required": true,
+      "probe_extra_args": [],
+      "probe_flag": "--probe-only",
+      "probe_max_generate_flag": null,
+      "probe_question_floor": 0,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "param_search"
+    },
+    {
+      "batch_flag": null,
+      "extra_args": [],
+      "fallback_dataset_slugs": [
+        "gsm8k_test"
+      ],
+      "group": "param_search",
+      "is_cot": true,
+      "module": "src.bin.param_search_select",
+      "name": "param_search_select",
+      "probe_dataset_required": false,
+      "probe_extra_args": [],
+      "probe_flag": null,
+      "probe_max_generate_flag": null,
+      "probe_question_floor": 0,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "param_search"
+    },
+    {
+      "batch_flag": "--batch-size",
+      "extra_args": [],
+      "fallback_dataset_slugs": [
+        "human_eval_test"
+      ],
+      "group": "coding",
+      "is_cot": false,
+      "module": "src.eval.coding.runner",
+      "name": "code_human_eval",
+      "probe_dataset_required": false,
+      "probe_extra_args": [],
+      "probe_flag": "--probe-only",
+      "probe_max_generate_flag": "--max-tokens",
+      "probe_question_floor": 5000,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "code"
+    },
+    {
+      "batch_flag": "--batch-size",
+      "extra_args": [
+        "--prompt-profile",
+        "naive"
+      ],
+      "fallback_dataset_slugs": [
+        "human_eval_test"
+      ],
+      "group": "coding",
+      "is_cot": false,
+      "module": "src.eval.coding.runner",
+      "name": "code_human_eval_naive",
+      "probe_dataset_required": false,
+      "probe_extra_args": [],
+      "probe_flag": "--probe-only",
+      "probe_max_generate_flag": "--max-tokens",
+      "probe_question_floor": 5000,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "code"
+    },
+    {
+      "batch_flag": "--batch-size",
+      "extra_args": [
+        "--cot-mode",
+        "no_cot"
+      ],
+      "fallback_dataset_slugs": [
+        "mbpp_test"
+      ],
+      "group": "coding",
+      "is_cot": false,
+      "module": "src.eval.coding.runner",
+      "name": "code_mbpp",
+      "probe_dataset_required": false,
+      "probe_extra_args": [],
+      "probe_flag": "--probe-only",
+      "probe_max_generate_flag": "--max-tokens",
+      "probe_question_floor": 5000,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "code"
+    },
+    {
+      "batch_flag": "--batch-size",
+      "extra_args": [
+        "--cot-mode",
+        "no_cot",
+        "--prompt-profile",
+        "naive"
+      ],
+      "fallback_dataset_slugs": [
+        "mbpp_test"
+      ],
+      "group": "coding",
+      "is_cot": false,
+      "module": "src.eval.coding.runner",
+      "name": "code_mbpp_naive",
+      "probe_dataset_required": false,
+      "probe_extra_args": [],
+      "probe_flag": "--probe-only",
+      "probe_max_generate_flag": "--max-tokens",
+      "probe_question_floor": 5000,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "code"
+    },
+    {
+      "batch_flag": "--batch-size",
+      "extra_args": [],
+      "fallback_dataset_slugs": [
+        "livecodebench_test"
+      ],
+      "group": "coding",
+      "is_cot": true,
+      "module": "src.eval.coding.runner",
+      "name": "code_livecodebench",
+      "probe_dataset_required": false,
+      "probe_extra_args": [],
+      "probe_flag": "--probe-only",
+      "probe_max_generate_flag": "--max-tokens",
+      "probe_question_floor": 5000,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "code"
+    },
+    {
+      "batch_flag": "--batch-size",
+      "extra_args": [
+        "--prompt-profile",
+        "naive"
+      ],
+      "fallback_dataset_slugs": [
+        "livecodebench_test"
+      ],
+      "group": "coding",
+      "is_cot": true,
+      "module": "src.eval.coding.runner",
+      "name": "code_livecodebench_naive",
+      "probe_dataset_required": false,
+      "probe_extra_args": [],
+      "probe_flag": "--probe-only",
+      "probe_max_generate_flag": "--max-tokens",
+      "probe_question_floor": 5000,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "code"
+    },
+    {
+      "batch_flag": "--batch-size",
+      "extra_args": [],
+      "fallback_dataset_slugs": [
+        "swe_bench_lite_test",
+        "swe_bench_verified_test",
+        "swe_bench_test",
+        "swe_bench_lite_oracle_test",
+        "swe_bench_lite_bm25_13k_test"
+      ],
+      "group": "coding",
+      "is_cot": true,
+      "module": "src.eval.coding.runner",
+      "name": "code_swe_bench",
+      "probe_dataset_required": false,
+      "probe_extra_args": [],
+      "probe_flag": "--probe-only",
+      "probe_max_generate_flag": "--max-tokens",
+      "probe_question_floor": 5000,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "code"
+    },
+    {
+      "batch_flag": "--batch-size",
+      "extra_args": [
+        "--prompt-profile",
+        "naive"
+      ],
+      "fallback_dataset_slugs": [
+        "swe_bench_lite_test",
+        "swe_bench_verified_test",
+        "swe_bench_test",
+        "swe_bench_lite_oracle_test",
+        "swe_bench_lite_bm25_13k_test"
+      ],
+      "group": "coding",
+      "is_cot": true,
+      "module": "src.eval.coding.runner",
+      "name": "code_swe_bench_naive",
+      "probe_dataset_required": false,
+      "probe_extra_args": [],
+      "probe_flag": "--probe-only",
+      "probe_max_generate_flag": "--max-tokens",
+      "probe_question_floor": 5000,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "code"
+    },
+    {
+      "batch_flag": "--batch-size",
+      "extra_args": [],
+      "fallback_dataset_slugs": [
+        "browsecomp_test",
+        "browsecomp_zh_test"
+      ],
+      "group": "function_calling",
+      "is_cot": true,
+      "module": "src.eval.function_calling.runner",
+      "name": "function_browsecomp",
+      "probe_dataset_required": true,
+      "probe_extra_args": [],
+      "probe_flag": "--probe-only",
+      "probe_max_generate_flag": null,
+      "probe_question_floor": 5000,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "function_calling"
+    },
+    {
+      "batch_flag": null,
+      "extra_args": [],
+      "fallback_dataset_slugs": [
+        "browsecomp_plus_test"
+      ],
+      "group": "function_calling",
+      "is_cot": true,
+      "module": "src.eval.function_calling.runner",
+      "name": "function_browsecomp_plus",
+      "probe_dataset_required": true,
+      "probe_extra_args": [],
+      "probe_flag": "--probe-only",
+      "probe_max_generate_flag": null,
+      "probe_question_floor": 5000,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "function_calling"
+    },
+    {
+      "batch_flag": "--batch-size",
+      "extra_args": [],
+      "fallback_dataset_slugs": [
+        "complexfuncbench_official_test"
+      ],
+      "group": "function_calling",
+      "is_cot": true,
+      "module": "src.eval.function_calling.runner",
+      "name": "function_complexfuncbench",
+      "probe_dataset_required": true,
+      "probe_extra_args": [],
+      "probe_flag": "--probe-only",
+      "probe_max_generate_flag": null,
+      "probe_question_floor": 5000,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "function_calling"
+    },
+    {
+      "batch_flag": "--batch-size",
+      "extra_args": [],
+      "fallback_dataset_slugs": [
+        "longbench_test",
+        "longbench_qa_test",
+        "longbench_qa_balanced_test"
+      ],
+      "group": "function_calling",
+      "is_cot": true,
+      "module": "src.eval.function_calling.runner",
+      "name": "function_longbench",
+      "probe_dataset_required": true,
+      "probe_extra_args": [],
+      "probe_flag": "--probe-only",
+      "probe_max_generate_flag": null,
+      "probe_question_floor": 5000,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "function_calling"
+    },
+    {
+      "batch_flag": "--batch-size",
+      "extra_args": [],
+      "fallback_dataset_slugs": [
+        "longcodeqa_test"
+      ],
+      "group": "function_calling",
+      "is_cot": true,
+      "module": "src.eval.function_calling.runner",
+      "name": "function_longcodebench",
+      "probe_dataset_required": true,
+      "probe_extra_args": [],
+      "probe_flag": "--probe-only",
+      "probe_max_generate_flag": null,
+      "probe_question_floor": 5000,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "function_calling"
+    },
+    {
+      "batch_flag": null,
+      "extra_args": [],
+      "fallback_dataset_slugs": [
+        "mcp_bench_test"
+      ],
+      "group": "function_calling",
+      "is_cot": true,
+      "module": "src.eval.function_calling.runner",
+      "name": "function_mcp_bench",
+      "probe_dataset_required": true,
+      "probe_extra_args": [],
+      "probe_flag": "--probe-only",
+      "probe_max_generate_flag": null,
+      "probe_question_floor": 0,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "function_calling"
+    },
+    {
+      "batch_flag": "--batch-size",
+      "extra_args": [],
+      "fallback_dataset_slugs": [
+        "apibank_level1_test",
+        "apibank_level2_test"
+      ],
+      "group": "function_calling",
+      "is_cot": true,
+      "module": "src.eval.function_calling.runner",
+      "name": "function_api_bank",
+      "probe_dataset_required": true,
+      "probe_extra_args": [],
+      "probe_flag": "--probe-only",
+      "probe_max_generate_flag": null,
+      "probe_question_floor": 5000,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "function_calling"
+    },
+    {
+      "batch_flag": null,
+      "extra_args": [],
+      "fallback_dataset_slugs": [
+        "agentbench_db_test",
+        "agentbench_kg_test"
+      ],
+      "group": "function_calling",
+      "is_cot": true,
+      "module": "src.eval.function_calling.runner",
+      "name": "function_agentbench",
+      "probe_dataset_required": true,
+      "probe_extra_args": [],
+      "probe_flag": "--probe-only",
+      "probe_max_generate_flag": null,
+      "probe_question_floor": 0,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "function_calling"
+    },
+    {
+      "batch_flag": "--batch-size",
+      "extra_args": [],
+      "fallback_dataset_slugs": [
+        "bfcl_v3_test"
+      ],
+      "group": "function_calling",
+      "is_cot": true,
+      "module": "src.eval.function_calling.runner",
+      "name": "function_bfcl_v3",
+      "probe_dataset_required": true,
+      "probe_extra_args": [],
+      "probe_flag": "--probe-only",
+      "probe_max_generate_flag": null,
+      "probe_question_floor": 5000,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "function_calling"
+    },
+    {
+      "batch_flag": "--batch-size",
+      "extra_args": [],
+      "fallback_dataset_slugs": [
+        "bfcl_simple_python_test",
+        "bfcl_exec_simple_ast_test",
+        "bfcl_multiple_test",
+        "bfcl_exec_multiple_ast_test"
+      ],
+      "group": "function_calling",
+      "is_cot": true,
+      "module": "src.eval.function_calling.runner",
+      "name": "function_bfcl_ast",
+      "probe_dataset_required": true,
+      "probe_extra_args": [],
+      "probe_flag": "--probe-only",
+      "probe_max_generate_flag": null,
+      "probe_question_floor": 5000,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "function_calling"
+    },
+    {
+      "batch_flag": "--batch-size",
+      "extra_args": [],
+      "fallback_dataset_slugs": [
+        "bfcl_exec_simple_test",
+        "bfcl_exec_multiple_test",
+        "bfcl_exec_parallel_test",
+        "bfcl_exec_parallel_multiple_test"
+      ],
+      "group": "function_calling",
+      "is_cot": true,
+      "module": "src.eval.function_calling.runner",
+      "name": "function_bfcl_exec",
+      "probe_dataset_required": true,
+      "probe_extra_args": [],
+      "probe_flag": "--probe-only",
+      "probe_max_generate_flag": null,
+      "probe_question_floor": 5000,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "function_calling"
+    },
+    {
+      "batch_flag": "--batch-size",
+      "extra_args": [],
+      "fallback_dataset_slugs": [
+        "toolalpaca_eval_simulated_test",
+        "toolalpaca_eval_real_test"
+      ],
+      "group": "function_calling",
+      "is_cot": true,
+      "module": "src.eval.function_calling.runner",
+      "name": "function_toolalpaca",
+      "probe_dataset_required": true,
+      "probe_extra_args": [],
+      "probe_flag": "--probe-only",
+      "probe_max_generate_flag": null,
+      "probe_question_floor": 5000,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "function_calling"
+    },
+    {
+      "batch_flag": "--batch-size",
+      "extra_args": [],
+      "fallback_dataset_slugs": [
+        "tau_bench_airline_test",
+        "tau_bench_retail_test",
+        "tau_bench_telecom_test"
+      ],
+      "group": "function_calling",
+      "is_cot": true,
+      "module": "src.eval.function_calling.runner",
+      "name": "function_tau_bench",
+      "probe_dataset_required": true,
+      "probe_extra_args": [],
+      "probe_flag": "--probe-only",
+      "probe_max_generate_flag": null,
+      "probe_question_floor": 5000,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "function_calling"
+    },
+    {
+      "batch_flag": "--batch-size",
+      "extra_args": [],
+      "fallback_dataset_slugs": [
+        "tau2_bench_airline_base",
+        "tau2_bench_retail_base",
+        "tau2_bench_telecom_base"
+      ],
+      "group": "function_calling",
+      "is_cot": true,
+      "module": "src.eval.function_calling.runner",
+      "name": "function_tau2_bench",
+      "probe_dataset_required": true,
+      "probe_extra_args": [],
+      "probe_flag": "--probe-only",
+      "probe_max_generate_flag": null,
+      "probe_question_floor": 5000,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "function_calling"
+    },
+    {
+      "batch_flag": "--batch-size",
+      "extra_args": [],
+      "fallback_dataset_slugs": [
+        "tau3_bench_airline_base",
+        "tau3_bench_retail_base",
+        "tau3_bench_telecom_base",
+        "tau3_bench_banking_knowledge_base",
+        "tau3_bench_mock_base",
+        "tau3_bench_mock_long_context_base"
+      ],
+      "group": "function_calling",
+      "is_cot": true,
+      "module": "src.eval.function_calling.runner",
+      "name": "function_tau3_bench",
+      "probe_dataset_required": true,
+      "probe_extra_args": [],
+      "probe_flag": "--probe-only",
+      "probe_max_generate_flag": null,
+      "probe_question_floor": 5000,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "function_calling"
+    },
+    {
+      "batch_flag": null,
+      "extra_args": [],
+      "fallback_dataset_slugs": [],
+      "group": "instruction_following",
+      "is_cot": false,
+      "module": "src.eval.instruction_following.runner",
+      "name": "instruction_following",
+      "probe_dataset_required": false,
+      "probe_extra_args": [],
+      "probe_flag": null,
+      "probe_max_generate_flag": null,
+      "probe_question_floor": 5000,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "instruction_following"
+    },
+    {
+      "batch_flag": null,
+      "extra_args": [
+        "--prompt-profile",
+        "naive"
+      ],
+      "fallback_dataset_slugs": [],
+      "group": "instruction_following",
+      "is_cot": false,
+      "module": "src.eval.instruction_following.runner",
+      "name": "instruction_following_naive",
+      "probe_dataset_required": false,
+      "probe_extra_args": [],
+      "probe_flag": null,
+      "probe_max_generate_flag": null,
+      "probe_question_floor": 5000,
+      "probe_samples_per_task": 1,
+      "scheduler_domain": "instruction_following"
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "branch": "vllm-rwkv",
+    "dirty": true,
+    "head": "b328b229d94adc04e33fdf799345ed4f50c7bc98",
+    "repo": "/home/chase/GitHub/rwkv-skills"
+  }
+}
