@@ -11,6 +11,7 @@ from unittest import mock
 from helicopter_cli import __main__ as cli_main
 from helicopter_cli import commands, config, env, eval_catalog
 from helicopter_eval import (
+    agentbench,
     apibank,
     arena_hard,
     bfcl_ast,
@@ -569,6 +570,8 @@ class CommandPlanTests(unittest.TestCase):
                 "longbench",
                 "longbench_qa",
                 "longbench_qa_balanced",
+                "agentbench_db",
+                "agentbench_kg",
                 "browsecomp",
                 "browsecomp_zh",
                 "apibank_l1",
@@ -620,6 +623,9 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(specs["longbench"].kind, "longbench")
         self.assertEqual(specs["longbench_qa"].row_adapter, "longbench_qa")
         self.assertEqual(specs["longbench_qa_balanced"].row_adapter, "longbench_qa_balanced")
+        self.assertEqual(specs["agentbench_db"].kind, "agentbench")
+        self.assertEqual(specs["agentbench_db"].source_type, "agentbench_official")
+        self.assertEqual(specs["agentbench_kg"].dataset_name, "agentbench_kg")
         self.assertEqual(specs["browsecomp"].kind, "browsecomp")
         self.assertEqual(specs["browsecomp"].source_type, "browsecomp_csv")
         self.assertEqual(specs["browsecomp_zh"].source_type, "browsecomp_zh_xlsx")
@@ -677,10 +683,10 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         payload = print_json.call_args.args[0]
         self.assertEqual(payload["count"], 95)
-        self.assertEqual(payload["status_counts"]["implemented"], 70)
+        self.assertEqual(payload["status_counts"]["implemented"], 72)
         self.assertEqual(payload["status_counts"].get("needs_dataset_adapter", 0), 0)
         self.assertEqual(payload["status_counts"]["needs_dataset_access"], 2)
-        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 23)
+        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 21)
 
     def test_run_catalog_human_eval_dry_run_uses_code_generation_runner(self) -> None:
         args = Namespace(
@@ -1024,6 +1030,58 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(payload["source_dataset"], "toolalpaca_eval_simulated")
         self.assertEqual(payload["scoreboard_dataset"], "toolalpaca_eval_simulated_test_limit2")
         self.assertEqual(payload["job_name"], "function_toolalpaca")
+
+    def test_agentbench_loads_manifest_for_dry_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "test.jsonl"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "task_id": "agentbench_db__00000",
+                        "task_name": "dbbench-std",
+                        "index": 0,
+                        "metadata": {"source_format": "official_agentbench_controller"},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            config = agentbench.AgentBenchRunConfig(
+                base_url="http://127.0.0.1:29082",
+                model="rwkv7-g1d-0.4b-20260210-ctx8192",
+                benchmark="agentbench_db",
+                dataset_name="agentbench_db",
+                source_path=str(manifest),
+            )
+
+            payload = agentbench.dry_run_summary(config)
+
+        self.assertEqual(payload["available_samples"], 1)
+        self.assertEqual(payload["scoreboard_dataset"], "agentbench_db_test")
+        self.assertTrue(payload["controller_required"])
+
+    def test_agentbench_kg_prompt_and_final_answer_message(self) -> None:
+        prompt = agentbench.build_prompt(
+            [{"role": "user", "content": "Find the entity id."}],
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "search",
+                        "description": "Search the graph.",
+                        "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
+                    },
+                }
+            ],
+            allow_final_answer_text=True,
+        )
+        message = agentbench._assistant_message_from_calls(
+            [{"name": "final_answer", "arguments": {"answer": "Final Answer: #42"}}],
+            1,
+        )
+
+        self.assertIn("final_answer", prompt)
+        self.assertEqual(message, {"role": "assistant", "content": "Final Answer: #42"})
 
     def test_toolalpaca_loads_official_source_and_scores_request(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

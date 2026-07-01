@@ -13,6 +13,7 @@ RunKind = Literal[
     "longcodeqa",
     "longbench",
     "arena_hard",
+    "agentbench",
     "browsecomp",
     "browsecomp_plus",
     "apibank",
@@ -353,6 +354,22 @@ _DIRECT_HF_SPECS: dict[str, dict[str, Any]] = {
         "job_name": "instruction_arena_hard",
         "max_tokens": 2048,
         "reason": "arena_hard_pairwise_judged",
+    },
+    "agentbench_db": {
+        "kind": "agentbench",
+        "source_type": "agentbench_official",
+        "dataset_name": "agentbench_db",
+        "job_name": "function_agentbench",
+        "max_tokens": 1024,
+        "reason": "official_agentbench_controller",
+    },
+    "agentbench_kg": {
+        "kind": "agentbench",
+        "source_type": "agentbench_official",
+        "dataset_name": "agentbench_kg",
+        "job_name": "function_agentbench",
+        "max_tokens": 1024,
+        "reason": "official_agentbench_controller",
     },
     "apibank_l1": {
         "kind": "apibank",
@@ -877,10 +894,17 @@ def dry_run_catalog_spec(
     base_url: str,
     model: str,
     limit: int | None,
+    agentbench_controller_url: str | None = None,
 ) -> dict[str, Any]:
     if spec.status != "implemented" or spec.kind is None:
         raise RuntimeError(f"{spec.benchmark} is not runnable yet: {spec.reason}")
-    config = _run_config(spec, base_url=base_url, model=model, limit=limit)
+    config = _run_config(
+        spec,
+        base_url=base_url,
+        model=model,
+        limit=limit,
+        agentbench_controller_url=agentbench_controller_url,
+    )
     if spec.kind == "free_response":
         from .free_response import dry_run_summary
 
@@ -903,6 +927,10 @@ def dry_run_catalog_spec(
         return dry_run_summary(config)
     if spec.kind == "arena_hard":
         from .arena_hard import dry_run_summary
+
+        return dry_run_summary(config)
+    if spec.kind == "agentbench":
+        from .agentbench import dry_run_summary
 
         return dry_run_summary(config)
     if spec.kind == "browsecomp":
@@ -953,10 +981,17 @@ def run_catalog_spec(
     model: str,
     limit: int | None,
     repo_root: Path,
+    agentbench_controller_url: str | None = None,
 ) -> dict[str, Any]:
     if spec.status != "implemented" or spec.kind is None:
         raise RuntimeError(f"{spec.benchmark} is not runnable yet: {spec.reason}")
-    config = _run_config(spec, base_url=base_url, model=model, limit=limit)
+    config = _run_config(
+        spec,
+        base_url=base_url,
+        model=model,
+        limit=limit,
+        agentbench_controller_url=agentbench_controller_url,
+    )
     if spec.kind == "free_response":
         from .free_response import run_free_response
 
@@ -981,6 +1016,10 @@ def run_catalog_spec(
         from .arena_hard import run_arena_hard
 
         return run_arena_hard(config, repo_root=repo_root)
+    if spec.kind == "agentbench":
+        from .agentbench import run_agentbench
+
+        return run_agentbench(config, repo_root=repo_root)
     if spec.kind == "browsecomp":
         from .browsecomp import run_browsecomp
 
@@ -1022,7 +1061,14 @@ def run_catalog_spec(
     return run_multiple_choice(config, repo_root=repo_root)
 
 
-def _run_config(spec: CatalogRunSpec, *, base_url: str, model: str, limit: int | None) -> Any:
+def _run_config(
+    spec: CatalogRunSpec,
+    *,
+    base_url: str,
+    model: str,
+    limit: int | None,
+    agentbench_controller_url: str | None = None,
+) -> Any:
     if spec.kind == "free_response":
         from .free_response import FreeResponseRunConfig
         from .gsm8k import REFERENCE_ANSWER_FIXES
@@ -1166,6 +1212,23 @@ def _run_config(spec: CatalogRunSpec, *, base_url: str, model: str, limit: int |
             max_tokens=int(spec.max_tokens or 2048),
             scoreboard_dataset=spec.dataset_slug,
             job_name=spec.job_name or "instruction_arena_hard",
+            job_id=f"helicopter-{spec.benchmark}",
+            runner="helicopter_eval.catalog_runner",
+        )
+    if spec.kind == "agentbench":
+        from .agentbench import AgentBenchRunConfig
+
+        return AgentBenchRunConfig(
+            base_url=base_url,
+            model=model,
+            benchmark=spec.benchmark,
+            dataset_name=str(spec.dataset_name),
+            limit=limit,
+            split=str(spec.source_split),
+            controller_url=agentbench_controller_url,
+            max_tokens=int(spec.max_tokens or 1024),
+            scoreboard_dataset=spec.dataset_slug,
+            job_name=spec.job_name or "function_agentbench",
             job_id=f"helicopter-{spec.benchmark}",
             runner="helicopter_eval.catalog_runner",
         )

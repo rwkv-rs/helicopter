@@ -193,6 +193,7 @@ def handle_eval_run_catalog(args: argparse.Namespace, *, root: Any, **_: Any) ->
         "base_url": str(args.base_url or defaults.base_url),
         "model": str(args.model or defaults.model_name),
         "limit": args.limit,
+        "agentbench_controller_url": getattr(args, "agentbench_controller_url", None),
     }
     payload = (
         dry_run_catalog_spec(spec, **kwargs)
@@ -341,6 +342,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_run_catalog.add_argument("--base-url", help="OpenAI-compatible vLLM base URL")
     eval_run_catalog.add_argument("--model", help="served model name")
     eval_run_catalog.add_argument("--limit", type=int)
+    eval_run_catalog.add_argument("--agentbench-controller-url", help="AgentBench controller API URL")
     eval_run_catalog.set_defaults(handler=handle_eval_run_catalog)
 
     eval_run_free_response = eval_subparsers.add_parser(
