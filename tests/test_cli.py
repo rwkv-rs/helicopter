@@ -17,6 +17,7 @@ from helicopter_eval import (
     browsecomp,
     catalog_runner,
     code_generation,
+    complexfuncbench,
     free_response,
     gsm8k,
     instruction_following,
@@ -576,6 +577,8 @@ class CommandPlanTests(unittest.TestCase):
                 "bfcl_exec_parallel_multiple",
                 "toolalpaca_eval_simulated",
                 "toolalpaca_eval_real",
+                "complexfuncbench_official",
+                "complexfuncbench_subset",
             )
         }
 
@@ -630,6 +633,9 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(specs["toolalpaca_eval_simulated"].kind, "toolalpaca")
         self.assertEqual(specs["toolalpaca_eval_simulated"].source_type, "toolalpaca_git")
         self.assertEqual(specs["toolalpaca_eval_real"].row_adapter, "eval_real")
+        self.assertEqual(specs["complexfuncbench_official"].kind, "complexfuncbench")
+        self.assertEqual(specs["complexfuncbench_official"].source_type, "hf_complexfuncbench")
+        self.assertEqual(specs["complexfuncbench_subset"].dataset_name, "complexfuncbench_subset")
 
     def test_run_catalog_gsm8k_dry_run_uses_rwkv_dataset_slug(self) -> None:
         args = Namespace(
@@ -669,10 +675,10 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         payload = print_json.call_args.args[0]
         self.assertEqual(payload["count"], 95)
-        self.assertEqual(payload["status_counts"]["implemented"], 65)
+        self.assertEqual(payload["status_counts"]["implemented"], 67)
         self.assertEqual(payload["status_counts"].get("needs_dataset_adapter", 0), 0)
         self.assertEqual(payload["status_counts"]["needs_dataset_access"], 2)
-        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 28)
+        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 26)
 
     def test_run_catalog_human_eval_dry_run_uses_code_generation_runner(self) -> None:
         args = Namespace(
@@ -1107,6 +1113,122 @@ class CommandPlanTests(unittest.TestCase):
             translation.score_completion("Translation: Bonjour le monde", "Bonjour le monde")[:2],
             (1.0, True),
         )
+
+    def test_run_catalog_complexfuncbench_dry_run_uses_runner(self) -> None:
+        args = Namespace(
+            dry_run=True,
+            benchmark="complexfuncbench_official",
+            base_url=None,
+            model=None,
+            limit=2,
+        )
+
+        with mock.patch.object(cli_main, "print_json") as print_json:
+            rc = cli_main.handle_eval_run_catalog(args, root=ROOT)
+
+        self.assertEqual(rc, 0)
+        payload = print_json.call_args.args[0]
+        self.assertEqual(payload["benchmark"], "complexfuncbench_official")
+        self.assertEqual(payload["source"], "hf://zai-org/ComplexFuncBench")
+        self.assertEqual(payload["scoreboard_dataset"], "complexfuncbench_official_test_limit2")
+        self.assertEqual(payload["job_name"], "function_complexfuncbench")
+        self.assertEqual(payload["runtime"], "local_golden_conversation")
+        self.assertEqual(payload["metric"], "tool_call_sequence_exact_match")
+
+    def test_complexfuncbench_loads_official_row_and_scores_sequence(self) -> None:
+        row = {
+            "id": "case-1",
+            "tools": [
+                {
+                    "name": "SearchHotel",
+                    "description": "Search hotels.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}, "adults": {"type": "integer"}},
+                    },
+                },
+                {"name": "BookHotel", "description": "Book hotels.", "parameters": {"type": "object"}},
+            ],
+            "conversations": [
+                {"role": "user", "content": "Find a hotel in Paris for two adults, then book h1."},
+                {
+                    "role": "assistant",
+                    "function_call": [
+                        {"name": "SearchHotel", "arguments": {"city": "Paris", "adults": 2}},
+                        {"name": "BookHotel", "arguments": {"hotel_id": "h1"}},
+                    ],
+                },
+                {"role": "observation", "content": [{"hotel_id": "h1"}, {"status": "booked"}]},
+            ],
+        }
+        sample = complexfuncbench.sample_from_row(row, sample_index=0)
+        assert sample is not None
+
+        self.assertEqual(sample.task_id, "complexfuncbench_official__case-1")
+        self.assertIn("final_answer", {tool["name"] for tool in sample.tools})
+        self.assertEqual(
+            complexfuncbench.evaluate_completion(
+                sample,
+                (
+                    "["
+                    '{"name":"SearchHotel","arguments":{"city":"Paris","adults":2}},'
+                    '{"name":"BookHotel","arguments":{"hotel_id":"h1"}}'
+                    "]"
+                ),
+            )[:2],
+            (True, ""),
+        )
+        self.assertEqual(
+            complexfuncbench.evaluate_completion(
+                sample,
+                '[{"name":"SearchHotel","arguments":{"city":"Lyon","adults":2}}]',
+            )[:1],
+            (False,),
+        )
+
+    def test_complexfuncbench_episode_advances_observation_per_turn(self) -> None:
+        row = {
+            "id": "case-2",
+            "tools": [
+                {"name": "SearchHotel", "description": "Search hotels.", "parameters": {"type": "object"}},
+                {"name": "BookHotel", "description": "Book hotels.", "parameters": {"type": "object"}},
+            ],
+            "conversations": [
+                {"role": "user", "content": "Find then book h1."},
+                {"role": "assistant", "function_call": [{"name": "SearchHotel", "arguments": {"city": "Paris"}}]},
+                {"role": "observation", "content": [{"hotel_id": "h1"}]},
+                {"role": "assistant", "function_call": [{"name": "BookHotel", "arguments": {"hotel_id": "h1"}}]},
+                {"role": "observation", "content": [{"status": "booked"}]},
+            ],
+        }
+        sample = complexfuncbench.sample_from_row(row, sample_index=0)
+        assert sample is not None
+        outputs = iter(
+            [
+                '{"name":"SearchHotel","arguments":{"city":"Paris"}}',
+                '{"name":"BookHotel","arguments":{"hotel_id":"h1"}}',
+                '{"name":"final_answer","arguments":{"answer":"Booked."}}',
+            ]
+        )
+        prompts: list[str] = []
+
+        def fake_request(_config: object, prompt: str) -> str:
+            prompts.append(prompt)
+            return next(outputs)
+
+        config = complexfuncbench.ComplexFuncBenchRunConfig(
+            base_url="http://127.0.0.1:29082",
+            model="rwkv7-g1d-0.4b-20260210-ctx8192",
+            benchmark="complexfuncbench_official",
+            dataset_name="complexfuncbench_official",
+        )
+        with mock.patch.object(complexfuncbench, "_request_completion", side_effect=fake_request):
+            result = complexfuncbench.evaluate_sample(sample, config)
+
+        self.assertTrue(result.is_passed)
+        self.assertNotIn("hotel_id", prompts[0])
+        self.assertIn("hotel_id", prompts[1])
+        self.assertIn("final_answer", prompts[2])
 
     def test_multiple_choice_normalizes_list_and_arc_choices(self) -> None:
         list_choices = multiple_choice.normalize_choices(["red", "blue"])

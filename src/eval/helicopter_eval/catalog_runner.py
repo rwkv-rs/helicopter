@@ -18,6 +18,7 @@ RunKind = Literal[
     "bfcl_exec",
     "toolalpaca",
     "translation",
+    "complexfuncbench",
 ]
 
 
@@ -457,6 +458,22 @@ _DIRECT_HF_SPECS: dict[str, dict[str, Any]] = {
         "max_tokens": 1024,
         "reason": "official_toolalpaca_request_execution",
     },
+    "complexfuncbench_official": {
+        "kind": "complexfuncbench",
+        "source_type": "hf_complexfuncbench",
+        "dataset_name": "complexfuncbench_official",
+        "job_name": "function_complexfuncbench",
+        "max_tokens": 1024,
+        "reason": "hf_complexfuncbench_local_golden_conversation",
+    },
+    "complexfuncbench_subset": {
+        "kind": "complexfuncbench",
+        "source_type": "hf_complexfuncbench",
+        "dataset_name": "complexfuncbench_subset",
+        "job_name": "function_complexfuncbench",
+        "max_tokens": 1024,
+        "reason": "hf_complexfuncbench_local_golden_conversation",
+    },
     "amc23": {
         "kind": "free_response",
         "source_type": "qwen_math",
@@ -877,6 +894,10 @@ def dry_run_catalog_spec(
         from .translation import dry_run_summary
 
         return dry_run_summary(config)
+    if spec.kind == "complexfuncbench":
+        from .complexfuncbench import dry_run_summary
+
+        return dry_run_summary(config)
     from .multiple_choice import dry_run_summary
 
     return dry_run_summary(config)
@@ -937,6 +958,10 @@ def run_catalog_spec(
         from .translation import run_translation
 
         return run_translation(config, repo_root=repo_root)
+    if spec.kind == "complexfuncbench":
+        from .complexfuncbench import run_complexfuncbench
+
+        return run_complexfuncbench(config, repo_root=repo_root)
     from .multiple_choice import run_multiple_choice
 
     return run_multiple_choice(config, repo_root=repo_root)
@@ -1175,6 +1200,23 @@ def _run_config(spec: CatalogRunSpec, *, base_url: str, model: str, limit: int |
             max_tokens=int(spec.max_tokens or 512),
             scoreboard_dataset=spec.dataset_slug,
             job_name=spec.job_name or "translation_chrf",
+            job_id=f"helicopter-{spec.benchmark}",
+            runner="helicopter_eval.catalog_runner",
+        )
+    if spec.kind == "complexfuncbench":
+        from .complexfuncbench import COMPLEXFUNCBENCH_SOURCE_URL, ComplexFuncBenchRunConfig
+
+        return ComplexFuncBenchRunConfig(
+            base_url=base_url,
+            model=model,
+            benchmark=spec.benchmark,
+            dataset_name=str(spec.dataset_name),
+            limit=limit,
+            split=str(spec.source_split),
+            source_url=spec.source_url or COMPLEXFUNCBENCH_SOURCE_URL,
+            max_tokens=int(spec.max_tokens or 1024),
+            scoreboard_dataset=spec.dataset_slug,
+            job_name=spec.job_name or "function_complexfuncbench",
             job_id=f"helicopter-{spec.benchmark}",
             runner="helicopter_eval.catalog_runner",
         )
