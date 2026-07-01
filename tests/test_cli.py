@@ -511,8 +511,12 @@ class CommandPlanTests(unittest.TestCase):
                 "ceval",
                 "gpqa_main",
                 "supergpqa",
+                "aime24",
+                "algebra222",
                 "hendrycks_math",
+                "hle",
                 "math_500",
+                "polymath",
                 "human_eval",
             )
         }
@@ -524,10 +528,14 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(specs["ceval"].choice_fields, ("A", "B", "C", "D"))
         self.assertEqual(specs["gpqa_main"].row_adapter, "gpqa")
         self.assertEqual(specs["supergpqa"].source_split, "train")
+        self.assertEqual(specs["aime24"].source_type, "package_jsonl")
+        self.assertEqual(specs["algebra222"].source_type, "url_csv")
         self.assertEqual(specs["hendrycks_math"].source_type, "qwen_math")
         self.assertEqual(specs["hendrycks_math"].dataset_name, "math")
+        self.assertEqual(specs["hle"].status, "needs_dataset_access")
         self.assertEqual(specs["math_500"].source_type, "url_jsonl")
         self.assertEqual(specs["math_500"].row_adapter, "answer_solution")
+        self.assertEqual(specs["polymath"].source_type, "polymath")
         self.assertEqual(specs["human_eval"].status, "needs_specialized_runner")
 
     def test_run_catalog_gsm8k_dry_run_uses_rwkv_dataset_slug(self) -> None:
@@ -568,7 +576,9 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         payload = print_json.call_args.args[0]
         self.assertEqual(payload["count"], 95)
-        self.assertEqual(payload["status_counts"]["implemented"], 19)
+        self.assertEqual(payload["status_counts"]["implemented"], 33)
+        self.assertEqual(payload["status_counts"]["needs_dataset_adapter"], 2)
+        self.assertEqual(payload["status_counts"]["needs_dataset_access"], 1)
         self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 59)
 
     def test_multiple_choice_normalizes_list_and_arc_choices(self) -> None:

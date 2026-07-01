@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 from dataclasses import dataclass
+from functools import lru_cache
+from importlib import resources
+import io
 import json
 from pathlib import Path
 import re
 from typing import Any, Mapping, Sequence
 import urllib.request
+import xml.etree.ElementTree as ET
 
 from .openai_client import chat_completion
 from .scoreboard import ScoreboardEvalResult, ScoreboardWriteConfig, write_scoreboard_results
@@ -58,6 +63,8 @@ class FreeResponseRunConfig:
     dataset_config: str | None = None
     source_type: str = "hf"
     source_url: str | None = None
+    source_urls: tuple[str, ...] = ()
+    source_path: str | None = None
     row_adapter: str | None = None
     split: str = "test"
     temperature: float = 0.0
@@ -165,14 +172,33 @@ def _iter_qwen_math_rows(config: FreeResponseRunConfig):
             yield payload
 
 
+def _source_urls(config: FreeResponseRunConfig) -> tuple[str, ...]:
+    if config.source_urls:
+        return config.source_urls
+    if config.source_url:
+        return (config.source_url,)
+    return ()
+
+
+def _read_url_text(url: str, *, timeout_s: float) -> str:
+    with urllib.request.urlopen(url, timeout=timeout_s) as response:
+        return response.read().decode("utf-8")
+
+
 def _iter_url_jsonl_rows(config: FreeResponseRunConfig):
-    if not config.source_url:
+    urls = _source_urls(config)
+    if not urls:
         raise ValueError("url_jsonl source requires source_url")
-    with urllib.request.urlopen(config.source_url, timeout=config.timeout_s) as response:
-        for raw_line in response:
-            line = raw_line.decode("utf-8").strip()
-            if line:
-                yield json.loads(line)
+    for url in urls:
+        with urllib.request.urlopen(url, timeout=config.timeout_s) as response:
+            for source_index, raw_line in enumerate(response):
+                line = raw_line.decode("utf-8").strip()
+                if line:
+                    payload = json.loads(line)
+                    if isinstance(payload, dict):
+                        payload.setdefault("_source_index", source_index)
+                        payload.setdefault("_source_url", url)
+                    yield payload
 
 
 def _iter_url_json_rows(config: FreeResponseRunConfig):
@@ -185,13 +211,71 @@ def _iter_url_json_rows(config: FreeResponseRunConfig):
     yield from payload
 
 
+def _iter_url_csv_rows(config: FreeResponseRunConfig):
+    if not config.source_url:
+        raise ValueError("url_csv source requires source_url")
+    reader = csv.DictReader(io.StringIO(_read_url_text(config.source_url, timeout_s=config.timeout_s)))
+    yield from reader
+
+
+def _iter_url_xml_rows(config: FreeResponseRunConfig):
+    if not config.source_url:
+        raise ValueError("url_xml source requires source_url")
+    root = ET.fromstring(_read_url_text(config.source_url, timeout_s=config.timeout_s))
+    yield from root.iter("Problem")
+
+
+def _iter_package_jsonl_rows(config: FreeResponseRunConfig):
+    if not config.source_path:
+        raise ValueError("package_jsonl source requires source_path")
+    resource = resources.files("helicopter_eval").joinpath(config.source_path)
+    with resource.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if line.strip():
+                yield json.loads(line)
+
+
 def _iter_hf_rows(config: FreeResponseRunConfig):
     try:
-        from datasets import load_dataset
+        from datasets import get_dataset_config_names, load_dataset
     except ImportError as exc:  # pragma: no cover - exercised in integration environments
         raise SystemExit("free-response eval requires the `datasets` package; install the rwkv dependency group.") from exc
 
+    if config.dataset_config == "*":
+        def _rows():
+            for config_name in sorted(
+                name for name in get_dataset_config_names(config.dataset_name) if name and name != "default"
+            ):
+                yield from load_dataset(config.dataset_name, config_name, split=config.split)
+
+        return _rows()
     return iter(load_dataset(config.dataset_name, config.dataset_config, split=config.split))
+
+
+def _polymath_source_splits(split: str) -> tuple[str, ...]:
+    if split == "all":
+        return ("top", "high", "medium", "low")
+    if split in {"top", "high", "medium", "low"}:
+        return (split,)
+    raise ValueError("polymath only supports all/top/high/medium/low split")
+
+
+def _iter_polymath_rows(config: FreeResponseRunConfig):
+    try:
+        from datasets import get_dataset_config_names, load_dataset
+    except ImportError as exc:  # pragma: no cover - exercised in integration environments
+        raise SystemExit("polymath eval requires the `datasets` package; install the rwkv dependency group.") from exc
+
+    for config_name in sorted(
+        name for name in get_dataset_config_names(config.dataset_name) if name and name != "default"
+    ):
+        for source_split in _polymath_source_splits(config.split):
+            for index, row in enumerate(load_dataset(config.dataset_name, config_name, split=source_split)):
+                payload = dict(row)
+                payload["_polymath_language"] = config_name
+                payload["_polymath_difficulty"] = source_split
+                payload["_polymath_index"] = index
+                yield payload
 
 
 def _iter_rows(config: FreeResponseRunConfig):
@@ -203,6 +287,14 @@ def _iter_rows(config: FreeResponseRunConfig):
         return _iter_url_jsonl_rows(config)
     if config.source_type == "url_json":
         return _iter_url_json_rows(config)
+    if config.source_type == "url_csv":
+        return _iter_url_csv_rows(config)
+    if config.source_type == "url_xml":
+        return _iter_url_xml_rows(config)
+    if config.source_type == "package_jsonl":
+        return _iter_package_jsonl_rows(config)
+    if config.source_type == "polymath":
+        return _iter_polymath_rows(config)
     raise ValueError(f"unsupported free-response source_type: {config.source_type}")
 
 
@@ -233,6 +325,50 @@ def _normalize_math_odyssey_answer(answer: str) -> str:
     return answer.replace("$", "").strip()
 
 
+def _intish(value: Any) -> Any:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return value
+    if int(numeric) == numeric:
+        return int(numeric)
+    return numeric
+
+
+def _element_text(element: ET.Element, name: str) -> str:
+    child = element.find(name)
+    if child is None or child.text is None:
+        return ""
+    return child.text.strip()
+
+
+@lru_cache(maxsize=None)
+def _gsm_plus_cleaned_indexes(cleaning: str = "light") -> frozenset[int]:
+    resource = resources.files("helicopter_eval").joinpath("data/free_response/gsm_plus_cleaned_indexes.json")
+    payload = json.loads(resource.read_text(encoding="utf-8"))
+    if cleaning == "none":
+        return frozenset()
+    if cleaning not in payload:
+        raise ValueError(f"unknown gsm_plus cleaning level: {cleaning}")
+    return frozenset(int(item) for item in payload[cleaning])
+
+
+def _mean_annotation_score(annotations: object) -> float | None:
+    if not isinstance(annotations, list) or not annotations:
+        return None
+    scores: list[float] = []
+    for annotation in annotations:
+        if not isinstance(annotation, dict):
+            continue
+        try:
+            scores.append(float(annotation.get("score")))
+        except (TypeError, ValueError):
+            continue
+    if not scores:
+        return None
+    return sum(scores) / len(scores)
+
+
 def adapt_free_response_row(item: Any, config: FreeResponseRunConfig) -> dict[str, Any] | None:
     if config.row_adapter == "answer_solution":
         payload = dict(item)
@@ -254,6 +390,12 @@ def adapt_free_response_row(item: Any, config: FreeResponseRunConfig) -> dict[st
             "id": key,
         }
 
+    if config.row_adapter == "answer_to_expected":
+        payload = dict(item)
+        if "answer" in payload:
+            payload["expected_answer"] = payload.pop("answer")
+        return payload
+
     if config.row_adapter == "svamp":
         answer = item["Answer"]
         if isinstance(answer, (int, float)) and int(answer) == answer:
@@ -263,6 +405,109 @@ def adapt_free_response_row(item: Any, config: FreeResponseRunConfig) -> dict[st
             "expected_answer": answer,
             "reference_equation": item["Equation"],
         }
+
+    if config.row_adapter == "algebra222":
+        return {
+            "problem": item["question"],
+            "expected_answer": _intish(item["final_answer"]),
+        }
+
+    if config.row_adapter == "asdiv_xml":
+        answer = _element_text(item, "Answer").split("(")[0].strip()
+        return {
+            "problem": f"{_element_text(item, 'Body')} {_element_text(item, 'Question')}".strip(),
+            "expected_answer": str(_intish(answer)),
+            "type": _element_text(item, "Solution-Type"),
+        }
+
+    if config.row_adapter == "mawps":
+        return {
+            "problem": item["input"],
+            "expected_answer": _intish(item["target"]),
+            "type": item.get("_source_name"),
+        }
+
+    if config.row_adapter == "gsm_plus":
+        valid_indices = _gsm_plus_cleaned_indexes("light")
+        source_index = int(item.get("_source_index", -1))
+        if valid_indices and source_index not in valid_indices:
+            return None
+        expected_answer = item.get("answer") or item.get("expected_answer")
+        if expected_answer == "None":
+            expected_answer = "insufficient"
+        payload = dict(item)
+        payload["problem"] = item["question"]
+        payload["expected_answer"] = expected_answer
+        payload["reference_solution"] = item.get("solution") or item.get("reference_solution")
+        payload["perturbation_type"] = str(item.get("perturbation_type", "")).replace(" ", "_")
+        return payload
+
+    if config.row_adapter == "hle":
+        if item.get("image"):
+            return None
+        return {
+            "id": item["id"],
+            "problem": item["question"],
+            "expected_answer": item["answer"],
+            "answer_type": item.get("answer_type"),
+            "reference_solution": item.get("rationale"),
+            "raw_subject": item.get("raw_subject"),
+            "category": item.get("category"),
+            "author_name": item.get("author_name"),
+            "canary": item.get("canary"),
+        }
+
+    if config.row_adapter == "answer_judge":
+        mean_score = _mean_annotation_score(item.get("annotations"))
+        if mean_score is None:
+            return None
+        expected_judgement = "Judgement: Yes" if mean_score > 0.5 else "Judgement: No"
+        problem = str(item.get("question", "") or "")
+        expected_answer = str(item.get("gt_answer", "") or "")
+        predicted_answer = str(item.get("gen_answer", "") or "")
+        return {
+            "problem": (
+                "Problem:\n"
+                f"{problem}\n\n"
+                "Expected answer:\n"
+                f"{expected_answer}\n\n"
+                "Predicted answer:\n"
+                f"{predicted_answer}\n\n"
+                "Decide whether the predicted answer matches the expected answer. "
+                "Return exactly `Judgement: Yes` or `Judgement: No`."
+            ),
+            "expected_answer": expected_answer,
+            "predicted_answer": predicted_answer,
+            "expected_judgement": expected_judgement,
+            "comment": f"judges-verdict mean_score={mean_score:.3f}",
+            "source": item.get("dataset_name") or "judges-verdict",
+            "source_id": item.get("item_name"),
+        }
+
+    if config.row_adapter == "simpleqa_verified":
+        return {
+            "id": item.get("original_index"),
+            "question": item["problem"],
+            "expected_answer": item["answer"],
+            "metadata": dict(item),
+        }
+
+    if config.row_adapter == "polymath":
+        payload: dict[str, Any] = {
+            "id": item.get("id") or (
+                f"{item.get('_polymath_language')}_{item.get('_polymath_difficulty')}_{item.get('_polymath_index')}"
+            ),
+            "problem": str(item.get("question") or item.get("problem") or ""),
+            "expected_answer": str(item.get("answer") or item.get("expected_answer") or ""),
+            "language": item.get("_polymath_language"),
+            "difficulty": item.get("_polymath_difficulty"),
+            "source": "polymath",
+        }
+        for key in ("solution", "explanation", "subject", "topic"):
+            value = item.get(key)
+            if value is not None:
+                payload[key] = value
+        return payload
 
     return dict(item)
 

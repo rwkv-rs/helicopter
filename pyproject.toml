@@ -132,3 +132,4 @@ include = ["helicopter_cli*", "helicopter_eval*"]
 
 [tool.setuptools.package-data]
 helicopter_cli = ["data/*.json"]
+helicopter_eval = ["data/free_response/*.json", "data/free_response/*.jsonl"]
