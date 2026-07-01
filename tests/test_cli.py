@@ -12,6 +12,7 @@ from helicopter_cli import commands, config, env, eval_catalog
 from helicopter_eval import (
     apibank,
     bfcl_ast,
+    bfcl_exec,
     browsecomp,
     catalog_runner,
     code_generation,
@@ -566,6 +567,8 @@ class CommandPlanTests(unittest.TestCase):
                 "apibank_level2",
                 "bfcl_simple_python",
                 "bfcl_exec_multiple_ast",
+                "bfcl_exec_simple",
+                "bfcl_exec_parallel_multiple",
             )
         }
 
@@ -610,6 +613,9 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(specs["bfcl_simple_python"].kind, "bfcl_ast")
         self.assertEqual(specs["bfcl_simple_python"].row_adapter, "simple_python")
         self.assertEqual(specs["bfcl_exec_multiple_ast"].row_adapter, "exec_multiple")
+        self.assertEqual(specs["bfcl_exec_simple"].kind, "bfcl_exec")
+        self.assertEqual(specs["bfcl_exec_simple"].row_adapter, "exec_simple")
+        self.assertEqual(specs["bfcl_exec_parallel_multiple"].row_adapter, "exec_parallel_multiple")
 
     def test_run_catalog_gsm8k_dry_run_uses_rwkv_dataset_slug(self) -> None:
         args = Namespace(
@@ -649,10 +655,10 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         payload = print_json.call_args.args[0]
         self.assertEqual(payload["count"], 95)
-        self.assertEqual(payload["status_counts"]["implemented"], 58)
+        self.assertEqual(payload["status_counts"]["implemented"], 62)
         self.assertEqual(payload["status_counts"].get("needs_dataset_adapter", 0), 0)
         self.assertEqual(payload["status_counts"]["needs_dataset_access"], 1)
-        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 36)
+        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 32)
 
     def test_run_catalog_human_eval_dry_run_uses_code_generation_runner(self) -> None:
         args = Namespace(
@@ -902,6 +908,78 @@ class CommandPlanTests(unittest.TestCase):
             bfcl_ast.evaluate_completion(
                 sample,
                 '{"name":"calculate_triangle_area","arguments":{"base":10,"height":5}}',
+            )[:2],
+            (True, ""),
+        )
+
+    def test_run_catalog_bfcl_exec_dry_run_uses_runner(self) -> None:
+        args = Namespace(
+            dry_run=True,
+            benchmark="bfcl_exec_parallel",
+            base_url=None,
+            model=None,
+            limit=2,
+        )
+
+        with mock.patch.object(cli_main, "print_json") as print_json:
+            rc = cli_main.handle_eval_run_catalog(args, root=ROOT)
+
+        self.assertEqual(rc, 0)
+        payload = print_json.call_args.args[0]
+        self.assertEqual(payload["benchmark"], "bfcl_exec_parallel")
+        self.assertEqual(payload["category"], "exec_parallel")
+        self.assertEqual(payload["scoreboard_dataset"], "bfcl_exec_parallel_test_limit2")
+        self.assertEqual(payload["job_name"], "function_bfcl_exec")
+
+    def test_bfcl_exec_scores_executable_exact_result(self) -> None:
+        sample = bfcl_exec.BfclExecSample(
+            sample_index=0,
+            task_id="toy",
+            instruction="Compute a binomial probability.",
+            tools=(),
+            expected_executable_calls=("calc_binomial_probability(n=20, k=5, p=0.6)",),
+            execution_result_type=("exact_match",),
+            category="exec_simple",
+        )
+
+        self.assertEqual(
+            bfcl_exec.evaluate_completion(
+                sample,
+                '{"name":"calc_binomial_probability","arguments":{"n":20,"k":5,"p":0.6}}',
+            )[:2],
+            (True, ""),
+        )
+        self.assertEqual(
+            bfcl_exec.evaluate_completion(
+                sample,
+                '{"name":"calc_binomial_probability","arguments":{"n":20,"k":4,"p":0.6}}',
+            )[:1],
+            (False,),
+        )
+
+    def test_bfcl_exec_parallel_scores_calls_order_insensitive(self) -> None:
+        sample = bfcl_exec.BfclExecSample(
+            sample_index=0,
+            task_id="toy-parallel",
+            instruction="Run independent calls.",
+            tools=(),
+            expected_executable_calls=(
+                "get_zipcode_by_ip_address(ip_address='192.168.1.1')",
+                "calculate_electrostatic_potential_energy(charge=5.0, voltage=10.0)",
+            ),
+            execution_result_type=("exact_match", "exact_match"),
+            category="exec_parallel",
+        )
+
+        self.assertEqual(
+            bfcl_exec.evaluate_completion(
+                sample,
+                (
+                    "["
+                    '{"name":"calculate_electrostatic_potential_energy","arguments":{"charge":5.0,"voltage":10.0}},'
+                    '{"name":"get_zipcode_by_ip_address","arguments":{"ip_address":"192.168.1.1"}}'
+                    "]"
+                ),
             )[:2],
             (True, ""),
         )

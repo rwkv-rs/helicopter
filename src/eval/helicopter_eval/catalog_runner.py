@@ -15,6 +15,7 @@ RunKind = Literal[
     "browsecomp",
     "apibank",
     "bfcl_ast",
+    "bfcl_exec",
 ]
 
 
@@ -380,6 +381,42 @@ _DIRECT_HF_SPECS: dict[str, dict[str, Any]] = {
         "job_name": "function_bfcl_ast",
         "max_tokens": 768,
         "reason": "official_bfcl_v4_exec_ast",
+    },
+    "bfcl_exec_simple": {
+        "kind": "bfcl_exec",
+        "source_type": "bfcl_v4_exec_github",
+        "dataset_name": "ShishirPatil/gorilla/bfcl_v4",
+        "row_adapter": "exec_simple",
+        "job_name": "function_bfcl_exec",
+        "max_tokens": 768,
+        "reason": "official_bfcl_v4_exec",
+    },
+    "bfcl_exec_multiple": {
+        "kind": "bfcl_exec",
+        "source_type": "bfcl_v4_exec_github",
+        "dataset_name": "ShishirPatil/gorilla/bfcl_v4",
+        "row_adapter": "exec_multiple",
+        "job_name": "function_bfcl_exec",
+        "max_tokens": 768,
+        "reason": "official_bfcl_v4_exec",
+    },
+    "bfcl_exec_parallel": {
+        "kind": "bfcl_exec",
+        "source_type": "bfcl_v4_exec_github",
+        "dataset_name": "ShishirPatil/gorilla/bfcl_v4",
+        "row_adapter": "exec_parallel",
+        "job_name": "function_bfcl_exec",
+        "max_tokens": 768,
+        "reason": "official_bfcl_v4_exec",
+    },
+    "bfcl_exec_parallel_multiple": {
+        "kind": "bfcl_exec",
+        "source_type": "bfcl_v4_exec_github",
+        "dataset_name": "ShishirPatil/gorilla/bfcl_v4",
+        "row_adapter": "exec_parallel_multiple",
+        "job_name": "function_bfcl_exec",
+        "max_tokens": 768,
+        "reason": "official_bfcl_v4_exec",
     },
     "amc23": {
         "kind": "free_response",
@@ -789,6 +826,10 @@ def dry_run_catalog_spec(
         from .bfcl_ast import dry_run_summary
 
         return dry_run_summary(config)
+    if spec.kind == "bfcl_exec":
+        from .bfcl_exec import dry_run_summary
+
+        return dry_run_summary(config)
     from .multiple_choice import dry_run_summary
 
     return dry_run_summary(config)
@@ -837,6 +878,10 @@ def run_catalog_spec(
         from .bfcl_ast import run_bfcl_ast
 
         return run_bfcl_ast(config, repo_root=repo_root)
+    if spec.kind == "bfcl_exec":
+        from .bfcl_exec import run_bfcl_exec
+
+        return run_bfcl_exec(config, repo_root=repo_root)
     from .multiple_choice import run_multiple_choice
 
     return run_multiple_choice(config, repo_root=repo_root)
@@ -1020,6 +1065,22 @@ def _run_config(spec: CatalogRunSpec, *, base_url: str, model: str, limit: int |
             max_tokens=int(spec.max_tokens or 768),
             scoreboard_dataset=spec.dataset_slug,
             job_name=spec.job_name or "function_bfcl_ast",
+            job_id=f"helicopter-{spec.benchmark}",
+            runner="helicopter_eval.catalog_runner",
+        )
+    if spec.kind == "bfcl_exec":
+        from .bfcl_exec import BfclExecRunConfig
+
+        return BfclExecRunConfig(
+            base_url=base_url,
+            model=model,
+            benchmark=spec.benchmark,
+            category=str(spec.row_adapter or spec.benchmark),
+            limit=limit,
+            split=str(spec.source_split),
+            max_tokens=int(spec.max_tokens or 768),
+            scoreboard_dataset=spec.dataset_slug,
+            job_name=spec.job_name or "function_bfcl_exec",
             job_id=f"helicopter-{spec.benchmark}",
             runner="helicopter_eval.catalog_runner",
         )
