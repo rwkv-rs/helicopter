@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from helicopter_cli import commands, config, env, eval_catalog
+from helicopter_eval import gsm8k
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -396,6 +397,43 @@ class CommandPlanTests(unittest.TestCase):
                 "VLLM_RWKV7_WKV_MODE": "fp16",
             },
         )
+
+    def test_gsm8k_answer_normalization_matches_final_number(self) -> None:
+        self.assertEqual(gsm8k.reference_answer_from_gsm8k("reasoning\n#### 1,234.00"), "1234")
+        self.assertEqual(gsm8k.completion_answer("The answer is 17."), "17")
+        self.assertEqual(gsm8k.completion_answer("work #### -42"), "-42")
+
+    def test_gsm8k_dry_run_summary_uses_vllm_defaults(self) -> None:
+        run_config = gsm8k.Gsm8kRunConfig(
+            base_url="http://127.0.0.1:29082",
+            model="rwkv7-g1d-0.4b-20260210-ctx8192",
+            limit=3,
+        )
+
+        self.assertEqual(
+            gsm8k.dry_run_summary(run_config),
+            {
+                "benchmark": "gsm8k",
+                "hf_dataset": "gsm8k",
+                "hf_config": "main",
+                "split": "test",
+                "limit": 3,
+                "base_url": "http://127.0.0.1:29082",
+                "model": "rwkv7-g1d-0.4b-20260210-ctx8192",
+                "scoreboard_dataset": "gsm8k_test_limit3",
+                "job_name": "free_response_judge",
+                "job_id": "helicopter-gsm8k",
+            },
+        )
+
+    def test_gsm8k_full_run_keeps_formal_dataset_name(self) -> None:
+        run_config = gsm8k.Gsm8kRunConfig(
+            base_url="http://127.0.0.1:29082",
+            model="rwkv7-g1d-0.4b-20260210-ctx8192",
+            limit=None,
+        )
+
+        self.assertEqual(gsm8k.scoreboard_dataset_name(run_config), "gsm8k_test")
 
     def test_takeoff_config_adv_estimator_becomes_hydra_overrides(self) -> None:
         loaded_config = load_example_config()

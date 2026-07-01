@@ -127,8 +127,8 @@ full = [
 package = true
 
 [tool.setuptools.packages.find]
-where = ["src/cli"]
-include = ["helicopter_cli*"]
+where = ["src/cli", "src/eval"]
+include = ["helicopter_cli*", "helicopter_eval*"]
 
 [tool.setuptools.package-data]
 helicopter_cli = ["data/*.json"]

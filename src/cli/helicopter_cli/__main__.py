@@ -127,6 +127,28 @@ def handle_eval_plan(args: argparse.Namespace, **_: Any) -> int:
     return 0
 
 
+def handle_eval_run(args: argparse.Namespace, *, root: Any, **_: Any) -> int:
+    if args.benchmark != "gsm8k":
+        raise SystemExit("only gsm8k is implemented for eval run in this stage")
+    from helicopter_eval.gsm8k import Gsm8kRunConfig, dry_run_summary, run_gsm8k
+
+    defaults = load_rwkv_skills_catalog().inference_defaults
+    run_config = Gsm8kRunConfig(
+        base_url=str(args.base_url or defaults.base_url),
+        model=str(args.model or defaults.model_name),
+        limit=args.limit,
+        split=str(args.split),
+        temperature=float(args.temperature),
+        top_p=float(args.top_p),
+        max_tokens=int(args.max_tokens),
+        timeout_s=float(args.timeout_s),
+        job_id=str(args.job_id),
+    )
+    payload = dry_run_summary(run_config) if args.dry_run else run_gsm8k(run_config, repo_root=root)
+    print_json(payload)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="helicopter")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -179,6 +201,20 @@ def build_parser() -> argparse.ArgumentParser:
     eval_plan.add_argument("--ready-only", action="store_true", help="only show runnable registry rows")
     eval_plan.add_argument("--json", action="store_true")
     eval_plan.set_defaults(handler=handle_eval_plan)
+
+    eval_run = eval_subparsers.add_parser("run", help="run a implemented benchmark and write scoreboard DB rows")
+    add_common_options(eval_run)
+    eval_run.add_argument("benchmark", choices=("gsm8k",))
+    eval_run.add_argument("--base-url", help="OpenAI-compatible vLLM base URL")
+    eval_run.add_argument("--model", help="served model name")
+    eval_run.add_argument("--limit", type=int)
+    eval_run.add_argument("--split", default="test")
+    eval_run.add_argument("--temperature", type=float, default=0.0)
+    eval_run.add_argument("--top-p", type=float, default=1.0)
+    eval_run.add_argument("--max-tokens", type=int, default=512)
+    eval_run.add_argument("--timeout-s", type=float, default=600.0)
+    eval_run.add_argument("--job-id", default="helicopter-gsm8k")
+    eval_run.set_defaults(handler=handle_eval_run)
 
     eval_infer = eval_subparsers.add_parser("infer", help="start the default local 0.4B vLLM-RWKV service")
     add_common_options(eval_infer)
