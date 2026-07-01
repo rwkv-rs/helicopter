@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import contextlib
 from dataclasses import dataclass
+from decimal import Decimal
 import faulthandler
 import gzip
 import hashlib
@@ -17,6 +19,7 @@ import re
 import signal
 import tempfile
 import traceback
+from types import ModuleType
 from typing import Any, Sequence
 import urllib.request
 
@@ -36,6 +39,32 @@ _FENCED_CODE_RE = re.compile(
 _LEADING_END_THINK_RE = re.compile(r"^[\s\r\n]*</think>[ \t]*\r?\n?", re.IGNORECASE)
 _STANDALONE_CODE_FENCE_RE = re.compile(r"^[ \t]*```[ \t]*(?:python|py)?[ \t]*$", re.IGNORECASE)
 _DEF_RE = re.compile(r"def\s+(?P<name>[\w_]+)\s*\(")
+_LCB_DATASET_ID = "livecodebench/code_generation_lite"
+_LCB_DATASET_CONFIG = "release_latest"
+_LCB_VERSION_TAG = "release_v6"
+_LCB_SYSTEM_MESSAGE = (
+    "You are an expert Python programmer. You will be given a question "
+    "(problem specification) and will generate a correct Python program "
+    "that matches the specification and passes all tests."
+)
+_LCB_FORMAT_WITH_STARTER = (
+    "You will use the following starter code to write the solution to the problem and enclose your code within delimiters."
+)
+_LCB_FORMAT_WITHOUT_STARTER = (
+    "Read the inputs from stdin solve the problem and write the answer to STDOUT "
+    "(do not directly test on the sample inputs). Enclose your code within delimiters as follows. "
+    "Ensure that when the python program runs, it reads the inputs, runs the algorithm and writes output to STDOUT."
+)
+_LCB_FINAL_ANSWER_PREFIX = "\n</think>\n```python\n"
+_LCB_IMPORT_STRING = (
+    "from string import *\nfrom re import *\nfrom datetime import *\nfrom collections import *\n"
+    "from heapq import *\nfrom bisect import *\nfrom copy import *\nfrom math import *\n"
+    "from random import *\nfrom statistics import *\nfrom itertools import *\nfrom functools import *\n"
+    "from operator import *\nfrom io import *\nfrom sys import *\nfrom json import *\nfrom builtins import *\n"
+    "from typing import *\nimport string\nimport re\nimport datetime\nimport collections\nimport heapq\n"
+    "import bisect\nimport copy\nimport math\nimport random\nimport statistics\nimport itertools\nimport functools\n"
+    "import operator\nimport io\nimport sys\nimport json\nsys.setrecursionlimit(50000)\n"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,11 +73,16 @@ class CodeGenerationSample:
     task_id: str
     prompt: str
     check_prefix: str | None = None
+    starter_code: str | None = None
     entry_point: str | None = None
     canonical_solution: str | None = None
     test: str | None = None
     assertion: Any | None = None
     test_list: Any | None = None
+    public_test_cases: Any | None = None
+    private_test_cases: Any | None = None
+    metadata: dict[str, Any] | None = None
+    difficulty: str | None = None
     base_input: Any | None = None
     plus_input: Any | None = None
     contract: str | None = None
@@ -135,6 +169,8 @@ def extract_function_signature(code: str | None) -> str | None:
 
 
 def build_prompt(sample: CodeGenerationSample, config: CodeGenerationRunConfig) -> str:
+    if config.benchmark == "livecodebench":
+        return _format_lcb_cot_prompt(sample.prompt, sample.starter_code)
     if config.benchmark.startswith("mbpp"):
         signature = extract_function_signature(sample.canonical_solution)
         body = (
@@ -144,6 +180,27 @@ def build_prompt(sample: CodeGenerationSample, config: CodeGenerationRunConfig) 
         )
         return _format_code_prompt_no_echo(body)
     return _format_code_prompt(sample.prompt)
+
+
+def _format_lcb_body(question: str, starter_code: str | None) -> str:
+    clean = (question or "").strip()
+    body = f"### Question:\n{clean}\n\n"
+    if starter_code and starter_code.strip():
+        body += f"### Format: {_LCB_FORMAT_WITH_STARTER}\n"
+        body += f"```python\n{starter_code}\n```\n\n"
+    else:
+        body += f"### Format: {_LCB_FORMAT_WITHOUT_STARTER}\n"
+        body += "```python\n# YOUR CODE HERE\n```\n\n"
+    body += "### Answer: (use the provided format with backticks)\n\n"
+    return body
+
+
+def _format_lcb_cot_prompt(question: str, starter_code: str | None) -> str:
+    return f"User: {_LCB_SYSTEM_MESSAGE}\n{_format_lcb_body(question, starter_code)}Assistant: <think"
+
+
+def _format_lcb_final_prompt(cot_prompt: str, cot_completion: str) -> str:
+    return f"{cot_prompt}{cot_completion}{_LCB_FINAL_ANSWER_PREFIX}"
 
 
 def extract_code_completion(text: str) -> str:
@@ -168,6 +225,9 @@ def _strip_standalone_code_fence_edges(text: str) -> str:
 
 
 def _reference_answer(sample: CodeGenerationSample) -> str:
+    if sample.public_test_cases is not None or sample.private_test_cases is not None:
+        _, ref_answer = _lcb_input_output(sample)
+        return ref_answer
     if sample.canonical_solution:
         return sample.canonical_solution.strip()
     for value in (sample.test, sample.assertion, sample.test_list):
@@ -250,6 +310,7 @@ def _sample_from_payload(index: int, payload: dict[str, Any]) -> CodeGenerationS
         task_id=str(task_id),
         prompt=str(prompt),
         check_prefix=str(payload["declaration"]) if payload.get("declaration") is not None else None,
+        starter_code=str(payload["starter_code"]) if payload.get("starter_code") is not None else None,
         entry_point=entry_point,
         canonical_solution=(
             str(payload["canonical_solution"]) if payload.get("canonical_solution") is not None else None
@@ -257,11 +318,28 @@ def _sample_from_payload(index: int, payload: dict[str, Any]) -> CodeGenerationS
         test=str(payload["test"]) if payload.get("test") is not None else None,
         assertion=payload.get("assertion"),
         test_list=payload.get("test_list") or payload.get("test_cases") or payload.get("tests") or payload.get("unit_tests"),
+        public_test_cases=payload.get("public_test_cases"),
+        private_test_cases=payload.get("private_test_cases"),
+        metadata=_parse_dict_maybe(payload.get("metadata")),
+        difficulty=str(payload["difficulty"]) if payload.get("difficulty") is not None else None,
         base_input=payload.get("base_input"),
         plus_input=payload.get("plus_input"),
         contract=str(payload["contract"]) if payload.get("contract") is not None else None,
         atol=float(payload.get("atol") or 0.0),
     )
+
+
+def _parse_dict_maybe(value: object) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(payload, dict):
+            return payload
+    return None
 
 
 def _extract_entry_point(payload: dict[str, Any]) -> str | None:
@@ -357,6 +435,31 @@ def _iter_mbpp_rows(config: CodeGenerationRunConfig):
         yield payload
 
 
+def _iter_livecodebench_rows(config: CodeGenerationRunConfig):
+    if config.split != "test":
+        raise ValueError("livecodebench only supports test split")
+    try:
+        from datasets import load_dataset
+    except ImportError as exc:  # pragma: no cover - exercised in integration environments
+        raise SystemExit("livecodebench requires the `datasets` package; install the rwkv dependency group.") from exc
+    version_tag = os.environ.get("RWKV_SKILLS_LIVECODEBENCH_VERSION_TAG", _LCB_VERSION_TAG).strip()
+    dataset = load_dataset(
+        path=_LCB_DATASET_ID,
+        name=_LCB_DATASET_CONFIG,
+        split=config.split,
+        version_tag=version_tag,
+    )
+    for row in sorted(dataset, key=lambda item: str(item.get("question_id", ""))):
+        payload = dict(row)
+        question_id = str(payload.get("question_id", "") or "")
+        payload["task_id"] = question_id
+        payload["prompt"] = str(payload.get("question_content") or payload.get("question_title") or "")
+        payload.setdefault("question_id", question_id)
+        payload["release_version"] = version_tag
+        payload["source_dataset"] = _LCB_DATASET_ID
+        yield payload
+
+
 def _iter_rows(config: CodeGenerationRunConfig):
     if config.source_type == "human_eval_url_gzip":
         return _iter_human_eval_rows(config)
@@ -368,6 +471,8 @@ def _iter_rows(config: CodeGenerationRunConfig):
         return _iter_human_eval_plus_rows(config)
     if config.source_type == "mbpp_evalplus":
         return _iter_mbpp_rows(config)
+    if config.source_type == "livecodebench_hf":
+        return _iter_livecodebench_rows(config)
     raise ValueError(f"unsupported code-generation source_type: {config.source_type}")
 
 
@@ -544,6 +649,274 @@ def _score_mbpp_base(sample: CodeGenerationSample, completion: str, config: Code
     return (*_execute_program(_build_mbpp_check_program(sample, completion), config.eval_timeout_s), None)
 
 
+def _parse_json_maybe(value: object) -> object:
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    return value
+
+
+def _decode_lcb_private_tests(raw: str) -> list[dict[str, Any]]:
+    import base64
+    import pickle
+    import zlib
+
+    try:
+        payload = pickle.loads(zlib.decompress(base64.b64decode(raw.encode("utf-8"))))
+        decoded = json.loads(payload)
+    except Exception:
+        return []
+    return decoded if isinstance(decoded, list) else []
+
+
+def _parse_lcb_tests(raw: object) -> list[dict[str, Any]]:
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, dict)]
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return _decode_lcb_private_tests(raw)
+        return [item for item in parsed if isinstance(item, dict)] if isinstance(parsed, list) else []
+    return []
+
+
+def _lcb_input_output(sample: CodeGenerationSample) -> tuple[dict[str, str], str]:
+    metadata = _parse_json_maybe(sample.metadata or {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    public_tests = _parse_lcb_tests(sample.public_test_cases)
+    private_tests = _parse_lcb_tests(sample.private_test_cases)
+    tests = public_tests + private_tests
+    input_output = {
+        "input_output": json.dumps(
+            {
+                "inputs": [str(item.get("input", "")) for item in tests],
+                "outputs": [str(item.get("output", "")) for item in tests],
+                "fn_name": metadata.get("func_name"),
+            }
+        )
+    }
+    ref_answer = (
+        f"LiveCodeBench official tests for task_id={sample.task_id}; "
+        f"public_tests={len(public_tests)}, private_tests={len(private_tests)}."
+    )
+    return input_output, ref_answer
+
+
+def _format_lcb_exception(exc: BaseException, *, include_traceback: bool = False) -> str:
+    exc_type = type(exc).__name__
+    exc_msg = str(exc).strip()
+    header = f"failed: {exc_type}: {exc_msg}" if exc_msg else f"failed: {exc_type}"
+    if not include_traceback:
+        return header
+    tb = traceback.format_exc().rstrip()
+    return f"{header}\n{tb}" if tb else header
+
+
+def _lcb_clean_if_name(code: str) -> str:
+    try:
+        astree = ast.parse(code)
+        last_block = astree.body[-1]
+        if isinstance(last_block, ast.If) and ast.unparse(last_block.test).strip() == "__name__ == '__main__'":
+            code = ast.unparse(astree.body[:-1]) + "\n" + ast.unparse(last_block.body)
+    except Exception:
+        pass
+    return code
+
+
+def _lcb_make_function(code: str) -> str:
+    try:
+        import_stmts = []
+        other_stmts = []
+        astree = ast.parse(code)
+        for stmt in astree.body:
+            if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+                import_stmts.append(stmt)
+            else:
+                other_stmts.append(stmt)
+        function_ast = ast.FunctionDef(
+            name="wrapped_function",
+            args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
+            body=other_stmts,
+            decorator_list=[],
+            lineno=-1,
+        )
+        return _LCB_IMPORT_STRING + "\n" + ast.unparse(import_stmts) + "\n" + ast.unparse(function_ast)
+    except Exception:
+        return code
+
+
+def _lcb_compile_code(code: str, timeout: float):
+    with _time_limit(timeout):
+        tmp_sol = ModuleType("tmp_sol", "")
+        with _swallow_io():
+            exec(code, tmp_sol.__dict__)
+        if "class Solution" in code:
+            return tmp_sol.Solution()
+        return tmp_sol
+
+
+def _lcb_get_function(compiled_sol: object, fn_name: str):
+    try:
+        assert hasattr(compiled_sol, fn_name)
+        return getattr(compiled_sol, fn_name)
+    except Exception:
+        return None
+
+
+def _lcb_decimal_line(line: str) -> tuple[bool, list[Decimal]]:
+    try:
+        return True, [Decimal(item) for item in line.split()]
+    except Exception:
+        return False, []
+
+
+def _lcb_stripped_lines(value: str) -> list[str]:
+    return [line.strip() for line in value.strip().split("\n")]
+
+
+@contextlib.contextmanager
+def _capture_output(stdin_text: str):
+    stdout = io.StringIO()
+    stdin = io.StringIO(stdin_text)
+    stdin.buffer = io.BytesIO(stdin_text.encode("utf-8"))  # type: ignore[attr-defined]
+    with contextlib.redirect_stdout(stdout):
+        with contextlib.redirect_stderr(io.StringIO()):
+            with redirect_stdin(stdin):
+                yield stdout
+
+
+def _grade_lcb_call_based(code: str, all_inputs: list[Any], all_outputs: list[Any], fn_name: str, timeout: float) -> str:
+    code = _LCB_IMPORT_STRING + "\n\n" + code
+    try:
+        compiled_sol = _lcb_compile_code(code, timeout)
+    except TimeoutException:
+        return "timed out"
+    except BaseException as exc:  # noqa: BLE001
+        return _format_lcb_exception(exc)
+    method = _lcb_get_function(compiled_sol, fn_name)
+    if method is None:
+        return "failed: Missing entry point"
+    try:
+        parsed_inputs = [[json.loads(line) for line in inputs.split("\n")] for inputs in all_inputs]
+        parsed_outputs = [json.loads(output) for output in all_outputs]
+    except Exception:
+        return "failed: Invalid test case"
+    for gt_inp, gt_out in zip(parsed_inputs, parsed_outputs):
+        try:
+            with _swallow_io():
+                with _time_limit(timeout):
+                    prediction = method(*gt_inp)
+            if isinstance(prediction, tuple):
+                prediction = list(prediction)
+            if prediction != gt_out:
+                return "failed: Wrong Answer"
+        except TimeoutException:
+            return "timed out"
+        except BaseException as exc:  # noqa: BLE001
+            return _format_lcb_exception(exc)
+    return "passed"
+
+
+def _grade_lcb_stdio(code: str, all_inputs: list[Any], all_outputs: list[Any], timeout: float) -> str:
+    code = _lcb_make_function(_lcb_clean_if_name(code))
+    try:
+        compiled_sol = _lcb_compile_code(code, timeout)
+    except TimeoutException:
+        return "timed out"
+    except BaseException as exc:  # noqa: BLE001
+        return _format_lcb_exception(exc)
+    method = _lcb_get_function(compiled_sol, "wrapped_function")
+    if method is None:
+        return "failed: Missing entry point"
+    for gt_inp, gt_out in zip(all_inputs, all_outputs):
+        try:
+            with _capture_output(str(gt_inp)) as captured_output:
+                with _time_limit(timeout):
+                    method()
+            prediction = captured_output.getvalue()
+        except TimeoutException:
+            return "timed out"
+        except BaseException as exc:  # noqa: BLE001
+            return _format_lcb_exception(exc)
+        pred_lines = _lcb_stripped_lines(prediction)
+        gt_lines = _lcb_stripped_lines(str(gt_out))
+        if len(pred_lines) != len(gt_lines):
+            return "failed: Wrong Answer"
+        for pred_line, gt_line in zip(pred_lines, gt_lines):
+            if pred_line == gt_line:
+                continue
+            pred_ok, pred_decimals = _lcb_decimal_line(pred_line)
+            gt_ok, gt_decimals = _lcb_decimal_line(gt_line)
+            if not pred_ok or not gt_ok or pred_decimals != gt_decimals:
+                return "failed: Wrong Answer"
+    return "passed"
+
+
+def _run_lcb_test(sample: dict[str, str], completion: str, timeout: float) -> str:
+    if not completion:
+        return "failed: no test code provided"
+    try:
+        in_outs = json.loads(sample["input_output"])
+    except Exception:
+        return "failed: Invalid test case"
+    if not isinstance(in_outs, dict):
+        return "failed: Invalid test case"
+    all_inputs = in_outs.get("inputs") or []
+    all_outputs = in_outs.get("outputs") or []
+    fn_name = in_outs.get("fn_name")
+    if fn_name:
+        return _grade_lcb_call_based(completion, all_inputs, all_outputs, str(fn_name), timeout)
+    return _grade_lcb_stdio(completion, all_inputs, all_outputs, timeout)
+
+
+def _unsafe_execute_lcb(sample: dict[str, str], completion: str, timeout: float, result):
+    with _create_tempdir():
+        import os as _os
+        import shutil
+
+        rmtree = shutil.rmtree
+        rmdir = _os.rmdir
+        chdir = _os.chdir
+        _reliability_guard()
+        try:
+            result.append(_run_lcb_test(sample, completion, timeout))
+        except TimeoutException:
+            result.append("timed out")
+        except BaseException as exc:  # noqa: BLE001
+            result.append(_format_lcb_exception(exc, include_traceback=True))
+        shutil.rmtree = rmtree
+        _os.rmdir = rmdir
+        _os.chdir = chdir
+
+
+def _score_livecodebench(sample: CodeGenerationSample, completion: str, config: CodeGenerationRunConfig) -> tuple[bool, str, bool | None]:
+    lcb_sample, _ = _lcb_input_output(sample)
+    manager = multiprocessing.Manager()
+    try:
+        result = manager.list()
+        process = multiprocessing.Process(
+            target=_unsafe_execute_lcb,
+            args=(lcb_sample, completion, config.eval_timeout_s, result),
+        )
+        process.start()
+        process.join(timeout=config.eval_timeout_s + 1)
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=1)
+        if not result:
+            result.append("timed out")
+        detail = str(result[0])
+        return detail == "passed", detail, None
+    finally:
+        manager.shutdown()
+
+
 _MP_ARENA_DIRS_SANITIZED = False
 
 
@@ -683,6 +1056,8 @@ def score_completion(
         if expected_outputs is None:
             raise ValueError("mbpp_plus expected_outputs are required")
         return _score_mbpp_plus(sample, completion, expected_outputs[sample.task_id], config)
+    if config.benchmark == "livecodebench":
+        return _score_livecodebench(sample, completion, config)
     return _score_human_eval(sample, completion, config)
 
 
@@ -693,6 +1068,17 @@ def generate_completion(
     expected_outputs: dict[str, dict[str, Any]] | None = None,
 ) -> CodeGenerationResult:
     prompt = build_prompt(sample, config)
+    if config.benchmark == "livecodebench":
+        cot_completion = chat_completion(
+            base_url=config.base_url,
+            model=config.model,
+            prompt=prompt,
+            temperature=config.temperature,
+            top_p=config.top_p,
+            max_tokens=config.max_tokens,
+            timeout_s=config.timeout_s,
+        )
+        prompt = _format_lcb_final_prompt(prompt, cot_completion)
     raw_completion = chat_completion(
         base_url=config.base_url,
         model=config.model,

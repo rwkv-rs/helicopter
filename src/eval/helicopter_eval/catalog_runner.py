@@ -234,6 +234,15 @@ _DIRECT_HF_SPECS: dict[str, dict[str, Any]] = {
         "max_tokens": 512,
         "reason": "evalplus_base_plus_code_execution",
     },
+    "livecodebench": {
+        "kind": "code_generation",
+        "source_type": "livecodebench_hf",
+        "dataset_name": "livecodebench/code_generation_lite",
+        "dataset_config": "release_latest",
+        "job_name": "code_livecodebench",
+        "max_tokens": 1024,
+        "reason": "hf_livecodebench_code_execution",
+    },
     "amc23": {
         "kind": "free_response",
         "source_type": "qwen_math",
@@ -744,5 +753,6 @@ def _run_config(spec: CatalogRunSpec, *, base_url: str, model: str, limit: int |
             job_name=spec.job_name or "code_human_eval",
             job_id=f"helicopter-{spec.benchmark}",
             runner="helicopter_eval.catalog_runner",
+            cot_mode="CoT" if spec.benchmark == "livecodebench" else "NoCoT",
         )
     raise RuntimeError(f"{spec.benchmark} is not runnable yet: {spec.reason}")

@@ -543,6 +543,7 @@ class CommandPlanTests(unittest.TestCase):
                 "human_eval",
                 "human_eval_plus",
                 "mbpp",
+                "livecodebench",
             )
         }
 
@@ -571,6 +572,8 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(specs["human_eval"].source_type, "human_eval_url_gzip")
         self.assertEqual(specs["human_eval_plus"].source_type, "human_eval_plus_evalplus")
         self.assertEqual(specs["mbpp"].source_type, "mbpp_evalplus")
+        self.assertEqual(specs["livecodebench"].source_type, "livecodebench_hf")
+        self.assertEqual(specs["livecodebench"].job_name, "code_livecodebench")
 
     def test_run_catalog_gsm8k_dry_run_uses_rwkv_dataset_slug(self) -> None:
         args = Namespace(
@@ -610,10 +613,10 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         payload = print_json.call_args.args[0]
         self.assertEqual(payload["count"], 95)
-        self.assertEqual(payload["status_counts"]["implemented"], 43)
+        self.assertEqual(payload["status_counts"]["implemented"], 44)
         self.assertEqual(payload["status_counts"].get("needs_dataset_adapter", 0), 0)
         self.assertEqual(payload["status_counts"]["needs_dataset_access"], 1)
-        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 51)
+        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 50)
 
     def test_run_catalog_human_eval_dry_run_uses_code_generation_runner(self) -> None:
         args = Namespace(
@@ -650,6 +653,52 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(
             code_generation.extract_code_completion(text),
             "def add(a, b):\n    return a + b",
+        )
+
+    def test_livecodebench_scores_stdio_sample(self) -> None:
+        sample = code_generation.CodeGenerationSample(
+            sample_index=0,
+            task_id="toy",
+            prompt="Read an integer and print it plus one.",
+            public_test_cases=[{"input": "1\n", "output": "2\n"}],
+            private_test_cases=[],
+            metadata={},
+        )
+        config = code_generation.CodeGenerationRunConfig(
+            base_url="http://127.0.0.1:29082",
+            model="rwkv7-g1d-0.4b-20260210-ctx8192",
+            benchmark="livecodebench",
+            dataset_name="livecodebench/code_generation_lite",
+            source_type="livecodebench_hf",
+            eval_timeout_s=1.0,
+        )
+
+        self.assertEqual(
+            code_generation.score_completion(sample, "n = int(input())\nprint(n + 1)", config),
+            (True, "passed", None),
+        )
+
+    def test_livecodebench_scores_call_based_sample(self) -> None:
+        sample = code_generation.CodeGenerationSample(
+            sample_index=0,
+            task_id="toy-call",
+            prompt="Implement add(a, b).",
+            public_test_cases=[{"input": "1\n2", "output": "3"}],
+            private_test_cases=[],
+            metadata={"func_name": "add"},
+        )
+        config = code_generation.CodeGenerationRunConfig(
+            base_url="http://127.0.0.1:29082",
+            model="rwkv7-g1d-0.4b-20260210-ctx8192",
+            benchmark="livecodebench",
+            dataset_name="livecodebench/code_generation_lite",
+            source_type="livecodebench_hf",
+            eval_timeout_s=1.0,
+        )
+
+        self.assertEqual(
+            code_generation.score_completion(sample, "def add(a, b):\n    return a + b", config),
+            (True, "passed", None),
         )
 
     def test_multiple_choice_normalizes_list_and_arc_choices(self) -> None:
