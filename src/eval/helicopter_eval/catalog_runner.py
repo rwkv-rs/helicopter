@@ -5,7 +5,14 @@ from pathlib import Path
 from typing import Any, Literal
 
 
-RunKind = Literal["free_response", "multiple_choice", "instruction_following", "code_generation", "longcodeqa"]
+RunKind = Literal[
+    "free_response",
+    "multiple_choice",
+    "instruction_following",
+    "code_generation",
+    "longcodeqa",
+    "longbench",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,6 +258,32 @@ _DIRECT_HF_SPECS: dict[str, dict[str, Any]] = {
         "job_name": "function_longcodebench",
         "max_tokens": 64,
         "reason": "hf_zip_longcodeqa_exact_letter",
+    },
+    "longbench": {
+        "kind": "longbench",
+        "source_type": "hf_longbench",
+        "dataset_name": "THUDM/LongBench",
+        "job_name": "function_longbench",
+        "max_tokens": 128,
+        "reason": "hf_longbench_em_f1",
+    },
+    "longbench_qa": {
+        "kind": "longbench",
+        "source_type": "hf_longbench",
+        "dataset_name": "THUDM/LongBench",
+        "row_adapter": "longbench_qa",
+        "job_name": "function_longbench",
+        "max_tokens": 128,
+        "reason": "hf_longbench_qa_em_f1",
+    },
+    "longbench_qa_balanced": {
+        "kind": "longbench",
+        "source_type": "hf_longbench",
+        "dataset_name": "THUDM/LongBench",
+        "row_adapter": "longbench_qa_balanced",
+        "job_name": "function_longbench",
+        "max_tokens": 128,
+        "reason": "hf_longbench_qa_round_robin_em_f1",
     },
     "amc23": {
         "kind": "free_response",
@@ -644,6 +677,10 @@ def dry_run_catalog_spec(
         from .longcodeqa import dry_run_summary
 
         return dry_run_summary(config)
+    if spec.kind == "longbench":
+        from .longbench import dry_run_summary
+
+        return dry_run_summary(config)
     from .multiple_choice import dry_run_summary
 
     return dry_run_summary(config)
@@ -676,6 +713,10 @@ def run_catalog_spec(
         from .longcodeqa import run_longcodeqa
 
         return run_longcodeqa(config, repo_root=repo_root)
+    if spec.kind == "longbench":
+        from .longbench import run_longbench
+
+        return run_longbench(config, repo_root=repo_root)
     from .multiple_choice import run_multiple_choice
 
     return run_multiple_choice(config, repo_root=repo_root)
@@ -785,6 +826,29 @@ def _run_config(spec: CatalogRunSpec, *, base_url: str, model: str, limit: int |
             max_tokens=int(spec.max_tokens or 64),
             scoreboard_dataset=spec.dataset_slug,
             job_name=spec.job_name or "function_longcodebench",
+            job_id=f"helicopter-{spec.benchmark}",
+            runner="helicopter_eval.catalog_runner",
+        )
+    if spec.kind == "longbench":
+        from .longbench import LONG_BENCH_QA_DATASETS, LongBenchRunConfig
+
+        include_datasets: tuple[str, ...] = ()
+        balance_by_dataset = False
+        if spec.row_adapter in {"longbench_qa", "longbench_qa_balanced"}:
+            include_datasets = tuple(sorted(LONG_BENCH_QA_DATASETS))
+        if spec.row_adapter == "longbench_qa_balanced":
+            balance_by_dataset = True
+        return LongBenchRunConfig(
+            base_url=base_url,
+            model=model,
+            benchmark=spec.benchmark,
+            limit=limit,
+            split=str(spec.source_split),
+            include_datasets=include_datasets,
+            balance_by_dataset=balance_by_dataset,
+            max_tokens=int(spec.max_tokens or 128),
+            scoreboard_dataset=spec.dataset_slug,
+            job_name=spec.job_name or "function_longbench",
             job_id=f"helicopter-{spec.benchmark}",
             runner="helicopter_eval.catalog_runner",
         )

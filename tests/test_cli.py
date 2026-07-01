@@ -15,6 +15,7 @@ from helicopter_eval import (
     free_response,
     gsm8k,
     instruction_following,
+    longbench,
     longcodeqa,
     multiple_choice,
 )
@@ -553,6 +554,9 @@ class CommandPlanTests(unittest.TestCase):
                 "mbpp",
                 "livecodebench",
                 "longcodeqa",
+                "longbench",
+                "longbench_qa",
+                "longbench_qa_balanced",
             )
         }
 
@@ -585,6 +589,9 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(specs["livecodebench"].job_name, "code_livecodebench")
         self.assertEqual(specs["longcodeqa"].kind, "longcodeqa")
         self.assertEqual(specs["longcodeqa"].source_type, "hf_zip")
+        self.assertEqual(specs["longbench"].kind, "longbench")
+        self.assertEqual(specs["longbench_qa"].row_adapter, "longbench_qa")
+        self.assertEqual(specs["longbench_qa_balanced"].row_adapter, "longbench_qa_balanced")
 
     def test_run_catalog_gsm8k_dry_run_uses_rwkv_dataset_slug(self) -> None:
         args = Namespace(
@@ -624,10 +631,10 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         payload = print_json.call_args.args[0]
         self.assertEqual(payload["count"], 95)
-        self.assertEqual(payload["status_counts"]["implemented"], 45)
+        self.assertEqual(payload["status_counts"]["implemented"], 48)
         self.assertEqual(payload["status_counts"].get("needs_dataset_adapter", 0), 0)
         self.assertEqual(payload["status_counts"]["needs_dataset_access"], 1)
-        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 49)
+        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 46)
 
     def test_run_catalog_human_eval_dry_run_uses_code_generation_runner(self) -> None:
         args = Namespace(
@@ -752,6 +759,36 @@ class CommandPlanTests(unittest.TestCase):
             correct_letter="B",
         )
         self.assertEqual(longcodeqa.evaluate_completion(sample, "B"), ("B", True))
+
+    def test_run_catalog_longbench_qa_dry_run_uses_runner(self) -> None:
+        args = Namespace(
+            dry_run=True,
+            benchmark="longbench_qa",
+            base_url=None,
+            model=None,
+            limit=2,
+        )
+
+        with mock.patch.object(cli_main, "print_json") as print_json:
+            rc = cli_main.handle_eval_run_catalog(args, root=ROOT)
+
+        self.assertEqual(rc, 0)
+        payload = print_json.call_args.args[0]
+        self.assertEqual(payload["benchmark"], "longbench_qa")
+        self.assertEqual(payload["source"], "hf://THUDM/LongBench")
+        self.assertEqual(payload["limit"], 2)
+        self.assertFalse(payload["balance_by_dataset"])
+        self.assertIn("hotpotqa", payload["include_datasets"])
+        self.assertEqual(payload["scoreboard_dataset"], "longbench_qa_test_limit2")
+
+    def test_longbench_scores_exact_and_f1(self) -> None:
+        self.assertEqual(longbench.normalize_answer("Answer: The Eiffel Tower"), "The Eiffel Tower")
+        self.assertTrue(longbench.exact_match("the eiffel tower", "Eiffel Tower"))
+        self.assertGreater(longbench.token_f1("red blue", "red green"), 0.0)
+        exact, f1, ref = longbench.score_answer("Paris", ("Paris", "Lyon"))
+        self.assertTrue(exact)
+        self.assertEqual(f1, 1.0)
+        self.assertEqual(ref, "Paris")
 
     def test_multiple_choice_normalizes_list_and_arc_choices(self) -> None:
         list_choices = multiple_choice.normalize_choices(["red", "blue"])
