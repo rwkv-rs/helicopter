@@ -25,6 +25,8 @@ class CatalogRunSpec:
     choice_fields: tuple[str, ...] = ()
     choice_labels: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     answer_marker: str | None = "####"
+    row_adapter: str | None = None
+    adapter_seed: int = 42
     job_name: str | None = None
     max_tokens: int | None = None
 
@@ -73,6 +75,64 @@ _DIRECT_HF_SPECS: dict[str, dict[str, Any]] = {
         "job_name": "multi_choice_plain",
         "max_tokens": 32,
     },
+    "gpqa_diamond": {
+        "kind": "multiple_choice",
+        "dataset_name": "Idavidrein/gpqa",
+        "dataset_config": "gpqa_diamond",
+        "source_split": "train",
+        "row_adapter": "gpqa",
+        "choice_labels": "ABCD",
+        "job_name": "multi_choice_plain",
+        "max_tokens": 32,
+    },
+    "gpqa_extended": {
+        "kind": "multiple_choice",
+        "dataset_name": "Idavidrein/gpqa",
+        "dataset_config": "gpqa_extended",
+        "source_split": "train",
+        "row_adapter": "gpqa",
+        "choice_labels": "ABCD",
+        "job_name": "multi_choice_plain",
+        "max_tokens": 32,
+    },
+    "gpqa_main": {
+        "kind": "multiple_choice",
+        "dataset_name": "Idavidrein/gpqa",
+        "dataset_config": "gpqa_main",
+        "source_split": "train",
+        "row_adapter": "gpqa",
+        "choice_labels": "ABCD",
+        "job_name": "multi_choice_plain",
+        "max_tokens": 32,
+    },
+    "include": {
+        "kind": "multiple_choice",
+        "dataset_name": "CohereForAI/include-base-44",
+        "dataset_config": "*",
+        "row_adapter": "include",
+        "choice_labels": "ABCD",
+        "job_name": "multi_choice_plain",
+        "max_tokens": 32,
+    },
+    "mmlu_redux": {
+        "kind": "multiple_choice",
+        "dataset_name": "edinburgh-dawg/mmlu-redux-2.0",
+        "dataset_config": "*",
+        "row_adapter": "mmlu_redux",
+        "choice_labels": "ABCD",
+        "job_name": "multi_choice_plain",
+        "max_tokens": 32,
+    },
+    "supergpqa": {
+        "kind": "multiple_choice",
+        "dataset_name": "m-a-p/SuperGPQA",
+        "dataset_config": None,
+        "source_split": "train",
+        "row_adapter": "supergpqa",
+        "choice_labels": "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        "job_name": "multi_choice_plain",
+        "max_tokens": 32,
+    },
 }
 
 
@@ -96,6 +156,8 @@ def resolve_catalog_run_spec(benchmark: Any) -> CatalogRunSpec:
             choice_fields=tuple(str(item) for item in raw.get("choice_fields", ())),
             choice_labels=str(raw.get("choice_labels", "ABCDEFGHIJKLMNOPQRSTUVWXYZ")),
             answer_marker=raw.get("answer_marker"),
+            row_adapter=raw.get("row_adapter"),
+            adapter_seed=int(raw.get("adapter_seed") or 42),
             job_name=str(raw.get("job_name") or ""),
             max_tokens=int(raw.get("max_tokens") or 512),
         )
@@ -130,6 +192,7 @@ def catalog_run_spec_to_dict(spec: CatalogRunSpec) -> dict[str, Any]:
         "hf_dataset": spec.dataset_name,
         "hf_config": spec.dataset_config,
         "source_split": spec.source_split,
+        "row_adapter": spec.row_adapter,
     }
 
 
@@ -209,6 +272,8 @@ def _run_config(spec: CatalogRunSpec, *, base_url: str, model: str, limit: int |
             answer_field=spec.answer_field,
             limit=limit,
             choice_fields=spec.choice_fields,
+            row_adapter=spec.row_adapter,
+            adapter_seed=spec.adapter_seed,
             split=str(spec.source_split),
             max_tokens=int(spec.max_tokens or 32),
             choice_labels=spec.choice_labels,

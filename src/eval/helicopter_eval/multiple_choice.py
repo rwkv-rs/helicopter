@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from pathlib import Path
+import random
 import re
 from typing import Any, Sequence
 
@@ -22,6 +23,13 @@ class ChoiceSet:
 @dataclass(frozen=True, slots=True)
 class MultipleChoiceSample:
     sample_index: int
+    question: str
+    choices: ChoiceSet
+    reference_answer: str
+
+
+@dataclass(frozen=True, slots=True)
+class AdaptedChoiceRow:
     question: str
     choices: ChoiceSet
     reference_answer: str
@@ -62,6 +70,8 @@ class MultipleChoiceRunConfig:
     limit: int | None = None
     dataset_config: str | None = None
     choice_fields: tuple[str, ...] = ()
+    row_adapter: str | None = None
+    adapter_seed: int = 42
     split: str = "test"
     temperature: float = 0.0
     top_p: float = 1.0
@@ -78,6 +88,10 @@ class MultipleChoiceRunConfig:
 
 def normalize_text(value: Any) -> str:
     return " ".join(str(value).strip().split()).lower()
+
+
+def normalized_whitespace(value: Any) -> str:
+    return " ".join(str(value or "").strip().split())
 
 
 def normalize_choices(raw_choices: Any, *, fallback_labels: str = DEFAULT_LABELS) -> ChoiceSet:
@@ -178,7 +192,12 @@ def _iter_hf_rows(config: MultipleChoiceRunConfig):
         raise SystemExit("multiple-choice eval requires the `datasets` package; install the rwkv dependency group.") from exc
 
     if config.dataset_config == "*":
-        config_names = tuple(name for name in get_dataset_config_names(config.dataset_name) if name and name != "default")
+        if config.row_adapter == "include":
+            config_names = _include_config_names(config.dataset_name, config.split)
+        else:
+            config_names = tuple(
+                name for name in get_dataset_config_names(config.dataset_name) if name and name != "default"
+            )
     else:
         config_names = (config.dataset_config,)
     for config_name in config_names:
@@ -190,10 +209,101 @@ def _iter_hf_rows(config: MultipleChoiceRunConfig):
             yield item
 
 
+def _include_config_names(dataset_name: str, split: str) -> tuple[str, ...]:
+    from datasets import get_dataset_config_names
+    from huggingface_hub import list_repo_files
+
+    files = set(list_repo_files(dataset_name, repo_type="dataset"))
+    return tuple(
+        sorted(
+            name
+            for name in get_dataset_config_names(dataset_name)
+            if name and name != "default" and f"{name}/{split}-00000-of-00001.parquet" in files
+        )
+    )
+
+
 def _row_choices(item: Any, config: MultipleChoiceRunConfig) -> ChoiceSet:
     if config.choice_fields:
         return normalize_choices([item[field] for field in config.choice_fields], fallback_labels=config.choice_labels)
     return normalize_choices(item[config.choices_field], fallback_labels=config.choice_labels)
+
+
+def adapt_choice_row(
+    item: Any,
+    config: MultipleChoiceRunConfig,
+    rng: random.Random,
+) -> AdaptedChoiceRow | None:
+    if config.row_adapter == "gpqa":
+        choices = [
+            normalized_whitespace(item.get("Incorrect Answer 1")),
+            normalized_whitespace(item.get("Incorrect Answer 2")),
+            normalized_whitespace(item.get("Incorrect Answer 3")),
+            normalized_whitespace(item.get("Correct Answer")),
+        ]
+        correct = choices[-1]
+        rng.shuffle(choices)
+        choice_set = normalize_choices(choices, fallback_labels=config.choice_labels)
+        return AdaptedChoiceRow(
+            question=normalized_whitespace(item.get("Question")),
+            choices=choice_set,
+            reference_answer=choice_set.labels[choice_set.texts.index(correct)],
+        )
+
+    if config.row_adapter == "supergpqa":
+        choices = [normalized_whitespace(option) for option in item.get("options", [])]
+        answer_letter = str(item.get("answer_letter", "")).strip().upper()
+        answer_idx = ord(answer_letter) - ord("A")
+        if not (0 <= answer_idx < len(choices)):
+            raise ValueError(f"answer_letter out of range: {answer_letter!r}")
+        correct = choices[answer_idx]
+        rng.shuffle(choices)
+        choice_set = normalize_choices(choices, fallback_labels=config.choice_labels)
+        return AdaptedChoiceRow(
+            question=normalized_whitespace(item.get("question")),
+            choices=choice_set,
+            reference_answer=choice_set.labels[choice_set.texts.index(correct)],
+        )
+
+    if config.row_adapter == "mmlu_redux":
+        error_type = item.get("error_type")
+        if error_type == "ok":
+            raw_answer: Any = item.get("answer")
+        elif error_type == "wrong_groundtruth" and isinstance(item.get("correct_answer"), str):
+            raw_answer = item.get("correct_answer")
+        else:
+            return None
+        choice_set = normalize_choices(item.get("choices", []), fallback_labels=config.choice_labels)
+        return AdaptedChoiceRow(
+            question=normalized_whitespace(item.get("question")),
+            choices=choice_set,
+            reference_answer=reference_answer(raw_answer, choice_set),
+        )
+
+    if config.row_adapter == "include":
+        raw_choices = item.get("options") or item.get("choices") or item.get("answers")
+        if raw_choices is None:
+            option_keys = ("option_a", "option_b", "option_c", "option_d")
+            if all(item.get(key) is not None for key in option_keys):
+                raw_choices = [item[key] for key in option_keys]
+        choice_set = normalize_choices(raw_choices, fallback_labels=config.choice_labels)
+        raw_answer = item.get("answer")
+        if raw_answer is None:
+            raw_answer = item.get("label")
+        if raw_answer is None:
+            raw_answer = item.get("target")
+        return AdaptedChoiceRow(
+            question=normalized_whitespace(item.get("question") or item.get("prompt") or item.get("input")),
+            choices=choice_set,
+            reference_answer=reference_answer(raw_answer, choice_set),
+        )
+
+    choices = _row_choices(item, config)
+    return AdaptedChoiceRow(
+        question=str(item[config.question_field]),
+        choices=choices,
+        reference_answer=reference_answer(item[config.answer_field], choices),
+    )
 
 
 def load_samples(config: MultipleChoiceRunConfig) -> list[MultipleChoiceSample]:
@@ -201,16 +311,19 @@ def load_samples(config: MultipleChoiceRunConfig) -> list[MultipleChoiceSample]:
         raise ValueError("limit must be non-negative")
     limit = None if config.limit is None else int(config.limit)
     samples: list[MultipleChoiceSample] = []
-    for index, item in enumerate(_iter_hf_rows(config)):
-        if limit is not None and index >= limit:
+    rng = random.Random(config.adapter_seed)
+    for item in _iter_hf_rows(config):
+        if limit is not None and len(samples) >= limit:
             break
-        choices = _row_choices(item, config)
+        adapted = adapt_choice_row(item, config, rng)
+        if adapted is None:
+            continue
         samples.append(
             MultipleChoiceSample(
-                sample_index=index,
-                question=str(item[config.question_field]),
-                choices=choices,
-                reference_answer=reference_answer(item[config.answer_field], choices),
+                sample_index=len(samples),
+                question=adapted.question,
+                choices=adapted.choices,
+                reference_answer=adapted.reference_answer,
             )
         )
     return samples

@@ -504,7 +504,7 @@ class CommandPlanTests(unittest.TestCase):
         catalog = eval_catalog.load_rwkv_skills_catalog()
         specs = {
             name: catalog_runner.resolve_catalog_run_spec(catalog.benchmarks_by_name[name])
-            for name in ("gsm8k", "mmlu", "mmlu_pro", "ceval", "human_eval")
+            for name in ("gsm8k", "mmlu", "mmlu_pro", "ceval", "gpqa_main", "supergpqa", "human_eval")
         }
 
         self.assertEqual(specs["gsm8k"].status, "implemented")
@@ -512,6 +512,8 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(specs["mmlu"].dataset_config, "all")
         self.assertEqual(specs["ceval"].dataset_config, "*")
         self.assertEqual(specs["ceval"].choice_fields, ("A", "B", "C", "D"))
+        self.assertEqual(specs["gpqa_main"].row_adapter, "gpqa")
+        self.assertEqual(specs["supergpqa"].source_split, "train")
         self.assertEqual(specs["human_eval"].status, "needs_specialized_runner")
 
     def test_run_catalog_gsm8k_dry_run_uses_rwkv_dataset_slug(self) -> None:
@@ -552,7 +554,7 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         payload = print_json.call_args.args[0]
         self.assertEqual(payload["count"], 95)
-        self.assertEqual(payload["status_counts"]["implemented"], 4)
+        self.assertEqual(payload["status_counts"]["implemented"], 10)
         self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 59)
 
     def test_multiple_choice_normalizes_list_and_arc_choices(self) -> None:
@@ -565,6 +567,55 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(multiple_choice.reference_answer("dog", arc_choices), "B")
         self.assertEqual(multiple_choice.reference_answer("1", numeric_choices), "1")
         self.assertEqual(multiple_choice.completion_answer("I think the answer is B.", arc_choices.labels), "B")
+
+    def test_multiple_choice_adapters_keep_reference_with_shuffled_choices(self) -> None:
+        rng = multiple_choice.random.Random(42)
+        gpqa_config = multiple_choice.MultipleChoiceRunConfig(
+            base_url="http://127.0.0.1:29082",
+            model="rwkv7-g1d-0.4b-20260210-ctx8192",
+            benchmark="gpqa_main",
+            dataset_name="Idavidrein/gpqa",
+            dataset_config="gpqa_main",
+            question_field="question",
+            choices_field="choices",
+            answer_field="answer",
+            row_adapter="gpqa",
+        )
+        gpqa_row = multiple_choice.adapt_choice_row(
+            {
+                "Question": "q",
+                "Incorrect Answer 1": "wrong 1",
+                "Incorrect Answer 2": "wrong 2",
+                "Incorrect Answer 3": "wrong 3",
+                "Correct Answer": "right",
+            },
+            gpqa_config,
+            rng,
+        )
+
+        self.assertIsNotNone(gpqa_row)
+        assert gpqa_row is not None
+        self.assertEqual(gpqa_row.choices.texts[gpqa_row.choices.labels.index(gpqa_row.reference_answer)], "right")
+
+        redux_config = multiple_choice.MultipleChoiceRunConfig(
+            base_url="http://127.0.0.1:29082",
+            model="rwkv7-g1d-0.4b-20260210-ctx8192",
+            benchmark="mmlu_redux",
+            dataset_name="edinburgh-dawg/mmlu-redux-2.0",
+            dataset_config="abstract_algebra",
+            question_field="question",
+            choices_field="choices",
+            answer_field="answer",
+            row_adapter="mmlu_redux",
+        )
+
+        self.assertIsNone(
+            multiple_choice.adapt_choice_row(
+                {"error_type": "bad_question", "question": "q", "choices": ["a", "b"], "answer": 0},
+                redux_config,
+                multiple_choice.random.Random(42),
+            )
+        )
 
     def test_generic_multiple_choice_dry_run_uses_hf_dataset_config(self) -> None:
         args = Namespace(
