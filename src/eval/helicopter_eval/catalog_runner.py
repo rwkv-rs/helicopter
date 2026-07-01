@@ -12,6 +12,7 @@ RunKind = Literal[
     "code_generation",
     "longcodeqa",
     "longbench",
+    "browsecomp",
 ]
 
 
@@ -284,6 +285,27 @@ _DIRECT_HF_SPECS: dict[str, dict[str, Any]] = {
         "job_name": "function_longbench",
         "max_tokens": 128,
         "reason": "hf_longbench_qa_round_robin_em_f1",
+    },
+    "browsecomp": {
+        "kind": "browsecomp",
+        "source_type": "browsecomp_csv",
+        "source_url": "https://openaipublic.blob.core.windows.net/simple-evals/browse_comp_test_set.csv",
+        "dataset_name": "openai/simple-evals-browsecomp",
+        "job_name": "function_browsecomp",
+        "max_tokens": 2048,
+        "reason": "url_csv_encrypted_two_stage_judged",
+    },
+    "browsecomp_zh": {
+        "kind": "browsecomp",
+        "source_type": "browsecomp_zh_xlsx",
+        "source_url": (
+            "https://raw.githubusercontent.com/PALIN2018/BrowseComp-ZH/main/data/"
+            "browsecomp-zh-encrypted.xlsx"
+        ),
+        "dataset_name": "PALIN2018/BrowseComp-ZH",
+        "job_name": "function_browsecomp",
+        "max_tokens": 2048,
+        "reason": "url_xlsx_encrypted_two_stage_judged",
     },
     "amc23": {
         "kind": "free_response",
@@ -681,6 +703,10 @@ def dry_run_catalog_spec(
         from .longbench import dry_run_summary
 
         return dry_run_summary(config)
+    if spec.kind == "browsecomp":
+        from .browsecomp import dry_run_summary
+
+        return dry_run_summary(config)
     from .multiple_choice import dry_run_summary
 
     return dry_run_summary(config)
@@ -717,6 +743,10 @@ def run_catalog_spec(
         from .longbench import run_longbench
 
         return run_longbench(config, repo_root=repo_root)
+    if spec.kind == "browsecomp":
+        from .browsecomp import run_browsecomp
+
+        return run_browsecomp(config, repo_root=repo_root)
     from .multiple_choice import run_multiple_choice
 
     return run_multiple_choice(config, repo_root=repo_root)
@@ -849,6 +879,24 @@ def _run_config(spec: CatalogRunSpec, *, base_url: str, model: str, limit: int |
             max_tokens=int(spec.max_tokens or 128),
             scoreboard_dataset=spec.dataset_slug,
             job_name=spec.job_name or "function_longbench",
+            job_id=f"helicopter-{spec.benchmark}",
+            runner="helicopter_eval.catalog_runner",
+        )
+    if spec.kind == "browsecomp":
+        from .browsecomp import BrowseCompRunConfig
+
+        return BrowseCompRunConfig(
+            base_url=base_url,
+            model=model,
+            benchmark=spec.benchmark,
+            source_type=spec.source_type,
+            source_url=spec.source_url,
+            limit=limit,
+            split=str(spec.source_split),
+            cot_max_tokens=int(spec.max_tokens or 2048),
+            answer_max_tokens=1024,
+            scoreboard_dataset=spec.dataset_slug,
+            job_name=spec.job_name or "function_browsecomp",
             job_id=f"helicopter-{spec.benchmark}",
             runner="helicopter_eval.catalog_runner",
         )

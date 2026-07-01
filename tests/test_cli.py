@@ -10,6 +10,7 @@ from unittest import mock
 from helicopter_cli import __main__ as cli_main
 from helicopter_cli import commands, config, env, eval_catalog
 from helicopter_eval import (
+    browsecomp,
     catalog_runner,
     code_generation,
     free_response,
@@ -557,6 +558,8 @@ class CommandPlanTests(unittest.TestCase):
                 "longbench",
                 "longbench_qa",
                 "longbench_qa_balanced",
+                "browsecomp",
+                "browsecomp_zh",
             )
         }
 
@@ -592,6 +595,9 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(specs["longbench"].kind, "longbench")
         self.assertEqual(specs["longbench_qa"].row_adapter, "longbench_qa")
         self.assertEqual(specs["longbench_qa_balanced"].row_adapter, "longbench_qa_balanced")
+        self.assertEqual(specs["browsecomp"].kind, "browsecomp")
+        self.assertEqual(specs["browsecomp"].source_type, "browsecomp_csv")
+        self.assertEqual(specs["browsecomp_zh"].source_type, "browsecomp_zh_xlsx")
 
     def test_run_catalog_gsm8k_dry_run_uses_rwkv_dataset_slug(self) -> None:
         args = Namespace(
@@ -631,10 +637,10 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         payload = print_json.call_args.args[0]
         self.assertEqual(payload["count"], 95)
-        self.assertEqual(payload["status_counts"]["implemented"], 48)
+        self.assertEqual(payload["status_counts"]["implemented"], 50)
         self.assertEqual(payload["status_counts"].get("needs_dataset_adapter", 0), 0)
         self.assertEqual(payload["status_counts"]["needs_dataset_access"], 1)
-        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 46)
+        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 44)
 
     def test_run_catalog_human_eval_dry_run_uses_code_generation_runner(self) -> None:
         args = Namespace(
@@ -789,6 +795,35 @@ class CommandPlanTests(unittest.TestCase):
         self.assertTrue(exact)
         self.assertEqual(f1, 1.0)
         self.assertEqual(ref, "Paris")
+
+    def test_run_catalog_browsecomp_dry_run_uses_runner(self) -> None:
+        args = Namespace(
+            dry_run=True,
+            benchmark="browsecomp",
+            base_url=None,
+            model=None,
+            limit=2,
+        )
+
+        with mock.patch.object(cli_main, "print_json") as print_json:
+            rc = cli_main.handle_eval_run_catalog(args, root=ROOT)
+
+        self.assertEqual(rc, 0)
+        payload = print_json.call_args.args[0]
+        self.assertEqual(payload["benchmark"], "browsecomp")
+        self.assertEqual(payload["source_type"], "browsecomp_csv")
+        self.assertEqual(payload["limit"], 2)
+        self.assertEqual(payload["scoreboard_dataset"], "browsecomp_test_limit2")
+        self.assertEqual(payload["job_name"], "function_browsecomp")
+
+    def test_browsecomp_final_answer_parser_accepts_function_call(self) -> None:
+        self.assertEqual(
+            browsecomp.parse_final_answer(
+                '```json\n{"name":"final_answer","arguments":{"answer":"Ada Lovelace"},"id":"final_answer"}\n```'
+            ),
+            "Ada Lovelace",
+        )
+        self.assertEqual(browsecomp.parse_final_answer('{"answer": 42}'), "42")
 
     def test_multiple_choice_normalizes_list_and_arc_choices(self) -> None:
         list_choices = multiple_choice.normalize_choices(["red", "blue"])

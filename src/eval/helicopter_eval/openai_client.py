@@ -13,12 +13,21 @@ def normalize_api_base(base_url: str) -> str:
     return f"{value}/v1"
 
 
-def post_json(url: str, payload: dict[str, Any], *, timeout_s: float) -> dict[str, Any]:
+def post_json(
+    url: str,
+    payload: dict[str, Any],
+    *,
+    timeout_s: float,
+    api_key: str | None = None,
+) -> dict[str, Any]:
     data = json.dumps(payload).encode("utf-8")
+    headers = {"content-type": "application/json"}
+    if api_key:
+        headers["authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(
         url,
         data=data,
-        headers={"content-type": "application/json"},
+        headers=headers,
         method="POST",
     )
     try:
@@ -40,6 +49,8 @@ def chat_completion(
     top_p: float,
     max_tokens: int,
     timeout_s: float,
+    api_key: str | None = None,
+    response_format: dict[str, Any] | None = None,
 ) -> str:
     payload = {
         "model": model,
@@ -49,10 +60,13 @@ def chat_completion(
         "max_tokens": max_tokens,
         "stream": False,
     }
+    if response_format is not None:
+        payload["response_format"] = response_format
     response = post_json(
         f"{normalize_api_base(base_url)}/chat/completions",
         payload,
         timeout_s=timeout_s,
+        api_key=api_key,
     )
     choices = response.get("choices")
     if not isinstance(choices, list) or not choices:
