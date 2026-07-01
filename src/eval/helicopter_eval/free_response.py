@@ -57,6 +57,8 @@ class FreeResponseRunConfig:
     limit: int | None = None
     dataset_config: str | None = None
     source_type: str = "hf"
+    source_url: str | None = None
+    row_adapter: str | None = None
     split: str = "test"
     temperature: float = 0.0
     top_p: float = 1.0
@@ -163,6 +165,26 @@ def _iter_qwen_math_rows(config: FreeResponseRunConfig):
             yield payload
 
 
+def _iter_url_jsonl_rows(config: FreeResponseRunConfig):
+    if not config.source_url:
+        raise ValueError("url_jsonl source requires source_url")
+    with urllib.request.urlopen(config.source_url, timeout=config.timeout_s) as response:
+        for raw_line in response:
+            line = raw_line.decode("utf-8").strip()
+            if line:
+                yield json.loads(line)
+
+
+def _iter_url_json_rows(config: FreeResponseRunConfig):
+    if not config.source_url:
+        raise ValueError("url_json source requires source_url")
+    with urllib.request.urlopen(config.source_url, timeout=config.timeout_s) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    if not isinstance(payload, list):
+        raise ValueError("url_json source must return a list")
+    yield from payload
+
+
 def _iter_hf_rows(config: FreeResponseRunConfig):
     try:
         from datasets import load_dataset
@@ -177,7 +199,72 @@ def _iter_rows(config: FreeResponseRunConfig):
         return _iter_hf_rows(config)
     if config.source_type == "qwen_math":
         return _iter_qwen_math_rows(config)
+    if config.source_type == "url_jsonl":
+        return _iter_url_jsonl_rows(config)
+    if config.source_type == "url_json":
+        return _iter_url_json_rows(config)
     raise ValueError(f"unsupported free-response source_type: {config.source_type}")
+
+
+def _strip_math_odyssey_problem(text: str) -> str:
+    text = text.replace("\\underline{\\hspace{2cm}}", "")
+    parts = text.split("\\end{problem}")
+    return parts[0].strip() if parts else text.strip()
+
+
+def _normalize_math_odyssey_answer(answer: str) -> str:
+    endings = (
+        "\\\n\\noindent",
+        "\\\n\n\\noindent",
+        "\\\n\t\\noindent",
+        ".\n\n\\noindent",
+        "\n\n\\noindent",
+        "\\\n\n  \n\t\\noindent",
+        "\\\\ \n\t\\noindent",
+        "\\\n\n\t\\noindent",
+    )
+    for ending in endings:
+        if answer.endswith(ending):
+            answer = answer[: -len(ending)]
+            break
+    answer = answer.strip().strip("\\")
+    if answer.endswith("."):
+        answer = answer[:-1]
+    return answer.replace("$", "").strip()
+
+
+def adapt_free_response_row(item: Any, config: FreeResponseRunConfig) -> dict[str, Any] | None:
+    if config.row_adapter == "answer_solution":
+        payload = dict(item)
+        if "answer" in payload:
+            payload["expected_answer"] = payload.pop("answer")
+        if "solution" in payload:
+            payload["reference_solution"] = payload.pop("solution")
+        return payload
+
+    if config.row_adapter == "math_odyssey":
+        key, payload = next(iter(dict(item).items()))
+        return {
+            "problem": _strip_math_odyssey_problem(str(payload["question"])),
+            "expected_answer": _normalize_math_odyssey_answer(str(payload["answer"])),
+            "original_answer": payload["answer"],
+            "reference_solution": payload["reasoning"],
+            "label": payload["label"],
+            "level": payload["level"],
+            "id": key,
+        }
+
+    if config.row_adapter == "svamp":
+        answer = item["Answer"]
+        if isinstance(answer, (int, float)) and int(answer) == answer:
+            answer = int(answer)
+        return {
+            "problem": str(item["Body"]).rstrip(".") + ". " + str(item["Question"]),
+            "expected_answer": answer,
+            "reference_equation": item["Equation"],
+        }
+
+    return dict(item)
 
 
 def load_samples(config: FreeResponseRunConfig) -> list[FreeResponseSample]:
@@ -185,9 +272,12 @@ def load_samples(config: FreeResponseRunConfig) -> list[FreeResponseSample]:
         raise ValueError("limit must be non-negative")
     limit = None if config.limit is None else int(config.limit)
     samples: list[FreeResponseSample] = []
-    for item in _iter_rows(config):
+    for raw_item in _iter_rows(config):
         if limit is not None and len(samples) >= limit:
             break
+        item = adapt_free_response_row(raw_item, config)
+        if item is None:
+            continue
         question = str(item[config.question_field])
         reference = extract_marked_answer(str(item[config.answer_field]), config.answer_marker)
         if config.reference_answer_overrides and question in config.reference_answer_overrides:

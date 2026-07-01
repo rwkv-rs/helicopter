@@ -19,6 +19,7 @@ class CatalogRunSpec:
     dataset_name: str | None = None
     dataset_config: str | None = None
     source_type: str = "hf"
+    source_url: str | None = None
     source_split: str | None = None
     question_field: str = "question"
     answer_field: str = "answer"
@@ -189,6 +190,58 @@ _DIRECT_HF_SPECS: dict[str, dict[str, Any]] = {
         "max_tokens": 512,
         "reason": "qwen_math_remote",
     },
+    "math_500": {
+        "kind": "free_response",
+        "source_type": "url_jsonl",
+        "source_url": "https://github.com/openai/prm800k/raw/main/prm800k/math_splits/test.jsonl",
+        "dataset_name": "math_500",
+        "question_field": "problem",
+        "answer_field": "expected_answer",
+        "answer_marker": None,
+        "row_adapter": "answer_solution",
+        "job_name": "free_response_judge",
+        "max_tokens": 512,
+        "reason": "url_jsonl_remote",
+    },
+    "math_odyssey": {
+        "kind": "free_response",
+        "source_type": "url_jsonl",
+        "source_url": "https://raw.githubusercontent.com/protagolabs/odyssey-math/main/final-odyssey-math-with-levels.jsonl",
+        "dataset_name": "math_odyssey",
+        "question_field": "problem",
+        "answer_field": "expected_answer",
+        "answer_marker": None,
+        "row_adapter": "math_odyssey",
+        "job_name": "free_response",
+        "max_tokens": 512,
+        "reason": "url_jsonl_remote",
+    },
+    "omni_math": {
+        "kind": "free_response",
+        "source_type": "url_jsonl",
+        "source_url": "https://raw.githubusercontent.com/KbsdJames/Omni-MATH/refs/heads/main/Omni-Math.jsonl",
+        "dataset_name": "omni_math",
+        "question_field": "problem",
+        "answer_field": "expected_answer",
+        "answer_marker": None,
+        "row_adapter": "answer_solution",
+        "job_name": "free_response",
+        "max_tokens": 512,
+        "reason": "url_jsonl_remote",
+    },
+    "svamp": {
+        "kind": "free_response",
+        "source_type": "url_json",
+        "source_url": "https://raw.githubusercontent.com/arkilpatel/SVAMP/main/SVAMP.json",
+        "dataset_name": "svamp",
+        "question_field": "problem",
+        "answer_field": "expected_answer",
+        "answer_marker": None,
+        "row_adapter": "svamp",
+        "job_name": "free_response",
+        "max_tokens": 512,
+        "reason": "url_json_remote",
+    },
 }
 
 
@@ -206,6 +259,7 @@ def resolve_catalog_run_spec(benchmark: Any) -> CatalogRunSpec:
             dataset_name=raw["dataset_name"],
             dataset_config=raw.get("dataset_config"),
             source_type=str(raw.get("source_type") or "hf"),
+            source_url=raw.get("source_url"),
             source_split=str(raw.get("source_split") or benchmark.default_split),
             question_field=str(raw.get("question_field", "question")),
             answer_field=str(raw.get("answer_field", "answer")),
@@ -249,6 +303,7 @@ def catalog_run_spec_to_dict(spec: CatalogRunSpec) -> dict[str, Any]:
         "hf_dataset": spec.dataset_name,
         "hf_config": spec.dataset_config,
         "source_type": spec.source_type,
+        "source_url": spec.source_url,
         "source_split": spec.source_split,
         "row_adapter": spec.row_adapter,
     }
@@ -305,6 +360,8 @@ def _run_config(spec: CatalogRunSpec, *, base_url: str, model: str, limit: int |
             dataset_name=str(spec.dataset_name),
             dataset_config=spec.dataset_config,
             source_type=spec.source_type,
+            source_url=spec.source_url,
+            row_adapter=spec.row_adapter,
             question_field=spec.question_field,
             answer_field=spec.answer_field,
             limit=limit,
