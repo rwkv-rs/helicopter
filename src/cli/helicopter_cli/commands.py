@@ -14,6 +14,12 @@ from .paths import resolve_path
 
 WKV_MODES = ("fp16", "fp32io16")
 EMB_DEVICES = ("cpu", "gpu")
+VLLM_INFER_RUNTIME_ENV_KEYS = frozenset(
+    {
+        "VLLM_ENABLE_V1_MULTIPROCESSING",
+        "VLLM_USE_V2_MODEL_RUNNER",
+    }
+)
 
 
 @dataclass
@@ -95,8 +101,19 @@ def apply_rwkv_env(
         command_env["VLLM_RWKV7_EMB_DEVICE"] = emb_device
 
 
-def strip_vllm_env(env: dict[str, str]) -> dict[str, str]:
-    return {key: value for key, value in env.items() if not key.startswith("VLLM_")}
+def strip_vllm_env(env: dict[str, str], *, allow: frozenset[str] = frozenset()) -> dict[str, str]:
+    return {key: value for key, value in env.items() if not key.startswith("VLLM_") or key in allow}
+
+
+def apply_vllm_runtime_env(
+    shown_env: dict[str, str],
+    *,
+    source_env: dict[str, str],
+    allow: frozenset[str],
+) -> None:
+    for key in sorted(allow):
+        if key in source_env:
+            shown_env[key] = source_env[key]
 
 
 def resolve_vllm_rwkv_path(config: dict[str, Any], *, root: Path, env: dict[str, str]) -> Path:
@@ -482,7 +499,8 @@ def build_infer_plan(
 
     shown_env: dict[str, str] = {}
     apply_rwkv_env(shown_env, wkv_mode=wkv_mode, emb_device=emb_device)
-    plan_env = strip_vllm_env(env)
+    apply_vllm_runtime_env(shown_env, source_env=env, allow=VLLM_INFER_RUNTIME_ENV_KEYS)
+    plan_env = strip_vllm_env(env, allow=VLLM_INFER_RUNTIME_ENV_KEYS)
     plan_env.update(shown_env)
     apply_vllm_rwkv_runtime_path(plan_env, shown_env, vllm_rwkv_path=vllm_rwkv_path)
     return CommandPlan(command=command, cwd=root, shown_env=shown_env, env=plan_env)
@@ -540,7 +558,8 @@ def build_eval_infer_plan(
 
     shown_env: dict[str, str] = {}
     apply_rwkv_env(shown_env, wkv_mode=wkv_mode, emb_device=emb_device)
-    plan_env = strip_vllm_env(env)
+    apply_vllm_runtime_env(shown_env, source_env=env, allow=VLLM_INFER_RUNTIME_ENV_KEYS)
+    plan_env = strip_vllm_env(env, allow=VLLM_INFER_RUNTIME_ENV_KEYS)
     plan_env.update(shown_env)
     apply_vllm_rwkv_runtime_path(plan_env, shown_env, vllm_rwkv_path=vllm_rwkv_path)
     return CommandPlan(command=command, cwd=root, shown_env=shown_env, env=plan_env)

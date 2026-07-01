@@ -346,6 +346,8 @@ class CommandPlanTests(unittest.TestCase):
                 "VLLM_RWKV7_WKV_MODE": "fp32io16",
                 "VLLM_GPU_MEMORY_UTILIZATION": "0.85",
                 "VLLM_MAX_NUM_SEQS": "2048",
+                "VLLM_USE_V2_MODEL_RUNNER": "0",
+                "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
             },
             config=loaded_config,
         )
@@ -354,6 +356,10 @@ class CommandPlanTests(unittest.TestCase):
         forbidden_option_keys = {"--gpu-memory-utilization", "--max-num-seqs"}
 
         self.assertEqual(plan.env["VLLM_RWKV7_WKV_MODE"], "fp32io16")
+        self.assertEqual(plan.env["VLLM_USE_V2_MODEL_RUNNER"], "0")
+        self.assertEqual(plan.env["VLLM_ENABLE_V1_MULTIPROCESSING"], "0")
+        self.assertEqual(plan.shown_env["VLLM_USE_V2_MODEL_RUNNER"], "0")
+        self.assertEqual(plan.shown_env["VLLM_ENABLE_V1_MULTIPROCESSING"], "0")
         self.assertEqual(plan.env["PYTHONPATH"], str(ROOT / "src/infer/vllm-rwkv"))
         self.assertEqual(forbidden_env_keys & plan.env.keys(), set())
         self.assertEqual(forbidden_option_keys & options.keys(), set())
@@ -421,6 +427,26 @@ class CommandPlanTests(unittest.TestCase):
                 "VLLM_RWKV7_WKV_MODE": "fp16",
             },
         )
+
+    def test_eval_infer_runtime_env_keeps_engine_mode_overrides(self) -> None:
+        loaded_config = load_example_config()
+
+        plan = commands.build_eval_infer_plan(
+            eval_infer_args(),
+            root=ROOT,
+            env={
+                "VLLM_GPU_MEMORY_UTILIZATION": "0.85",
+                "VLLM_USE_V2_MODEL_RUNNER": "0",
+                "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
+            },
+            config=loaded_config,
+        )
+
+        self.assertEqual(plan.env["VLLM_USE_V2_MODEL_RUNNER"], "0")
+        self.assertEqual(plan.env["VLLM_ENABLE_V1_MULTIPROCESSING"], "0")
+        self.assertEqual(plan.shown_env["VLLM_USE_V2_MODEL_RUNNER"], "0")
+        self.assertEqual(plan.shown_env["VLLM_ENABLE_V1_MULTIPROCESSING"], "0")
+        self.assertNotIn("VLLM_GPU_MEMORY_UTILIZATION", plan.env)
 
     def test_gsm8k_answer_normalization_matches_final_number(self) -> None:
         self.assertEqual(gsm8k.reference_answer_from_gsm8k("reasoning\n#### 1,234.00"), "1234")
