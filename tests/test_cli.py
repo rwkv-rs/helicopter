@@ -346,6 +346,7 @@ class CommandPlanTests(unittest.TestCase):
                 "VLLM_RWKV7_WKV_MODE": "fp32io16",
                 "VLLM_GPU_MEMORY_UTILIZATION": "0.85",
                 "VLLM_MAX_NUM_SEQS": "2048",
+                "VLLM_USE_FLASHINFER_SAMPLER": "0",
                 "VLLM_USE_RAPID_SAMPLER": "0",
                 "VLLM_USE_V2_MODEL_RUNNER": "0",
                 "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
@@ -358,10 +359,12 @@ class CommandPlanTests(unittest.TestCase):
         forbidden_option_keys = {"--gpu-memory-utilization", "--max-num-seqs"}
 
         self.assertEqual(plan.env["VLLM_RWKV7_WKV_MODE"], "fp32io16")
+        self.assertEqual(plan.env["VLLM_USE_FLASHINFER_SAMPLER"], "0")
         self.assertEqual(plan.env["VLLM_USE_RAPID_SAMPLER"], "0")
         self.assertEqual(plan.env["VLLM_USE_V2_MODEL_RUNNER"], "0")
         self.assertEqual(plan.env["VLLM_ENABLE_V1_MULTIPROCESSING"], "0")
         self.assertEqual(plan.env["VLLM_WSL2_ENABLE_PIN_MEMORY"], "1")
+        self.assertEqual(plan.shown_env["VLLM_USE_FLASHINFER_SAMPLER"], "0")
         self.assertEqual(plan.shown_env["VLLM_USE_RAPID_SAMPLER"], "0")
         self.assertEqual(plan.shown_env["VLLM_USE_V2_MODEL_RUNNER"], "0")
         self.assertEqual(plan.shown_env["VLLM_ENABLE_V1_MULTIPROCESSING"], "0")
@@ -431,6 +434,9 @@ class CommandPlanTests(unittest.TestCase):
                 "PYTHONPATH": str(ROOT / "src/infer/vllm-rwkv"),
                 "VLLM_RWKV7_EMB_DEVICE": "gpu",
                 "VLLM_RWKV7_WKV_MODE": "fp16",
+                "VLLM_USE_FLASHINFER_SAMPLER": "0",
+                "VLLM_USE_RAPID_SAMPLER": "0",
+                "VLLM_WSL2_ENABLE_PIN_MEMORY": "1",
             },
         )
 
@@ -442,6 +448,7 @@ class CommandPlanTests(unittest.TestCase):
             root=ROOT,
             env={
                 "VLLM_GPU_MEMORY_UTILIZATION": "0.85",
+                "VLLM_USE_FLASHINFER_SAMPLER": "1",
                 "VLLM_USE_RAPID_SAMPLER": "0",
                 "VLLM_USE_V2_MODEL_RUNNER": "0",
                 "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
@@ -450,10 +457,12 @@ class CommandPlanTests(unittest.TestCase):
             config=loaded_config,
         )
 
+        self.assertEqual(plan.env["VLLM_USE_FLASHINFER_SAMPLER"], "1")
         self.assertEqual(plan.env["VLLM_USE_RAPID_SAMPLER"], "0")
         self.assertEqual(plan.env["VLLM_USE_V2_MODEL_RUNNER"], "0")
         self.assertEqual(plan.env["VLLM_ENABLE_V1_MULTIPROCESSING"], "0")
         self.assertEqual(plan.env["VLLM_WSL2_ENABLE_PIN_MEMORY"], "1")
+        self.assertEqual(plan.shown_env["VLLM_USE_FLASHINFER_SAMPLER"], "1")
         self.assertEqual(plan.shown_env["VLLM_USE_RAPID_SAMPLER"], "0")
         self.assertEqual(plan.shown_env["VLLM_USE_V2_MODEL_RUNNER"], "0")
         self.assertEqual(plan.shown_env["VLLM_ENABLE_V1_MULTIPROCESSING"], "0")

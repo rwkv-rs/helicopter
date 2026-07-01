@@ -17,11 +17,17 @@ EMB_DEVICES = ("cpu", "gpu")
 VLLM_INFER_RUNTIME_ENV_KEYS = frozenset(
     {
         "VLLM_ENABLE_V1_MULTIPROCESSING",
+        "VLLM_USE_FLASHINFER_SAMPLER",
         "VLLM_USE_RAPID_SAMPLER",
         "VLLM_USE_V2_MODEL_RUNNER",
         "VLLM_WSL2_ENABLE_PIN_MEMORY",
     }
 )
+VLLM_EVAL_INFER_ENV_DEFAULTS = {
+    "VLLM_USE_FLASHINFER_SAMPLER": "0",
+    "VLLM_USE_RAPID_SAMPLER": "0",
+    "VLLM_WSL2_ENABLE_PIN_MEMORY": "1",
+}
 
 
 @dataclass
@@ -112,7 +118,11 @@ def apply_vllm_runtime_env(
     *,
     source_env: dict[str, str],
     allow: frozenset[str],
+    defaults: dict[str, str] | None = None,
 ) -> None:
+    if defaults is not None:
+        for key, value in defaults.items():
+            shown_env[key] = source_env.get(key, value)
     for key in sorted(allow):
         if key in source_env:
             shown_env[key] = source_env[key]
@@ -560,7 +570,12 @@ def build_eval_infer_plan(
 
     shown_env: dict[str, str] = {}
     apply_rwkv_env(shown_env, wkv_mode=wkv_mode, emb_device=emb_device)
-    apply_vllm_runtime_env(shown_env, source_env=env, allow=VLLM_INFER_RUNTIME_ENV_KEYS)
+    apply_vllm_runtime_env(
+        shown_env,
+        source_env=env,
+        allow=VLLM_INFER_RUNTIME_ENV_KEYS,
+        defaults=VLLM_EVAL_INFER_ENV_DEFAULTS,
+    )
     plan_env = strip_vllm_env(env, allow=VLLM_INFER_RUNTIME_ENV_KEYS)
     plan_env.update(shown_env)
     apply_vllm_rwkv_runtime_path(plan_env, shown_env, vllm_rwkv_path=vllm_rwkv_path)
