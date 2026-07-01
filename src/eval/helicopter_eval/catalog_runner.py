@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 
-RunKind = Literal["free_response", "multiple_choice", "instruction_following", "code_generation"]
+RunKind = Literal["free_response", "multiple_choice", "instruction_following", "code_generation", "longcodeqa"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,6 +242,15 @@ _DIRECT_HF_SPECS: dict[str, dict[str, Any]] = {
         "job_name": "code_livecodebench",
         "max_tokens": 1024,
         "reason": "hf_livecodebench_code_execution",
+    },
+    "longcodeqa": {
+        "kind": "longcodeqa",
+        "source_type": "hf_zip",
+        "dataset_name": "Steefano/LCB",
+        "source_path": "LongCodeQA.zip",
+        "job_name": "function_longcodebench",
+        "max_tokens": 64,
+        "reason": "hf_zip_longcodeqa_exact_letter",
     },
     "amc23": {
         "kind": "free_response",
@@ -631,6 +640,10 @@ def dry_run_catalog_spec(
         from .code_generation import dry_run_summary
 
         return dry_run_summary(config)
+    if spec.kind == "longcodeqa":
+        from .longcodeqa import dry_run_summary
+
+        return dry_run_summary(config)
     from .multiple_choice import dry_run_summary
 
     return dry_run_summary(config)
@@ -659,6 +672,10 @@ def run_catalog_spec(
         from .code_generation import run_code_generation
 
         return run_code_generation(config, repo_root=repo_root)
+    if spec.kind == "longcodeqa":
+        from .longcodeqa import run_longcodeqa
+
+        return run_longcodeqa(config, repo_root=repo_root)
     from .multiple_choice import run_multiple_choice
 
     return run_multiple_choice(config, repo_root=repo_root)
@@ -754,5 +771,21 @@ def _run_config(spec: CatalogRunSpec, *, base_url: str, model: str, limit: int |
             job_id=f"helicopter-{spec.benchmark}",
             runner="helicopter_eval.catalog_runner",
             cot_mode="CoT" if spec.benchmark == "livecodebench" else "NoCoT",
+        )
+    if spec.kind == "longcodeqa":
+        from .longcodeqa import LongCodeQARunConfig
+
+        return LongCodeQARunConfig(
+            base_url=base_url,
+            model=model,
+            benchmark=spec.benchmark,
+            limit=limit,
+            split=str(spec.source_split),
+            source_path=None,
+            max_tokens=int(spec.max_tokens or 64),
+            scoreboard_dataset=spec.dataset_slug,
+            job_name=spec.job_name or "function_longcodebench",
+            job_id=f"helicopter-{spec.benchmark}",
+            runner="helicopter_eval.catalog_runner",
         )
     raise RuntimeError(f"{spec.benchmark} is not runnable yet: {spec.reason}")

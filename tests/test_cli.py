@@ -9,7 +9,15 @@ from unittest import mock
 
 from helicopter_cli import __main__ as cli_main
 from helicopter_cli import commands, config, env, eval_catalog
-from helicopter_eval import catalog_runner, code_generation, free_response, gsm8k, instruction_following, multiple_choice
+from helicopter_eval import (
+    catalog_runner,
+    code_generation,
+    free_response,
+    gsm8k,
+    instruction_following,
+    longcodeqa,
+    multiple_choice,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -544,6 +552,7 @@ class CommandPlanTests(unittest.TestCase):
                 "human_eval_plus",
                 "mbpp",
                 "livecodebench",
+                "longcodeqa",
             )
         }
 
@@ -574,6 +583,8 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(specs["mbpp"].source_type, "mbpp_evalplus")
         self.assertEqual(specs["livecodebench"].source_type, "livecodebench_hf")
         self.assertEqual(specs["livecodebench"].job_name, "code_livecodebench")
+        self.assertEqual(specs["longcodeqa"].kind, "longcodeqa")
+        self.assertEqual(specs["longcodeqa"].source_type, "hf_zip")
 
     def test_run_catalog_gsm8k_dry_run_uses_rwkv_dataset_slug(self) -> None:
         args = Namespace(
@@ -613,10 +624,10 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         payload = print_json.call_args.args[0]
         self.assertEqual(payload["count"], 95)
-        self.assertEqual(payload["status_counts"]["implemented"], 44)
+        self.assertEqual(payload["status_counts"]["implemented"], 45)
         self.assertEqual(payload["status_counts"].get("needs_dataset_adapter", 0), 0)
         self.assertEqual(payload["status_counts"]["needs_dataset_access"], 1)
-        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 50)
+        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 49)
 
     def test_run_catalog_human_eval_dry_run_uses_code_generation_runner(self) -> None:
         args = Namespace(
@@ -700,6 +711,47 @@ class CommandPlanTests(unittest.TestCase):
             code_generation.score_completion(sample, "def add(a, b):\n    return a + b", config),
             (True, "passed", None),
         )
+
+    def test_run_catalog_longcodeqa_dry_run_uses_runner(self) -> None:
+        args = Namespace(
+            dry_run=True,
+            benchmark="longcodeqa",
+            base_url=None,
+            model=None,
+            limit=3,
+        )
+
+        with mock.patch.object(cli_main, "print_json") as print_json:
+            rc = cli_main.handle_eval_run_catalog(args, root=ROOT)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            print_json.call_args.args[0],
+            {
+                "benchmark": "longcodeqa",
+                "source": "hf://Steefano/LCB/LongCodeQA.zip",
+                "split": "test",
+                "limit": 3,
+                "base_url": "http://127.0.0.1:29082",
+                "model": "rwkv7-g1d-0.4b-20260210-ctx8192",
+                "scoreboard_dataset": "longcodeqa_test_limit3",
+                "job_name": "function_longcodebench",
+                "job_id": "helicopter-longcodeqa",
+            },
+        )
+
+    def test_longcodeqa_normalizes_json_and_plain_answers(self) -> None:
+        self.assertEqual(longcodeqa.normalize_answer('{"answer":"B"}', allowed_letters=("A", "B")), "B")
+        self.assertEqual(longcodeqa.normalize_answer("Final answer: C", allowed_letters=("A", "B", "C")), "C")
+        sample = longcodeqa.LongCodeQASample(
+            sample_index=0,
+            task_id="toy",
+            prompt="Question\nA) no\nB) yes",
+            repo_text="",
+            question="A) no\nB) yes",
+            correct_letter="B",
+        )
+        self.assertEqual(longcodeqa.evaluate_completion(sample, "B"), ("B", True))
 
     def test_multiple_choice_normalizes_list_and_arc_choices(self) -> None:
         list_choices = multiple_choice.normalize_choices(["red", "blue"])
