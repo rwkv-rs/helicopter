@@ -221,8 +221,8 @@ def build_grpo_hydra_overrides(
         f"actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu={format_hydra_value(ppo_micro_batch_size)}",
         f"actor_rollout_ref.actor.use_dynamic_bsz={format_hydra_value(dynamic_bsz)}",
         f"actor_rollout_ref.actor.ppo_max_token_len_per_gpu={format_hydra_value(ppo_max_token_len_per_gpu)}",
-        f"actor_rollout_ref.actor.use_kl_loss={format_hydra_value(takeoff_value(takeoff, env, 'actor_use_kl_loss', 'ACTOR_USE_KL_LOSS', True))}",
-        f"actor_rollout_ref.actor.kl_loss_coef={format_hydra_value(takeoff_value(takeoff, env, 'actor_kl_loss_coef', 'ACTOR_KL_LOSS_COEF', 0.001))}",
+        f"actor_rollout_ref.actor.use_kl_loss={format_hydra_value(takeoff_value(takeoff, env, 'actor_use_kl_loss', 'ACTOR_USE_KL_LOSS', False))}",
+        f"actor_rollout_ref.actor.kl_loss_coef={format_hydra_value(takeoff_value(takeoff, env, 'actor_kl_loss_coef', 'ACTOR_KL_LOSS_COEF', 0.0))}",
         f"actor_rollout_ref.actor.kl_loss_type={format_hydra_value(takeoff_value(takeoff, env, 'actor_kl_loss_type', 'ACTOR_KL_LOSS_TYPE', 'low_var_kl'))}",
     ]
     append_hydra_override(
@@ -494,12 +494,9 @@ def build_takeoff_plan(
         env=env,
     )
 
-    dataset_uses_explicit_files = (
-        "train_files" in dataset
-        or "val_files" in dataset
-        or env_value(env, "TRAIN_FILES") is not None
-        or env_value(env, "VAL_FILES") is not None
-    )
+    has_train_files = "train_files" in dataset or env_value(env, "TRAIN_FILES") is not None
+    has_val_files = "val_files" in dataset or env_value(env, "VAL_FILES") is not None
+    dataset_uses_explicit_files = has_train_files and has_val_files
     if not args.dry_run:
         for path, message in (
             (model_path, "RWKV checkpoint not found"),
