@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import re
 from typing import Any, Mapping, Sequence
+import urllib.request
 
 from .openai_client import chat_completion
 from .scoreboard import ScoreboardEvalResult, ScoreboardWriteConfig, write_scoreboard_results
 
 
 _NUMBER_RE = re.compile(r"[-+]?\d[\d,]*(?:\.\d+)?")
+_BOXED_RE = re.compile(r"\\boxed\{([^{}]+)\}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +56,7 @@ class FreeResponseRunConfig:
     answer_field: str
     limit: int | None = None
     dataset_config: str | None = None
+    source_type: str = "hf"
     split: str = "test"
     temperature: float = 0.0
     top_p: float = 1.0
@@ -122,25 +126,75 @@ def completion_sampling_config(config: FreeResponseRunConfig) -> dict[str, Any]:
     }
 
 
-def load_samples(config: FreeResponseRunConfig) -> list[FreeResponseSample]:
+def _extract_answer_from_solution(text: str) -> str | None:
+    matches = _BOXED_RE.findall(text)
+    if matches:
+        return matches[-1].strip()
+    match = re.search(r"The final answer is (.+)$", text, flags=re.MULTILINE)
+    if match:
+        return match.group(1).strip()
+    for line in reversed(text.splitlines()):
+        value = line.strip()
+        if value:
+            return value
+    return None
+
+
+def _iter_qwen_math_rows(config: FreeResponseRunConfig):
+    url = (
+        "https://raw.githubusercontent.com/QwenLM/Qwen2.5-Math/refs/heads/main/"
+        f"evaluation/data/{config.dataset_name}/{config.split}.jsonl"
+    )
+    with urllib.request.urlopen(url, timeout=config.timeout_s) as response:
+        for raw_line in response:
+            payload = json.loads(raw_line.decode("utf-8"))
+            if "answer" in payload:
+                payload["expected_answer"] = payload.pop("answer")
+            if "problem" not in payload and "question" in payload:
+                payload["problem"] = payload.pop("question")
+            if config.dataset_name == "olympiadbench" and "final_answer" in payload:
+                answers = payload.pop("final_answer")
+                if isinstance(answers, (list, tuple)) and answers:
+                    payload["expected_answer"] = str(answers[0]).strip("$")
+            if config.dataset_name == "minerva_math" and "solution" in payload:
+                extracted = _extract_answer_from_solution(str(payload["solution"]))
+                if extracted is not None:
+                    payload["expected_answer"] = extracted
+            yield payload
+
+
+def _iter_hf_rows(config: FreeResponseRunConfig):
     try:
         from datasets import load_dataset
     except ImportError as exc:  # pragma: no cover - exercised in integration environments
         raise SystemExit("free-response eval requires the `datasets` package; install the rwkv dependency group.") from exc
 
+    return iter(load_dataset(config.dataset_name, config.dataset_config, split=config.split))
+
+
+def _iter_rows(config: FreeResponseRunConfig):
+    if config.source_type == "hf":
+        return _iter_hf_rows(config)
+    if config.source_type == "qwen_math":
+        return _iter_qwen_math_rows(config)
+    raise ValueError(f"unsupported free-response source_type: {config.source_type}")
+
+
+def load_samples(config: FreeResponseRunConfig) -> list[FreeResponseSample]:
     if config.limit is not None and int(config.limit) < 0:
         raise ValueError("limit must be non-negative")
-    dataset = load_dataset(config.dataset_name, config.dataset_config, split=config.split)
-    limit = len(dataset) if config.limit is None else min(int(config.limit), len(dataset))
+    limit = None if config.limit is None else int(config.limit)
     samples: list[FreeResponseSample] = []
-    for index, item in enumerate(dataset.select(range(limit))):
+    for item in _iter_rows(config):
+        if limit is not None and len(samples) >= limit:
+            break
         question = str(item[config.question_field])
         reference = extract_marked_answer(str(item[config.answer_field]), config.answer_marker)
         if config.reference_answer_overrides and question in config.reference_answer_overrides:
             reference = str(config.reference_answer_overrides[question])
         samples.append(
             FreeResponseSample(
-                sample_index=index,
+                sample_index=len(samples),
                 question=question,
                 reference_answer=reference,
             )

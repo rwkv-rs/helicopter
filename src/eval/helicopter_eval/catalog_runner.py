@@ -18,6 +18,7 @@ class CatalogRunSpec:
     reason: str
     dataset_name: str | None = None
     dataset_config: str | None = None
+    source_type: str = "hf"
     source_split: str | None = None
     question_field: str = "question"
     answer_field: str = "answer"
@@ -133,6 +134,61 @@ _DIRECT_HF_SPECS: dict[str, dict[str, Any]] = {
         "job_name": "multi_choice_plain",
         "max_tokens": 32,
     },
+    "amc23": {
+        "kind": "free_response",
+        "source_type": "qwen_math",
+        "dataset_name": "amc23",
+        "question_field": "problem",
+        "answer_field": "expected_answer",
+        "answer_marker": None,
+        "job_name": "free_response_judge",
+        "max_tokens": 512,
+        "reason": "qwen_math_remote",
+    },
+    "college_math": {
+        "kind": "free_response",
+        "source_type": "qwen_math",
+        "dataset_name": "college_math",
+        "question_field": "problem",
+        "answer_field": "expected_answer",
+        "answer_marker": None,
+        "job_name": "free_response",
+        "max_tokens": 512,
+        "reason": "qwen_math_remote",
+    },
+    "hendrycks_math": {
+        "kind": "free_response",
+        "source_type": "qwen_math",
+        "dataset_name": "math",
+        "question_field": "problem",
+        "answer_field": "expected_answer",
+        "answer_marker": None,
+        "job_name": "free_response",
+        "max_tokens": 512,
+        "reason": "qwen_math_remote",
+    },
+    "minerva_math": {
+        "kind": "free_response",
+        "source_type": "qwen_math",
+        "dataset_name": "minerva_math",
+        "question_field": "problem",
+        "answer_field": "expected_answer",
+        "answer_marker": None,
+        "job_name": "free_response_judge",
+        "max_tokens": 512,
+        "reason": "qwen_math_remote",
+    },
+    "olympiadbench": {
+        "kind": "free_response",
+        "source_type": "qwen_math",
+        "dataset_name": "olympiadbench",
+        "question_field": "problem",
+        "answer_field": "expected_answer",
+        "answer_marker": None,
+        "job_name": "free_response_judge",
+        "max_tokens": 512,
+        "reason": "qwen_math_remote",
+    },
 }
 
 
@@ -146,9 +202,10 @@ def resolve_catalog_run_spec(benchmark: Any) -> CatalogRunSpec:
             dataset_slug=dataset_slug,
             status="implemented",
             kind=raw["kind"],
-            reason="direct_hf",
+            reason=str(raw.get("reason") or "direct_hf"),
             dataset_name=raw["dataset_name"],
             dataset_config=raw.get("dataset_config"),
+            source_type=str(raw.get("source_type") or "hf"),
             source_split=str(raw.get("source_split") or benchmark.default_split),
             question_field=str(raw.get("question_field", "question")),
             answer_field=str(raw.get("answer_field", "answer")),
@@ -191,6 +248,7 @@ def catalog_run_spec_to_dict(spec: CatalogRunSpec) -> dict[str, Any]:
         "reason": spec.reason,
         "hf_dataset": spec.dataset_name,
         "hf_config": spec.dataset_config,
+        "source_type": spec.source_type,
         "source_split": spec.source_split,
         "row_adapter": spec.row_adapter,
     }
@@ -246,6 +304,7 @@ def _run_config(spec: CatalogRunSpec, *, base_url: str, model: str, limit: int |
             benchmark=spec.benchmark,
             dataset_name=str(spec.dataset_name),
             dataset_config=spec.dataset_config,
+            source_type=spec.source_type,
             question_field=spec.question_field,
             answer_field=spec.answer_field,
             limit=limit,
