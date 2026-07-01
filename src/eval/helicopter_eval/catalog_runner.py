@@ -13,6 +13,7 @@ RunKind = Literal[
     "longcodeqa",
     "longbench",
     "browsecomp",
+    "apibank",
 ]
 
 
@@ -306,6 +307,42 @@ _DIRECT_HF_SPECS: dict[str, dict[str, Any]] = {
         "job_name": "function_browsecomp",
         "max_tokens": 2048,
         "reason": "url_xlsx_encrypted_two_stage_judged",
+    },
+    "apibank_l1": {
+        "kind": "apibank",
+        "source_type": "apibank_git",
+        "dataset_name": "AlibabaResearch/DAMO-ConvAI/api-bank",
+        "row_adapter": "apibank_level1",
+        "job_name": "function_api_bank",
+        "max_tokens": 768,
+        "reason": "official_api_bank_execution",
+    },
+    "apibank_l2": {
+        "kind": "apibank",
+        "source_type": "apibank_git",
+        "dataset_name": "AlibabaResearch/DAMO-ConvAI/api-bank",
+        "row_adapter": "apibank_level2",
+        "job_name": "function_api_bank",
+        "max_tokens": 768,
+        "reason": "official_api_bank_execution",
+    },
+    "apibank_level1": {
+        "kind": "apibank",
+        "source_type": "apibank_git",
+        "dataset_name": "AlibabaResearch/DAMO-ConvAI/api-bank",
+        "row_adapter": "apibank_level1",
+        "job_name": "function_api_bank",
+        "max_tokens": 768,
+        "reason": "official_api_bank_execution",
+    },
+    "apibank_level2": {
+        "kind": "apibank",
+        "source_type": "apibank_git",
+        "dataset_name": "AlibabaResearch/DAMO-ConvAI/api-bank",
+        "row_adapter": "apibank_level2",
+        "job_name": "function_api_bank",
+        "max_tokens": 768,
+        "reason": "official_api_bank_execution",
     },
     "amc23": {
         "kind": "free_response",
@@ -707,6 +744,10 @@ def dry_run_catalog_spec(
         from .browsecomp import dry_run_summary
 
         return dry_run_summary(config)
+    if spec.kind == "apibank":
+        from .apibank import dry_run_summary
+
+        return dry_run_summary(config)
     from .multiple_choice import dry_run_summary
 
     return dry_run_summary(config)
@@ -747,6 +788,10 @@ def run_catalog_spec(
         from .browsecomp import run_browsecomp
 
         return run_browsecomp(config, repo_root=repo_root)
+    if spec.kind == "apibank":
+        from .apibank import run_apibank
+
+        return run_apibank(config, repo_root=repo_root)
     from .multiple_choice import run_multiple_choice
 
     return run_multiple_choice(config, repo_root=repo_root)
@@ -897,6 +942,23 @@ def _run_config(spec: CatalogRunSpec, *, base_url: str, model: str, limit: int |
             answer_max_tokens=1024,
             scoreboard_dataset=spec.dataset_slug,
             job_name=spec.job_name or "function_browsecomp",
+            job_id=f"helicopter-{spec.benchmark}",
+            runner="helicopter_eval.catalog_runner",
+        )
+    if spec.kind == "apibank":
+        from .apibank import ApiBankRunConfig
+
+        level = 2 if spec.row_adapter == "apibank_level2" else 1
+        return ApiBankRunConfig(
+            base_url=base_url,
+            model=model,
+            benchmark=spec.benchmark,
+            level=level,
+            limit=limit,
+            split=str(spec.source_split),
+            max_tokens=int(spec.max_tokens or 768),
+            scoreboard_dataset=spec.dataset_slug,
+            job_name=spec.job_name or "function_api_bank",
             job_id=f"helicopter-{spec.benchmark}",
             runner="helicopter_eval.catalog_runner",
         )
