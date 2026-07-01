@@ -509,7 +509,9 @@ class CommandPlanTests(unittest.TestCase):
                 "mmlu",
                 "mmlu_pro",
                 "ceval",
+                "cmmlu",
                 "gpqa_main",
+                "mmmlu",
                 "supergpqa",
                 "aime24",
                 "algebra222",
@@ -526,7 +528,9 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(specs["mmlu"].dataset_config, "all")
         self.assertEqual(specs["ceval"].dataset_config, "*")
         self.assertEqual(specs["ceval"].choice_fields, ("A", "B", "C", "D"))
+        self.assertEqual(specs["cmmlu"].source_type, "cmmlu_zip")
         self.assertEqual(specs["gpqa_main"].row_adapter, "gpqa")
+        self.assertEqual(specs["mmmlu"].source_type, "mmmlu")
         self.assertEqual(specs["supergpqa"].source_split, "train")
         self.assertEqual(specs["aime24"].source_type, "package_jsonl")
         self.assertEqual(specs["algebra222"].source_type, "url_csv")
@@ -576,8 +580,8 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         payload = print_json.call_args.args[0]
         self.assertEqual(payload["count"], 95)
-        self.assertEqual(payload["status_counts"]["implemented"], 33)
-        self.assertEqual(payload["status_counts"]["needs_dataset_adapter"], 2)
+        self.assertEqual(payload["status_counts"]["implemented"], 35)
+        self.assertEqual(payload["status_counts"].get("needs_dataset_adapter", 0), 0)
         self.assertEqual(payload["status_counts"]["needs_dataset_access"], 1)
         self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 59)
 

@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 from dataclasses import dataclass
+import io
+import os
 from pathlib import Path
 import random
 import re
 from typing import Any, Sequence
+import urllib.request
+import zipfile
 
 from .openai_client import chat_completion
 from .scoreboard import ScoreboardEvalResult, ScoreboardWriteConfig, write_scoreboard_results
@@ -69,6 +74,8 @@ class MultipleChoiceRunConfig:
     answer_field: str
     limit: int | None = None
     dataset_config: str | None = None
+    source_type: str = "hf"
+    source_url: str | None = None
     choice_fields: tuple[str, ...] = ()
     row_adapter: str | None = None
     adapter_seed: int = 42
@@ -223,6 +230,95 @@ def _include_config_names(dataset_name: str, split: str) -> tuple[str, ...]:
     )
 
 
+def _iter_cmmlu_zip_rows(config: MultipleChoiceRunConfig):
+    if not config.source_url:
+        raise ValueError("cmmlu_zip source requires source_url")
+    with urllib.request.urlopen(config.source_url, timeout=config.timeout_s) as response:
+        data = response.read()
+    with zipfile.ZipFile(io.BytesIO(data), "r") as archive:
+        prefix = f"{config.split}/"
+        members = sorted(name for name in archive.namelist() if name.startswith(prefix) and name.endswith(".csv"))
+        for member in members:
+            subject = Path(member).stem
+            with archive.open(member, "r") as handle:
+                reader = csv.DictReader(io.TextIOWrapper(handle, encoding="utf-8-sig"))
+                for row in reader:
+                    question = normalized_whitespace(row.get("Question"))
+                    answer = str(row.get("Answer") or "").strip().upper()
+                    options = {letter: normalized_whitespace(row.get(letter)) for letter in ("A", "B", "C", "D")}
+                    if not question or not answer:
+                        continue
+                    yield {
+                        "question": question,
+                        "answer": answer,
+                        "subject": subject,
+                        **{letter: text for letter, text in options.items() if text},
+                    }
+
+
+_DEFAULT_MMMLU_LANGUAGE_SPLITS: tuple[str, ...] = (
+    "AR_XY",
+    "BN_BD",
+    "DE_DE",
+    "ES_LA",
+    "FR_FR",
+    "HI_IN",
+    "ID_ID",
+    "IT_IT",
+    "JA_JP",
+    "KO_KR",
+    "PT_BR",
+    "SW_KE",
+    "YO_NG",
+    "ZH_CN",
+)
+
+
+def _mmmlu_language_splits() -> tuple[str, ...]:
+    raw = os.environ.get("HELICOPTER_MMMLU_LANGS") or os.environ.get("RWKV_SKILLS_MMMLU_LANGS") or ""
+    parts = [part.strip() for part in raw.replace(";", ",").split(",")]
+    return tuple(part for part in parts if part) or _DEFAULT_MMMLU_LANGUAGE_SPLITS
+
+
+def _iter_mmmlu_rows(config: MultipleChoiceRunConfig):
+    if config.split != "test":
+        raise ValueError("mmmlu only supports test split")
+    try:
+        from datasets import get_dataset_config_names, load_dataset
+    except ImportError as exc:  # pragma: no cover - exercised in integration environments
+        raise SystemExit("mmmlu eval requires the `datasets` package; install the rwkv dependency group.") from exc
+
+    for subject in sorted(name for name in get_dataset_config_names(config.dataset_name) if name and name != "default"):
+        for language in _mmmlu_language_splits():
+            for row in load_dataset(config.dataset_name, subject, split=language):
+                question = normalized_whitespace(row.get("Question"))
+                choices = {letter: normalized_whitespace(row.get(letter)) for letter in ("A", "B", "C", "D")}
+                answer = str(row.get("Answer") or "").strip().upper()
+                if not question or not answer or not all(choices.values()):
+                    continue
+                yield {
+                    "question": question,
+                    "A": choices["A"],
+                    "B": choices["B"],
+                    "C": choices["C"],
+                    "D": choices["D"],
+                    "answer": answer,
+                    "subject": subject,
+                    "language": language,
+                    "source_dataset": config.dataset_name,
+                }
+
+
+def _iter_rows(config: MultipleChoiceRunConfig):
+    if config.source_type == "hf":
+        return _iter_hf_rows(config)
+    if config.source_type == "cmmlu_zip":
+        return _iter_cmmlu_zip_rows(config)
+    if config.source_type == "mmmlu":
+        return _iter_mmmlu_rows(config)
+    raise ValueError(f"unsupported multiple-choice source_type: {config.source_type}")
+
+
 def _row_choices(item: Any, config: MultipleChoiceRunConfig) -> ChoiceSet:
     if config.choice_fields:
         return normalize_choices([item[field] for field in config.choice_fields], fallback_labels=config.choice_labels)
@@ -312,7 +408,7 @@ def load_samples(config: MultipleChoiceRunConfig) -> list[MultipleChoiceSample]:
     limit = None if config.limit is None else int(config.limit)
     samples: list[MultipleChoiceSample] = []
     rng = random.Random(config.adapter_seed)
-    for item in _iter_hf_rows(config):
+    for item in _iter_rows(config):
         if limit is not None and len(samples) >= limit:
             break
         adapted = adapt_choice_row(item, config, rng)
