@@ -12,6 +12,7 @@ RunKind = Literal[
     "instruction_following",
     "code_generation",
     "swe_bench",
+    "tau_bench",
     "longcodeqa",
     "longbench",
     "arena_hard",
@@ -897,6 +898,30 @@ _DIRECT_HF_SPECS: dict[str, dict[str, Any]] = {
     },
 }
 
+for _tau_name, _tau_meta in {
+    "tau_bench_airline": ("function_tau_bench", "test"),
+    "tau_bench_retail": ("function_tau_bench", "test"),
+    "tau_bench_telecom": ("function_tau_bench", "test"),
+    "tau2_bench_airline": ("function_tau2_bench", "base"),
+    "tau2_bench_retail": ("function_tau2_bench", "base"),
+    "tau2_bench_telecom": ("function_tau2_bench", "base"),
+    "tau3_bench_airline": ("function_tau3_bench", "base"),
+    "tau3_bench_retail": ("function_tau3_bench", "base"),
+    "tau3_bench_telecom": ("function_tau3_bench", "base"),
+    "tau3_bench_banking_knowledge": ("function_tau3_bench", "base"),
+    "tau3_bench_mock": ("function_tau3_bench", "base"),
+    "tau3_bench_mock_long_context": ("function_tau3_bench", "base"),
+}.items():
+    _DIRECT_HF_SPECS[_tau_name] = {
+        "kind": "tau_bench",
+        "source_type": "tau_official_manifest",
+        "dataset_name": _tau_name,
+        "source_split": _tau_meta[1],
+        "job_name": _tau_meta[0],
+        "max_tokens": 512,
+        "reason": "official_tau_runtime_environment_judged",
+    }
+
 
 def resolve_catalog_run_spec(benchmark: Any) -> CatalogRunSpec:
     raw = _DIRECT_HF_SPECS.get(str(benchmark.name))
@@ -989,6 +1014,15 @@ def dry_run_catalog_spec(
     swebench_clean: bool = False,
     swebench_timeout_s: float | None = None,
     swebench_max_context_chars: int | None = None,
+    tau_runtime_root: str | None = None,
+    tau_data_root: str | None = None,
+    tau_user_base_url: str | None = None,
+    tau_user_model: str | None = None,
+    tau_user_api_key: str | None = None,
+    tau_max_steps: int | None = None,
+    tau_max_errors: int | None = None,
+    tau_history_max_chars: int | None = None,
+    tau_prompt_max_chars: int | None = None,
 ) -> dict[str, Any]:
     if spec.status != "implemented" or spec.kind is None:
         raise RuntimeError(f"{spec.benchmark} is not runnable yet: {spec.reason}")
@@ -1012,6 +1046,15 @@ def dry_run_catalog_spec(
         swebench_clean=swebench_clean,
         swebench_timeout_s=swebench_timeout_s,
         swebench_max_context_chars=swebench_max_context_chars,
+        tau_runtime_root=tau_runtime_root,
+        tau_data_root=tau_data_root,
+        tau_user_base_url=tau_user_base_url,
+        tau_user_model=tau_user_model,
+        tau_user_api_key=tau_user_api_key,
+        tau_max_steps=tau_max_steps,
+        tau_max_errors=tau_max_errors,
+        tau_history_max_chars=tau_history_max_chars,
+        tau_prompt_max_chars=tau_prompt_max_chars,
     )
     if spec.kind == "free_response":
         from .free_response import dry_run_summary
@@ -1027,6 +1070,10 @@ def dry_run_catalog_spec(
         return dry_run_summary(config)
     if spec.kind == "swe_bench":
         from .swe_bench import dry_run_summary
+
+        return dry_run_summary(config)
+    if spec.kind == "tau_bench":
+        from .tau_bench import dry_run_summary
 
         return dry_run_summary(config)
     if spec.kind == "longcodeqa":
@@ -1112,6 +1159,15 @@ def run_catalog_spec(
     swebench_clean: bool = False,
     swebench_timeout_s: float | None = None,
     swebench_max_context_chars: int | None = None,
+    tau_runtime_root: str | None = None,
+    tau_data_root: str | None = None,
+    tau_user_base_url: str | None = None,
+    tau_user_model: str | None = None,
+    tau_user_api_key: str | None = None,
+    tau_max_steps: int | None = None,
+    tau_max_errors: int | None = None,
+    tau_history_max_chars: int | None = None,
+    tau_prompt_max_chars: int | None = None,
 ) -> dict[str, Any]:
     if spec.status != "implemented" or spec.kind is None:
         raise RuntimeError(f"{spec.benchmark} is not runnable yet: {spec.reason}")
@@ -1135,6 +1191,15 @@ def run_catalog_spec(
         swebench_clean=swebench_clean,
         swebench_timeout_s=swebench_timeout_s,
         swebench_max_context_chars=swebench_max_context_chars,
+        tau_runtime_root=tau_runtime_root,
+        tau_data_root=tau_data_root,
+        tau_user_base_url=tau_user_base_url,
+        tau_user_model=tau_user_model,
+        tau_user_api_key=tau_user_api_key,
+        tau_max_steps=tau_max_steps,
+        tau_max_errors=tau_max_errors,
+        tau_history_max_chars=tau_history_max_chars,
+        tau_prompt_max_chars=tau_prompt_max_chars,
     )
     if spec.kind == "free_response":
         from .free_response import run_free_response
@@ -1152,6 +1217,10 @@ def run_catalog_spec(
         from .swe_bench import run_swe_bench
 
         return run_swe_bench(config, repo_root=repo_root)
+    if spec.kind == "tau_bench":
+        from .tau_bench import run_tau_bench
+
+        return run_tau_bench(config, repo_root=repo_root)
     if spec.kind == "longcodeqa":
         from .longcodeqa import run_longcodeqa
 
@@ -1234,6 +1303,15 @@ def _run_config(
     swebench_clean: bool = False,
     swebench_timeout_s: float | None = None,
     swebench_max_context_chars: int | None = None,
+    tau_runtime_root: str | None = None,
+    tau_data_root: str | None = None,
+    tau_user_base_url: str | None = None,
+    tau_user_model: str | None = None,
+    tau_user_api_key: str | None = None,
+    tau_max_steps: int | None = None,
+    tau_max_errors: int | None = None,
+    tau_history_max_chars: int | None = None,
+    tau_prompt_max_chars: int | None = None,
 ) -> Any:
     if spec.kind == "free_response":
         from .free_response import FreeResponseRunConfig
@@ -1348,6 +1426,34 @@ def _run_config(
             max_tokens=int(spec.max_tokens or 2048),
             scoreboard_dataset=spec.dataset_slug,
             job_name=spec.job_name or "code_swe_bench",
+            job_id=f"helicopter-{spec.benchmark}",
+            runner="helicopter_eval.catalog_runner",
+        )
+    if spec.kind == "tau_bench":
+        from .tau_bench import TauBenchRunConfig
+
+        return TauBenchRunConfig(
+            base_url=base_url,
+            model=model,
+            benchmark=spec.benchmark,
+            dataset_name=str(spec.dataset_name),
+            limit=limit,
+            split=str(spec.source_split),
+            runtime_root=tau_runtime_root,
+            data_root=tau_data_root,
+            user_base_url=tau_user_base_url,
+            user_model=tau_user_model,
+            user_api_key=tau_user_api_key,
+            judge_base_url=judge_base_url,
+            judge_model=judge_model,
+            judge_api_key=judge_api_key,
+            max_steps=int(tau_max_steps or 200),
+            max_errors=int(tau_max_errors or 10),
+            history_max_chars=int(tau_history_max_chars or 16000),
+            prompt_max_chars=int(tau_prompt_max_chars or 24576),
+            max_tokens=int(spec.max_tokens or 512),
+            scoreboard_dataset=spec.dataset_slug,
+            job_name=spec.job_name or "function_tau_bench",
             job_id=f"helicopter-{spec.benchmark}",
             runner="helicopter_eval.catalog_runner",
         )

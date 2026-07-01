@@ -29,6 +29,7 @@ from helicopter_eval import (
     mcp_bench,
     multiple_choice,
     swe_bench,
+    tau_bench,
     toolalpaca,
     translation,
 )
@@ -573,6 +574,18 @@ class CommandPlanTests(unittest.TestCase):
                 "swe_bench_verified",
                 "swe_bench_lite_oracle",
                 "swe_bench_lite_bm25_13k",
+                "tau_bench_airline",
+                "tau_bench_retail",
+                "tau_bench_telecom",
+                "tau2_bench_airline",
+                "tau2_bench_retail",
+                "tau2_bench_telecom",
+                "tau3_bench_airline",
+                "tau3_bench_retail",
+                "tau3_bench_telecom",
+                "tau3_bench_banking_knowledge",
+                "tau3_bench_mock",
+                "tau3_bench_mock_long_context",
                 "longcodeqa",
                 "longbench",
                 "longbench_qa",
@@ -635,6 +648,13 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(specs["swe_bench_verified"].dataset_name, "princeton-nlp/SWE-bench_Verified")
         self.assertEqual(specs["swe_bench_lite_oracle"].row_adapter, "swe_bench_lite_oracle")
         self.assertEqual(specs["swe_bench_lite_bm25_13k"].row_adapter, "swe_bench_lite_bm25_13k")
+        self.assertEqual(specs["tau_bench_airline"].kind, "tau_bench")
+        self.assertEqual(specs["tau_bench_airline"].source_type, "tau_official_manifest")
+        self.assertEqual(specs["tau_bench_airline"].source_split, "test")
+        self.assertEqual(specs["tau2_bench_retail"].source_split, "base")
+        self.assertEqual(specs["tau2_bench_retail"].job_name, "function_tau2_bench")
+        self.assertEqual(specs["tau3_bench_banking_knowledge"].job_name, "function_tau3_bench")
+        self.assertEqual(specs["tau3_bench_mock_long_context"].dataset_name, "tau3_bench_mock_long_context")
         self.assertEqual(specs["longcodeqa"].kind, "longcodeqa")
         self.assertEqual(specs["longcodeqa"].source_type, "hf_zip")
         self.assertEqual(specs["longbench"].kind, "longbench")
@@ -705,10 +725,10 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         payload = print_json.call_args.args[0]
         self.assertEqual(payload["count"], 95)
-        self.assertEqual(payload["status_counts"]["implemented"], 81)
+        self.assertEqual(payload["status_counts"]["implemented"], 93)
         self.assertEqual(payload["status_counts"].get("needs_dataset_adapter", 0), 0)
         self.assertEqual(payload["status_counts"]["needs_dataset_access"], 2)
-        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 12)
+        self.assertEqual(payload["status_counts"].get("needs_specialized_runner", 0), 0)
 
     def test_run_catalog_human_eval_dry_run_uses_code_generation_runner(self) -> None:
         args = Namespace(
@@ -823,6 +843,42 @@ class CommandPlanTests(unittest.TestCase):
         text = "Here is the fix:\n```diff\ndiff --git a/file.py b/file.py\n--- a/file.py\n+++ b/file.py\n@@\n-pass\n+return 1\n```"
 
         self.assertTrue(swe_bench.extract_swebench_patch(text).startswith("diff --git a/file.py"))
+
+    def test_tau_bench_loads_manifest_for_dry_run(self) -> None:
+        row = {
+            "task_id": "task_1",
+            "domain": "mock",
+            "index": 0,
+            "instruction": "Create a task.",
+            "benchmark_version": "tau_v3_light",
+            "task": {"id": "task_1", "ticket": "Create a task."},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "base.jsonl"
+            manifest.write_text(json.dumps(row) + "\n", encoding="utf-8")
+            config = tau_bench.TauBenchRunConfig(
+                base_url="http://127.0.0.1:29082",
+                model="rwkv7-g1d-0.4b-20260210-ctx8192",
+                benchmark="tau3_bench_mock",
+                dataset_name="tau3_bench_mock",
+                limit=1,
+                source_path=str(manifest),
+            )
+
+            summary = tau_bench.dry_run_summary(config)
+
+        self.assertEqual(summary["available_samples"], 1)
+        self.assertEqual(summary["domains"], ["mock"])
+        self.assertFalse(summary["user_model_required"])
+        self.assertIn("runtime_available", summary)
+
+    def test_tau_bench_parses_openai_tool_call_shape(self) -> None:
+        name, arguments = tau_bench.parse_tau_decision(
+            '{"tool_calls":[{"type":"function","function":{"name":"assistant.create_task","arguments":"{\\"title\\":\\"Important Meeting\\"}"}}]}'
+        )
+
+        self.assertEqual(name, "create_task")
+        self.assertEqual(arguments, {"title": "Important Meeting"})
 
     def test_run_catalog_longcodeqa_dry_run_uses_runner(self) -> None:
         args = Namespace(

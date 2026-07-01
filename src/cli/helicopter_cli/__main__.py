@@ -208,6 +208,15 @@ def handle_eval_run_catalog(args: argparse.Namespace, *, root: Any, **_: Any) ->
         "swebench_clean": getattr(args, "swebench_clean", False),
         "swebench_timeout_s": getattr(args, "swebench_timeout_s", None),
         "swebench_max_context_chars": getattr(args, "swebench_max_context_chars", None),
+        "tau_runtime_root": getattr(args, "tau_runtime_root", None),
+        "tau_data_root": getattr(args, "tau_data_root", None),
+        "tau_user_base_url": getattr(args, "tau_user_base_url", None),
+        "tau_user_model": getattr(args, "tau_user_model", None),
+        "tau_user_api_key": getattr(args, "tau_user_api_key", None),
+        "tau_max_steps": getattr(args, "tau_max_steps", None),
+        "tau_max_errors": getattr(args, "tau_max_errors", None),
+        "tau_history_max_chars": getattr(args, "tau_history_max_chars", None),
+        "tau_prompt_max_chars": getattr(args, "tau_prompt_max_chars", None),
     }
     payload = (
         dry_run_catalog_spec(spec, **kwargs)
@@ -371,6 +380,15 @@ def build_parser() -> argparse.ArgumentParser:
     eval_run_catalog.add_argument("--swebench-clean", action="store_true", help="pass --clean True to SWE-Bench harness")
     eval_run_catalog.add_argument("--swebench-timeout-s", type=float, help="SWE-Bench harness timeout in seconds")
     eval_run_catalog.add_argument("--swebench-max-context-chars", type=int, help="truncate retrieved SWE context")
+    eval_run_catalog.add_argument("--tau-runtime-root", help="TAU/Tau2/Tau3 official runtime root")
+    eval_run_catalog.add_argument("--tau-data-root", help="TAU/Tau2/Tau3 official data root")
+    eval_run_catalog.add_argument("--tau-user-base-url", help="OpenAI-compatible user simulator base URL")
+    eval_run_catalog.add_argument("--tau-user-model", help="user simulator model name")
+    eval_run_catalog.add_argument("--tau-user-api-key", help="user simulator API key")
+    eval_run_catalog.add_argument("--tau-max-steps", type=int, help="maximum TAU simulation steps")
+    eval_run_catalog.add_argument("--tau-max-errors", type=int, help="maximum TAU tool/protocol errors")
+    eval_run_catalog.add_argument("--tau-history-max-chars", type=int, help="TAU transcript budget")
+    eval_run_catalog.add_argument("--tau-prompt-max-chars", type=int, help="TAU prompt budget")
     eval_run_catalog.set_defaults(handler=handle_eval_run_catalog)
 
     eval_run_free_response = eval_subparsers.add_parser(
