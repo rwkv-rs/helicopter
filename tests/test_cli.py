@@ -9,7 +9,7 @@ from unittest import mock
 
 from helicopter_cli import __main__ as cli_main
 from helicopter_cli import commands, config, env, eval_catalog
-from helicopter_eval import catalog_runner, free_response, gsm8k, multiple_choice
+from helicopter_eval import catalog_runner, free_response, gsm8k, instruction_following, multiple_choice
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -500,6 +500,25 @@ class CommandPlanTests(unittest.TestCase):
             },
         )
 
+    def test_instruction_following_scores_ifeval_rule(self) -> None:
+        sample = instruction_following.InstructionFollowingSample(
+            sample_index=0,
+            key=1000,
+            prompt="Answer without commas.",
+            instruction_ids=("punctuation:no_comma",),
+            kwargs_list=({},),
+        )
+        config = instruction_following.InstructionFollowingRunConfig(
+            base_url="http://127.0.0.1:29082",
+            model="rwkv7-g1d-0.4b-20260210-ctx8192",
+            benchmark="ifeval",
+            dataset_name="google-research/instruction_following_eval",
+            source_url="https://example.invalid/input_data.jsonl",
+        )
+
+        self.assertEqual(instruction_following.score_response(sample, "No comma here", config)[:3], (True, 1, 1))
+        self.assertEqual(instruction_following.score_response(sample, "No, comma here", config)[:3], (False, 0, 1))
+
     def test_catalog_runner_marks_direct_hf_specs(self) -> None:
         catalog = eval_catalog.load_rwkv_skills_catalog()
         specs = {
@@ -513,6 +532,8 @@ class CommandPlanTests(unittest.TestCase):
                 "gpqa_main",
                 "mmmlu",
                 "supergpqa",
+                "ifeval",
+                "ifbench",
                 "aime24",
                 "algebra222",
                 "hendrycks_math",
@@ -532,6 +553,9 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(specs["gpqa_main"].row_adapter, "gpqa")
         self.assertEqual(specs["mmmlu"].source_type, "mmmlu")
         self.assertEqual(specs["supergpqa"].source_split, "train")
+        self.assertEqual(specs["ifeval"].kind, "instruction_following")
+        self.assertTrue(specs["ifeval"].strict)
+        self.assertFalse(specs["ifbench"].strict)
         self.assertEqual(specs["aime24"].source_type, "package_jsonl")
         self.assertEqual(specs["algebra222"].source_type, "url_csv")
         self.assertEqual(specs["hendrycks_math"].source_type, "qwen_math")
@@ -580,10 +604,10 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         payload = print_json.call_args.args[0]
         self.assertEqual(payload["count"], 95)
-        self.assertEqual(payload["status_counts"]["implemented"], 35)
+        self.assertEqual(payload["status_counts"]["implemented"], 37)
         self.assertEqual(payload["status_counts"].get("needs_dataset_adapter", 0), 0)
         self.assertEqual(payload["status_counts"]["needs_dataset_access"], 1)
-        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 59)
+        self.assertEqual(payload["status_counts"]["needs_specialized_runner"], 57)
 
     def test_multiple_choice_normalizes_list_and_arc_choices(self) -> None:
         list_choices = multiple_choice.normalize_choices(["red", "blue"])

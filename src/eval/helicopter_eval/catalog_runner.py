@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 
-RunKind = Literal["free_response", "multiple_choice"]
+RunKind = Literal["free_response", "multiple_choice", "instruction_following"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +31,7 @@ class CatalogRunSpec:
     answer_marker: str | None = "####"
     row_adapter: str | None = None
     adapter_seed: int = 42
+    strict: bool = True
     job_name: str | None = None
     max_tokens: int | None = None
 
@@ -161,6 +162,26 @@ _DIRECT_HF_SPECS: dict[str, dict[str, Any]] = {
         "choice_labels": "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
         "job_name": "multi_choice_plain",
         "max_tokens": 32,
+    },
+    "ifeval": {
+        "kind": "instruction_following",
+        "dataset_name": "google-research/instruction_following_eval",
+        "source_url": (
+            "https://raw.githubusercontent.com/google-research/google-research/"
+            "master/instruction_following_eval/data/input_data.jsonl"
+        ),
+        "job_name": "instruction_following",
+        "max_tokens": 1024,
+        "reason": "url_jsonl_rule_scored",
+    },
+    "ifbench": {
+        "kind": "instruction_following",
+        "dataset_name": "allenai/IFBench",
+        "source_url": "https://raw.githubusercontent.com/allenai/IFBench/refs/heads/main/data/IFBench_test.jsonl",
+        "job_name": "instruction_following",
+        "max_tokens": 1024,
+        "strict": False,
+        "reason": "url_jsonl_rule_scored",
     },
     "amc23": {
         "kind": "free_response",
@@ -484,6 +505,7 @@ def resolve_catalog_run_spec(benchmark: Any) -> CatalogRunSpec:
             answer_marker=raw.get("answer_marker"),
             row_adapter=raw.get("row_adapter"),
             adapter_seed=int(raw.get("adapter_seed") or 42),
+            strict=bool(raw.get("strict", True)),
             job_name=str(raw.get("job_name") or ""),
             max_tokens=int(raw.get("max_tokens") or 512),
         )
@@ -523,6 +545,7 @@ def catalog_run_spec_to_dict(spec: CatalogRunSpec) -> dict[str, Any]:
         "source_path": spec.source_path,
         "source_split": spec.source_split,
         "row_adapter": spec.row_adapter,
+        "strict": spec.strict,
     }
 
 
@@ -538,6 +561,10 @@ def dry_run_catalog_spec(
     config = _run_config(spec, base_url=base_url, model=model, limit=limit)
     if spec.kind == "free_response":
         from .free_response import dry_run_summary
+
+        return dry_run_summary(config)
+    if spec.kind == "instruction_following":
+        from .instruction_following import dry_run_summary
 
         return dry_run_summary(config)
     from .multiple_choice import dry_run_summary
@@ -560,6 +587,10 @@ def run_catalog_spec(
         from .free_response import run_free_response
 
         return run_free_response(config, repo_root=repo_root)
+    if spec.kind == "instruction_following":
+        from .instruction_following import run_instruction_following
+
+        return run_instruction_following(config, repo_root=repo_root)
     from .multiple_choice import run_multiple_choice
 
     return run_multiple_choice(config, repo_root=repo_root)
@@ -616,6 +647,24 @@ def _run_config(spec: CatalogRunSpec, *, base_url: str, model: str, limit: int |
             choice_labels=spec.choice_labels,
             scoreboard_dataset=spec.dataset_slug,
             job_name=spec.job_name or "multi_choice_plain",
+            job_id=f"helicopter-{spec.benchmark}",
+            runner="helicopter_eval.catalog_runner",
+        )
+    if spec.kind == "instruction_following":
+        from .instruction_following import InstructionFollowingRunConfig
+
+        return InstructionFollowingRunConfig(
+            base_url=base_url,
+            model=model,
+            benchmark=spec.benchmark,
+            dataset_name=str(spec.dataset_name),
+            source_url=str(spec.source_url),
+            limit=limit,
+            split=str(spec.source_split),
+            max_tokens=int(spec.max_tokens or 1024),
+            strict=spec.strict,
+            scoreboard_dataset=spec.dataset_slug,
+            job_name=spec.job_name or "instruction_following",
             job_id=f"helicopter-{spec.benchmark}",
             runner="helicopter_eval.catalog_runner",
         )

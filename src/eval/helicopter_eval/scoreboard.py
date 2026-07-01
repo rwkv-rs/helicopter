@@ -28,6 +28,7 @@ class ScoreboardWriteConfig:
     cot_mode: str
     sampling_config: dict[str, Any]
     completion_sampling_config: dict[str, Any]
+    extra_metrics: dict[str, Any] | None = None
 
 
 def _scoreboard_import_root(repo_root: Path) -> None:
@@ -92,11 +93,12 @@ async def write_scoreboard_results(
             ],
         )
         score = sum(1 for result in results if result.is_passed) / len(results) if results else 0.0
+        metrics = {"avg@1": score, **(config.extra_metrics or {})}
         await store.record_score_payload(
             task_id=task_id,
             payload={
                 "cot_mode": config.cot_mode,
-                "metrics": {"avg@1": score},
+                "metrics": metrics,
                 "runner": config.runner,
                 "benchmark": config.benchmark,
             },

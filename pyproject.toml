@@ -13,6 +13,7 @@ helicopter = "helicopter_cli.__main__:main"
 
 [dependency-groups]
 rwkv = [
+  "absl-py>=2.3.1",
   "accelerate",
   "aiohttp>=3.13.3",
   "anthropic>=0.71.0",
@@ -38,8 +39,10 @@ rwkv = [
   "huggingface-hub",
   "hydra-core",
   "ijson",
+  "immutabledict>=2.2.5",
   "jinja2",
   "jsonschema>=4.23.0",
+  "langdetect>=1.0.9",
   "diskcache==5.6.3",
   "lark==1.2.2",
   "llguidance>=1.7.0,<1.8.0",
@@ -49,6 +52,7 @@ rwkv = [
   "model-hosting-container-standards>=0.1.14,<1.0.0",
   "msgspec",
   "ninja",
+  "nltk>=3.9.1",
   "numba==0.65.0",
   "numpy>=2.0.0",
   "nvidia-cudnn-frontend>=1.19.1",
