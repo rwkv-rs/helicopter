@@ -415,7 +415,7 @@ class CommandPlanTests(unittest.TestCase):
             gsm8k.dry_run_summary(run_config),
             {
                 "benchmark": "gsm8k",
-                "hf_dataset": "gsm8k",
+                "hf_dataset": "openai/gsm8k",
                 "hf_config": "main",
                 "split": "test",
                 "limit": 3,

@@ -17,7 +17,7 @@ class Gsm8kRunConfig:
     top_p: float = 1.0
     max_tokens: int = 512
     timeout_s: float = 600.0
-    dataset_name: str = "gsm8k"
+    dataset_name: str = "openai/gsm8k"
     dataset_config: str = "main"
     question_field: str = "question"
     answer_field: str = "answer"
