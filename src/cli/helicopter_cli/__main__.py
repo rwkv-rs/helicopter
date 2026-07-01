@@ -149,6 +149,33 @@ def handle_eval_run(args: argparse.Namespace, *, root: Any, **_: Any) -> int:
     return 0
 
 
+def handle_eval_run_free_response(args: argparse.Namespace, *, root: Any, **_: Any) -> int:
+    from helicopter_eval.free_response import FreeResponseRunConfig, dry_run_summary, run_free_response
+
+    defaults = load_rwkv_skills_catalog().inference_defaults
+    run_config = FreeResponseRunConfig(
+        base_url=str(args.base_url or defaults.base_url),
+        model=str(args.model or defaults.model_name),
+        benchmark=str(args.benchmark),
+        dataset_name=str(args.dataset),
+        dataset_config=str(args.dataset_config) if args.dataset_config is not None else None,
+        question_field=str(args.question_field),
+        answer_field=str(args.answer_field),
+        limit=args.limit,
+        split=str(args.split),
+        temperature=float(args.temperature),
+        top_p=float(args.top_p),
+        max_tokens=int(args.max_tokens),
+        timeout_s=float(args.timeout_s),
+        answer_marker=str(args.answer_marker) if args.answer_marker else None,
+        job_name=str(args.job_name),
+        job_id=str(args.job_id) if args.job_id else None,
+    )
+    payload = dry_run_summary(run_config) if args.dry_run else run_free_response(run_config, repo_root=root)
+    print_json(payload)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="helicopter")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -215,6 +242,29 @@ def build_parser() -> argparse.ArgumentParser:
     eval_run.add_argument("--timeout-s", type=float, default=600.0)
     eval_run.add_argument("--job-id", default="helicopter-gsm8k")
     eval_run.set_defaults(handler=handle_eval_run)
+
+    eval_run_free_response = eval_subparsers.add_parser(
+        "run-free-response",
+        help="run a HF free-response benchmark and write scoreboard DB rows",
+    )
+    add_common_options(eval_run_free_response)
+    eval_run_free_response.add_argument("benchmark", help="scoreboard benchmark name")
+    eval_run_free_response.add_argument("--dataset", required=True, help="HF dataset path")
+    eval_run_free_response.add_argument("--dataset-config", help="HF dataset config/name")
+    eval_run_free_response.add_argument("--question-field", default="question")
+    eval_run_free_response.add_argument("--answer-field", default="answer")
+    eval_run_free_response.add_argument("--answer-marker", default="####")
+    eval_run_free_response.add_argument("--base-url", help="OpenAI-compatible vLLM base URL")
+    eval_run_free_response.add_argument("--model", help="served model name")
+    eval_run_free_response.add_argument("--limit", type=int)
+    eval_run_free_response.add_argument("--split", default="test")
+    eval_run_free_response.add_argument("--temperature", type=float, default=0.0)
+    eval_run_free_response.add_argument("--top-p", type=float, default=1.0)
+    eval_run_free_response.add_argument("--max-tokens", type=int, default=512)
+    eval_run_free_response.add_argument("--timeout-s", type=float, default=600.0)
+    eval_run_free_response.add_argument("--job-name", default="free_response_judge")
+    eval_run_free_response.add_argument("--job-id")
+    eval_run_free_response.set_defaults(handler=handle_eval_run_free_response)
 
     eval_infer = eval_subparsers.add_parser("infer", help="start the default local 0.4B vLLM-RWKV service")
     add_common_options(eval_infer)

@@ -7,8 +7,9 @@ from argparse import Namespace
 from pathlib import Path
 from unittest import mock
 
+from helicopter_cli import __main__ as cli_main
 from helicopter_cli import commands, config, env, eval_catalog
-from helicopter_eval import gsm8k
+from helicopter_eval import free_response, gsm8k
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -434,6 +435,70 @@ class CommandPlanTests(unittest.TestCase):
         )
 
         self.assertEqual(gsm8k.scoreboard_dataset_name(run_config), "gsm8k_test")
+
+    def test_generic_free_response_dry_run_uses_hf_dataset_config(self) -> None:
+        args = Namespace(
+            dry_run=True,
+            benchmark="toy_math",
+            dataset="org/toy_math",
+            dataset_config="main",
+            question_field="prompt",
+            answer_field="target",
+            answer_marker="####",
+            base_url=None,
+            model=None,
+            limit=5,
+            split="validation",
+            temperature=0.0,
+            top_p=1.0,
+            max_tokens=64,
+            timeout_s=30.0,
+            job_name="free_response_judge",
+            job_id=None,
+        )
+
+        with mock.patch.object(cli_main, "print_json") as print_json:
+            rc = cli_main.handle_eval_run_free_response(args, root=ROOT)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            print_json.call_args.args[0],
+            {
+                "benchmark": "toy_math",
+                "hf_dataset": "org/toy_math",
+                "hf_config": "main",
+                "split": "validation",
+                "limit": 5,
+                "base_url": "http://127.0.0.1:29082",
+                "model": "rwkv7-g1d-0.4b-20260210-ctx8192",
+                "scoreboard_dataset": "toy_math_validation_limit5",
+                "job_name": "free_response_judge",
+                "job_id": "helicopter-toy_math",
+            },
+        )
+
+    def test_free_response_completion_sampling_matches_scoreboard_task_config(self) -> None:
+        run_config = free_response.FreeResponseRunConfig(
+            base_url="http://127.0.0.1:29082",
+            model="rwkv7-g1d-0.4b-20260210-ctx8192",
+            benchmark="toy_math",
+            dataset_name="org/toy_math",
+            dataset_config="main",
+            question_field="prompt",
+            answer_field="target",
+            limit=1,
+            max_tokens=64,
+        )
+
+        self.assertEqual(
+            free_response.task_sampling_config(run_config),
+            {
+                "avg_k": 1,
+                "pass_ks": [1],
+                "prompt_profile": "helicopter",
+                "sampling_config": {"answer": {"temperature": 0.0, "top_p": 1.0, "max_new_tokens": 64}},
+            },
+        )
 
     def test_takeoff_config_adv_estimator_becomes_hydra_overrides(self) -> None:
         loaded_config = load_example_config()

@@ -1,0 +1,66 @@
+from __future__ import annotations
+
+import json
+import urllib.error
+import urllib.request
+from typing import Any
+
+
+def normalize_api_base(base_url: str) -> str:
+    value = base_url.rstrip("/")
+    if value.endswith("/v1"):
+        return value
+    return f"{value}/v1"
+
+
+def post_json(url: str, payload: dict[str, Any], *, timeout_s: float) -> dict[str, Any]:
+    data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_s) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"infer request failed: HTTP {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"infer request failed: {exc.reason}") from exc
+
+
+def chat_completion(
+    *,
+    base_url: str,
+    model: str,
+    prompt: str,
+    temperature: float,
+    top_p: float,
+    max_tokens: int,
+    timeout_s: float,
+) -> str:
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": temperature,
+        "top_p": top_p,
+        "max_tokens": max_tokens,
+        "stream": False,
+    }
+    response = post_json(
+        f"{normalize_api_base(base_url)}/chat/completions",
+        payload,
+        timeout_s=timeout_s,
+    )
+    choices = response.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise RuntimeError("infer response missing choices")
+    choice = choices[0]
+    if not isinstance(choice, dict):
+        raise RuntimeError("infer response choice is not an object")
+    message = choice.get("message")
+    if not isinstance(message, dict):
+        raise RuntimeError("infer response missing message")
+    return str(message.get("content") or "")
