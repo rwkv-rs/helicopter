@@ -436,6 +436,10 @@ class CommandPlanTests(unittest.TestCase):
             suite["benchmarks"]["supergpqa"]["lighteval_tasks"],
             ["rwkv_skills:supergpqa"],
         )
+        self.assertEqual(
+            suite["benchmarks"]["omni_math"]["lighteval_tasks"],
+            ["rwkv_skills:omni_math"],
+        )
 
     def test_lighteval_suite_requires_explicit_mapped_only_for_partial_mapping(self) -> None:
         loaded_config = load_example_config()
@@ -515,11 +519,14 @@ class CommandPlanTests(unittest.TestCase):
         custom_tasks = ROOT / "src/cli/helicopter_cli/lighteval_rwkv_skills_tasks.py"
         registry = Registry(custom_tasks=str(custom_tasks))
 
+        self.assertIn("rwkv_skills:algebra222", registry._task_registry)
         self.assertIn("rwkv_skills:gaokao2023en", registry._task_registry)
         self.assertIn("rwkv_skills:amc23", registry._task_registry)
         self.assertIn("rwkv_skills:beyond_aime", registry._task_registry)
         self.assertIn("rwkv_skills:brumo25", registry._task_registry)
         self.assertIn("rwkv_skills:hmmt_feb25", registry._task_registry)
+        self.assertIn("rwkv_skills:math_odyssey", registry._task_registry)
+        self.assertIn("rwkv_skills:omni_math", registry._task_registry)
         self.assertIn("rwkv_skills:supergpqa", registry._task_registry)
 
     def test_takeoff_plan_uses_verl_module_entrypoint_and_default_overrides(self) -> None:

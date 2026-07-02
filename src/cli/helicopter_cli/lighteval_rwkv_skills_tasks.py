@@ -11,6 +11,10 @@ from lighteval.tasks.requests import Doc
 
 
 HF_MATH_TASKS = {
+    "algebra222": {
+        "repo": "sirdug/Algebra222",
+        "split": "train",
+    },
     "amc23": {
         "repo": "math-ai/amc23",
         "split": "test",
@@ -31,8 +35,16 @@ HF_MATH_TASKS = {
         "repo": "MathArena/hmmt_feb_2025",
         "split": "train",
     },
+    "math_odyssey": {
+        "repo": "MathOdyssey/MathOdyssey",
+        "split": "test",
+    },
     "minerva_math": {
         "repo": "math-ai/minervamath",
+        "split": "test",
+    },
+    "omni_math": {
+        "repo": "KbsdJames/Omni-MATH",
         "split": "test",
     },
 }
@@ -60,18 +72,24 @@ Reasoning:
 
 
 def _question(record: dict) -> str:
-    for key in ("question", "problem", "prompt", "input"):
+    for key in ("question", "problem", "problem_statement", "prompt", "input"):
         value = record.get(key)
         if value is not None:
             return str(value)
     return ""
 
 
+def _format_answer(value: object) -> str:
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
 def _answer(record: dict) -> str:
-    for key in ("expected_answer", "answer", "final_answer", "target"):
+    for key in ("expected_answer", "answer", "final_answer", "target", "result"):
         value = record.get(key)
         if value is not None:
-            return str(value)
+            return _format_answer(value)
     return ""
 
 

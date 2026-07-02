@@ -369,8 +369,8 @@ lighteval_tasks = ["aime25"]
 
 [benchmarks.algebra222]
 field = "maths"
-status = "needs_adapter"
-reason = "No direct Algebra222 task was found in the current LightEval registry snapshot."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:algebra222"]
 
 [benchmarks.amc23]
 field = "maths"
@@ -444,8 +444,8 @@ lighteval_tasks = ["math_500"]
 
 [benchmarks.math_odyssey]
 field = "maths"
-status = "needs_adapter"
-reason = "No direct Math Odyssey task was found in the current LightEval registry snapshot."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:math_odyssey"]
 
 [benchmarks.mawps]
 field = "maths"
@@ -464,8 +464,8 @@ lighteval_tasks = ["olympiad_bench"]
 
 [benchmarks.omni_math]
 field = "maths"
-status = "needs_adapter"
-reason = "No direct Omni-MATH task was found in the current LightEval registry snapshot."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:omni_math"]
 
 [benchmarks.polymath]
 field = "maths"
