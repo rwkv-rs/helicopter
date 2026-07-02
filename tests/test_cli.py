@@ -335,6 +335,7 @@ class CommandPlanTests(unittest.TestCase):
         )
 
         options = command_options(plan.command)
+        self.assertEqual(plan.command[0], "/home/chase/GitHub/vllm-rwkv/.venv/bin/vllm")
         self.assertEqual(options["--served-model-name"], "g1d-0.4b")
         self.assertEqual(options["--gpu-memory-utilization"], "0.45")
         self.assertEqual(options["--max-model-len"], "8192")

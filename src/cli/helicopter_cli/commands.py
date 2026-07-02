@@ -771,8 +771,11 @@ def build_infer_plan(
     if not args.dry_run and not model_path.is_file():
         raise SystemExit(f"RWKV checkpoint not found: {model_path}")
 
+    vllm_bin = str(
+        resolve_path(str(infer.get("vllm_bin")), root=root, env=env) if infer.get("vllm_bin") else "vllm"
+    )
     command = [
-        "vllm",
+        vllm_bin,
         "serve",
         str(model_path),
         "--host",
