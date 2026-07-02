@@ -571,6 +571,8 @@ class CommandPlanTests(unittest.TestCase):
                 "amc23",
                 "answer_judge",
                 "arena_hard_v2",
+                "agentbench_db",
+                "agentbench_kg",
                 "apibank_l1",
                 "apibank_l2",
                 "apibank_level1",
@@ -646,6 +648,14 @@ class CommandPlanTests(unittest.TestCase):
         }
         for name, expected_count in expected_counts.items():
             path = Path(lighteval_rwkv_skills_tasks.MCP_BENCH_PATHS[name])
+            self.assertTrue(path.is_file(), name)
+            with path.open(encoding="utf-8") as fh:
+                self.assertEqual(sum(1 for _line in fh), expected_count, name)
+
+    def test_agentbench_static_data_files_are_packaged(self) -> None:
+        expected_counts = {"agentbench_db": 300, "agentbench_kg": 150}
+        for name, expected_count in expected_counts.items():
+            path = Path(lighteval_rwkv_skills_tasks.AGENTBENCH_PATHS[name])
             self.assertTrue(path.is_file(), name)
             with path.open(encoding="utf-8") as fh:
                 self.assertEqual(sum(1 for _line in fh), expected_count, name)
@@ -1314,6 +1324,68 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(f1.compute(response, doc), 1.0)
         self.assertEqual(nonempty.compute(response, doc), 1.0)
         self.assertEqual(nonempty.compute(ModelResponse(text=[""]), doc), 0.0)
+
+    def test_agentbench_db_prompt_scores_final_answer(self) -> None:
+        doc = lighteval_rwkv_skills_tasks.agentbench_db_prompt(
+            {
+                "task_id": "agentbench_db__00000",
+                "task_name": "dbbench-std",
+                "index": 0,
+                "domain": "dbbench",
+                "question": "What are the Notes when the Method is decision?",
+                "additional_description": "The table is Jiu-Jitsu Championships Results.",
+                "operation_type": "other",
+                "tables": [
+                    {
+                        "table_name": "Jiu-Jitsu Championships Results",
+                        "columns": ["Method", "Notes"],
+                        "rows": [["Decision", "Women +60kg Bronze"]],
+                    }
+                ],
+                "reference_answers": ["Women +60kg Bronze"],
+                "reference_sql": "SELECT Notes FROM table WHERE Method = 'Decision';",
+                "reference_plan": "SQL: SELECT Notes FROM table WHERE Method = 'Decision';\nFinal answer: [\"Women +60kg Bronze\"]",
+            },
+            "agentbench_db",
+        )
+
+        self.assertIsNotNone(doc)
+        assert doc is not None
+        self.assertIn("AgentBench DBBench", doc.query)
+        self.assertIn("execute", doc.query.lower())
+        self.assertEqual(doc.specific["sample_id"], "agentbench_db__00000")
+
+        f1 = lighteval_rwkv_skills_tasks.AgentBenchDbAnswerF1()
+        nonempty = lighteval_rwkv_skills_tasks.AgentBenchResponseNonEmpty()
+        self.assertEqual(f1.compute(ModelResponse(text=['{"final_answer":"Women +60kg Bronze"}']), doc), 1.0)
+        self.assertEqual(nonempty.compute(ModelResponse(text=['{"final_answer":"Women +60kg Bronze"}']), doc), 1.0)
+        self.assertEqual(nonempty.compute(ModelResponse(text=[""]), doc), 0.0)
+
+    def test_agentbench_kg_prompt_scores_reference_plan(self) -> None:
+        doc = lighteval_rwkv_skills_tasks.agentbench_kg_prompt(
+            {
+                "task_id": "agentbench_kg__00000",
+                "task_name": "kg-std",
+                "index": 0,
+                "domain": "knowledgegraph",
+                "question": "what is the attitude of the first dog and the german shepherds?",
+                "entities": {"first dog": "m.05t073s", "german shepherds": "m.0km5c"},
+                "reference_actions": ["get_relations(m.05t073s)", "intersection(#1,#2)"],
+                "reference_answers": ["Obedient", "Intelligent"],
+                "reference_plan": "Actions:\nget_relations(m.05t073s)\nintersection(#1,#2)\nFinal answer names: [\"Obedient\", \"Intelligent\"]",
+            },
+            "agentbench_kg",
+        )
+
+        self.assertIsNotNone(doc)
+        assert doc is not None
+        self.assertIn("AgentBench KnowledgeGraph", doc.query)
+        self.assertIn("get_relations", doc.query)
+        self.assertEqual(doc.specific["sample_id"], "agentbench_kg__00000")
+
+        f1 = lighteval_rwkv_skills_tasks.AgentBenchKgPlanF1()
+        response = ModelResponse(text=[doc.specific["reference_plans"][0]])
+        self.assertEqual(f1.compute(response, doc), 1.0)
 
     def test_lighteval_export_prefers_specific_sample_id(self) -> None:
         row = lighteval_export.export_rows_from_frame(
