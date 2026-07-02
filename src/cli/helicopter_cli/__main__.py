@@ -232,6 +232,15 @@ def handle_eval_run_catalog(args: argparse.Namespace, *, root: Any, **_: Any) ->
         "tau_max_errors": getattr(args, "tau_max_errors", None),
         "tau_history_max_chars": getattr(args, "tau_history_max_chars", None),
         "tau_prompt_max_chars": getattr(args, "tau_prompt_max_chars", None),
+        "candidate_router_mode": getattr(args, "candidate_router_mode", None),
+        "candidate_router_chunk_tools": getattr(args, "candidate_router_chunk_tools", None),
+        "candidate_router_batch_size": getattr(args, "candidate_router_batch_size", None),
+        "candidate_router_context_chars": getattr(args, "candidate_router_context_chars", None),
+        "candidate_router_prompt_max_chars": getattr(args, "candidate_router_prompt_max_chars", None),
+        "candidate_router_candidate_max_tokens": getattr(args, "candidate_router_candidate_max_tokens", None),
+        "candidate_router_aggregate_max_tokens": getattr(args, "candidate_router_aggregate_max_tokens", None),
+        "candidate_router_max_candidates": getattr(args, "candidate_router_max_candidates", None),
+        "candidate_router_tool_schema_mode": getattr(args, "candidate_router_tool_schema_mode", None),
     }
     try:
         write_sample_manifest = getattr(args, "write_sample_manifest", None)
@@ -454,6 +463,27 @@ def build_parser() -> argparse.ArgumentParser:
     eval_run_catalog.add_argument("--tau-max-errors", type=int, help="maximum TAU tool/protocol errors")
     eval_run_catalog.add_argument("--tau-history-max-chars", type=int, help="TAU transcript budget")
     eval_run_catalog.add_argument("--tau-prompt-max-chars", type=int, help="TAU prompt budget")
+    eval_run_catalog.add_argument("--candidate-router-mode", choices=("off", "parallel"), help="BFCL v3 candidate router mode")
+    eval_run_catalog.add_argument("--candidate-router-chunk-tools", type=int, help="BFCL v3 candidate-router tools per shard")
+    eval_run_catalog.add_argument("--candidate-router-batch-size", type=int, help="BFCL v3 candidate-router request fanout")
+    eval_run_catalog.add_argument("--candidate-router-context-chars", type=int, help="BFCL v3 candidate-router history budget")
+    eval_run_catalog.add_argument("--candidate-router-prompt-max-chars", type=int, help="BFCL v3 candidate-router prompt budget")
+    eval_run_catalog.add_argument(
+        "--candidate-router-candidate-max-tokens",
+        type=int,
+        help="BFCL v3 candidate-router per-shard generation cap",
+    )
+    eval_run_catalog.add_argument(
+        "--candidate-router-aggregate-max-tokens",
+        type=int,
+        help="BFCL v3 candidate-router aggregation generation cap",
+    )
+    eval_run_catalog.add_argument("--candidate-router-max-candidates", type=int, help="BFCL v3 aggregation candidate cap")
+    eval_run_catalog.add_argument(
+        "--candidate-router-tool-schema-mode",
+        choices=("minimal", "compact", "full"),
+        help="BFCL v3 tool schema verbosity inside candidate-router prompts",
+    )
     eval_run_catalog.set_defaults(handler=handle_eval_run_catalog)
 
     eval_run_free_response = eval_subparsers.add_parser(

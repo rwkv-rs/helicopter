@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 import importlib
 import json
@@ -19,6 +20,12 @@ from .scoreboard import ScoreboardEvalResult, ScoreboardWriteConfig, write_score
 
 
 BFCL_ADDITIONAL_FUNCTION_PROMPT = "I have updated some more functions you can choose from. What about now?"
+BFCL_CANDIDATE_ROUTER_NO_TOOL = "__no_tool_call__"
+BFCL_CANDIDATE_ROUTER_POLICY = (
+    "BFCL v3 tool-call policy: choose exactly one next official sandbox action. "
+    "Use only listed tool names. Do not invent tool names, arguments, IDs, dates, files, or state transitions. "
+    "Choose __no_tool_call__ only when no tool call is needed for the current turn."
+)
 BFCL_SOURCE_ROOT_ENV_VARS = (
     "RWKV_BFCL_V3_SOURCE_ROOT",
     "BFCL_V3_SOURCE_ROOT",
@@ -145,11 +152,43 @@ class BfclV3RunConfig:
     max_tokens: int = 1024
     timeout_s: float = 600.0
     max_turns: int = 20
+    candidate_router_mode: str = "off"
+    candidate_router_chunk_tools: int = 2
+    candidate_router_batch_size: int = 16
+    candidate_router_context_chars: int = 6000
+    candidate_router_prompt_max_chars: int = 8192
+    candidate_router_candidate_max_tokens: int = 192
+    candidate_router_aggregate_max_tokens: int = 192
+    candidate_router_max_candidates: int = 12
+    candidate_router_tool_schema_mode: str = "compact"
     scoreboard_dataset: str | None = None
     job_name: str = "function_bfcl_v3"
     job_id: str | None = None
     runner: str = "helicopter_eval.bfcl_v3"
     cot_mode: str = "CoT"
+
+
+@dataclass(frozen=True, slots=True)
+class BfclV3Candidate:
+    name: str
+    arguments: dict[str, Any]
+    confidence: float
+    evidence: str
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "arguments": dict(self.arguments),
+            "confidence": float(self.confidence),
+            "evidence": self.evidence,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class BfclV3CandidateRoute:
+    completion: str
+    prompt: str
+    trace: dict[str, Any]
 
 
 def load_samples(config: BfclV3RunConfig) -> list[BfclV3Sample]:
@@ -262,6 +301,406 @@ def build_prompt(sample: BfclV3Sample, *, turn_index: int, active_tools: Sequenc
     )
 
 
+def _candidate_router_enabled(config: BfclV3RunConfig) -> bool:
+    mode = str(config.candidate_router_mode or "off").strip().lower()
+    if mode == "off":
+        return False
+    if mode != "parallel":
+        raise ValueError(f"unsupported candidate_router_mode={config.candidate_router_mode!r}; expected off or parallel")
+    return True
+
+
+def route_candidate_tool_call(
+    *,
+    config: BfclV3RunConfig,
+    sample: BfclV3Sample,
+    turn_index: int,
+    active_tools: Sequence[Mapping[str, Any]],
+    history: Sequence[Mapping[str, str]],
+) -> BfclV3CandidateRoute:
+    tool_chunks = _chunk_tools(active_tools, chunk_size=max(1, int(config.candidate_router_chunk_tools)))
+    chunks_by_index: dict[int, dict[str, Any]] = {}
+    candidates: list[BfclV3Candidate] = []
+
+    def run_chunk(chunk_index: int, chunk: Sequence[Mapping[str, Any]]) -> tuple[int, dict[str, Any], BfclV3Candidate | None]:
+        valid_names = _tool_names(chunk)
+        valid_names.add(BFCL_CANDIDATE_ROUTER_NO_TOOL)
+        prompt = build_candidate_router_prompt(
+            config=config,
+            sample=sample,
+            turn_index=turn_index,
+            tools=chunk,
+            history=history,
+        )
+        trace: dict[str, Any] = {
+            "chunk_index": chunk_index,
+            "tool_names": sorted(name for name in valid_names if name != BFCL_CANDIDATE_ROUTER_NO_TOOL),
+            "prompt_chars": len(prompt),
+            "prompt": prompt,
+            "completion": "",
+            "candidate": None,
+            "error": "",
+        }
+        if len(prompt) > max(1, int(config.candidate_router_prompt_max_chars)):
+            trace["error"] = (
+                f"candidate shard prompt_chars={len(prompt)} exceeds "
+                f"budget={int(config.candidate_router_prompt_max_chars)}"
+            )
+            return chunk_index, trace, None
+        try:
+            completion = chat_completion(
+                base_url=config.base_url,
+                model=config.model,
+                prompt=prompt,
+                temperature=config.temperature,
+                top_p=config.top_p,
+                max_tokens=max(1, int(config.candidate_router_candidate_max_tokens)),
+                timeout_s=config.timeout_s,
+            )
+            trace["completion"] = completion
+            candidate = _parse_candidate(completion)
+            candidate = _normalize_candidate(candidate, valid_names=valid_names)
+            trace["candidate"] = candidate.payload()
+            return chunk_index, trace, candidate
+        except Exception as exc:  # noqa: BLE001
+            trace["error"] = str(exc)
+            return chunk_index, trace, None
+
+    max_workers = min(len(tool_chunks), max(1, int(config.candidate_router_batch_size)))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(run_chunk, index, chunk) for index, chunk in enumerate(tool_chunks)]
+        for future in as_completed(futures):
+            chunk_index, trace, candidate = future.result()
+            chunks_by_index[chunk_index] = trace
+            if candidate is not None:
+                candidates.append(candidate)
+
+    ordered_chunks = [chunks_by_index[index] for index in range(len(tool_chunks))]
+    candidates = sorted(candidates, key=lambda item: float(item.confidence), reverse=True)[
+        : max(1, int(config.candidate_router_max_candidates))
+    ]
+    aggregate_prompt = build_candidate_aggregate_prompt(
+        config=config,
+        candidates=candidates,
+        valid_tool_names=sorted(_tool_names(active_tools) | {BFCL_CANDIDATE_ROUTER_NO_TOOL}),
+        history=history,
+    )
+    selected: BfclV3Candidate | None = None
+    aggregate_completion = ""
+    aggregate_error = ""
+    fallback_used = False
+    if not candidates:
+        aggregate_error = "no valid candidate tool calls"
+    elif len(aggregate_prompt) > max(1, int(config.candidate_router_prompt_max_chars)):
+        aggregate_error = (
+            f"candidate aggregate prompt_chars={len(aggregate_prompt)} exceeds "
+            f"budget={int(config.candidate_router_prompt_max_chars)}"
+        )
+    else:
+        try:
+            aggregate_completion = chat_completion(
+                base_url=config.base_url,
+                model=config.model,
+                prompt=aggregate_prompt,
+                temperature=config.temperature,
+                top_p=config.top_p,
+                max_tokens=max(1, int(config.candidate_router_aggregate_max_tokens)),
+                timeout_s=config.timeout_s,
+            )
+            selected = _normalize_candidate(
+                _parse_candidate(aggregate_completion),
+                valid_names=_tool_names(active_tools) | {BFCL_CANDIDATE_ROUTER_NO_TOOL},
+            )
+        except Exception as exc:  # noqa: BLE001
+            aggregate_error = str(exc)
+    if selected is None and candidates:
+        selected = candidates[0]
+        fallback_used = True
+    completion = _candidate_completion(selected)
+    trace = {
+        "mode": "parallel",
+        "config": candidate_router_config_payload(config),
+        "chunks": ordered_chunks,
+        "aggregate_prompt": aggregate_prompt,
+        "aggregate_completion": aggregate_completion,
+        "aggregate_error": aggregate_error,
+        "fallback_used": fallback_used,
+        "selected": selected.payload() if selected is not None else None,
+    }
+    return BfclV3CandidateRoute(completion=completion, prompt=aggregate_prompt, trace=trace)
+
+
+def candidate_router_config_payload(config: BfclV3RunConfig) -> dict[str, Any]:
+    return {
+        "mode": str(config.candidate_router_mode or "off"),
+        "chunk_tools": int(config.candidate_router_chunk_tools),
+        "batch_size": int(config.candidate_router_batch_size),
+        "context_chars": int(config.candidate_router_context_chars),
+        "prompt_max_chars": int(config.candidate_router_prompt_max_chars),
+        "candidate_max_tokens": int(config.candidate_router_candidate_max_tokens),
+        "aggregate_max_tokens": int(config.candidate_router_aggregate_max_tokens),
+        "max_candidates": int(config.candidate_router_max_candidates),
+        "tool_schema_mode": str(config.candidate_router_tool_schema_mode),
+    }
+
+
+def build_candidate_router_prompt(
+    *,
+    config: BfclV3RunConfig,
+    sample: BfclV3Sample,
+    turn_index: int,
+    tools: Sequence[Mapping[str, Any]],
+    history: Sequence[Mapping[str, str]],
+) -> str:
+    schemas = [_schema_for_prompt(tool, mode=config.candidate_router_tool_schema_mode) for tool in tools]
+    schemas.append(
+        {
+            "name": BFCL_CANDIDATE_ROUTER_NO_TOOL,
+            "description": "Choose this only when no tool call is needed for the current BFCL turn.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        }
+    )
+    fixed = "\n".join(
+        [
+            "You are one worker in a parallel candidate tool-call router for BFCL v3.",
+            "Given only this tool shard and the conversation, propose the single best next action.",
+            "Return exactly one JSON object with only these fields:",
+            '{"name":"tool_name","arguments":{},"confidence":0.0,"evidence":"short reason"}',
+            "confidence must be a number from 0 to 1.",
+            "Use exactly one name from this shard's Tools array. Do not invent tool names.",
+            "Never invent IDs, dates, files, function names, or state transitions.",
+            f"Task id: {sample.task_id}",
+            f"Turn: {turn_index + 1}/{len(sample.turns)}",
+            "Tools:",
+            json.dumps(schemas, ensure_ascii=False, separators=(",", ":")),
+            "Policy:",
+            BFCL_CANDIDATE_ROUTER_POLICY,
+            "Conversation:",
+        ]
+    )
+    return _fit_history_prompt(fixed, history, suffix="Candidate JSON:", config=config)
+
+
+def build_candidate_aggregate_prompt(
+    *,
+    config: BfclV3RunConfig,
+    candidates: Sequence[BfclV3Candidate],
+    valid_tool_names: Sequence[str],
+    history: Sequence[Mapping[str, str]],
+) -> str:
+    fixed = "\n".join(
+        [
+            "You are the aggregator for a parallel candidate tool-call router for BFCL v3.",
+            "Choose the best next action from the candidate set.",
+            "Return exactly one JSON object with only these fields:",
+            '{"name":"tool_name","arguments":{},"confidence":0.0,"evidence":"short reason"}',
+            "Use only a valid tool name listed below and prefer candidate arguments unless the conversation clearly fixes them.",
+            "Do not invent tool names or identifiers.",
+            "Valid tool names:",
+            json.dumps(list(valid_tool_names), ensure_ascii=False, separators=(",", ":")),
+            "Candidates:",
+            json.dumps([candidate.payload() for candidate in candidates], ensure_ascii=False, separators=(",", ":")),
+            "Policy:",
+            BFCL_CANDIDATE_ROUTER_POLICY,
+            "Conversation:",
+        ]
+    )
+    return _fit_history_prompt(fixed, history, suffix="Aggregate candidate JSON:", config=config)
+
+
+def _fit_history_prompt(
+    fixed_prefix: str,
+    history: Sequence[Mapping[str, str]],
+    *,
+    suffix: str,
+    config: BfclV3RunConfig,
+) -> str:
+    budget = max(1, int(config.candidate_router_prompt_max_chars))
+    context_chars = max(0, int(config.candidate_router_context_chars))
+    for allowed in (context_chars, max(0, context_chars // 2), max(0, context_chars // 4), 0):
+        rendered = _truncate_left(_render_history(history), allowed)
+        prompt = _normalize_prompt_text(f"{fixed_prefix}\n{rendered or '(empty)'}\n\n{suffix}")
+        if len(prompt) <= budget or allowed == 0:
+            return prompt
+    return _normalize_prompt_text(f"{fixed_prefix}\n\n{suffix}")
+
+
+def _schema_for_prompt(tool: Mapping[str, Any], *, mode: str) -> dict[str, Any]:
+    schema = _normalize_tool_schema(tool)
+    selected = str(mode or "compact").strip().lower()
+    if selected == "full":
+        return schema
+    if selected == "minimal":
+        return {
+            "name": schema["name"],
+            "parameters": {
+                "type": "object",
+                "required": list(_required_parameters(schema)),
+                "properties": {name: {"type": _parameter_type(prop)} for name, prop in _parameter_properties(schema).items()},
+            },
+        }
+    if selected == "compact":
+        return {
+            "name": schema["name"],
+            "description": _truncate_right(str(schema.get("description") or ""), 180),
+            "parameters": {
+                "type": "object",
+                "required": list(_required_parameters(schema)),
+                "properties": {
+                    name: _compact_parameter_schema(prop) for name, prop in _parameter_properties(schema).items()
+                },
+            },
+        }
+    raise ValueError(f"unsupported candidate router tool schema mode: {mode}")
+
+
+def _compact_parameter_schema(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, Mapping):
+        return {"type": "string"}
+    result: dict[str, Any] = {"type": _parameter_type(raw)}
+    description = str(raw.get("description") or "").strip()
+    if description:
+        result["description"] = _truncate_right(description, 140)
+    if isinstance(raw.get("enum"), list):
+        result["enum"] = list(raw["enum"])[:20]
+    if isinstance(raw.get("items"), Mapping):
+        result["items"] = _compact_parameter_schema(raw["items"])
+    return result
+
+
+def _parameter_properties(schema: Mapping[str, Any]) -> dict[str, Any]:
+    parameters = schema.get("parameters") if isinstance(schema.get("parameters"), Mapping) else {}
+    properties = parameters.get("properties") if isinstance(parameters.get("properties"), Mapping) else {}
+    return {str(key): value for key, value in properties.items()}
+
+
+def _required_parameters(schema: Mapping[str, Any]) -> tuple[str, ...]:
+    parameters = schema.get("parameters") if isinstance(schema.get("parameters"), Mapping) else {}
+    required = parameters.get("required") if isinstance(parameters.get("required"), list) else []
+    return tuple(str(item) for item in required)
+
+
+def _parameter_type(raw: Any) -> str:
+    if not isinstance(raw, Mapping):
+        return "string"
+    value = raw.get("type")
+    if isinstance(value, list):
+        value = next((item for item in value if item != "null"), value[0] if value else "string")
+    text = str(value or "string")
+    return "object" if text == "dict" else text
+
+
+def _chunk_tools(tools: Sequence[Mapping[str, Any]], *, chunk_size: int) -> list[list[Mapping[str, Any]]]:
+    routeable = [tool for tool in tools if str(tool.get("name") or "").strip()]
+    size = max(1, int(chunk_size))
+    return [routeable[index : index + size] for index in range(0, len(routeable), size)] or [[]]
+
+
+def _tool_names(tools: Sequence[Mapping[str, Any]]) -> set[str]:
+    return {str(tool.get("name") or "").strip() for tool in tools if str(tool.get("name") or "").strip()}
+
+
+def _parse_candidate(text: str) -> BfclV3Candidate:
+    payload = _extract_json_payload(text)
+    if isinstance(payload, list):
+        payload = payload[0] if payload else {}
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"candidate response is not an object: {text!r}")
+    arguments = payload.get("arguments")
+    if not isinstance(arguments, Mapping):
+        arguments = {}
+    return BfclV3Candidate(
+        name=str(payload.get("name") or payload.get("tool_name") or "").strip(),
+        arguments=dict(arguments),
+        confidence=_coerce_confidence(payload.get("confidence", payload.get("score", 0.0))),
+        evidence=_truncate_right(str(payload.get("evidence") or payload.get("reason") or "").strip(), 240),
+    )
+
+
+def _extract_json_payload(text: str) -> Any:
+    value = str(text or "").strip()
+    if value.startswith("```"):
+        value = re.sub(r"^```(?:json)?\s*", "", value, flags=re.IGNORECASE)
+        value = re.sub(r"\s*```$", "", value)
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        decoder = json.JSONDecoder()
+        start_candidates = sorted(index for index in (value.find("{"), value.find("[")) if index >= 0)
+        for start in start_candidates:
+            try:
+                payload, _end = decoder.raw_decode(value[start:])
+                return payload
+            except json.JSONDecodeError:
+                continue
+        raise
+
+
+def _normalize_candidate(candidate: BfclV3Candidate, *, valid_names: set[str]) -> BfclV3Candidate:
+    name = _candidate_name_alias(candidate.name, valid_names)
+    if name not in valid_names:
+        raise ValueError(f"candidate name {candidate.name!r} not in valid tool names")
+    return BfclV3Candidate(
+        name=name,
+        arguments=dict(candidate.arguments),
+        confidence=candidate.confidence,
+        evidence=candidate.evidence,
+    )
+
+
+def _candidate_name_alias(name: str, valid_names: set[str]) -> str:
+    if name in valid_names:
+        return name
+    canonical = _canonical_name(name)
+    for valid in valid_names:
+        if _canonical_name(valid) == canonical:
+            return valid
+    if canonical in {"none", "no_tool", "no_tool_call", "no_call", "empty", "skip"}:
+        return BFCL_CANDIDATE_ROUTER_NO_TOOL
+    return name
+
+
+def _candidate_completion(candidate: BfclV3Candidate | None) -> str:
+    if candidate is None or candidate.name == BFCL_CANDIDATE_ROUTER_NO_TOOL:
+        return "[]"
+    return json.dumps({"name": candidate.name, "arguments": dict(candidate.arguments)}, ensure_ascii=False, sort_keys=True)
+
+
+def _coerce_confidence(raw: Any) -> float:
+    try:
+        return max(0.0, min(1.0, float(raw)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _render_history(history: Sequence[Mapping[str, str]]) -> str:
+    return "\n".join(f"{str(item.get('role') or '').title()}: {item.get('content') or ''}" for item in history)
+
+
+def _truncate_left(value: str, max_chars: int) -> str:
+    text = str(value or "")
+    limit = max(0, int(max_chars))
+    if not limit or len(text) <= limit:
+        return text if limit else ""
+    return text[-limit:]
+
+
+def _truncate_right(value: str, max_chars: int) -> str:
+    text = str(value or "")
+    limit = max(0, int(max_chars))
+    if not limit or len(text) <= limit:
+        return text if limit else ""
+    return text[:limit]
+
+
+def _canonical_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+
+
+def _normalize_prompt_text(value: str) -> str:
+    return re.sub(r"\n{3,}", "\n\n", str(value or "").replace("\r\n", "\n")).strip()
+
+
 def evaluate_sample(sample: BfclV3Sample, config: BfclV3RunConfig) -> BfclV3Result:
     _load_official_runtime(sample.official_root)
     active_tools = list(sample.tools)
@@ -281,17 +720,30 @@ def evaluate_sample(sample: BfclV3Sample, config: BfclV3RunConfig) -> BfclV3Resu
                 history.append({"role": str(message.get("role") or "user"), "content": content})
         if not turn.messages and turn.tool_additions:
             history.append({"role": "user", "content": BFCL_ADDITIONAL_FUNCTION_PROMPT})
-        prompt = build_prompt(sample, turn_index=turn_index, active_tools=active_tools, history=history)
+        if _candidate_router_enabled(config):
+            route = route_candidate_tool_call(
+                config=config,
+                sample=sample,
+                turn_index=turn_index,
+                active_tools=active_tools,
+                history=history,
+            )
+            prompt = route.prompt
+            completion = route.completion
+            candidate_router_trace: dict[str, Any] | None = route.trace
+        else:
+            prompt = build_prompt(sample, turn_index=turn_index, active_tools=active_tools, history=history)
+            completion = chat_completion(
+                base_url=config.base_url,
+                model=config.model,
+                prompt=prompt,
+                temperature=config.temperature,
+                top_p=config.top_p,
+                max_tokens=config.max_tokens,
+                timeout_s=config.timeout_s,
+            )
+            candidate_router_trace = None
         prompts.append(prompt)
-        completion = chat_completion(
-            base_url=config.base_url,
-            model=config.model,
-            prompt=prompt,
-            temperature=config.temperature,
-            top_p=config.top_p,
-            max_tokens=config.max_tokens,
-            timeout_s=config.timeout_s,
-        )
         try:
             calls = _decode_bfcl_v3_calls(completion)
             rendered_calls = [render_bfcl_exec_call(call) for call in calls]
@@ -307,6 +759,7 @@ def evaluate_sample(sample: BfclV3Sample, config: BfclV3RunConfig) -> BfclV3Resu
                 "completion": completion,
                 "decoded_calls": rendered_calls,
                 "parse_error": parse_error,
+                "candidate_router": candidate_router_trace,
             }
         )
         if parse_error:
@@ -367,7 +820,8 @@ def completion_sampling_config(config: BfclV3RunConfig) -> dict[str, Any]:
             "temperature": config.temperature,
             "top_p": config.top_p,
             "max_new_tokens": config.max_tokens,
-        }
+        },
+        "candidate_router": candidate_router_config_payload(config),
     }
 
 
@@ -429,6 +883,7 @@ def dry_run_summary(config: BfclV3RunConfig) -> dict[str, Any]:
         "scoreboard_dataset": scoreboard_dataset_name(config),
         "job_name": config.job_name,
         "job_id": job_id(config),
+        "candidate_router": candidate_router_config_payload(config),
         "source_files": [str(source_path) for _category, source_path, _answer_path, _official_root in sources],
         "possible_answer_files": [str(answer_path) for _category, _source_path, answer_path, _official_root in sources],
         "official_roots": sorted({str(official_root) for _category, _source_path, _answer_path, official_root in sources}),

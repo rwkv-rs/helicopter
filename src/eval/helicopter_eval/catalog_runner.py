@@ -1046,6 +1046,15 @@ def dry_run_catalog_spec(
     tau_max_errors: int | None = None,
     tau_history_max_chars: int | None = None,
     tau_prompt_max_chars: int | None = None,
+    candidate_router_mode: str | None = None,
+    candidate_router_chunk_tools: int | None = None,
+    candidate_router_batch_size: int | None = None,
+    candidate_router_context_chars: int | None = None,
+    candidate_router_prompt_max_chars: int | None = None,
+    candidate_router_candidate_max_tokens: int | None = None,
+    candidate_router_aggregate_max_tokens: int | None = None,
+    candidate_router_max_candidates: int | None = None,
+    candidate_router_tool_schema_mode: str | None = None,
 ) -> dict[str, Any]:
     if spec.status != "implemented" or spec.kind is None:
         raise RuntimeError(f"{spec.benchmark} is not runnable yet: {spec.reason}")
@@ -1088,6 +1097,15 @@ def dry_run_catalog_spec(
         tau_max_errors=tau_max_errors,
         tau_history_max_chars=tau_history_max_chars,
         tau_prompt_max_chars=tau_prompt_max_chars,
+        candidate_router_mode=candidate_router_mode,
+        candidate_router_chunk_tools=candidate_router_chunk_tools,
+        candidate_router_batch_size=candidate_router_batch_size,
+        candidate_router_context_chars=candidate_router_context_chars,
+        candidate_router_prompt_max_chars=candidate_router_prompt_max_chars,
+        candidate_router_candidate_max_tokens=candidate_router_candidate_max_tokens,
+        candidate_router_aggregate_max_tokens=candidate_router_aggregate_max_tokens,
+        candidate_router_max_candidates=candidate_router_max_candidates,
+        candidate_router_tool_schema_mode=candidate_router_tool_schema_mode,
     )
     if spec.kind == "free_response":
         from .free_response import dry_run_summary
@@ -1211,6 +1229,15 @@ def run_catalog_spec(
     tau_max_errors: int | None = None,
     tau_history_max_chars: int | None = None,
     tau_prompt_max_chars: int | None = None,
+    candidate_router_mode: str | None = None,
+    candidate_router_chunk_tools: int | None = None,
+    candidate_router_batch_size: int | None = None,
+    candidate_router_context_chars: int | None = None,
+    candidate_router_prompt_max_chars: int | None = None,
+    candidate_router_candidate_max_tokens: int | None = None,
+    candidate_router_aggregate_max_tokens: int | None = None,
+    candidate_router_max_candidates: int | None = None,
+    candidate_router_tool_schema_mode: str | None = None,
 ) -> dict[str, Any]:
     if spec.status != "implemented" or spec.kind is None:
         raise RuntimeError(f"{spec.benchmark} is not runnable yet: {spec.reason}")
@@ -1253,6 +1280,15 @@ def run_catalog_spec(
         tau_max_errors=tau_max_errors,
         tau_history_max_chars=tau_history_max_chars,
         tau_prompt_max_chars=tau_prompt_max_chars,
+        candidate_router_mode=candidate_router_mode,
+        candidate_router_chunk_tools=candidate_router_chunk_tools,
+        candidate_router_batch_size=candidate_router_batch_size,
+        candidate_router_context_chars=candidate_router_context_chars,
+        candidate_router_prompt_max_chars=candidate_router_prompt_max_chars,
+        candidate_router_candidate_max_tokens=candidate_router_candidate_max_tokens,
+        candidate_router_aggregate_max_tokens=candidate_router_aggregate_max_tokens,
+        candidate_router_max_candidates=candidate_router_max_candidates,
+        candidate_router_tool_schema_mode=candidate_router_tool_schema_mode,
     )
     if spec.kind == "free_response":
         from .free_response import run_free_response
@@ -1418,6 +1454,15 @@ def _run_config(
     tau_max_errors: int | None = None,
     tau_history_max_chars: int | None = None,
     tau_prompt_max_chars: int | None = None,
+    candidate_router_mode: str | None = None,
+    candidate_router_chunk_tools: int | None = None,
+    candidate_router_batch_size: int | None = None,
+    candidate_router_context_chars: int | None = None,
+    candidate_router_prompt_max_chars: int | None = None,
+    candidate_router_candidate_max_tokens: int | None = None,
+    candidate_router_aggregate_max_tokens: int | None = None,
+    candidate_router_max_candidates: int | None = None,
+    candidate_router_tool_schema_mode: str | None = None,
 ) -> Any:
     if sample_size is not None and spec.kind not in _SAMPLE_SIZE_SUPPORTED_KINDS:
         raise ValueError(f"--sample-size is not supported for {spec.kind} benchmark: {spec.benchmark}")
@@ -1786,6 +1831,15 @@ def _run_config(
             limit=limit,
             split=str(spec.source_split),
             max_tokens=int(spec.max_tokens or 1024),
+            candidate_router_mode=str(candidate_router_mode or "parallel"),
+            candidate_router_chunk_tools=int(candidate_router_chunk_tools or 2),
+            candidate_router_batch_size=int(candidate_router_batch_size or 16),
+            candidate_router_context_chars=int(candidate_router_context_chars or 6000),
+            candidate_router_prompt_max_chars=int(candidate_router_prompt_max_chars or 8192),
+            candidate_router_candidate_max_tokens=int(candidate_router_candidate_max_tokens or 192),
+            candidate_router_aggregate_max_tokens=int(candidate_router_aggregate_max_tokens or 192),
+            candidate_router_max_candidates=int(candidate_router_max_candidates or 12),
+            candidate_router_tool_schema_mode=str(candidate_router_tool_schema_mode or "compact"),
             scoreboard_dataset=spec.dataset_slug,
             job_name=spec.job_name or "function_bfcl_v3",
             job_id=f"helicopter-{spec.benchmark}",

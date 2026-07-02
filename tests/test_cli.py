@@ -1759,6 +1759,91 @@ class CommandPlanTests(unittest.TestCase):
             },
         )
 
+    def test_catalog_bfcl_v3_defaults_to_parallel_candidate_router(self) -> None:
+        catalog = eval_catalog.load_rwkv_skills_catalog()
+        spec = catalog_runner.resolve_catalog_run_spec(catalog.benchmarks_by_name["bfcl_v3"])
+
+        config_obj = catalog_runner._run_config(
+            spec,
+            base_url="http://127.0.0.1:29082",
+            model="rwkv7-g1d-0.4b-20260210-ctx8192",
+            limit=1,
+        )
+
+        self.assertEqual(config_obj.candidate_router_mode, "parallel")
+        self.assertEqual(config_obj.candidate_router_chunk_tools, 2)
+        self.assertEqual(config_obj.candidate_router_batch_size, 16)
+        self.assertEqual(config_obj.candidate_router_context_chars, 6000)
+        self.assertEqual(config_obj.candidate_router_prompt_max_chars, 8192)
+        self.assertEqual(config_obj.candidate_router_candidate_max_tokens, 192)
+        self.assertEqual(config_obj.candidate_router_aggregate_max_tokens, 192)
+        self.assertEqual(config_obj.candidate_router_tool_schema_mode, "compact")
+
+    def test_bfcl_v3_candidate_router_splits_and_aggregates_tools(self) -> None:
+        sample = bfcl_v3.BfclV3Sample(
+            sample_index=0,
+            task_id="task-1",
+            category="multi_turn_base",
+            turns=(bfcl_v3.BfclV3Turn(messages=({"role": "user", "content": "Call foo with x=1."},), ground_truth=()),),
+            tools=(),
+            initial_config={},
+            involved_classes=(),
+            source_path="/tmp/source.json",
+            official_root="/tmp/official",
+        )
+        tools = (
+            {
+                "name": "foo",
+                "description": "Foo tool",
+                "parameters": {"type": "object", "properties": {"x": {"type": "integer"}}, "required": ["x"]},
+            },
+            {
+                "name": "bar",
+                "description": "Bar tool",
+                "parameters": {"type": "object", "properties": {"y": {"type": "string"}}, "required": ["y"]},
+            },
+        )
+        config_obj = bfcl_v3.BfclV3RunConfig(
+            base_url="http://127.0.0.1:29082",
+            model="rwkv7-g1d-0.4b-20260210-ctx8192",
+            benchmark="bfcl_v3",
+            candidate_router_mode="parallel",
+            candidate_router_chunk_tools=1,
+            candidate_router_batch_size=2,
+        )
+
+        def fake_chat_completion(**kwargs: object) -> str:
+            prompt = str(kwargs["prompt"])
+            if "You are the aggregator" in prompt:
+                return '{"name":"foo","arguments":{"x":1},"confidence":0.9,"evidence":"best candidate"}'
+            if '"name":"foo"' in prompt:
+                return '{"name":"foo","arguments":{"x":1},"confidence":0.8,"evidence":"user asked for foo"}'
+            return '{"name":"bar","arguments":{"y":"bad"},"confidence":0.2,"evidence":"other shard"}'
+
+        with mock.patch.object(bfcl_v3, "chat_completion", side_effect=fake_chat_completion):
+            route = bfcl_v3.route_candidate_tool_call(
+                config=config_obj,
+                sample=sample,
+                turn_index=0,
+                active_tools=tools,
+                history=({"role": "user", "content": "Call foo with x=1."},),
+            )
+
+        self.assertEqual(json.loads(route.completion), {"arguments": {"x": 1}, "name": "foo"})
+        self.assertEqual(route.trace["mode"], "parallel")
+        self.assertEqual(len(route.trace["chunks"]), 2)
+        self.assertEqual(route.trace["selected"]["name"], "foo")
+
+    def test_bfcl_v3_candidate_parser_uses_first_json_value(self) -> None:
+        candidate = bfcl_v3._parse_candidate(
+            '[{"name":"foo","arguments":{"x":1},"confidence":0.7}]'
+            '\nUser: accidental continuation'
+        )
+
+        self.assertEqual(candidate.name, "foo")
+        self.assertEqual(candidate.arguments, {"x": 1})
+        self.assertEqual(candidate.confidence, 0.7)
+
     def test_run_catalog_toolalpaca_dry_run_uses_runner(self) -> None:
         args = Namespace(
             dry_run=True,
