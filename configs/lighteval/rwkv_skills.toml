@@ -309,18 +309,18 @@ adapter = "tau"
 
 [benchmarks.tau_bench_airline]
 field = "function_calling"
-status = "needs_adapter"
-reason = "TAU Bench requires an interactive environment adapter."
+status = "adapter"
+adapter = "tau"
 
 [benchmarks.tau_bench_retail]
 field = "function_calling"
-status = "needs_adapter"
-reason = "TAU Bench requires an interactive environment adapter."
+status = "adapter"
+adapter = "tau"
 
 [benchmarks.tau_bench_telecom]
 field = "function_calling"
 status = "needs_adapter"
-reason = "TAU Bench requires an interactive environment adapter."
+reason = "The official tau-bench v1 runtime only ships airline and retail; telecom is available through tau2/tau3."
 
 [benchmarks.toolalpaca_eval_real]
 field = "function_calling"

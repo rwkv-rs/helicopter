@@ -50,6 +50,8 @@ _FENCED_BLOCK_RE = re.compile(r"```(?:diff|patch)?\s*(.*?)```", re.IGNORECASE | 
 _JSON_FENCED_BLOCK_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
 
 TAU_ADAPTER_BENCHMARKS: dict[str, dict[str, str]] = {
+    "tau_bench_airline": {"domain": "airline", "version": "tau_v1"},
+    "tau_bench_retail": {"domain": "retail", "version": "tau_v1"},
     "tau2_bench_airline": {"domain": "airline", "version": "tau_v2"},
     "tau2_bench_retail": {"domain": "retail", "version": "tau_v2"},
     "tau2_bench_telecom": {"domain": "telecom", "version": "tau_v2"},
@@ -68,6 +70,13 @@ TAU3_LIGHT_MOCK_TASK_IDS = frozenset(
         "impossible_task_1",
     }
 )
+
+
+def _repo_root() -> Path:
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "pyproject.toml").is_file():
+            return parent
+    return Path.cwd()
 
 
 @dataclass(frozen=True)
@@ -372,8 +381,6 @@ def load_adapter_env_file(path: str | None = None) -> str | None:
         path,
         os.environ.get("HELICOPTER_ENV_FILE"),
         ".env",
-        str(Path.home() / "GitHub/rwkv-skills/.env"),
-        str(Path.home() / "rwkv-skills/.env"),
     ]
     loaded_paths: list[str] = []
     for candidate in candidates:
@@ -521,6 +528,7 @@ def _tau_timeout_args() -> dict[str, float]:
 
 
 def _resolve_tau_bench_root(raw_root: str | None = None) -> Path:
+    repo_root = _repo_root()
     candidates = [
         raw_root,
         os.environ.get("HELICOPTER_TAU2_BENCH_ROOT"),
@@ -528,7 +536,7 @@ def _resolve_tau_bench_root(raw_root: str | None = None) -> Path:
         os.environ.get("TAU3_BENCH_ROOT"),
         os.environ.get("RWKV_TAU2_BENCH_ROOT"),
         os.environ.get("TAU2_BENCH_ROOT"),
-        str(Path.home() / "GitHub/rwkv-skills/references/tau2-bench"),
+        str(repo_root / "references/tau2-bench"),
         "/tmp/tau2-bench",
     ]
     for candidate in candidates:
@@ -555,6 +563,38 @@ def _ensure_tau2_runtime_path(raw_root: str | None = None, raw_data_root: str | 
     if str(src_root) not in sys.path:
         sys.path.insert(0, str(src_root))
     os.environ.setdefault("TAU2_DATA_DIR", str(data_root))
+    return root
+
+
+def _resolve_tau_v1_root(raw_root: str | None = None) -> Path:
+    repo_root = _repo_root()
+    candidates = [
+        raw_root,
+        os.environ.get("HELICOPTER_TAU_V1_ROOT"),
+        os.environ.get("RWKV_TAU_V1_ROOT"),
+        os.environ.get("TAU_V1_ROOT"),
+        str(repo_root / "references/tau-bench"),
+        str(repo_root / "references/tau_v1"),
+        "/tmp/tau-bench",
+        "/tmp/tau_v1",
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        root = Path(str(candidate)).expanduser().resolve()
+        if (root / "tau_bench" / "envs").is_dir():
+            return root
+    checked = ", ".join(str(item) for item in candidates if item)
+    raise FileNotFoundError(
+        "tau-bench v1 runtime not found; set HELICOPTER_TAU_V1_ROOT. "
+        f"Checked: {checked}"
+    )
+
+
+def _ensure_tau_v1_runtime_path(raw_root: str | None = None) -> Path:
+    root = _resolve_tau_v1_root(raw_root)
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
     return root
 
 
@@ -786,6 +826,47 @@ def _normalize_official_tau_task_row(task: Any, *, domain: str, version: str, in
     }
 
 
+def _tau_v1_task_source(domain: str, split: str) -> tuple[str, str]:
+    domain = str(domain).strip().lower()
+    split = str(split or "test").strip().lower()
+    if domain == "airline":
+        mapping = {"test": ("tau_bench.envs.airline.tasks_test", "TASKS")}
+    elif domain == "retail":
+        mapping = {
+            "test": ("tau_bench.envs.retail.tasks_test", "TASKS_TEST"),
+            "train": ("tau_bench.envs.retail.tasks_train", "TASKS_TRAIN"),
+            "dev": ("tau_bench.envs.retail.tasks_dev", "TASKS_DEV"),
+        }
+    else:
+        raise ValueError(f"unsupported tau-bench v1 domain: {domain}")
+    try:
+        return mapping[split]
+    except KeyError as exc:
+        valid = ", ".join(sorted(mapping))
+        raise ValueError(f"tau-bench v1 domain={domain} does not support split={split}; valid: {valid}") from exc
+
+
+def _load_tau_v1_rows(*, benchmark_name: str, domain: str, split: str, root: Path) -> list[dict[str, Any]]:
+    del benchmark_name, root
+    module_name, attr_name = _tau_v1_task_source(domain, split)
+    module = __import__(module_name, fromlist=[attr_name])
+    raw_tasks = getattr(module, attr_name)
+    rows: list[dict[str, Any]] = []
+    for index, task in enumerate(raw_tasks):
+        payload = _dump_model(task)
+        rows.append(
+            {
+                "task_id": str(index),
+                "domain": domain,
+                "index": index,
+                "instruction": str(getattr(task, "instruction", "") or payload.get("instruction") or ""),
+                "task": payload,
+                "benchmark_version": "tau_v1",
+            }
+        )
+    return rows
+
+
 def load_tau_adapter_records(
     benchmark_name: str,
     entry: Mapping[str, Any],
@@ -796,13 +877,17 @@ def load_tau_adapter_records(
 ) -> list[TauAdapterRecord]:
     if benchmark_name not in TAU_ADAPTER_BENCHMARKS:
         raise ValueError(f"unsupported tau adapter benchmark: {benchmark_name}")
-    root = _ensure_tau2_runtime_path(tau_bench_root, tau_data_root)
     adapter_spec = TAU_ADAPTER_BENCHMARKS[benchmark_name]
     domain = str(entry.get("tau_domain") or adapter_spec["domain"])
     version = str(entry.get("tau_version") or adapter_spec["version"])
-    if benchmark_name == "tau3_bench_mock_long_context":
+    if version == "tau_v1":
+        root = _ensure_tau_v1_runtime_path(tau_bench_root)
+        rows = _load_tau_v1_rows(benchmark_name=benchmark_name, domain=domain, split=split, root=root)
+    elif benchmark_name == "tau3_bench_mock_long_context":
+        root = _ensure_tau2_runtime_path(tau_bench_root, tau_data_root)
         rows = _tau3_mock_long_context_rows()
     else:
+        root = _ensure_tau2_runtime_path(tau_bench_root, tau_data_root)
         registry_module = __import__("tau2.registry", fromlist=["registry"])
         registry = getattr(registry_module, "registry")
         get_tasks = registry.get_tasks_loader(domain)
@@ -832,7 +917,7 @@ def load_tau_adapter_records(
                 metadata={
                     "benchmark_name": benchmark_name,
                     "tau_bench_root": str(root),
-                    "source": "tau2-bench",
+                    "source": "tau-bench-v1" if version == "tau_v1" else "tau2-bench",
                 },
             )
         )
@@ -986,6 +1071,10 @@ def parse_tau_agent_decision(text: str) -> tuple[str, dict[str, Any]]:
         raise ValueError("tau decision must be a JSON object")
     name = str(payload.get("name") or payload.get("tool_name") or payload.get("function") or "").strip()
     arguments = payload.get("arguments")
+    payload_type = str(payload.get("type") or "").strip().lower()
+    if not name and payload_type in {"message", "response", "final_answer", "answer"}:
+        name = "respond"
+        arguments = {"content": str(payload.get("content") or payload.get("answer") or payload.get("message") or "")}
     if not isinstance(arguments, Mapping):
         arguments = payload.get("parameters")
     if not isinstance(arguments, Mapping):
@@ -1235,6 +1324,128 @@ def _task_uses_nl_assertions(task: Any) -> bool:
     return bool(assertions)
 
 
+def _tau_v1_user_provider(model_config: TauExternalModelConfig) -> str:
+    base_url = _normalize_openai_base_url(model_config.base_url) or ""
+    if "api.deepseek.com" in base_url:
+        return "deepseek"
+    return "openai"
+
+
+def _apply_tau_v1_user_env(model_config: TauExternalModelConfig) -> None:
+    os.environ["OPENAI_API_KEY"] = model_config.api_key
+    if model_config.base_url:
+        os.environ["OPENAI_BASE_URL"] = model_config.base_url
+        os.environ["OPENAI_API_BASE"] = model_config.base_url
+
+
+def _tau_v1_tool_schema(tool_info: Mapping[str, Any]) -> dict[str, Any]:
+    function = tool_info.get("function")
+    if not isinstance(function, Mapping):
+        return {
+            "name": str(tool_info.get("name") or "unknown_tool"),
+            "description": str(tool_info.get("description") or ""),
+            "arguments": {},
+            "required": [],
+        }
+    parameters = function.get("parameters")
+    properties = parameters.get("properties") if isinstance(parameters, Mapping) else {}
+    return {
+        "name": str(function.get("name") or "unknown_tool"),
+        "description": str(function.get("description") or ""),
+        "arguments": dict(properties) if isinstance(properties, Mapping) else {},
+        "required": list(parameters.get("required") or []) if isinstance(parameters, Mapping) else [],
+    }
+
+
+def _render_tau_v1_prompt_messages(messages: Sequence[Mapping[str, Any]]) -> str:
+    parts: list[str] = []
+    for message in messages:
+        role = str(message.get("role") or "").strip().lower()
+        if role == "user":
+            content = str(message.get("content") or "").strip()
+            if content:
+                parts.append(f"User: {content}")
+        elif role == "assistant":
+            tool_calls = message.get("tool_calls")
+            if isinstance(tool_calls, Sequence) and not isinstance(tool_calls, (str, bytes)) and tool_calls:
+                rendered_calls: list[dict[str, Any]] = []
+                for call in tool_calls:
+                    if not isinstance(call, Mapping):
+                        continue
+                    function = call.get("function")
+                    if not isinstance(function, Mapping):
+                        continue
+                    raw_arguments = function.get("arguments")
+                    try:
+                        arguments = json.loads(str(raw_arguments or "{}"))
+                    except json.JSONDecodeError:
+                        arguments = {}
+                    rendered_calls.append(
+                        {
+                            "name": str(function.get("name") or ""),
+                            "arguments": arguments,
+                        }
+                    )
+                if rendered_calls:
+                    parts.append("Assistant: " + json.dumps(rendered_calls[-1], ensure_ascii=False, separators=(",", ":")))
+                    continue
+            content = str(message.get("content") or "").strip()
+            if content:
+                parts.append(f"Assistant: {content}")
+        elif role == "tool":
+            payload = {
+                "name": str(message.get("name") or "unknown_tool"),
+                "content": str(message.get("content") or ""),
+            }
+            parts.append("Tool: " + json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+    return "\n\n".join(parts) if parts else "User: Hi! How can I help you today?"
+
+
+def build_tau_v1_agent_prompt(
+    *,
+    domain_policy: str,
+    tools_info: Sequence[Mapping[str, Any]],
+    messages: Sequence[Mapping[str, Any]],
+    history_max_chars: int,
+    prompt_max_chars: int,
+) -> str:
+    tool_schemas = [_tau_v1_tool_schema(tool) for tool in tools_info]
+    tool_schemas.append(
+        {
+            "name": "respond",
+            "description": "Send a natural-language message to the user. Include ###STOP### when the task is complete.",
+            "arguments": {"content": {"type": "string"}},
+            "required": ["content"],
+        }
+    )
+    system = "\n".join(
+        [
+            "You are a tau-bench customer-service agent.",
+            "Return exactly one JSON object and no prose.",
+            'For tool calls use {"name":"tool_name","arguments":{...}}.',
+            'For user messages use {"type":"message","content":"..."} or {"name":"respond","arguments":{"content":"..."}}.',
+            "Use only exact listed tool names. Do not invent IDs; ask the user or inspect tools first.",
+            "",
+            "Tools:",
+            json.dumps(tool_schemas, ensure_ascii=False, indent=2, sort_keys=True),
+            "",
+            "Domain policy:",
+            str(domain_policy or "").strip(),
+        ]
+    )
+    history = _render_tau_v1_prompt_messages(messages)
+    if history_max_chars > 0 and len(history) > history_max_chars:
+        history = "[earlier history truncated]\n" + history[-history_max_chars:].lstrip()
+    prompt = "\n\n".join([f"System: {system}", history, "Assistant: ```json\n{"]).strip()
+    if prompt_max_chars > 0 and len(prompt) > prompt_max_chars:
+        overflow = len(prompt) - prompt_max_chars
+        shorter_history = history[max(0, overflow + 512):].lstrip()
+        if shorter_history:
+            shorter_history = "[earlier history truncated]\n" + shorter_history
+        prompt = "\n\n".join([f"System: {system}", shorter_history, "Assistant: ```json\n{"]).strip()
+    return prompt
+
+
 def _normalize_tau_task_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     normalized = dict(payload)
     criteria = normalized.get("evaluation_criteria")
@@ -1262,6 +1473,210 @@ def _tau_task_needs_initial_user(task_payload: Mapping[str, Any]) -> bool:
     return str(getattr(last, "role", "") or "").strip().lower() != "user"
 
 
+def run_tau_v1_adapter(
+    name: str,
+    records: Sequence[TauAdapterRecord],
+    *,
+    selected: Sequence[tuple[int, TauAdapterRecord]],
+    args: argparse.Namespace,
+    run_root: Path,
+    split: str,
+    env_file_loaded: str | None,
+    user_model: TauExternalModelConfig,
+) -> dict[str, Any]:
+    _ensure_tau_v1_runtime_path(args.tau_bench_root)
+    _apply_tau_v1_user_env(user_model)
+    envs_module = __import__("tau_bench.envs", fromlist=["get_env"])
+    get_env = getattr(envs_module, "get_env")
+    types_module = __import__("tau_bench.types", fromlist=["Action", "RESPOND_ACTION_NAME"])
+    Action = getattr(types_module, "Action")
+    respond_action_name = str(getattr(types_module, "RESPOND_ACTION_NAME"))
+
+    benchmark_dir = run_root / name
+    benchmark_dir.mkdir(parents=True, exist_ok=True)
+    completions: list[dict[str, Any]] = []
+    eval_rows: list[dict[str, Any]] = []
+    for ordinal, (dataset_index, record) in enumerate(selected):
+        started = time.monotonic()
+        stages: list[dict[str, Any]] = []
+        messages: list[dict[str, Any]] = []
+        trace: list[dict[str, Any]] = []
+        reward = 0.0
+        is_passed = False
+        runtime_error = ""
+        termination_reason = ""
+        parse_errors: list[str] = []
+        details: dict[str, Any] = {}
+        try:
+            env = get_env(
+                record.domain,
+                user_strategy="llm",
+                user_model=_tau_litellm_model_name(user_model),
+                user_provider=_tau_v1_user_provider(user_model),
+                task_split=split,
+                task_index=record.index,
+            )
+            reset = env.reset(task_index=record.index)
+            info = _dump_model(getattr(reset, "info", {}))
+            messages = [
+                {"role": "system", "content": str(getattr(env, "wiki", "") or "")},
+                {"role": "user", "content": str(getattr(reset, "observation", "") or "")},
+            ]
+            for step_index in range(max(1, int(args.tau_max_steps))):
+                prompt = build_tau_v1_agent_prompt(
+                    domain_policy=str(getattr(env, "wiki", "") or ""),
+                    tools_info=list(getattr(env, "tools_info", []) or []),
+                    messages=messages,
+                    history_max_chars=args.tau_history_max_chars,
+                    prompt_max_chars=args.tau_prompt_max_chars,
+                )
+                completion, finish_reason = call_chat_completion(
+                    base_url=args.base_url,
+                    api_key=args.api_key,
+                    model=args.model_name,
+                    prompt=prompt,
+                    max_tokens=args.max_tokens,
+                    temperature=args.temperature,
+                    timeout_s=args.timeout_s,
+                )
+                parsed_name = ""
+                parse_error = ""
+                try:
+                    parsed_name, arguments = parse_tau_agent_decision(completion)
+                except Exception as exc:  # noqa: BLE001
+                    arguments = {"content": "I cannot continue safely. ###STOP###"}
+                    parsed_name = "respond"
+                    parse_error = str(exc)
+                    parse_errors.append(parse_error)
+                stages.append(
+                    {
+                        "prompt": prompt,
+                        "completion": completion,
+                        "finish_reason": finish_reason,
+                        "parsed_name": parsed_name,
+                        "parse_error": parse_error,
+                        "step": step_index,
+                    }
+                )
+                if parsed_name == "respond":
+                    content = str(arguments.get("content") or "").strip()
+                    step = env.step(Action(name=respond_action_name, kwargs={"content": content}))
+                    messages.append({"role": "assistant", "content": content})
+                    messages.append({"role": "user", "content": str(getattr(step, "observation", "") or "")})
+                else:
+                    step = env.step(Action(name=parsed_name, kwargs=dict(arguments)))
+                    call_id = f"call_{uuid.uuid4().hex[:12]}"
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": call_id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": parsed_name,
+                                        "arguments": json.dumps(dict(arguments), ensure_ascii=False),
+                                    },
+                                }
+                            ],
+                        }
+                    )
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "name": parsed_name,
+                            "content": str(getattr(step, "observation", "") or ""),
+                        }
+                    )
+                reward = float(getattr(step, "reward", 0.0) or 0.0)
+                info = _dump_model(getattr(step, "info", {}))
+                details = info
+                if bool(getattr(step, "done", False)):
+                    termination_reason = "done"
+                    break
+                if parse_error and len(parse_errors) >= max(1, int(args.tau_max_errors)):
+                    termination_reason = "parse_errors"
+                    break
+            else:
+                termination_reason = "max_steps"
+            is_passed = reward >= 1.0 - 1e-6
+            trace = list(messages)
+        except Exception as exc:  # noqa: BLE001
+            reward = 0.0
+            is_passed = False
+            runtime_error = f"{type(exc).__name__}: {exc}"
+            termination_reason = "runtime_error"
+            details = {"runtime_error": runtime_error}
+            trace = list(messages)
+        latency_s = time.monotonic() - started
+        row = {
+            "benchmark_name": name,
+            "dataset_split": split,
+            "sample_index": ordinal,
+            "dataset_index": dataset_index,
+            "task_id": record.task_id,
+            "domain": record.domain,
+            "benchmark_version": record.benchmark_version,
+            "instruction": record.instruction,
+            "model_name": args.model_name,
+            "latency_s": latency_s,
+            "reward": reward,
+            "is_passed": is_passed,
+            "termination_reason": termination_reason,
+            "runtime_error": runtime_error,
+            "parse_errors": parse_errors,
+            "stages": stages,
+            "agent_trace": trace,
+            "details": details,
+            "metadata": record.metadata,
+        }
+        completions.append(row)
+        eval_rows.append(
+            {
+                "task_id": record.task_id,
+                "sample_index": ordinal,
+                "is_passed": is_passed,
+                "reward": reward,
+                "fail_reason": runtime_error or ("passed" if is_passed else termination_reason),
+            }
+        )
+        print(
+            f"{name}: generated {ordinal + 1}/{len(selected)} task={record.task_id} "
+            f"reward={reward:.3f} passed={is_passed}"
+        )
+
+    completions_path = benchmark_dir / "completions.jsonl"
+    eval_path = benchmark_dir / "eval.jsonl"
+    write_jsonl(completions_path, completions)
+    write_jsonl(eval_path, eval_rows)
+    passed = sum(1 for item in eval_rows if item["is_passed"])
+    parse_error_count = sum(1 for item in completions if item["parse_errors"])
+    metrics = {
+        "adapter": "tau",
+        "benchmark": name,
+        "samples": len(selected),
+        "source_rows": len(records),
+        "passed": passed,
+        "success_rate": (passed / len(eval_rows)) if eval_rows else 0.0,
+        "avg_reward": (sum(float(item["reward"]) for item in eval_rows) / len(eval_rows)) if eval_rows else 0.0,
+        "parse_error_count": parse_error_count,
+        "parse_error_rate": (parse_error_count / len(eval_rows)) if eval_rows else 0.0,
+        "split": split,
+        "env_file_loaded": env_file_loaded,
+        "external_user_model": user_model.model_name,
+        "external_judge_model": None,
+        "completions_path": str(completions_path),
+        "eval_path": str(eval_path),
+    }
+    (benchmark_dir / "metrics.json").write_text(
+        json.dumps(metrics, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return metrics
+
+
 def run_tau_adapter(name: str, entry: Mapping[str, Any], args: argparse.Namespace, run_root: Path) -> dict[str, Any]:
     env_file_loaded = load_adapter_env_file(getattr(args, "env_file", None))
     split = str(getattr(args, "split", None) or entry.get("split") or "base")
@@ -1280,6 +1695,19 @@ def run_tau_adapter(name: str, entry: Mapping[str, Any], args: argparse.Namespac
         user_model = resolve_tau_user_model_config(args)
         judge_model = resolve_tau_judge_model_config(args, default_model=user_model)
         configure_tau_judge(judge_model)
+    if selected and all(str(record.benchmark_version) == "tau_v1" for _index, record in selected):
+        if user_model is None:
+            user_model = resolve_tau_user_model_config(args)
+        return run_tau_v1_adapter(
+            name,
+            records,
+            selected=selected,
+            args=args,
+            run_root=run_root,
+            split=split,
+            env_file_loaded=env_file_loaded,
+            user_model=user_model,
+        )
     benchmark_dir = run_root / name
     benchmark_dir.mkdir(parents=True, exist_ok=True)
 

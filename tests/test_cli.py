@@ -499,6 +499,8 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(suite["benchmarks"]["tau3_bench_mock_long_context"]["status"], "adapter")
         self.assertEqual(suite["benchmarks"]["tau3_bench_mock_long_context"]["adapter"], "tau")
         for benchmark in (
+            "tau_bench_airline",
+            "tau_bench_retail",
             "tau2_bench_airline",
             "tau2_bench_retail",
             "tau2_bench_telecom",
@@ -509,6 +511,8 @@ class CommandPlanTests(unittest.TestCase):
         ):
             self.assertEqual(suite["benchmarks"][benchmark]["status"], "adapter")
             self.assertEqual(suite["benchmarks"][benchmark]["adapter"], "tau")
+        self.assertEqual(suite["benchmarks"]["tau_bench_telecom"]["status"], "needs_adapter")
+        self.assertIn("official tau-bench v1", suite["benchmarks"]["tau_bench_telecom"]["reason"])
         self.assertEqual(suite["benchmarks"]["longcodeqa"]["lighteval_tasks"], ["rwkv_skills:longcodeqa"])
         self.assertEqual(suite["benchmarks"]["apibank_l1"]["lighteval_tasks"], ["rwkv_skills:apibank_l1"])
         self.assertEqual(suite["benchmarks"]["apibank_l2"]["lighteval_tasks"], ["rwkv_skills:apibank_l2"])
@@ -761,6 +765,18 @@ class CommandPlanTests(unittest.TestCase):
                 self.assertEqual(os.environ["USER_MODEL_NAME"], "user-model")
                 self.assertEqual(os.environ["JUDGE_MODEL"], "judge-model")
 
+    def test_adapter_env_file_does_not_load_rwkv_skills_dotenv_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(directory)
+                with mock.patch.dict(os.environ, {}, clear=True):
+                    loaded = benchmark_adapters.load_adapter_env_file()
+                    self.assertIsNone(loaded)
+                    self.assertNotIn("USER_MODEL_NAME", os.environ)
+            finally:
+                os.chdir(old_cwd)
+
     def test_swebench_adapter_loads_local_rows_and_extracts_patches(self) -> None:
         from helicopter_cli import benchmark_adapters
 
@@ -818,6 +834,21 @@ class CommandPlanTests(unittest.TestCase):
         )
         self.assertEqual(name, "respond")
         self.assertEqual(arguments["content"], "###STOP###")
+
+        name, arguments = benchmark_adapters.parse_tau_agent_decision(
+            '{"type":"message","content":"I need your booking reference."}'
+        )
+        self.assertEqual(name, "respond")
+        self.assertEqual(arguments["content"], "I need your booking reference.")
+
+        self.assertEqual(
+            benchmark_adapters._tau_v1_task_source("airline", "test"),
+            ("tau_bench.envs.airline.tasks_test", "TASKS"),
+        )
+        self.assertEqual(
+            benchmark_adapters._tau_v1_task_source("retail", "dev"),
+            ("tau_bench.envs.retail.tasks_dev", "TASKS_DEV"),
+        )
 
         rows = benchmark_adapters._tau3_mock_long_context_rows()
         self.assertEqual([row["task_id"] for row in rows], ["mock_long_context_create_task", "mock_long_context_update_task"])
