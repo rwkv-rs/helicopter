@@ -39,9 +39,11 @@ configs/local/
 /logs/
 /runs/
 /outputs/
+/results/
 /checkpoints/
 /wandb/
 /tensorboard/
+.litellm_cache/
 
 /weights/
 /models/
