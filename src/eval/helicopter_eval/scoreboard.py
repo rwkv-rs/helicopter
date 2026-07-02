@@ -15,6 +15,7 @@ class ScoreboardEvalResult:
     reference_answer: str
     is_passed: bool
     fail_reason: str
+    metadata: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +74,7 @@ async def write_scoreboard_results(
                     "completion1": result.completion,
                     "stop_reason1": "stop",
                     "sampling_config": config.completion_sampling_config,
+                    "metadata": result.metadata or {},
                 }
                 for result in results
             ],

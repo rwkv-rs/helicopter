@@ -596,6 +596,28 @@ class CommandPlanTests(unittest.TestCase):
             },
         )
 
+    def test_free_response_random_sampling_is_deterministic_and_traceable(self) -> None:
+        run_config = free_response.FreeResponseRunConfig(
+            base_url="http://127.0.0.1:29082",
+            model="rwkv7-g1d-0.4b-20260210-ctx8192",
+            benchmark="toy_math",
+            dataset_name="org/toy_math",
+            question_field="question",
+            answer_field="answer",
+            answer_marker=None,
+            sample_size=3,
+            sample_seed=7,
+        )
+        rows = [{"id": f"row-{index}", "question": f"q{index}", "answer": str(index)} for index in range(10)]
+
+        with mock.patch.object(free_response, "_iter_rows", return_value=iter(rows)):
+            samples = free_response.load_samples(run_config)
+
+        self.assertEqual([sample.sample_index for sample in samples], [0, 1, 2])
+        self.assertEqual([sample.metadata["original_sample_index"] for sample in samples], [2, 5, 6])
+        self.assertEqual([sample.metadata["source_id"] for sample in samples], ["row-2", "row-5", "row-6"])
+        self.assertEqual(free_response.scoreboard_dataset_name(run_config), "toy_math_test_sample3_seed7")
+
     def test_polymath_uses_fixed_language_and_split_inventory(self) -> None:
         self.assertEqual(len(free_response._POLYMATH_CONFIG_NAMES), 18)
         self.assertEqual(free_response._POLYMATH_CONFIG_NAMES[0], "ar")

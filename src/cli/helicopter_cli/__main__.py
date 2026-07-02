@@ -193,6 +193,8 @@ def handle_eval_run_catalog(args: argparse.Namespace, *, root: Any, **_: Any) ->
         "base_url": str(args.base_url or defaults.base_url),
         "model": str(args.model or defaults.model_name),
         "limit": args.limit,
+        "sample_size": getattr(args, "sample_size", None),
+        "sample_seed": int(getattr(args, "sample_seed", 42)),
         "agentbench_controller_url": getattr(args, "agentbench_controller_url", None),
         "mcp_runtime_root": getattr(args, "mcp_runtime_root", None),
         "mcp_worker_script": getattr(args, "mcp_worker_script", None),
@@ -240,6 +242,8 @@ def handle_eval_run_free_response(args: argparse.Namespace, *, root: Any, **_: A
         question_field=str(args.question_field),
         answer_field=str(args.answer_field),
         limit=args.limit,
+        sample_size=getattr(args, "sample_size", None),
+        sample_seed=int(getattr(args, "sample_seed", 42)),
         split=str(args.split),
         temperature=float(args.temperature),
         top_p=float(args.top_p),
@@ -365,6 +369,8 @@ def build_parser() -> argparse.ArgumentParser:
     eval_run_catalog.add_argument("--base-url", help="OpenAI-compatible vLLM base URL")
     eval_run_catalog.add_argument("--model", help="served model name")
     eval_run_catalog.add_argument("--limit", type=int)
+    eval_run_catalog.add_argument("--sample-size", type=int, help="randomly sample N free-response rows")
+    eval_run_catalog.add_argument("--sample-seed", type=int, default=42, help="seed for --sample-size")
     eval_run_catalog.add_argument("--agentbench-controller-url", help="AgentBench controller API URL")
     eval_run_catalog.add_argument("--mcp-runtime-root", help="MCP-Bench official runtime root")
     eval_run_catalog.add_argument("--mcp-worker-script", help="MCP-Bench worker script path")
@@ -405,6 +411,8 @@ def build_parser() -> argparse.ArgumentParser:
     eval_run_free_response.add_argument("--base-url", help="OpenAI-compatible vLLM base URL")
     eval_run_free_response.add_argument("--model", help="served model name")
     eval_run_free_response.add_argument("--limit", type=int)
+    eval_run_free_response.add_argument("--sample-size", type=int, help="randomly sample N rows")
+    eval_run_free_response.add_argument("--sample-seed", type=int, default=42, help="seed for --sample-size")
     eval_run_free_response.add_argument("--split", default="test")
     eval_run_free_response.add_argument("--temperature", type=float, default=0.0)
     eval_run_free_response.add_argument("--top-p", type=float, default=1.0)

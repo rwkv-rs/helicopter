@@ -8,6 +8,7 @@ from importlib import resources
 import io
 import json
 from pathlib import Path
+import random
 import re
 from typing import Any, Mapping, Sequence
 import urllib.request
@@ -46,6 +47,7 @@ class FreeResponseSample:
     sample_index: int
     question: str
     reference_answer: str
+    metadata: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +60,7 @@ class FreeResponseResult:
     reference_answer: str
     is_passed: bool
     fail_reason: str
+    metadata: dict[str, Any] | None = None
 
     def to_scoreboard(self) -> ScoreboardEvalResult:
         return ScoreboardEvalResult(
@@ -68,6 +71,7 @@ class FreeResponseResult:
             reference_answer=self.reference_answer,
             is_passed=self.is_passed,
             fail_reason=self.fail_reason,
+            metadata=self.metadata,
         )
 
 
@@ -87,6 +91,8 @@ class FreeResponseRunConfig:
     source_path: str | None = None
     row_adapter: str | None = None
     split: str = "test"
+    sample_size: int | None = None
+    sample_seed: int = 42
     temperature: float = 0.0
     top_p: float = 1.0
     max_tokens: int = 512
@@ -129,6 +135,8 @@ def scoreboard_dataset_name(config: FreeResponseRunConfig) -> str:
     dataset = config.scoreboard_dataset or f"{config.benchmark}_{config.split}"
     if config.limit is not None:
         dataset = f"{dataset}_limit{int(config.limit)}"
+    if config.sample_size is not None:
+        dataset = f"{dataset}_sample{int(config.sample_size)}_seed{int(config.sample_seed)}"
     return dataset
 
 
@@ -528,6 +536,7 @@ def adapt_free_response_row(item: Any, config: FreeResponseRunConfig) -> dict[st
             "expected_answer": str(item.get("answer") or item.get("expected_answer") or ""),
             "language": item.get("_polymath_language"),
             "difficulty": item.get("_polymath_difficulty"),
+            "source_index": item.get("_polymath_index"),
             "source": "polymath",
         }
         for key in ("solution", "explanation", "subject", "topic"):
@@ -539,9 +548,47 @@ def adapt_free_response_row(item: Any, config: FreeResponseRunConfig) -> dict[st
     return dict(item)
 
 
+def _sample_metadata(item: Mapping[str, Any], *, original_sample_index: int, config: FreeResponseRunConfig) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "benchmark": config.benchmark,
+        "dataset_name": config.dataset_name,
+        "split": config.split,
+        "original_sample_index": original_sample_index,
+    }
+    for source_key, target_key in (
+        ("id", "source_id"),
+        ("source", "source"),
+        ("language", "language"),
+        ("difficulty", "difficulty"),
+        ("source_index", "source_index"),
+        ("subject", "subject"),
+        ("topic", "topic"),
+    ):
+        value = item.get(source_key)
+        if value is not None:
+            metadata[target_key] = value
+    return metadata
+
+
+def _renumber_samples(samples: Sequence[FreeResponseSample]) -> list[FreeResponseSample]:
+    return [
+        FreeResponseSample(
+            sample_index=index,
+            question=sample.question,
+            reference_answer=sample.reference_answer,
+            metadata=sample.metadata,
+        )
+        for index, sample in enumerate(samples)
+    ]
+
+
 def load_samples(config: FreeResponseRunConfig) -> list[FreeResponseSample]:
     if config.limit is not None and int(config.limit) < 0:
         raise ValueError("limit must be non-negative")
+    if config.sample_size is not None and int(config.sample_size) < 0:
+        raise ValueError("sample_size must be non-negative")
+    if config.limit is not None and config.sample_size is not None:
+        raise ValueError("limit and sample_size are mutually exclusive")
     limit = None if config.limit is None else int(config.limit)
     samples: list[FreeResponseSample] = []
     for raw_item in _iter_rows(config):
@@ -550,6 +597,7 @@ def load_samples(config: FreeResponseRunConfig) -> list[FreeResponseSample]:
         item = adapt_free_response_row(raw_item, config)
         if item is None:
             continue
+        original_sample_index = len(samples)
         question = str(item[config.question_field])
         reference = extract_marked_answer(str(item[config.answer_field]), config.answer_marker)
         if config.reference_answer_overrides and question in config.reference_answer_overrides:
@@ -559,8 +607,13 @@ def load_samples(config: FreeResponseRunConfig) -> list[FreeResponseSample]:
                 sample_index=len(samples),
                 question=question,
                 reference_answer=reference,
+                metadata=_sample_metadata(item, original_sample_index=original_sample_index, config=config),
             )
         )
+    if config.sample_size is not None and int(config.sample_size) < len(samples):
+        rng = random.Random(int(config.sample_seed))
+        samples = sorted(rng.sample(samples, int(config.sample_size)), key=lambda item: item.sample_index)
+        samples = _renumber_samples(samples)
     return samples
 
 
@@ -586,6 +639,7 @@ def generate_completion(sample: FreeResponseSample, config: FreeResponseRunConfi
         reference_answer=sample.reference_answer,
         is_passed=is_passed,
         fail_reason="" if is_passed else f"expected {sample.reference_answer}, got {answer}",
+        metadata=sample.metadata,
     )
 
 
@@ -631,7 +685,7 @@ def run_free_response(config: FreeResponseRunConfig, *, repo_root: Path) -> dict
 
 
 def dry_run_summary(config: FreeResponseRunConfig) -> dict[str, Any]:
-    return {
+    payload = {
         "benchmark": config.benchmark,
         "hf_dataset": config.dataset_name,
         "hf_config": config.dataset_config,
@@ -643,3 +697,7 @@ def dry_run_summary(config: FreeResponseRunConfig) -> dict[str, Any]:
         "job_name": config.job_name,
         "job_id": job_id(config),
     }
+    if config.sample_size is not None:
+        payload["sample_size"] = config.sample_size
+        payload["sample_seed"] = config.sample_seed
+    return payload
