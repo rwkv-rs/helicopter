@@ -643,6 +643,44 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(instruction_following.score_response(sample, "No comma here", config)[:3], (True, 1, 1))
         self.assertEqual(instruction_following.score_response(sample, "No, comma here", config)[:3], (False, 0, 1))
 
+    def test_instruction_following_random_sampling_is_deterministic_and_traceable(self) -> None:
+        run_config = instruction_following.InstructionFollowingRunConfig(
+            base_url="http://127.0.0.1:29082",
+            model="rwkv7-g1d-0.4b-20260210-ctx8192",
+            benchmark="ifeval",
+            dataset_name="google-research/instruction_following_eval",
+            source_url="https://example.invalid/input_data.jsonl",
+            sample_size=3,
+            sample_seed=7,
+        )
+        rows = [
+            {
+                "key": 1000 + index,
+                "prompt": f"q{index}",
+                "instruction_id_list": ["punctuation:no_comma"],
+                "kwargs": [{}],
+            }
+            for index in range(10)
+        ]
+
+        with mock.patch.object(instruction_following, "_iter_url_jsonl", return_value=iter(rows)):
+            samples = instruction_following.load_samples(run_config)
+
+        self.assertEqual([sample.sample_index for sample in samples], [0, 1, 2])
+        self.assertEqual([sample.metadata["original_sample_index"] for sample in samples], [2, 5, 6])
+        self.assertEqual([sample.metadata["source_id"] for sample in samples], ["1002", "1005", "1006"])
+        self.assertEqual(
+            [sample.metadata["instruction_ids"] for sample in samples],
+            [["punctuation:no_comma"], ["punctuation:no_comma"], ["punctuation:no_comma"]],
+        )
+        self.assertEqual(instruction_following.scoreboard_dataset_name(run_config), "ifeval_test_sample3_seed7")
+
+    def test_instruction_following_word_tokenize_falls_back_without_nltk_data(self) -> None:
+        from helicopter_eval.instruction_following_rules import instructions_util
+
+        with mock.patch.object(instructions_util, "_has_sentence_tokenizer_resources", return_value=False):
+            self.assertEqual(instructions_util.word_tokenize("HELLO-world"), ["HELLO", "world"])
+
     def test_catalog_runner_marks_direct_hf_specs(self) -> None:
         catalog = eval_catalog.load_rwkv_skills_catalog()
         specs = {
@@ -881,10 +919,29 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(print_json.call_args.args[0]["sample_size"], 3)
         self.assertEqual(print_json.call_args.args[0]["sample_seed"], 7)
 
-    def test_run_catalog_rejects_sample_size_for_unsupported_kind(self) -> None:
+    def test_run_catalog_ifeval_dry_run_supports_sample_size(self) -> None:
         args = Namespace(
             dry_run=True,
             benchmark="ifeval",
+            base_url=None,
+            model=None,
+            limit=None,
+            sample_size=3,
+            sample_seed=7,
+        )
+
+        with mock.patch.object(cli_main, "print_json") as print_json:
+            rc = cli_main.handle_eval_run_catalog(args, root=ROOT)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(print_json.call_args.args[0]["scoreboard_dataset"], "ifeval_test_sample3_seed7")
+        self.assertEqual(print_json.call_args.args[0]["sample_size"], 3)
+        self.assertEqual(print_json.call_args.args[0]["sample_seed"], 7)
+
+    def test_run_catalog_rejects_sample_size_for_unsupported_kind(self) -> None:
+        args = Namespace(
+            dry_run=True,
+            benchmark="longbench",
             base_url=None,
             model=None,
             limit=None,

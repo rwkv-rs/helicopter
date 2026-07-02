@@ -30,7 +30,9 @@ RunKind = Literal[
 ]
 
 
-_SAMPLE_SIZE_SUPPORTED_KINDS = frozenset({"free_response", "multiple_choice", "code_generation"})
+_SAMPLE_SIZE_SUPPORTED_KINDS = frozenset(
+    {"free_response", "multiple_choice", "code_generation", "instruction_following"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1395,6 +1397,8 @@ def _run_config(
             dataset_name=str(spec.dataset_name),
             source_url=str(spec.source_url),
             limit=limit,
+            sample_size=sample_size,
+            sample_seed=sample_seed,
             split=str(spec.source_split),
             max_tokens=int(spec.max_tokens or 1024),
             strict=spec.strict,

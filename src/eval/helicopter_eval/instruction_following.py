@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 from pathlib import Path
+import random
 import re
 from typing import Any, Iterable, Mapping, Sequence
 import urllib.request
@@ -23,6 +24,7 @@ class InstructionFollowingSample:
     prompt: str
     instruction_ids: tuple[str, ...]
     kwargs_list: tuple[dict[str, Any], ...]
+    metadata: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +38,7 @@ class InstructionFollowingResult:
     fail_reason: str
     instruction_correct: int
     instruction_total: int
+    metadata: dict[str, Any] | None = None
 
     def to_scoreboard(self) -> ScoreboardEvalResult:
         return ScoreboardEvalResult(
@@ -46,6 +49,7 @@ class InstructionFollowingResult:
             reference_answer=self.reference_answer,
             is_passed=self.is_passed,
             fail_reason=self.fail_reason,
+            metadata=self.metadata,
         )
 
 
@@ -57,6 +61,8 @@ class InstructionFollowingRunConfig:
     dataset_name: str
     source_url: str
     limit: int | None = None
+    sample_size: int | None = None
+    sample_seed: int = 42
     split: str = "test"
     temperature: float = 0.0
     top_p: float = 1.0
@@ -79,6 +85,8 @@ def scoreboard_dataset_name(config: InstructionFollowingRunConfig) -> str:
     dataset = config.scoreboard_dataset or f"{config.benchmark}_{config.split}"
     if config.limit is not None:
         dataset = f"{dataset}_limit{int(config.limit)}"
+    if config.sample_size is not None:
+        dataset = f"{dataset}_sample{int(config.sample_size)}_seed{int(config.sample_seed)}"
     return dataset
 
 
@@ -122,9 +130,33 @@ def _as_int_key(value: Any, fallback: int) -> int:
         return fallback
 
 
+def _sample_metadata(
+    raw_item: Mapping[str, Any],
+    *,
+    original_sample_index: int,
+    key: int,
+    instruction_ids: Sequence[str],
+    config: InstructionFollowingRunConfig,
+) -> dict[str, Any]:
+    return {
+        "benchmark": config.benchmark,
+        "dataset_name": config.dataset_name,
+        "split": config.split,
+        "source_url": config.source_url,
+        "original_sample_index": original_sample_index,
+        "source_id": str(raw_item.get("key", key)),
+        "key": key,
+        "instruction_ids": list(instruction_ids),
+    }
+
+
 def load_samples(config: InstructionFollowingRunConfig) -> list[InstructionFollowingSample]:
     if config.limit is not None and int(config.limit) < 0:
         raise ValueError("limit must be non-negative")
+    if config.sample_size is not None and int(config.sample_size) < 0:
+        raise ValueError("sample_size must be non-negative")
+    if config.limit is not None and config.sample_size is not None:
+        raise ValueError("limit and sample_size are mutually exclusive")
     if config.split != "test":
         raise ValueError(f"{config.benchmark} only supports test split")
     limit = None if config.limit is None else int(config.limit)
@@ -141,15 +173,28 @@ def load_samples(config: InstructionFollowingRunConfig) -> list[InstructionFollo
             continue
         if not isinstance(kwargs_list, list) or not all(isinstance(item, dict) for item in kwargs_list):
             continue
+        original_sample_index = len(samples)
+        key = _as_int_key(raw_item.get("key"), len(samples))
         samples.append(
             InstructionFollowingSample(
                 sample_index=len(samples),
-                key=_as_int_key(raw_item.get("key"), len(samples)),
+                key=key,
                 prompt=prompt,
                 instruction_ids=tuple(instruction_ids),
                 kwargs_list=tuple(dict(item) for item in kwargs_list),
+                metadata=_sample_metadata(
+                    raw_item,
+                    original_sample_index=original_sample_index,
+                    key=key,
+                    instruction_ids=instruction_ids,
+                    config=config,
+                ),
             )
         )
+    if config.sample_size is not None and int(config.sample_size) < len(samples):
+        rng = random.Random(int(config.sample_seed))
+        samples = sorted(rng.sample(samples, int(config.sample_size)), key=lambda item: item.sample_index)
+        samples = [replace(sample, sample_index=index) for index, sample in enumerate(samples)]
     return samples
 
 
@@ -241,6 +286,7 @@ def generate_completion(
         fail_reason="" if is_passed else "one or more instruction checks failed",
         instruction_correct=instruction_correct,
         instruction_total=instruction_total,
+        metadata=sample.metadata,
     )
 
 
@@ -308,7 +354,7 @@ def run_instruction_following(config: InstructionFollowingRunConfig, *, repo_roo
 
 
 def dry_run_summary(config: InstructionFollowingRunConfig) -> dict[str, Any]:
-    return {
+    payload = {
         "benchmark": config.benchmark,
         "hf_dataset": config.dataset_name,
         "hf_config": None,
@@ -321,3 +367,7 @@ def dry_run_summary(config: InstructionFollowingRunConfig) -> dict[str, Any]:
         "job_id": job_id(config),
         "strict": config.strict,
     }
+    if config.sample_size is not None:
+        payload["sample_size"] = config.sample_size
+        payload["sample_seed"] = config.sample_seed
+    return payload

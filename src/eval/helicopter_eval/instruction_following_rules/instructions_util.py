@@ -130,30 +130,49 @@ def count_words(text):
   return num_words
 
 
+def word_tokenize(text):
+  """Tokenizes words without failing when optional NLTK data is absent."""
+  if _has_sentence_tokenizer_resources():
+    try:
+      return nltk.word_tokenize(text)
+    except Exception:  # Optional NLTK data may be missing or partially written.
+      pass
+  tokenizer = nltk.tokenize.RegexpTokenizer(r"\w+")
+  return tokenizer.tokenize(text)
+
+
 @functools.lru_cache(maxsize=None)
-def _ensure_nltk_resource(resource_path, download_name):
+def _has_nltk_resource(resource_path):
   try:
     nltk.data.find(resource_path)
-  except LookupError:
-    nltk.download(download_name, quiet=True)
+    return True
+  except Exception:  # Optional NLTK data may be absent or corrupted.
+    return False
 
 
-def _ensure_sentence_tokenizer_resources():
-  _ensure_nltk_resource("tokenizers/punkt_tab", "punkt_tab")
-  _ensure_nltk_resource("tokenizers/punkt", "punkt")
+def _has_sentence_tokenizer_resources():
+  return _has_nltk_resource("tokenizers/punkt_tab") and _has_nltk_resource(
+      "tokenizers/punkt"
+  )
 
 
 @functools.lru_cache(maxsize=None)
 def _get_sentence_tokenizer():
-  _ensure_sentence_tokenizer_resources()
-  return nltk.data.load("nltk:tokenizers/punkt/english.pickle")
+  if not _has_sentence_tokenizer_resources():
+    return None
+  try:
+    return nltk.data.load("nltk:tokenizers/punkt/english.pickle")
+  except Exception:  # Optional NLTK data may be missing or partially written.
+    return None
 
 
 def count_sentences(text):
   """Count the number of sentences."""
   tokenizer = _get_sentence_tokenizer()
-  tokenized_sentences = tokenizer.tokenize(text)
-  return len(tokenized_sentences)
+  if tokenizer is not None:
+    tokenized_sentences = tokenizer.tokenize(text)
+    return len(tokenized_sentences)
+  return len(split_into_sentences(text))
 
 
 def generate_keywords(num_keywords):
