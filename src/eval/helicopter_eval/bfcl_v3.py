@@ -316,7 +316,7 @@ def evaluate_sample(sample: BfclV3Sample, config: BfclV3RunConfig) -> BfclV3Resu
         else:
             history.append({"role": "assistant", "content": "[]"})
 
-    checker = _check_official(sample, decoded_turns)
+    checker = _json_safe(_check_official(sample, decoded_turns))
     parse_errors = [str(item["parse_error"]) for item in completions if item.get("parse_error")]
     valid = bool(checker.get("valid", False)) and not parse_errors
     failure_bits: list[str] = []
@@ -694,6 +694,16 @@ def _decode_bfcl_v3_calls(completion: str) -> list[dict[str, Any]]:
     if text == "[]":
         return []
     return decode_tool_calls(text)
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    return str(value)
 
 
 def _check_official(sample: BfclV3Sample, decoded_turns: list[list[list[str]]]) -> dict[str, Any]:

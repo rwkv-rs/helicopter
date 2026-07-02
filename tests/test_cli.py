@@ -18,6 +18,7 @@ from helicopter_eval import (
     arena_hard,
     bfcl_ast,
     bfcl_exec,
+    bfcl_v3,
     browsecomp_plus,
     browsecomp,
     catalog_runner,
@@ -30,6 +31,7 @@ from helicopter_eval import (
     longcodeqa,
     mcp_bench,
     multiple_choice,
+    openai_client,
     swe_bench,
     tau_bench,
     toolalpaca,
@@ -242,6 +244,61 @@ class ConfigResolutionTests(unittest.TestCase):
 
 
 class CommandPlanTests(unittest.TestCase):
+    def test_openai_client_retries_context_overflow_with_fewer_tokens(self) -> None:
+        calls: list[int] = []
+
+        def fake_post(url: str, payload: dict[str, object], **_: object) -> dict[str, object]:
+            calls.append(int(payload["max_tokens"]))
+            if len(calls) == 1:
+                raise openai_client.InferRequestError(
+                    "infer request failed: HTTP 400: maximum context length exceeded",
+                    status_code=400,
+                    detail="maximum context length exceeded",
+                )
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+        with mock.patch.object(openai_client, "post_json", side_effect=fake_post):
+            text = openai_client.chat_completion(
+                base_url="http://127.0.0.1:29082",
+                model="rwkv7-g1d-0.4b-20260210-ctx8192",
+                prompt="prompt",
+                temperature=0.0,
+                top_p=1.0,
+                max_tokens=1024,
+                timeout_s=1.0,
+            )
+
+        self.assertEqual(text, "ok")
+        self.assertEqual(calls, [1024, 512])
+
+    def test_openai_client_retries_without_response_format_on_server_error(self) -> None:
+        calls: list[bool] = []
+
+        def fake_post(url: str, payload: dict[str, object], **_: object) -> dict[str, object]:
+            calls.append("response_format" in payload)
+            if len(calls) == 1:
+                raise openai_client.InferRequestError(
+                    "infer request failed: HTTP 500: internal server error",
+                    status_code=500,
+                    detail='{"error":{"message":"Internal server error"}}',
+                )
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+        with mock.patch.object(openai_client, "post_json", side_effect=fake_post):
+            text = openai_client.chat_completion(
+                base_url="http://127.0.0.1:29082",
+                model="rwkv7-g1d-0.4b-20260210-ctx8192",
+                prompt="prompt",
+                temperature=0.0,
+                top_p=1.0,
+                max_tokens=16,
+                timeout_s=1.0,
+                response_format={"type": "json_object"},
+            )
+
+        self.assertEqual(text, "ok")
+        self.assertEqual(calls, [True, False])
+
     def test_infer_plan_uses_vllm_rwkv_contract(self) -> None:
         loaded_config = load_example_config()
 
@@ -423,6 +480,24 @@ class CommandPlanTests(unittest.TestCase):
         )
         self.assertGreater(len([row for row in plan if row.status == "ready"]), 0)
         self.assertEqual([row.status for row in plan if row.benchmark == "arena_hard_v2"], ["no_scheduler_job_in_rwkv_skills"])
+
+    def test_catalog_arena_hard_config_preserves_judge_settings(self) -> None:
+        catalog = eval_catalog.load_rwkv_skills_catalog()
+        spec = catalog_runner.resolve_catalog_run_spec(catalog.benchmarks_by_name["arena_hard_v2"])
+
+        config_obj = catalog_runner._run_config(
+            spec,
+            base_url="http://127.0.0.1:29082",
+            model="rwkv7-g1d-0.4b-20260210-ctx8192",
+            limit=1,
+            judge_base_url="http://judge.local/v1",
+            judge_model="judge-model",
+            judge_api_key="secret",
+        )
+
+        self.assertEqual(config_obj.judge_base_url, "http://judge.local/v1")
+        self.assertEqual(config_obj.judge_model, "judge-model")
+        self.assertEqual(config_obj.judge_api_key, "secret")
 
     def test_eval_infer_plan_uses_local_04_vllm_rwkv_defaults(self) -> None:
         loaded_config = load_example_config()
@@ -1497,6 +1572,9 @@ class CommandPlanTests(unittest.TestCase):
             base_url=None,
             model=None,
             limit=2,
+            judge_base_url="http://judge.local/v1",
+            judge_model="judge-model",
+            judge_api_key="secret",
         )
 
         with mock.patch.object(cli_main, "print_json") as print_json:
@@ -1509,6 +1587,7 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(payload["limit"], 2)
         self.assertEqual(payload["scoreboard_dataset"], "browsecomp_test_limit2")
         self.assertEqual(payload["job_name"], "function_browsecomp")
+        self.assertEqual(payload["judge_model"], "judge-model")
 
     def test_browsecomp_final_answer_parser_accepts_function_call(self) -> None:
         self.assertEqual(
@@ -1658,6 +1737,26 @@ class CommandPlanTests(unittest.TestCase):
                 ),
             )[:2],
             (True, ""),
+        )
+
+    def test_bfcl_v3_json_safe_converts_official_objects(self) -> None:
+        class OfficialDirectory:
+            def __str__(self) -> str:
+                return "Directory(/tmp/demo)"
+
+        payload = {
+            "valid": False,
+            "details": {"sandbox": OfficialDirectory()},
+            "items": (OfficialDirectory(), {"ok": True}),
+        }
+
+        self.assertEqual(
+            bfcl_v3._json_safe(payload),
+            {
+                "valid": False,
+                "details": {"sandbox": "Directory(/tmp/demo)"},
+                "items": ["Directory(/tmp/demo)", {"ok": True}],
+            },
         )
 
     def test_run_catalog_toolalpaca_dry_run_uses_runner(self) -> None:
