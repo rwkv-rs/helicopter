@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import ast
 import contextlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 import faulthandler
 import gzip
@@ -15,6 +15,7 @@ import multiprocessing
 import os
 from pathlib import Path
 import platform
+import random
 import re
 import signal
 import tempfile
@@ -100,6 +101,7 @@ class CodeGenerationResult:
     is_passed: bool
     fail_reason: str
     base_passed: bool | None = None
+    metadata: dict[str, Any] | None = None
 
     def to_scoreboard(self) -> ScoreboardEvalResult:
         return ScoreboardEvalResult(
@@ -110,6 +112,7 @@ class CodeGenerationResult:
             reference_answer=self.reference_answer,
             is_passed=self.is_passed,
             fail_reason=self.fail_reason,
+            metadata=self.metadata,
         )
 
 
@@ -120,6 +123,8 @@ class CodeGenerationRunConfig:
     benchmark: str
     dataset_name: str
     limit: int | None = None
+    sample_size: int | None = None
+    sample_seed: int = 42
     source_type: str = "human_eval_url_gzip"
     source_url: str | None = None
     split: str = "test"
@@ -245,6 +250,8 @@ def scoreboard_dataset_name(config: CodeGenerationRunConfig) -> str:
     dataset = config.scoreboard_dataset or f"{config.benchmark}_{config.split}"
     if config.limit is not None:
         dataset = f"{dataset}_limit{int(config.limit)}"
+    if config.sample_size is not None:
+        dataset = f"{dataset}_sample{int(config.sample_size)}_seed{int(config.sample_seed)}"
     return dataset
 
 
@@ -299,7 +306,43 @@ def _configure_evalplus_cache() -> Path:
     return cache_root
 
 
-def _sample_from_payload(index: int, payload: dict[str, Any]) -> CodeGenerationSample:
+def _sample_metadata(
+    payload: dict[str, Any],
+    *,
+    original_sample_index: int,
+    config: CodeGenerationRunConfig,
+) -> dict[str, Any]:
+    metadata = dict(_parse_dict_maybe(payload.get("metadata")) or {})
+    metadata.update(
+        {
+            "benchmark": config.benchmark,
+            "dataset_name": config.dataset_name,
+            "source_type": config.source_type,
+            "split": config.split,
+            "original_sample_index": original_sample_index,
+        }
+    )
+    for source_key, target_key in (
+        ("task_id", "source_id"),
+        ("problem_id", "source_id"),
+        ("id", "source_id"),
+        ("question_id", "source_id"),
+        ("source_dataset", "source"),
+        ("difficulty", "difficulty"),
+        ("release_version", "release_version"),
+    ):
+        value = payload.get(source_key)
+        if value is not None and target_key not in metadata:
+            metadata[target_key] = value
+    return metadata
+
+
+def _sample_from_payload(
+    index: int,
+    payload: dict[str, Any],
+    *,
+    metadata: dict[str, Any] | None = None,
+) -> CodeGenerationSample:
     task_id = payload.get("task_id") or payload.get("problem_id") or payload.get("id")
     prompt = payload.get("prompt") or payload.get("question") or payload.get("instruction") or payload.get("text")
     if task_id is None or prompt is None:
@@ -320,7 +363,7 @@ def _sample_from_payload(index: int, payload: dict[str, Any]) -> CodeGenerationS
         test_list=payload.get("test_list") or payload.get("test_cases") or payload.get("tests") or payload.get("unit_tests"),
         public_test_cases=payload.get("public_test_cases"),
         private_test_cases=payload.get("private_test_cases"),
-        metadata=_parse_dict_maybe(payload.get("metadata")),
+        metadata=metadata if metadata is not None else _parse_dict_maybe(payload.get("metadata")),
         difficulty=str(payload["difficulty"]) if payload.get("difficulty") is not None else None,
         base_input=payload.get("base_input"),
         plus_input=payload.get("plus_input"),
@@ -479,12 +522,28 @@ def _iter_rows(config: CodeGenerationRunConfig):
 def load_samples(config: CodeGenerationRunConfig) -> list[CodeGenerationSample]:
     if config.limit is not None and int(config.limit) < 0:
         raise ValueError("limit must be non-negative")
+    if config.sample_size is not None and int(config.sample_size) < 0:
+        raise ValueError("sample_size must be non-negative")
+    if config.limit is not None and config.sample_size is not None:
+        raise ValueError("limit and sample_size are mutually exclusive")
     limit = None if config.limit is None else int(config.limit)
     samples: list[CodeGenerationSample] = []
     for payload in _iter_rows(config):
         if limit is not None and len(samples) >= limit:
             break
-        samples.append(_sample_from_payload(len(samples), dict(payload)))
+        payload = dict(payload)
+        original_sample_index = len(samples)
+        samples.append(
+            _sample_from_payload(
+                len(samples),
+                payload,
+                metadata=_sample_metadata(payload, original_sample_index=original_sample_index, config=config),
+            )
+        )
+    if config.sample_size is not None and int(config.sample_size) < len(samples):
+        rng = random.Random(int(config.sample_seed))
+        samples = sorted(rng.sample(samples, int(config.sample_size)), key=lambda item: item.sample_index)
+        samples = [replace(sample, sample_index=index) for index, sample in enumerate(samples)]
     return samples
 
 
@@ -1105,6 +1164,7 @@ def generate_completion(
         is_passed=is_passed,
         fail_reason="" if is_passed else detail,
         base_passed=base_passed,
+        metadata=sample.metadata,
     )
 
 
@@ -1163,7 +1223,7 @@ def run_code_generation(config: CodeGenerationRunConfig, *, repo_root: Path) -> 
 
 
 def dry_run_summary(config: CodeGenerationRunConfig) -> dict[str, Any]:
-    return {
+    payload = {
         "benchmark": config.benchmark,
         "dataset_name": config.dataset_name,
         "source_type": config.source_type,
@@ -1175,6 +1235,10 @@ def dry_run_summary(config: CodeGenerationRunConfig) -> dict[str, Any]:
         "job_name": config.job_name,
         "job_id": job_id(config),
     }
+    if config.sample_size is not None:
+        payload["sample_size"] = config.sample_size
+        payload["sample_seed"] = config.sample_seed
+    return payload
 
 
 @contextlib.contextmanager

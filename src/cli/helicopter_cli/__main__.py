@@ -220,11 +220,14 @@ def handle_eval_run_catalog(args: argparse.Namespace, *, root: Any, **_: Any) ->
         "tau_history_max_chars": getattr(args, "tau_history_max_chars", None),
         "tau_prompt_max_chars": getattr(args, "tau_prompt_max_chars", None),
     }
-    payload = (
-        dry_run_catalog_spec(spec, **kwargs)
-        if args.dry_run
-        else run_catalog_spec(spec, repo_root=root, **kwargs)
-    )
+    try:
+        payload = (
+            dry_run_catalog_spec(spec, **kwargs)
+            if args.dry_run
+            else run_catalog_spec(spec, repo_root=root, **kwargs)
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     print_json(payload)
     return 0
 

@@ -838,6 +838,8 @@ class CommandPlanTests(unittest.TestCase):
             base_url=None,
             model=None,
             limit=2,
+            sample_size=None,
+            sample_seed=42,
         )
 
         with mock.patch.object(cli_main, "print_json") as print_json:
@@ -859,6 +861,73 @@ class CommandPlanTests(unittest.TestCase):
                 "job_id": "helicopter-human_eval",
             },
         )
+
+    def test_run_catalog_human_eval_dry_run_supports_sample_size(self) -> None:
+        args = Namespace(
+            dry_run=True,
+            benchmark="human_eval",
+            base_url=None,
+            model=None,
+            limit=None,
+            sample_size=3,
+            sample_seed=7,
+        )
+
+        with mock.patch.object(cli_main, "print_json") as print_json:
+            rc = cli_main.handle_eval_run_catalog(args, root=ROOT)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(print_json.call_args.args[0]["scoreboard_dataset"], "human_eval_test_sample3_seed7")
+        self.assertEqual(print_json.call_args.args[0]["sample_size"], 3)
+        self.assertEqual(print_json.call_args.args[0]["sample_seed"], 7)
+
+    def test_run_catalog_rejects_sample_size_for_unsupported_kind(self) -> None:
+        args = Namespace(
+            dry_run=True,
+            benchmark="ifeval",
+            base_url=None,
+            model=None,
+            limit=None,
+            sample_size=3,
+            sample_seed=7,
+        )
+
+        with self.assertRaisesRegex(SystemExit, "--sample-size is not supported"):
+            cli_main.handle_eval_run_catalog(args, root=ROOT)
+
+    def test_code_generation_random_sampling_is_deterministic_and_traceable(self) -> None:
+        run_config = code_generation.CodeGenerationRunConfig(
+            base_url="http://127.0.0.1:29082",
+            model="rwkv7-g1d-0.4b-20260210-ctx8192",
+            benchmark="human_eval",
+            dataset_name="human_eval",
+            source_type="human_eval_url_gzip",
+            sample_size=3,
+            sample_seed=7,
+        )
+        rows = [
+            {
+                "task_id": f"HumanEval/{index}",
+                "prompt": f"def f{index}():\n    pass",
+                "entry_point": f"f{index}",
+                "canonical_solution": f"def f{index}():\n    return {index}",
+                "test": "def check(candidate):\n    pass",
+                "difficulty": "toy",
+            }
+            for index in range(10)
+        ]
+
+        with mock.patch.object(code_generation, "_iter_rows", return_value=iter(rows)):
+            samples = code_generation.load_samples(run_config)
+
+        self.assertEqual([sample.sample_index for sample in samples], [0, 1, 2])
+        self.assertEqual([sample.metadata["original_sample_index"] for sample in samples], [2, 5, 6])
+        self.assertEqual(
+            [sample.metadata["source_id"] for sample in samples],
+            ["HumanEval/2", "HumanEval/5", "HumanEval/6"],
+        )
+        self.assertEqual([sample.metadata["difficulty"] for sample in samples], ["toy", "toy", "toy"])
+        self.assertEqual(code_generation.scoreboard_dataset_name(run_config), "human_eval_test_sample3_seed7")
 
     def test_code_generation_extracts_last_python_fence(self) -> None:
         text = "<think>draft</think>\n```text\nignore\n```\n```python\ndef add(a, b):\n    return a + b\n```"

@@ -30,6 +30,9 @@ RunKind = Literal[
 ]
 
 
+_SAMPLE_SIZE_SUPPORTED_KINDS = frozenset({"free_response", "multiple_choice", "code_generation"})
+
+
 @dataclass(frozen=True, slots=True)
 class CatalogRunSpec:
     benchmark: str
@@ -1323,6 +1326,8 @@ def _run_config(
     tau_history_max_chars: int | None = None,
     tau_prompt_max_chars: int | None = None,
 ) -> Any:
+    if sample_size is not None and spec.kind not in _SAMPLE_SIZE_SUPPORTED_KINDS:
+        raise ValueError(f"--sample-size is not supported for {spec.kind} benchmark: {spec.benchmark}")
     if spec.kind == "free_response":
         from .free_response import FreeResponseRunConfig
         from .gsm8k import REFERENCE_ANSWER_FIXES
@@ -1409,6 +1414,8 @@ def _run_config(
             source_type=spec.source_type,
             source_url=spec.source_url,
             limit=limit,
+            sample_size=sample_size,
+            sample_seed=sample_seed,
             split=str(spec.source_split),
             max_tokens=int(spec.max_tokens or 512),
             scoreboard_dataset=spec.dataset_slug,
