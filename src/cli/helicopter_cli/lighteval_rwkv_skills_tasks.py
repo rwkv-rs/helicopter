@@ -243,6 +243,54 @@ BFCL_EXEC_TASKS = {
         "answer": ("unused_datasets", "possible_answer", "BFCL_v4_exec_parallel_multiple.json"),
     },
 }
+BFCL_V3_LIGHTEVAL_DATASET = "rwkv_skills_bfcl_v3"
+BFCL_V3_TASKS = {"bfcl_v3": {}}
+BFCL_V3_SOURCE_SPECS = (
+    {
+        "category": "multi_turn_base",
+        "raw": "BFCL_v3_multi_turn_base.json",
+        "question": ("BFCL_v4_multi_turn_base.json",),
+        "answer": ("possible_answer", "BFCL_v4_multi_turn_base.json"),
+    },
+    {
+        "category": "multi_turn_composite",
+        "raw": "BFCL_v3_multi_turn_composite.json",
+        "question": ("unused_datasets", "question", "BFCL_v4_multi_turn_composite.json"),
+        "answer": ("unused_datasets", "possible_answer", "BFCL_v4_multi_turn_composite.json"),
+    },
+    {
+        "category": "multi_turn_long_context",
+        "raw": "BFCL_v3_multi_turn_long_context.json",
+        "question": ("BFCL_v4_multi_turn_long_context.json",),
+        "answer": ("possible_answer", "BFCL_v4_multi_turn_long_context.json"),
+    },
+    {
+        "category": "multi_turn_miss_func",
+        "raw": "BFCL_v3_multi_turn_miss_func.json",
+        "question": ("BFCL_v4_multi_turn_miss_func.json",),
+        "answer": ("possible_answer", "BFCL_v4_multi_turn_miss_func.json"),
+    },
+    {
+        "category": "multi_turn_miss_param",
+        "raw": "BFCL_v3_multi_turn_miss_param.json",
+        "question": ("BFCL_v4_multi_turn_miss_param.json",),
+        "answer": ("possible_answer", "BFCL_v4_multi_turn_miss_param.json"),
+    },
+)
+BFCL_V3_FUNC_DOC_FILE_MAPPING = {
+    "GorillaFileSystem": "gorilla_file_system.json",
+    "MathAPI": "math_api.json",
+    "MessageAPI": "message_api.json",
+    "TwitterAPI": "posting_api.json",
+    "TicketAPI": "ticket_api.json",
+    "TradingBot": "trading_bot.json",
+    "TravelAPI": "travel_booking.json",
+    "VehicleControlAPI": "vehicle_control.json",
+    "WebSearchAPI": "web_search.json",
+    "MemoryAPI_kv": "memory_kv.json",
+    "MemoryAPI_vector": "memory_vector.json",
+    "MemoryAPI_rec_sum": "memory_rec_sum.json",
+}
 APIBANK_LIGHTEVAL_DATASET = "rwkv_skills_apibank"
 APIBANK_REPO_URL = "https://github.com/AlibabaResearch/DAMO-ConvAI.git"
 APIBANK_REPO_REVISION = "main"
@@ -4530,6 +4578,359 @@ COMPLEXFUNCBENCH_CALL_ACCURACY = SampleLevelMetric(
 )
 
 
+def _bfcl_v3_raw_root_candidates() -> tuple[Path, ...]:
+    candidates: list[Path] = []
+    for raw in (
+        os.environ.get("RWKV_LIGHTEVAL_BFCL_V3_SOURCE_ROOT"),
+        os.environ.get("RWKV_BFCL_V3_SOURCE_ROOT"),
+        os.environ.get("BFCL_V3_SOURCE_ROOT"),
+    ):
+        if raw:
+            candidates.append(Path(raw).expanduser())
+    repo_root = Path(__file__).resolve().parents[3]
+    candidates.extend(
+        [
+            repo_root / "benchmarks" / "lighteval_data" / "bfcl_v3_raw",
+            repo_root / "data" / "bfcl_v3_raw",
+            Path("/tmp/helicopter-bfcl-v3/raw"),
+            Path("/home/chase/GitHub/rwkv-skills/data/bfcl_v3_raw"),
+        ]
+    )
+    return tuple(dict.fromkeys(path.expanduser().resolve() for path in candidates))
+
+
+def _bfcl_v3_raw_root() -> Path | None:
+    for candidate in _bfcl_v3_raw_root_candidates():
+        if all((candidate / str(spec["raw"])).is_file() for spec in BFCL_V3_SOURCE_SPECS):
+            return candidate.resolve()
+    return None
+
+
+def _bfcl_v3_support_root_has_assets(data_root: Path) -> bool:
+    if not (data_root / "multi_turn_func_doc").is_dir():
+        return False
+    for spec in BFCL_V3_SOURCE_SPECS:
+        if not data_root.joinpath(*spec["answer"]).is_file():
+            return False
+    return True
+
+
+def _bfcl_v3_support_data_root() -> Path:
+    for candidate in _bfcl_source_candidates():
+        data_root = _bfcl_data_root_from_candidate(candidate)
+        if _bfcl_v3_support_root_has_assets(data_root):
+            return data_root.resolve()
+    data_root = _download_bfcl_source("bfcl_simple_python")
+    if _bfcl_v3_support_root_has_assets(data_root):
+        return data_root.resolve()
+    raise FileNotFoundError(f"BFCL v3 support assets are incomplete under {data_root}")
+
+
+def _bfcl_v3_question_path(spec: Mapping[str, Any], raw_root: Path | None, data_root: Path) -> Path:
+    if raw_root is not None:
+        raw_path = raw_root / str(spec["raw"])
+        if raw_path.is_file():
+            return raw_path.resolve()
+    question_path = data_root.joinpath(*spec["question"])
+    if question_path.is_file():
+        return question_path.resolve()
+    raise FileNotFoundError(f"BFCL v3 question source is missing for {spec.get('category')}: {question_path}")
+
+
+def _bfcl_v3_answer_lookup(path: Path) -> dict[str, list[list[str]]]:
+    lookup: dict[str, list[list[str]]] = {}
+    for item in _read_json_or_jsonl_items(path):
+        if not isinstance(item, Mapping):
+            continue
+        task_id = str(item.get("id") or item.get("task_id") or "").strip()
+        raw_turns = item.get("ground_truth")
+        if not task_id or not isinstance(raw_turns, Sequence) or isinstance(raw_turns, (str, bytes, bytearray)):
+            continue
+        turns: list[list[str]] = []
+        for turn in raw_turns:
+            calls = [str(entry).strip() for entry in _coerce_list(turn) if str(entry).strip()]
+            turns.append(calls)
+        lookup[task_id] = turns
+    return lookup
+
+
+def _bfcl_v3_involved_classes(row: Mapping[str, Any]) -> list[str]:
+    classes = _coerce_string_list(row.get("involved_classes") or row.get("classes"))
+    if classes:
+        return classes
+    result: list[str] = []
+    for path in _coerce_string_list(row.get("path")):
+        namespace, _, _method = path.partition(".")
+        if namespace and namespace not in result:
+            result.append(namespace)
+    return result
+
+
+def _bfcl_v3_question_turns(raw: Any) -> list[list[dict[str, str]]]:
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)):
+        return []
+    turns: list[list[dict[str, str]]] = []
+    for turn in raw:
+        entries = [turn] if isinstance(turn, (Mapping, str)) else _coerce_list(turn)
+        messages: list[dict[str, str]] = []
+        for entry in entries:
+            if isinstance(entry, Mapping):
+                content = str(entry.get("content") or entry.get("text") or "").strip()
+                if content:
+                    role = str(entry.get("role") or "user").strip().lower() or "user"
+                    messages.append({"role": role, "content": content})
+                continue
+            text = str(entry or "").strip()
+            if text:
+                messages.append({"role": "user", "content": text})
+        turns.append(messages)
+    return turns
+
+
+def _render_bfcl_v3_question_turns(turns: Sequence[Sequence[Mapping[str, str]]]) -> str:
+    parts = ["Multi-turn requests:"]
+    for index, turn in enumerate(turns, start=1):
+        parts.append(f"Turn {index}:")
+        if not turn:
+            parts.append("No new user message; continue with newly available context/tools if needed.")
+            continue
+        for message in turn:
+            role = str(message.get("role") or "user").strip().lower() or "user"
+            content = str(message.get("content") or "").strip()
+            if content:
+                parts.append(f"{role.title()}: {content}")
+        if index < len(turns):
+            parts.append("")
+    return "\n".join(parts).strip()
+
+
+def _bfcl_v3_tools_for_classes(data_root: Path, involved_classes: Sequence[str]) -> list[dict[str, Any]]:
+    func_doc_root = data_root / "multi_turn_func_doc"
+    tools: list[dict[str, Any]] = []
+    for class_name in involved_classes:
+        filename = BFCL_V3_FUNC_DOC_FILE_MAPPING.get(str(class_name))
+        if not filename:
+            continue
+        path = func_doc_root / filename
+        if not path.is_file():
+            continue
+        for item in _read_json_or_jsonl_items(path):
+            if isinstance(item, Mapping):
+                tools.append(_normalize_tool_schema(item))
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for tool in tools:
+        name = str(tool.get("name") or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        deduped.append(tool)
+    return deduped
+
+
+def _bfcl_v3_tool_parameter_names(tool: Mapping[str, Any] | None) -> list[str]:
+    if not isinstance(tool, Mapping):
+        return []
+    parameters = tool.get("parameters")
+    if not isinstance(parameters, Mapping):
+        return []
+    properties = parameters.get("properties")
+    if not isinstance(properties, Mapping):
+        return []
+    return [str(name) for name in properties.keys()]
+
+
+def _parse_bfcl_v3_call_string(call_string: str, tool_lookup: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    text = str(call_string or "").strip()
+    if not text:
+        return {"name": "unknown_tool", "arguments": {}}
+    try:
+        parsed = ast.parse(text, mode="eval")
+    except SyntaxError:
+        return {"name": text.split("(", 1)[0].strip() or "unknown_tool", "arguments": {}}
+    if not isinstance(parsed.body, ast.Call):
+        return {"name": text, "arguments": {}}
+    name = _render_ast_call_name(parsed.body.func) or text.split("(", 1)[0].strip() or "unknown_tool"
+    if "." in name:
+        name = name.rsplit(".", 1)[-1]
+    arguments: dict[str, Any] = {}
+    for keyword in parsed.body.keywords:
+        if keyword.arg is not None:
+            arguments[keyword.arg] = _literal_from_ast(keyword.value)
+    parameter_names = _bfcl_v3_tool_parameter_names(tool_lookup.get(name))
+    for index, arg_node in enumerate(parsed.body.args):
+        key = parameter_names[index] if index < len(parameter_names) else f"arg{index}"
+        arguments[key] = _literal_from_ast(arg_node)
+    return {"name": name, "arguments": arguments}
+
+
+def _bfcl_v3_expected_turns(raw_turns: Sequence[Sequence[str]], tools: Sequence[Mapping[str, Any]]) -> list[list[dict[str, Any]]]:
+    tool_lookup = {str(tool.get("name") or ""): tool for tool in tools}
+    expected_turns: list[list[dict[str, Any]]] = []
+    for turn in raw_turns:
+        calls = [_parse_bfcl_v3_call_string(call_string, tool_lookup) for call_string in turn if str(call_string).strip()]
+        if calls:
+            expected_turns.append(calls)
+    return expected_turns
+
+
+def _load_bfcl_v3_rows(dataset_name: str) -> list[dict[str, Any]]:
+    if dataset_name not in BFCL_V3_TASKS:
+        raise ValueError(f"unknown BFCL v3 dataset: {dataset_name}")
+    raw_root = _bfcl_v3_raw_root()
+    data_root = _bfcl_v3_support_data_root()
+    rows: list[dict[str, Any]] = []
+    for spec in BFCL_V3_SOURCE_SPECS:
+        question_path = _bfcl_v3_question_path(spec, raw_root, data_root)
+        answer_path = data_root.joinpath(*spec["answer"]).resolve()
+        answer_lookup = _bfcl_v3_answer_lookup(answer_path)
+        for index, item in enumerate(_read_json_or_jsonl_items(question_path)):
+            if not isinstance(item, Mapping):
+                continue
+            official_id = str(item.get("id") or item.get("task_id") or f"{spec['category']}_{index}")
+            ground_truth_turns = answer_lookup.get(official_id)
+            if ground_truth_turns is None:
+                raise ValueError(f"missing BFCL v3 possible-answer entry for {official_id}")
+            question_turns = _bfcl_v3_question_turns(item.get("question"))
+            instruction = _render_bfcl_v3_question_turns(question_turns)
+            if not instruction:
+                instruction = _render_bfcl_question(item.get("question"))
+            if not instruction:
+                raise ValueError(f"BFCL v3 row {official_id!r} is missing question content")
+            involved_classes = _bfcl_v3_involved_classes(item)
+            tools = _bfcl_v3_tools_for_classes(data_root, involved_classes)
+            if not tools:
+                tools = [_normalize_tool_schema(tool) for tool in _coerce_list(item.get("function") or item.get("tools"))]
+            expected_turns = _bfcl_v3_expected_turns(ground_truth_turns, tools)
+            if not expected_turns:
+                continue
+            rows.append(
+                {
+                    "task_id": f"bfcl_v3__{official_id}",
+                    "instruction": instruction,
+                    "tools": tools,
+                    "expected_tool_turns": expected_turns,
+                    "metadata": {
+                        "source_format": "official_bfcl_v3_multi_turn",
+                        "official_source": "gorilla/berkeley-function-call-leaderboard",
+                        "official_id": official_id,
+                        "category": str(spec["category"]),
+                        "source_path": str(question_path),
+                        "possible_answer_path": str(answer_path),
+                        "support_data_root": str(data_root),
+                        "raw_source_root": str(raw_root) if raw_root is not None else "",
+                        "involved_classes": involved_classes,
+                        "question_turn_count": len(question_turns),
+                        "ground_truth_turn_count": len(ground_truth_turns),
+                        "non_empty_tool_turn_count": len(expected_turns),
+                        "bfcl_v3_total_call_num": sum(len(turn) for turn in expected_turns),
+                        "has_initial_config": isinstance(item.get("initial_config"), Mapping),
+                        "missed_function": item.get("missed_function") if isinstance(item.get("missed_function"), Mapping) else {},
+                        "direct_lighteval_mode": "golden_multi_turn_call_chain",
+                    },
+                }
+            )
+    if not rows:
+        raise ValueError("BFCL v3 sources did not yield any rows")
+    return rows
+
+
+def _load_bfcl_v3_dataset_dict(dataset_name: str):
+    from datasets import Dataset, DatasetDict
+
+    rows: list[dict[str, Any]] = []
+    for row in _load_bfcl_v3_rows(dataset_name):
+        rendered = dict(row)
+        for key in ("tools", "expected_tool_turns", "metadata"):
+            rendered[key] = json.dumps(rendered.get(key) or ([] if key != "metadata" else {}), ensure_ascii=False, sort_keys=True)
+        rows.append(rendered)
+    return DatasetDict({"test": Dataset.from_list(rows)})
+
+
+def bfcl_v3_prompt(line: dict, task_name: str | None = None) -> Doc:
+    instruction = _normalize_rwkv_text(line.get("instruction"))
+    tools = _bfcl_json_list_field(line.get("tools"))
+    expected_tool_turns = _bfcl_json_list_field(line.get("expected_tool_turns"))
+    metadata = _bfcl_json_mapping_field(line.get("metadata"))
+    expected_payload = {"tool_turns": expected_tool_turns}
+    system_prompt = "\n".join(
+        [
+            "You are solving a BFCL v3 multi-turn function-calling task.",
+            "Tools:",
+            _render_bfcl_tool_catalog([tool for tool in tools if isinstance(tool, Mapping)]),
+            "Output JSON schema:",
+            _render_complexfuncbench_output_schema(),
+            "Return exactly one JSON object that validates against the schema.",
+            "The value of tool_turns is the ordered sequence of non-empty assistant tool-call turns.",
+            "For user turns that require no tool call, omit that turn from tool_turns.",
+            "Each inner array contains every required tool call for that assistant turn in execution order.",
+            "Each call must use only a listed tool name and an arguments object with final argument values.",
+            "Do not include observations, explanations, markdown, tool schemas, wrapper text, or natural-language final answers.",
+        ]
+    )
+    query = f"System: {system_prompt}\n\nUser: {instruction}\n\nJSON:"
+    return Doc(
+        task_name=task_name,
+        query=query,
+        choices=[json.dumps(expected_payload, ensure_ascii=False, sort_keys=True)],
+        gold_index=0,
+        specific={
+            "task_id": line.get("task_id"),
+            "instruction": instruction,
+            "tools": json.dumps(tools, ensure_ascii=False, sort_keys=True),
+            "expected_tool_turns": json.dumps(expected_tool_turns, ensure_ascii=False, sort_keys=True),
+            "metadata": json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+            "prompt_chars": len(query),
+        },
+    )
+
+
+class BfclV3SuccessRate(SampleLevelComputation):
+    def compute(self, doc: Doc, model_response, **kwargs) -> float:
+        record = dict(doc.specific or {})
+        for prediction in model_response.final_text:
+            try:
+                decoded_turns = decode_complexfuncbench_response(prediction)
+                result = evaluate_complexfuncbench_turns(record, decoded_turns)
+            except Exception:
+                continue
+            if float(result.get("success_rate") or 0.0) > 0:
+                return 1.0
+        return 0.0
+
+
+class BfclV3CallAccuracy(SampleLevelComputation):
+    def compute(self, doc: Doc, model_response, **kwargs) -> float:
+        record = dict(doc.specific or {})
+        best = 0.0
+        for prediction in model_response.final_text:
+            try:
+                decoded_turns = decode_complexfuncbench_response(prediction)
+                result = evaluate_complexfuncbench_turns(record, decoded_turns)
+            except Exception:
+                continue
+            best = max(best, float(result.get("call_accuracy") or 0.0))
+        return best
+
+
+BFCL_V3_SUCCESS_RATE = SampleLevelMetric(
+    metric_name="bfcl_v3_success_rate",
+    sample_level_fn=BfclV3SuccessRate(),
+    category=SamplingMethod.GENERATIVE,
+    corpus_level_fn=_mean,
+    higher_is_better=True,
+)
+
+
+BFCL_V3_CALL_ACCURACY = SampleLevelMetric(
+    metric_name="bfcl_v3_call_accuracy",
+    sample_level_fn=BfclV3CallAccuracy(),
+    category=SamplingMethod.GENERATIVE,
+    corpus_level_fn=_mean,
+    higher_is_better=True,
+)
+
+
 def _install_longcodeqa_data_files_patch() -> None:
     """Scope LightEval 0.13 dataset patches to custom rwkv-skills datasets."""
 
@@ -4561,6 +4962,11 @@ def _install_longcodeqa_data_files_patch() -> None:
             if dataset_name is None and len(args) > 1:
                 dataset_name = args[1]
             return _load_bfcl_exec_dataset_dict(str(dataset_name or ""))
+        if path == BFCL_V3_LIGHTEVAL_DATASET:
+            dataset_name = kwargs.get("name")
+            if dataset_name is None and len(args) > 1:
+                dataset_name = args[1]
+            return _load_bfcl_v3_dataset_dict(str(dataset_name or ""))
         if path == APIBANK_LIGHTEVAL_DATASET:
             dataset_name = kwargs.get("name")
             if dataset_name is None and len(args) > 1:
@@ -5356,6 +5762,23 @@ def _hf_complexfuncbench_task(name: str) -> LightevalTaskConfig:
     )
 
 
+def _hf_bfcl_v3_task(name: str) -> LightevalTaskConfig:
+    return LightevalTaskConfig(
+        name=f"rwkv_skills:{name}",
+        prompt_function=bfcl_v3_prompt,
+        hf_repo=BFCL_V3_LIGHTEVAL_DATASET,
+        hf_subset=name,
+        hf_avail_splits=["test"],
+        evaluation_splits=["test"],
+        few_shots_split=None,
+        few_shots_select=None,
+        generation_size=1024,
+        metrics=[BFCL_V3_SUCCESS_RATE, BFCL_V3_CALL_ACCURACY],
+        stop_sequence=["\nUser:", "\nSystem:", "\nAssistant:"],
+        version=0,
+    )
+
+
 _install_longcodeqa_data_files_patch()
 
 
@@ -5375,6 +5798,7 @@ TASKS_TABLE = [
     *[_hf_longbench_task(dataset) for dataset in LONG_BENCH_DATASETS],
     *[_hf_bfcl_ast_task(name) for name in BFCL_AST_TASKS],
     *[_hf_bfcl_exec_task(name) for name in BFCL_EXEC_TASKS],
+    *[_hf_bfcl_v3_task(name) for name in BFCL_V3_TASKS],
     *[_hf_apibank_task(name) for name in APIBANK_TASKS],
     *[_hf_toolalpaca_task(name) for name in TOOLALPACA_TASKS],
     *[_hf_complexfuncbench_task(name) for name in COMPLEXFUNCBENCH_TASKS],

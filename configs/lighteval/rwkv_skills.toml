@@ -136,8 +136,8 @@ lighteval_tasks = ["rwkv_skills:bfcl_simple_python"]
 
 [benchmarks.bfcl_v3]
 field = "function_calling"
-status = "needs_adapter"
-reason = "BFCL v3 requires function-calling and long-context routing adapters."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:bfcl_v3"]
 
 [benchmarks.browsecomp]
 field = "function_calling"
