@@ -7,6 +7,11 @@ from argparse import Namespace
 from pathlib import Path
 from unittest import mock
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover
+    import tomli as tomllib  # type: ignore[no-redef]
+
 from helicopter_cli import commands, config, env
 
 
@@ -92,6 +97,37 @@ def lighteval_tasks_args(**overrides: object) -> Namespace:
         "load_tasks_multilingual": None,
         "num_samples": None,
         "show_config": None,
+    }
+    values.update(overrides)
+    return Namespace(**values)
+
+
+def lighteval_suite_args(**overrides: object) -> Namespace:
+    values = {
+        "model": "g1d-0.4b",
+        "suite": "rwkv_skills",
+        "mapped_only": False,
+        "field": None,
+        "benchmark": None,
+        "model_args": None,
+        "lighteval_model_name": None,
+        "base_url": None,
+        "provider": None,
+        "api_key": None,
+        "concurrent_requests": None,
+        "max_model_length": None,
+        "max_samples": None,
+        "output_dir": None,
+        "dataset_loading_processes": None,
+        "num_fewshot_seeds": None,
+        "custom_tasks": None,
+        "load_tasks_multilingual": None,
+        "save_details": None,
+        "push_to_hub": None,
+        "public_run": None,
+        "results_org": None,
+        "job_id": None,
+        "extra": None,
     }
     values.update(overrides)
     return Namespace(**values)
@@ -290,6 +326,58 @@ class CommandPlanTests(unittest.TestCase):
         )
 
         self.assertEqual(plan.command[1:5], ["-m", "lighteval", "tasks", "list"])
+        self.assertIn("--load-tasks-multilingual", plan.command)
+
+    def test_rwkv_skills_lighteval_suite_manifest_covers_registry_count(self) -> None:
+        suite_path = ROOT / "configs/lighteval/rwkv_skills.toml"
+
+        with suite_path.open("rb") as file:
+            suite = tomllib.load(file)
+
+        self.assertEqual(suite["source_count"], 95)
+        self.assertEqual(len(suite["benchmarks"]), 95)
+        self.assertIn("gsm8k", suite["benchmarks"])
+        self.assertEqual(suite["benchmarks"]["gsm8k"]["lighteval_tasks"], ["gsm8k"])
+
+    def test_lighteval_suite_requires_explicit_mapped_only_for_partial_mapping(self) -> None:
+        loaded_config = load_example_config()
+
+        with self.assertRaises(SystemExit) as raised:
+            commands.build_lighteval_suite_plan(
+                lighteval_suite_args(benchmark=["gsm8k", "bfcl_v3"]),
+                root=ROOT,
+                env={},
+                config=loaded_config,
+            )
+
+        self.assertIn("without direct LightEval tasks", str(raised.exception))
+
+    def test_lighteval_suite_mapped_only_uses_0_4b_endpoint_model(self) -> None:
+        loaded_config = load_example_config()
+
+        plan = commands.build_lighteval_suite_plan(
+            lighteval_suite_args(mapped_only=True, benchmark=["gsm8k", "aime24"], max_samples=2),
+            root=ROOT,
+            env={},
+            config=loaded_config,
+        )
+
+        self.assertEqual(plan.command[1:5], ["-m", "lighteval", "endpoint", "litellm"])
+        self.assertIn("model_name=openai/g1d-0.4b", plan.command[5])
+        self.assertEqual(set(plan.command[6].split(",")), {"gsm8k", "aime24"})
+        self.assertEqual(command_options(plan.command)["--max-samples"], "2")
+
+    def test_lighteval_suite_enables_multilingual_when_needed(self) -> None:
+        loaded_config = load_example_config()
+
+        plan = commands.build_lighteval_suite_plan(
+            lighteval_suite_args(mapped_only=True, benchmark=["ceval"], max_samples=1),
+            root=ROOT,
+            env={},
+            config=loaded_config,
+        )
+
+        self.assertEqual(plan.command[6], "ceval_zho_mcf")
         self.assertIn("--load-tasks-multilingual", plan.command)
 
     def test_takeoff_plan_uses_verl_module_entrypoint_and_default_overrides(self) -> None:

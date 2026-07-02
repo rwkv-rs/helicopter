@@ -1,0 +1,482 @@
+name = "rwkv_skills"
+source = "/home/chase/GitHub/rwkv-skills/src/eval/benchmark_registry.py"
+source_count = 95
+description = "LightEval mapping for the benchmark set registered by ~/GitHub/rwkv-skills."
+
+[benchmarks.human_eval]
+field = "coding"
+status = "needs_adapter"
+reason = "rwkv-skills HumanEval runner is not a direct LightEval task in the endpoint registry."
+
+[benchmarks.human_eval_cn]
+field = "coding"
+status = "needs_adapter"
+reason = "Requires a custom LightEval task for the rwkv-skills Chinese HumanEval dataset."
+
+[benchmarks.human_eval_fix]
+field = "coding"
+status = "needs_adapter"
+reason = "Requires a custom LightEval task for the rwkv-skills HumanEval fix dataset."
+
+[benchmarks.human_eval_plus]
+field = "coding"
+status = "needs_adapter"
+reason = "Requires a custom LightEval task or EvalPlus-compatible adapter."
+
+[benchmarks.livecodebench]
+field = "coding"
+status = "direct"
+lighteval_tasks = ["lcb:codegeneration"]
+
+[benchmarks.mbpp]
+field = "coding"
+status = "needs_adapter"
+reason = "No direct MBPP task was found in the current LightEval registry snapshot."
+
+[benchmarks.mbpp_plus]
+field = "coding"
+status = "needs_adapter"
+reason = "Requires an MBPP+ custom task or EvalPlus-compatible adapter."
+
+[benchmarks.swe_bench]
+field = "coding"
+status = "needs_adapter"
+reason = "SWE-Bench is agentic patch generation, not a direct LightEval endpoint task."
+
+[benchmarks.swe_bench_lite]
+field = "coding"
+status = "needs_adapter"
+reason = "SWE-Bench Lite is agentic patch generation, not a direct LightEval endpoint task."
+
+[benchmarks.swe_bench_lite_bm25_13k]
+field = "coding"
+status = "needs_adapter"
+reason = "Requires the rwkv-skills retrieval/context adapter before LightEval can run it."
+
+[benchmarks.swe_bench_lite_oracle]
+field = "coding"
+status = "needs_adapter"
+reason = "Requires the rwkv-skills oracle-context adapter before LightEval can run it."
+
+[benchmarks.swe_bench_verified]
+field = "coding"
+status = "needs_adapter"
+reason = "SWE-Bench Verified is agentic patch generation, not a direct LightEval endpoint task."
+
+[benchmarks.agentbench_db]
+field = "function_calling"
+status = "needs_adapter"
+reason = "AgentBench DB requires an interactive tool/agent environment adapter."
+
+[benchmarks.agentbench_kg]
+field = "function_calling"
+status = "needs_adapter"
+reason = "AgentBench KG requires an interactive tool/agent environment adapter."
+
+[benchmarks.apibank_l1]
+field = "function_calling"
+status = "needs_adapter"
+reason = "APIBank requires a function-calling custom task adapter."
+
+[benchmarks.apibank_l2]
+field = "function_calling"
+status = "needs_adapter"
+reason = "APIBank requires a function-calling custom task adapter."
+
+[benchmarks.apibank_level1]
+field = "function_calling"
+status = "needs_adapter"
+reason = "APIBank requires a function-calling custom task adapter."
+
+[benchmarks.apibank_level2]
+field = "function_calling"
+status = "needs_adapter"
+reason = "APIBank requires a function-calling custom task adapter."
+
+[benchmarks.bfcl_exec_multiple]
+field = "function_calling"
+status = "needs_adapter"
+reason = "BFCL execution tasks require function-call execution semantics."
+
+[benchmarks.bfcl_exec_multiple_ast]
+field = "function_calling"
+status = "needs_adapter"
+reason = "BFCL AST tasks require a custom parser/scorer adapter."
+
+[benchmarks.bfcl_exec_parallel]
+field = "function_calling"
+status = "needs_adapter"
+reason = "BFCL parallel execution requires the rwkv-skills parallel candidate routing semantics."
+
+[benchmarks.bfcl_exec_parallel_multiple]
+field = "function_calling"
+status = "needs_adapter"
+reason = "BFCL parallel execution requires the rwkv-skills parallel candidate routing semantics."
+
+[benchmarks.bfcl_exec_simple]
+field = "function_calling"
+status = "needs_adapter"
+reason = "BFCL execution tasks require function-call execution semantics."
+
+[benchmarks.bfcl_exec_simple_ast]
+field = "function_calling"
+status = "needs_adapter"
+reason = "BFCL AST tasks require a custom parser/scorer adapter."
+
+[benchmarks.bfcl_multiple]
+field = "function_calling"
+status = "needs_adapter"
+reason = "BFCL AST tasks require a custom parser/scorer adapter."
+
+[benchmarks.bfcl_simple_python]
+field = "function_calling"
+status = "needs_adapter"
+reason = "BFCL AST tasks require a custom parser/scorer adapter."
+
+[benchmarks.bfcl_v3]
+field = "function_calling"
+status = "needs_adapter"
+reason = "BFCL v3 requires function-calling and long-context routing adapters."
+
+[benchmarks.browsecomp]
+field = "function_calling"
+status = "needs_adapter"
+reason = "No direct BrowseComp task was found in the current LightEval registry snapshot."
+
+[benchmarks.browsecomp_plus]
+field = "function_calling"
+status = "needs_adapter"
+reason = "No direct BrowseComp-Plus task was found in the current LightEval registry snapshot."
+
+[benchmarks.browsecomp_zh]
+field = "function_calling"
+status = "needs_adapter"
+reason = "No direct Chinese BrowseComp task was found in the current LightEval registry snapshot."
+
+[benchmarks.complexfuncbench_official]
+field = "function_calling"
+status = "needs_adapter"
+reason = "ComplexFuncBench requires a function-calling custom task adapter."
+
+[benchmarks.complexfuncbench_subset]
+field = "function_calling"
+status = "needs_adapter"
+reason = "ComplexFuncBench requires a function-calling custom task adapter."
+
+[benchmarks.longbench]
+field = "function_calling"
+status = "needs_adapter"
+reason = "LongBench requires the rwkv-skills long-context prompt/router adapter."
+
+[benchmarks.longbench_qa]
+field = "function_calling"
+status = "needs_adapter"
+reason = "LongBench QA requires the rwkv-skills long-context prompt/router adapter."
+
+[benchmarks.longbench_qa_balanced]
+field = "function_calling"
+status = "needs_adapter"
+reason = "LongBench QA balanced requires the rwkv-skills long-context prompt/router adapter."
+
+[benchmarks.longcodeqa]
+field = "function_calling"
+status = "needs_adapter"
+reason = "LongCodeQA requires the rwkv-skills long-context coding adapter."
+
+[benchmarks.mcp_bench]
+field = "function_calling"
+status = "needs_adapter"
+reason = "MCP-Bench requires MCP server orchestration and tool-call scoring."
+
+[benchmarks.mcp_bench_multi_2server]
+field = "function_calling"
+status = "needs_adapter"
+reason = "MCP-Bench requires MCP server orchestration and tool-call scoring."
+
+[benchmarks.mcp_bench_multi_3server]
+field = "function_calling"
+status = "needs_adapter"
+reason = "MCP-Bench requires MCP server orchestration and tool-call scoring."
+
+[benchmarks.mcp_bench_single]
+field = "function_calling"
+status = "needs_adapter"
+reason = "MCP-Bench requires MCP server orchestration and tool-call scoring."
+
+[benchmarks.tau2_bench_airline]
+field = "function_calling"
+status = "needs_adapter"
+reason = "TAU2 requires an interactive environment adapter."
+
+[benchmarks.tau2_bench_retail]
+field = "function_calling"
+status = "needs_adapter"
+reason = "TAU2 requires an interactive environment adapter."
+
+[benchmarks.tau2_bench_telecom]
+field = "function_calling"
+status = "needs_adapter"
+reason = "TAU2 requires an interactive environment adapter."
+
+[benchmarks.tau3_bench_airline]
+field = "function_calling"
+status = "needs_adapter"
+reason = "TAU3 requires an interactive environment adapter."
+
+[benchmarks.tau3_bench_banking_knowledge]
+field = "function_calling"
+status = "needs_adapter"
+reason = "TAU3 requires an interactive environment adapter."
+
+[benchmarks.tau3_bench_mock]
+field = "function_calling"
+status = "needs_adapter"
+reason = "TAU3 requires an interactive environment adapter."
+
+[benchmarks.tau3_bench_mock_long_context]
+field = "function_calling"
+status = "needs_adapter"
+reason = "TAU3 long-context mode requires an interactive environment and routing adapter."
+
+[benchmarks.tau3_bench_retail]
+field = "function_calling"
+status = "needs_adapter"
+reason = "TAU3 requires an interactive environment adapter."
+
+[benchmarks.tau3_bench_telecom]
+field = "function_calling"
+status = "needs_adapter"
+reason = "TAU3 requires an interactive environment adapter."
+
+[benchmarks.tau_bench_airline]
+field = "function_calling"
+status = "needs_adapter"
+reason = "TAU Bench requires an interactive environment adapter."
+
+[benchmarks.tau_bench_retail]
+field = "function_calling"
+status = "needs_adapter"
+reason = "TAU Bench requires an interactive environment adapter."
+
+[benchmarks.tau_bench_telecom]
+field = "function_calling"
+status = "needs_adapter"
+reason = "TAU Bench requires an interactive environment adapter."
+
+[benchmarks.toolalpaca_eval_real]
+field = "function_calling"
+status = "needs_adapter"
+reason = "ToolAlpaca requires tool-call parsing/scoring adapters."
+
+[benchmarks.toolalpaca_eval_simulated]
+field = "function_calling"
+status = "needs_adapter"
+reason = "ToolAlpaca requires tool-call parsing/scoring adapters."
+
+[benchmarks.arena_hard_v2]
+field = "instruction_following"
+status = "needs_adapter"
+reason = "No direct Arena-Hard task was found in the current LightEval registry snapshot."
+
+[benchmarks.flores200]
+field = "instruction_following"
+status = "direct"
+load_tasks_multilingual = true
+lighteval_tasks = ["flores200"]
+
+[benchmarks.ifbench]
+field = "instruction_following"
+status = "direct"
+lighteval_tasks = ["ifbench_test"]
+
+[benchmarks.ifeval]
+field = "instruction_following"
+status = "direct"
+lighteval_tasks = ["ifeval"]
+
+[benchmarks.wmt24pp]
+field = "instruction_following"
+status = "needs_adapter"
+reason = "No direct WMT24++ task was found in the current LightEval registry snapshot."
+
+[benchmarks.ceval]
+field = "knowledge"
+status = "direct"
+load_tasks_multilingual = true
+lighteval_tasks = ["ceval_zho_mcf"]
+
+[benchmarks.cmmlu]
+field = "knowledge"
+status = "direct"
+load_tasks_multilingual = true
+lighteval_tasks = ["cmmlu_zho_mcf"]
+
+[benchmarks.gpqa_diamond]
+field = "knowledge"
+status = "direct"
+lighteval_tasks = ["gpqa:diamond"]
+
+[benchmarks.gpqa_extended]
+field = "knowledge"
+status = "direct"
+lighteval_tasks = ["gpqa:extended"]
+
+[benchmarks.gpqa_main]
+field = "knowledge"
+status = "direct"
+lighteval_tasks = ["gpqa:main"]
+
+[benchmarks.include]
+field = "knowledge"
+status = "needs_adapter"
+reason = "No equivalent LightEval task was found for the rwkv-skills INCLUDE aggregate."
+
+[benchmarks.mmlu]
+field = "knowledge"
+status = "direct"
+lighteval_tasks = ["mmlu"]
+
+[benchmarks.mmlu_pro]
+field = "knowledge"
+status = "direct"
+lighteval_tasks = ["mmlu_pro"]
+
+[benchmarks.mmlu_redux]
+field = "knowledge"
+status = "direct"
+lighteval_tasks = ["mmlu_redux_2"]
+
+[benchmarks.mmmlu]
+field = "knowledge"
+status = "needs_adapter"
+reason = "LightEval has several multilingual MMLU families; the rwkv-skills MMMLU contract needs an explicit mapping choice."
+
+[benchmarks.supergpqa]
+field = "knowledge"
+status = "needs_adapter"
+reason = "No direct SuperGPQA task was found in the current LightEval registry snapshot."
+
+[benchmarks.aime24]
+field = "maths"
+status = "direct"
+lighteval_tasks = ["aime24"]
+
+[benchmarks.aime25]
+field = "maths"
+status = "direct"
+lighteval_tasks = ["aime25"]
+
+[benchmarks.algebra222]
+field = "maths"
+status = "needs_adapter"
+reason = "No direct Algebra222 task was found in the current LightEval registry snapshot."
+
+[benchmarks.amc23]
+field = "maths"
+status = "needs_adapter"
+reason = "No direct AMC23 task was found in the current LightEval registry snapshot."
+
+[benchmarks.answer_judge]
+field = "maths"
+status = "needs_adapter"
+reason = "answer_judge is a rwkv-skills internal judge dataset and needs a custom task."
+
+[benchmarks.asdiv]
+field = "maths"
+status = "direct"
+lighteval_tasks = ["asdiv"]
+
+[benchmarks.beyond_aime]
+field = "maths"
+status = "needs_adapter"
+reason = "No direct BeyondAIME task was found in the current LightEval registry snapshot."
+
+[benchmarks.brumo25]
+field = "maths"
+status = "needs_adapter"
+reason = "No direct BRUMO25 task was found in the current LightEval registry snapshot."
+
+[benchmarks.college_math]
+field = "maths"
+status = "needs_adapter"
+reason = "No direct CollegeMath task was found in the current LightEval registry snapshot."
+
+[benchmarks.comp_math_24_25]
+field = "maths"
+status = "needs_adapter"
+reason = "No direct COMP Math 24-25 task was found in the current LightEval registry snapshot."
+
+[benchmarks.gaokao2023en]
+field = "maths"
+status = "needs_adapter"
+reason = "LightEval has AGIEval Gaokao subsets, but no direct rwkv-skills gaokao2023en task mapping."
+
+[benchmarks.gsm8k]
+field = "maths"
+status = "direct"
+lighteval_tasks = ["gsm8k"]
+
+[benchmarks.gsm_plus]
+field = "maths"
+status = "direct"
+lighteval_tasks = ["gsm_plus"]
+
+[benchmarks.hendrycks_math]
+field = "maths"
+status = "direct"
+lighteval_tasks = ["math"]
+
+[benchmarks.hle]
+field = "maths"
+status = "direct"
+lighteval_tasks = ["hle"]
+
+[benchmarks.hmmt_feb25]
+field = "maths"
+status = "needs_adapter"
+reason = "No direct HMMT Feb 2025 task was found in the current LightEval registry snapshot."
+
+[benchmarks.math_500]
+field = "maths"
+status = "direct"
+lighteval_tasks = ["math_500"]
+
+[benchmarks.math_odyssey]
+field = "maths"
+status = "needs_adapter"
+reason = "No direct Math Odyssey task was found in the current LightEval registry snapshot."
+
+[benchmarks.mawps]
+field = "maths"
+status = "needs_adapter"
+reason = "No direct MAWPS task was found in the current LightEval registry snapshot."
+
+[benchmarks.minerva_math]
+field = "maths"
+status = "needs_adapter"
+reason = "No direct Minerva Math task was found in the current LightEval registry snapshot."
+
+[benchmarks.olympiadbench]
+field = "maths"
+status = "direct"
+lighteval_tasks = ["olympiad_bench"]
+
+[benchmarks.omni_math]
+field = "maths"
+status = "needs_adapter"
+reason = "No direct Omni-MATH task was found in the current LightEval registry snapshot."
+
+[benchmarks.polymath]
+field = "maths"
+status = "needs_adapter"
+reason = "No direct PolyMath task was found in the current LightEval registry snapshot."
+
+[benchmarks.simpleqa]
+field = "maths"
+status = "direct"
+lighteval_tasks = ["simpleqa"]
+
+[benchmarks.svamp]
+field = "maths"
+status = "needs_adapter"
+reason = "No direct SVAMP task was found in the current LightEval registry snapshot."

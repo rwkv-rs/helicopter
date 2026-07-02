@@ -4,7 +4,13 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover
+    import tomli as tomllib  # type: ignore[no-redef]
 
 from .config import dataset_root, resolve_model_entry, resolve_model_path, table
 from .env import env_value, pick
@@ -174,6 +180,76 @@ def lighteval_path_arg(value: Any, *, root: Path, env: dict[str, str]) -> str | 
     return text
 
 
+def load_lighteval_suite(config: dict[str, Any], suite_name: str, *, root: Path, env: dict[str, str]) -> dict[str, Any]:
+    suites = table(config, "lighteval_suites")
+    suite_config = suites.get(suite_name)
+    if isinstance(suite_config, dict):
+        suite_path = suite_config.get("path")
+    else:
+        suite_path = None
+    if not suite_path:
+        suite_path = f"configs/lighteval/{suite_name}.toml"
+    path = resolve_path(str(suite_path), root=root, env=env)
+    if not path.exists():
+        raise SystemExit(f"LightEval suite file not found: {path}")
+    with path.open("rb") as file:
+        suite = tomllib.load(file)
+    suite["_path"] = str(path)
+    return suite
+
+
+def lighteval_suite_entries(
+    suite: dict[str, Any],
+    *,
+    fields: tuple[str, ...],
+    benchmarks: tuple[str, ...],
+) -> list[tuple[str, dict[str, Any]]]:
+    raw_benchmarks = suite.get("benchmarks", {})
+    if not isinstance(raw_benchmarks, dict):
+        raise SystemExit("LightEval suite needs a [benchmarks] table")
+    selected: list[tuple[str, dict[str, Any]]] = []
+    field_set = {field.strip() for field in fields if field.strip()}
+    benchmark_set = {benchmark.strip() for benchmark in benchmarks if benchmark.strip()}
+    for name, raw_entry in raw_benchmarks.items():
+        entry = raw_entry if isinstance(raw_entry, dict) else {}
+        if field_set and str(entry.get("field", "")) not in field_set:
+            continue
+        if benchmark_set and name not in benchmark_set:
+            continue
+        selected.append((name, entry))
+    return selected
+
+
+def lighteval_suite_task_string(
+    entries: list[tuple[str, dict[str, Any]]],
+    *,
+    mapped_only: bool,
+) -> tuple[str, bool]:
+    tasks: list[str] = []
+    unmapped: list[str] = []
+    load_multilingual = False
+    for name, entry in entries:
+        raw_tasks = entry.get("lighteval_tasks")
+        entry_tasks = [str(item) for item in raw_tasks] if isinstance(raw_tasks, list) else []
+        if entry_tasks:
+            tasks.extend(entry_tasks)
+            load_multilingual = load_multilingual or bool_value(entry.get("load_tasks_multilingual", False))
+            continue
+        unmapped.append(name)
+
+    if unmapped and not mapped_only:
+        preview = ", ".join(unmapped[:12])
+        if len(unmapped) > 12:
+            preview += f", ... (+{len(unmapped) - 12} more)"
+        raise SystemExit(
+            "LightEval suite has benchmarks without direct LightEval tasks; "
+            f"use --mapped-only to run the mapped subset. Unmapped: {preview}"
+        )
+    if not tasks:
+        raise SystemExit("LightEval suite selection has no mapped tasks to run")
+    return ",".join(dict.fromkeys(tasks)), load_multilingual
+
+
 def build_lighteval_model_args(
     args: Any,
     *,
@@ -303,6 +379,31 @@ def build_lighteval_plan(
     if api_key:
         plan_env["OPENAI_API_KEY"] = api_key
     return CommandPlan(command=command, cwd=root, shown_env=shown_env, env=plan_env)
+
+
+def build_lighteval_suite_plan(
+    args: Any,
+    *,
+    root: Path,
+    env: dict[str, str],
+    config: dict[str, Any],
+) -> CommandPlan:
+    suite = load_lighteval_suite(config, args.suite, root=root, env=env)
+    entries = lighteval_suite_entries(
+        suite,
+        fields=tuple(getattr(args, "field", None) or ()),
+        benchmarks=tuple(getattr(args, "benchmark", None) or ()),
+    )
+    tasks, load_multilingual = lighteval_suite_task_string(entries, mapped_only=bool_value(args.mapped_only))
+    forwarded = SimpleNamespace(
+        **{
+            **vars(args),
+            "backend": "endpoint-litellm",
+            "tasks": tasks,
+            "load_tasks_multilingual": bool_value(args.load_tasks_multilingual) or load_multilingual,
+        }
+    )
+    return build_lighteval_plan(forwarded, root=root, env=env, config=config)
 
 
 def build_lighteval_tasks_plan(

@@ -8,6 +8,7 @@ from .commands import (
     WKV_MODES,
     build_infer_plan,
     build_lighteval_plan,
+    build_lighteval_suite_plan,
     build_lighteval_tasks_plan,
     build_takeoff_plan,
     prepend_venv_path,
@@ -85,6 +86,35 @@ def build_parser() -> argparse.ArgumentParser:
     lighteval.add_argument("--job-id", type=int)
     lighteval.add_argument("--extra", action="append", help="extra argument passed to LightEval")
     lighteval.set_defaults(plan_builder=build_lighteval_plan)
+
+    suite = eval_subparsers.add_parser("lighteval-suite", help="run a configured LightEval task suite")
+    add_common_options(suite)
+    suite.add_argument("model", help="model alias from configs")
+    suite.add_argument("suite", help="suite alias from [lighteval_suites], e.g. rwkv_skills")
+    suite.add_argument("--mapped-only", action="store_true", help="run only benchmarks with direct LightEval tasks")
+    suite.add_argument("--field", action="append", help="limit to a suite field; repeatable")
+    suite.add_argument("--benchmark", action="append", help="limit to a benchmark name; repeatable")
+    suite.add_argument("--model-args", help="raw LightEval model args string or YAML config path")
+    suite.add_argument("--lighteval-model-name", help="model name passed to LightEval/LiteLLM")
+    suite.add_argument("--base-url", help="OpenAI-compatible endpoint base URL")
+    suite.add_argument("--provider", help="LiteLLM provider prefix; defaults to openai")
+    suite.add_argument("--api-key", help="API key passed through OPENAI_API_KEY")
+    suite.add_argument("--concurrent-requests", type=int)
+    suite.add_argument("--max-model-length", type=int)
+    suite.add_argument("--max-samples", type=int)
+    suite.add_argument("--output-dir")
+    suite.add_argument("--dataset-loading-processes", type=int)
+    suite.add_argument("--num-fewshot-seeds", type=int)
+    suite.add_argument("--custom-tasks", help="custom LightEval task Python file")
+    suite.add_argument("--load-tasks-multilingual", action="store_true", default=None)
+    suite.add_argument("--save-details", dest="save_details", action="store_true", default=None)
+    suite.add_argument("--no-save-details", dest="save_details", action="store_false")
+    suite.add_argument("--push-to-hub", action="store_true", default=None)
+    suite.add_argument("--public-run", action="store_true", default=None)
+    suite.add_argument("--results-org")
+    suite.add_argument("--job-id", type=int)
+    suite.add_argument("--extra", action="append", help="extra argument passed to LightEval")
+    suite.set_defaults(plan_builder=build_lighteval_suite_plan)
 
     lighteval_tasks = eval_subparsers.add_parser("lighteval-tasks", help="list or inspect LightEval tasks")
     add_common_options(lighteval_tasks)

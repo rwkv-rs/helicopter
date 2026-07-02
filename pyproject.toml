@@ -13,7 +13,7 @@ helicopter = "helicopter_cli.__main__:main"
 
 [dependency-groups]
 eval = [
-  "lighteval[litellm]>=0.13.0,<0.14.0",
+  "lighteval[extended_tasks,litellm,multilingual]>=0.13.0,<0.14.0",
 ]
 
 rwkv = [
