@@ -11,13 +11,13 @@ lighteval_tasks = ["rwkv_skills:human_eval"]
 
 [benchmarks.human_eval_cn]
 field = "coding"
-status = "needs_adapter"
-reason = "Requires a custom LightEval task for the rwkv-skills Chinese HumanEval dataset."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:human_eval_cn"]
 
 [benchmarks.human_eval_fix]
 field = "coding"
-status = "needs_adapter"
-reason = "Requires a custom LightEval task for the rwkv-skills HumanEval fix dataset."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:human_eval_fix"]
 
 [benchmarks.human_eval_plus]
 field = "coding"

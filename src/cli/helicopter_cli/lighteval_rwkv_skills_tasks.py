@@ -139,6 +139,7 @@ _FENCED_CODE_RE = re.compile(
     r"```[ \t]*(?:python|py)?[^\S\r\n]*\r?\n(?P<code>.*?)```",
     re.IGNORECASE | re.DOTALL,
 )
+_DEF_RE = re.compile(r"def\s+(?P<name>[\w_]+)\s*\(")
 _LEADING_END_THINK_RE = re.compile(r"^[\s\r\n]*</think>[ \t]*\r?\n?", re.IGNORECASE)
 _STANDALONE_CODE_FENCE_RE = re.compile(r"^[ \t]*```[ \t]*(?:python|py)?[ \t]*$", re.IGNORECASE)
 
@@ -182,6 +183,20 @@ def _strip_standalone_code_fence_edges(text: str) -> str:
     while lines and _STANDALONE_CODE_FENCE_RE.match(lines[-1]):
         lines.pop()
     return "\n".join(lines).rstrip()
+
+
+def _extract_entry_point(line: dict[str, Any]) -> str | None:
+    raw = line.get("entry_point")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    for key in ("declaration", "prompt"):
+        text = line.get(key)
+        if not isinstance(text, str):
+            continue
+        match = _DEF_RE.search(text)
+        if match:
+            return match.group("name")
+    return None
 
 
 def _prompt_prefix_before_entrypoint(prompt: str, entry_point: str) -> str:
@@ -745,7 +760,42 @@ def human_eval_prompt(line: dict, task_name: str | None = None) -> Doc:
             "prompt": line.get("prompt"),
             "canonical_solution": line.get("canonical_solution"),
             "test": line.get("test"),
-            "entry_point": line.get("entry_point"),
+            "entry_point": _extract_entry_point(line),
+            "declaration": line.get("declaration"),
+            "example_test": line.get("example_test"),
+            "text": line.get("text"),
+        },
+    )
+
+
+def human_eval_fix_prompt(line: dict, task_name: str | None = None) -> Doc:
+    prompt = str(line.get("prompt") or "").rstrip()
+    buggy_solution = str(line.get("buggy_solution") or "").rstrip()
+    entry_point = _extract_entry_point(line) or ""
+    query = (
+        "Fix the following Python function. Return only the corrected executable Python code; do not explain.\n\n"
+        f"Original prompt:\n```python\n{prompt}\n```"
+    )
+    if buggy_solution:
+        query += f"\n\nBuggy implementation:\n```python\n{buggy_solution}\n```"
+    if entry_point:
+        query += f"\n\nFix `{entry_point}` so it passes all tests."
+    return Doc(
+        task_name=task_name,
+        query=query,
+        choices=[str(line.get("canonical_solution") or "")],
+        gold_index=0,
+        specific={
+            "task_id": line.get("task_id"),
+            "prompt": line.get("prompt"),
+            "canonical_solution": line.get("canonical_solution"),
+            "buggy_solution": line.get("buggy_solution"),
+            "test": line.get("test"),
+            "entry_point": entry_point,
+            "declaration": line.get("declaration"),
+            "example_test": line.get("example_test"),
+            "bug_type": line.get("bug_type"),
+            "failure_symptoms": line.get("failure_symptoms"),
         },
     )
 
@@ -946,12 +996,18 @@ def _hf_wmt24pp_task(target_language: str) -> LightevalTaskConfig:
     )
 
 
-def _hf_human_eval_task(name: str, repo: str) -> LightevalTaskConfig:
+def _hf_human_eval_task(
+    name: str,
+    repo: str,
+    *,
+    subset: str | None = None,
+    prompt_function=human_eval_prompt,
+) -> LightevalTaskConfig:
     return LightevalTaskConfig(
         name=f"rwkv_skills:{name}",
-        prompt_function=human_eval_prompt,
+        prompt_function=prompt_function,
         hf_repo=repo,
-        hf_subset=None,
+        hf_subset=subset,
         hf_avail_splits=["test"],
         evaluation_splits=["test"],
         few_shots_split=None,
@@ -982,6 +1038,13 @@ def _hf_mbpp_task(name: str, metric: SampleLevelMetric) -> LightevalTaskConfig:
 
 TASKS_TABLE = [
     _hf_human_eval_task("human_eval", "openai/openai_humaneval"),
+    _hf_human_eval_task("human_eval_cn", str(LOCAL_DATA_ROOT / "human_eval_cn")),
+    _hf_human_eval_task(
+        "human_eval_fix",
+        "bigcode/humanevalpack",
+        subset="python",
+        prompt_function=human_eval_fix_prompt,
+    ),
     _hf_human_eval_task("human_eval_plus", "evalplus/humanevalplus"),
     _hf_mbpp_task("mbpp", MBPP_PASS_AT_1),
     _hf_mbpp_task("mbpp_plus", MBPP_PLUS_PASS_AT_1),

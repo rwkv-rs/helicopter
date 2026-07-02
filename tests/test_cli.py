@@ -428,6 +428,11 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(len(suite["benchmarks"]), 95)
         self.assertIn("gsm8k", suite["benchmarks"])
         self.assertEqual(suite["benchmarks"]["human_eval"]["lighteval_tasks"], ["rwkv_skills:human_eval"])
+        self.assertEqual(suite["benchmarks"]["human_eval_cn"]["lighteval_tasks"], ["rwkv_skills:human_eval_cn"])
+        self.assertEqual(
+            suite["benchmarks"]["human_eval_fix"]["lighteval_tasks"],
+            ["rwkv_skills:human_eval_fix"],
+        )
         self.assertEqual(
             suite["benchmarks"]["human_eval_plus"]["lighteval_tasks"],
             ["rwkv_skills:human_eval_plus"],
@@ -566,6 +571,8 @@ class CommandPlanTests(unittest.TestCase):
         registry = Registry(custom_tasks=str(custom_tasks))
 
         self.assertIn("rwkv_skills:human_eval", registry._task_registry)
+        self.assertIn("rwkv_skills:human_eval_cn", registry._task_registry)
+        self.assertIn("rwkv_skills:human_eval_fix", registry._task_registry)
         self.assertIn("rwkv_skills:human_eval_plus", registry._task_registry)
         self.assertIn("rwkv_skills:mbpp", registry._task_registry)
         self.assertIn("rwkv_skills:mbpp_plus", registry._task_registry)
@@ -700,6 +707,64 @@ class CommandPlanTests(unittest.TestCase):
             )["passed"]
         )
         self.assertFalse(module._check_humaneval_correctness(problem, "    return a - b", timeout=1.0)["passed"])
+
+    def test_rwkv_skills_human_eval_cn_data_and_fix_prompt(self) -> None:
+        if importlib.util.find_spec("lighteval") is None:
+            self.skipTest("LightEval is not installed")
+
+        custom_tasks = ROOT / "src/cli/helicopter_cli/lighteval_rwkv_skills_tasks.py"
+        spec = importlib.util.spec_from_file_location("rwkv_skills_lighteval_tasks", custom_tasks)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        cn_data_file = ROOT / "benchmarks/lighteval_data/human_eval_cn/test.jsonl"
+        self.assertTrue(cn_data_file.exists())
+        with cn_data_file.open("r", encoding="utf-8") as handle:
+            first = handle.readline()
+            self.assertEqual(1 + sum(1 for line in handle if line.strip()), 164)
+
+        import json
+
+        cn_row = json.loads(first)
+        cn_doc = module.human_eval_prompt(cn_row, "rwkv_skills:human_eval_cn")
+        self.assertEqual(cn_doc.specific["entry_point"], "has_close_elements")
+        self.assertTrue(
+            module._check_humaneval_correctness(
+                cn_doc.specific,
+                cn_row["canonical_solution"],
+                timeout=1.0,
+            )["passed"]
+        )
+
+        fix_row = {
+            "task_id": "Python/fixture",
+            "prompt": "def foo(x):\n    \"\"\"Return x plus one.\"\"\"\n",
+            "buggy_solution": "    return x - 1\n",
+            "canonical_solution": "    return x + 1\n",
+            "entry_point": "foo",
+            "test": "def check(candidate):\n    assert candidate(1) == 2\ncheck(foo)",
+            "bug_type": "missing logic",
+            "failure_symptoms": "incorrect output",
+        }
+        fix_doc = module.human_eval_fix_prompt(fix_row, "rwkv_skills:human_eval_fix")
+        self.assertIn("Buggy implementation", fix_doc.query)
+        self.assertEqual(fix_doc.specific["prompt"], fix_row["prompt"])
+        self.assertFalse(
+            module._check_humaneval_correctness(
+                fix_doc.specific,
+                fix_row["buggy_solution"],
+                timeout=1.0,
+            )["passed"]
+        )
+        self.assertTrue(
+            module._check_humaneval_correctness(
+                fix_doc.specific,
+                fix_row["canonical_solution"],
+                timeout=1.0,
+            )["passed"]
+        )
 
     def test_rwkv_skills_mbpp_prompt_and_base_plus_executors(self) -> None:
         if importlib.util.find_spec("lighteval") is None:
