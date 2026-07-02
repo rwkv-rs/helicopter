@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import contextlib
 import ast
+import copy
 import faulthandler
+import importlib
 import io
 import json
 import linecache
@@ -21,7 +23,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from string import ascii_uppercase
 from types import ModuleType, SimpleNamespace
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
 from inspect_ai.dataset import Sample
 from inspect_ai.solver import generate, prompt_template
@@ -215,6 +217,17 @@ BFCL_AST_TASKS = {
         "answer": ("unused_datasets", "possible_answer", "BFCL_v4_exec_multiple.json"),
     },
 }
+APIBANK_LIGHTEVAL_DATASET = "rwkv_skills_apibank"
+APIBANK_REPO_URL = "https://github.com/AlibabaResearch/DAMO-ConvAI.git"
+APIBANK_REPO_REVISION = "main"
+APIBANK_REPO_ROOT_NAME = "DAMO-ConvAI"
+APIBANK_TASKS = {
+    "apibank_l1": {"level": 1},
+    "apibank_l2": {"level": 2},
+    "apibank_level1": {"level": 1},
+    "apibank_level2": {"level": 2},
+}
+_APIBANK_SCHEMA_SANDBOX_CACHE: dict[str, "ApiBankSandbox"] = {}
 _THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DOTALL)
 _FENCED_CODE_RE = re.compile(
     r"```[ \t]*(?:python|py)?[^\S\r\n]*\r?\n(?P<code>.*?)```",
@@ -977,10 +990,14 @@ def _read_json_or_jsonl_items(path: Path) -> list[Any]:
     raw = path.read_text(encoding="utf-8")
     try:
         payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        if "Extra data" not in str(exc):
+    except json.JSONDecodeError:
+        lines = [line for line in raw.splitlines() if line.strip()]
+        if not lines:
+            return []
+        try:
+            return [json.loads(line) for line in lines]
+        except json.JSONDecodeError:
             raise
-        return [json.loads(line) for line in raw.splitlines() if line.strip()]
     if isinstance(payload, list):
         return payload
     if isinstance(payload, Mapping):
@@ -1656,6 +1673,531 @@ BFCL_AST_ACCURACY = SampleLevelMetric(
 )
 
 
+def _apibank_source_candidates() -> tuple[Path, ...]:
+    candidates: list[Path] = []
+    for raw in (os.environ.get("API_BANK_SOURCE_ROOT"), os.environ.get("RWKV_API_BANK_SOURCE_ROOT")):
+        if raw:
+            candidates.append(Path(raw).expanduser())
+    repo_root = Path(__file__).resolve().parents[3]
+    candidates.extend(
+        [
+            repo_root / "references" / "DAMO-ConvAI" / "api-bank",
+            repo_root / "references" / "API-Bank",
+            repo_root / "references" / "api-bank",
+            repo_root.parent / "DAMO-ConvAI" / "api-bank",
+            repo_root.parent / "API-Bank",
+            repo_root.parent / "api-bank",
+            Path("/tmp/helicopter-apibank-official/DAMO-ConvAI/api-bank"),
+            Path("/tmp/rwkv-official-refs/DAMO-ConvAI/api-bank"),
+            Path("/tmp/ref-DAMO-ConvAI/api-bank"),
+            Path("/home/chase/GitHub/rwkv-skills/references/DAMO-ConvAI/api-bank"),
+            Path("/home/chase/GitHub/rwkv-skills/references/API-Bank"),
+            Path("/home/chase/GitHub/rwkv-skills/references/api-bank"),
+        ]
+    )
+    return tuple(dict.fromkeys(path.expanduser().resolve() for path in candidates))
+
+
+def _apibank_source_root_from_candidate(candidate: Path) -> Path:
+    root = candidate.expanduser().resolve()
+    if root.name == "level-1-given-desc" and root.parent.name == "lv1-lv2-samples":
+        return root.parent.parent.resolve()
+    if (root / "api-bank" / "lv1-lv2-samples" / "level-1-given-desc").is_dir():
+        return (root / "api-bank").resolve()
+    if (root / APIBANK_REPO_ROOT_NAME / "api-bank" / "lv1-lv2-samples" / "level-1-given-desc").is_dir():
+        return (root / APIBANK_REPO_ROOT_NAME / "api-bank").resolve()
+    return root
+
+
+def _apibank_required_paths(source_root: Path) -> tuple[Path, ...]:
+    return (
+        source_root / "apis",
+        source_root / "init_database",
+        source_root / "lv1-lv2-samples" / "level-1-given-desc",
+    )
+
+
+def _apibank_source_root() -> Path:
+    for candidate in _apibank_source_candidates():
+        source_root = _apibank_source_root_from_candidate(candidate)
+        if all(path.exists() for path in _apibank_required_paths(source_root)):
+            return source_root.resolve()
+    return _download_apibank_source()
+
+
+def _download_apibank_source() -> Path:
+    target = Path(os.environ.get("RWKV_LIGHTEVAL_APIBANK_CACHE", "/tmp/helicopter-apibank-official")).expanduser().resolve()
+    repo_root = target / APIBANK_REPO_ROOT_NAME
+    if not (repo_root / ".git").exists():
+        target.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [
+                "git",
+                "clone",
+                "--depth",
+                "1",
+                "--filter=blob:none",
+                "--sparse",
+                "--branch",
+                APIBANK_REPO_REVISION,
+                APIBANK_REPO_URL,
+                str(repo_root),
+            ],
+            check=True,
+        )
+    subprocess.run(
+        ["git", "-C", str(repo_root), "sparse-checkout", "set", "api-bank"],
+        check=True,
+    )
+    source_root = repo_root / "api-bank"
+    missing = [path for path in _apibank_required_paths(source_root) if not path.exists()]
+    if missing:
+        raise FileNotFoundError(f"APIBank source is incomplete: {', '.join(str(path) for path in missing)}")
+    return source_root.resolve()
+
+
+def _apibank_level_from_name(file_name: str) -> int | None:
+    if "level-1" in file_name:
+        return 1
+    if "level-2" in file_name:
+        return 2
+    return None
+
+
+def _render_apibank_history(history: Sequence[Mapping[str, Any]]) -> str:
+    lines: list[str] = []
+    for item in history:
+        role = str(item.get("role") or "").strip()
+        if role == "User":
+            text = str(item.get("text") or "").lstrip().rstrip(" ")
+            lines.append(f"User: {text}" if text else "User:")
+        elif role == "AI":
+            text = str(item.get("text") or "").lstrip().rstrip(" ")
+            lines.append(f"Assistant: {text}" if text else "Assistant:")
+        elif role == "API":
+            args = ", ".join(f"{key}={_official_arg_repr(value)}" for key, value in dict(item.get("param_dict") or {}).items())
+            lines.append(f"API: [{item.get('api_name')}({args})] Response: {item.get('result')}")
+    return "\n".join(lines).strip()
+
+
+def _official_arg_repr(value: Any) -> str:
+    if isinstance(value, str):
+        return repr(value)
+    if value is None:
+        return "None"
+    return repr(value)
+
+
+def _apibank_json_type(value: Any) -> str:
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, list):
+        return "array"
+    return "string"
+
+
+def _apibank_api_json_type(value: Any) -> str:
+    return {
+        "int": "integer",
+        "float": "number",
+        "str": "string",
+        "list": "array",
+        "list(str)": "array",
+        "bool": "boolean",
+    }.get(str(value), "string")
+
+
+@contextlib.contextmanager
+def _temporary_apibank_import_path(source_root: Path) -> Iterator[None]:
+    old_cwd = Path.cwd()
+    root_text = str(source_root)
+    previous_modules = {
+        name: module
+        for name, module in sys.modules.items()
+        if name == "apis" or name.startswith("apis.")
+    }
+    for name in previous_modules:
+        sys.modules.pop(name, None)
+    sys.path.insert(0, root_text)
+    os.chdir(source_root)
+    try:
+        yield
+    finally:
+        os.chdir(old_cwd)
+        try:
+            sys.path.remove(root_text)
+        except ValueError:
+            pass
+        for name in list(sys.modules):
+            if name == "apis" or name.startswith("apis."):
+                sys.modules.pop(name, None)
+        sys.modules.update(previous_modules)
+
+
+class ApiBankSandbox:
+    _ARGUMENT_ALIASES: dict[str, dict[str, str]] = {
+        "CancelTimedSwitch": {"device_id": "name"},
+        "TimedSwitch": {"device_id": "name"},
+    }
+
+    def __init__(self, source_root: str | Path) -> None:
+        self.source_root = Path(source_root).expanduser().resolve()
+        self._api_classes: dict[str, type] | None = None
+        self._tools: dict[str, Any] = {}
+        self._init_databases: dict[str, Any] | None = None
+
+    def api_call(self, api_name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        try:
+            tool = self.init_tool(api_name)
+            api_info = self._api_info(api_name)
+            normalized_arguments = self.normalize_arguments(api_name, arguments)
+            processed = {
+                key: self._coerce_arg(value, api_info.get("input_parameters", {}).get(key, {}).get("type"))
+                for key, value in normalized_arguments.items()
+            }
+            return {"success": True, "result": tool.call(**processed), "error": None}
+        except Exception as exc:  # noqa: BLE001
+            return {"success": False, "result": None, "error": str(exc)}
+
+    def check_api_call_correctness(self, api_name: str, actual: Any, expected: Any) -> bool:
+        return bool(self.init_tool(api_name).check_api_call_correctness(actual, expected))
+
+    def get_api_description(self, api_name: str) -> dict[str, Any] | None:
+        try:
+            info = dict(self._api_info(api_name))
+        except Exception:
+            return None
+        info.pop("class", None)
+        info.pop("init_database", None)
+        return info
+
+    def init_tool(self, api_name: str) -> Any:
+        if api_name in self._tools:
+            return self._tools[api_name]
+        info = self._api_info(api_name)
+        args: list[Any] = []
+        if "init_database" in info:
+            args.append(info["init_database"])
+        if api_name != "CheckToken" and "token" in info.get("input_parameters", {}) and "CheckToken" in self._api_classes_by_name():
+            args.append(self.init_tool("CheckToken"))
+        tool = info["class"](*args)
+        self._tools[api_name] = tool
+        return tool
+
+    def _api_info(self, api_name: str) -> dict[str, Any]:
+        cls = self._api_classes_by_name().get(api_name)
+        if cls is None:
+            raise ValueError(f"invalid APIBank tool name: {api_name}")
+        info: dict[str, Any] = {
+            "name": api_name,
+            "class": cls,
+            "description": getattr(cls, "description", ""),
+            "input_parameters": getattr(cls, "input_parameters", {}),
+            "output_parameters": getattr(cls, "output_parameters", {}),
+        }
+        database_name = getattr(cls, "database_name", None)
+        init_databases = self._load_init_databases()
+        if database_name in init_databases:
+            info["init_database"] = init_databases[database_name]
+        return info
+
+    def _api_classes_by_name(self) -> dict[str, type]:
+        if self._api_classes is not None:
+            return self._api_classes
+        classes: dict[str, type] = {}
+        with _temporary_apibank_import_path(self.source_root):
+            api_base = importlib.import_module("apis.api").API
+            for file_path in sorted((self.source_root / "apis").glob("*.py")):
+                if file_path.name in {"__init__.py", "api.py", "tool_search.py"}:
+                    continue
+                try:
+                    module = importlib.import_module(f"apis.{file_path.stem}")
+                except Exception:
+                    continue
+                for value in vars(module).values():
+                    if isinstance(value, type) and issubclass(value, api_base) and value is not api_base:
+                        classes[value.__name__] = value
+        self._api_classes = classes
+        return classes
+
+    def _load_init_databases(self) -> dict[str, Any]:
+        if self._init_databases is not None:
+            return self._init_databases
+        databases: dict[str, Any] = {}
+        db_dir = self.source_root / "init_database"
+        if db_dir.is_dir():
+            for file_path in db_dir.glob("*.json"):
+                databases[file_path.stem] = json.loads(file_path.read_text(encoding="utf-8"))
+        self._init_databases = databases
+        return databases
+
+    @classmethod
+    def normalize_arguments(cls, api_name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        aliases = cls._ARGUMENT_ALIASES.get(str(api_name), {})
+        return {aliases.get(str(key), str(key)): value for key, value in dict(arguments).items()}
+
+    @staticmethod
+    def _coerce_arg(value: Any, arg_type: Any) -> Any:
+        if arg_type == "int":
+            return int(value)
+        if arg_type == "float":
+            return float(value)
+        if arg_type == "bool":
+            return value if isinstance(value, bool) else str(value) == "True"
+        if str(arg_type) in {"list", "list(str)"}:
+            return _coerce_apibank_list_arg(value)
+        return value
+
+
+def _coerce_apibank_list_arg(value: Any) -> Any:
+    if isinstance(value, list):
+        return value
+    if not isinstance(value, str):
+        return value
+    raw = value.strip()
+    if not raw:
+        return []
+    for parser in (json.loads, ast.literal_eval):
+        try:
+            parsed = parser(raw)
+        except Exception:
+            continue
+        if isinstance(parsed, list):
+            return parsed
+    return value
+
+
+def _normalize_apibank_expected_result(api_name: str, expected: Any) -> Any:
+    if not isinstance(expected, Mapping):
+        return expected
+    normalized = copy.deepcopy(dict(expected))
+    input_payload = normalized.get("input")
+    if isinstance(input_payload, Mapping):
+        normalized["input"] = ApiBankSandbox.normalize_arguments(api_name, input_payload)
+    return normalized
+
+
+def _apibank_schema_sandbox_for(source_root: Path) -> ApiBankSandbox:
+    key = str(source_root.expanduser().resolve())
+    sandbox = _APIBANK_SCHEMA_SANDBOX_CACHE.get(key)
+    if sandbox is None:
+        sandbox = ApiBankSandbox(source_root)
+        _APIBANK_SCHEMA_SANDBOX_CACHE[key] = sandbox
+    return sandbox
+
+
+def _apibank_tool_schema(source_root: Path, api_name: str, fallback_args: Mapping[str, Any]) -> dict[str, Any]:
+    description = _apibank_schema_sandbox_for(source_root).get_api_description(api_name)
+    if not description:
+        return {
+            "name": api_name,
+            "description": f"APIBank tool {api_name}",
+            "parameters": {
+                "type": "object",
+                "properties": {str(key): {"type": _apibank_json_type(value)} for key, value in fallback_args.items()},
+                "required": [str(key) for key in fallback_args],
+            },
+        }
+    parameters = description.get("input_parameters")
+    properties: dict[str, Any] = {}
+    required: list[str] = []
+    if isinstance(parameters, Mapping):
+        for key, spec in parameters.items():
+            spec = spec if isinstance(spec, Mapping) else {}
+            properties[str(key)] = {
+                "type": _apibank_api_json_type(spec.get("type")),
+                "description": str(spec.get("description") or ""),
+            }
+            required.append(str(key))
+    return {
+        "name": api_name,
+        "description": str(description.get("description") or ""),
+        "parameters": {"type": "object", "properties": properties, "required": required},
+    }
+
+
+def _load_apibank_rows(dataset_name: str) -> list[dict[str, Any]]:
+    if dataset_name not in APIBANK_TASKS:
+        raise ValueError(f"unknown APIBank dataset: {dataset_name}")
+    level = int(APIBANK_TASKS[dataset_name]["level"])
+    source_root = _apibank_source_root()
+    source_dir = source_root / "lv1-lv2-samples" / "level-1-given-desc"
+    rows: list[dict[str, Any]] = []
+    for file_path in sorted(source_dir.glob("*.jsonl")):
+        if _apibank_level_from_name(file_path.name) != level:
+            continue
+        history = [item for item in _read_json_or_jsonl_items(file_path) if isinstance(item, Mapping)]
+        api_names = sorted(
+            {
+                str(item.get("api_name") or "").strip()
+                for item in history
+                if item.get("role") == "API"
+            }
+        )
+        for turn_index, item in enumerate(history):
+            if item.get("role") != "API":
+                continue
+            api_name = str(item.get("api_name") or "").strip()
+            if not api_name:
+                continue
+            param_dict = item.get("param_dict")
+            if not isinstance(param_dict, Mapping):
+                param_dict = {}
+            rows.append(
+                {
+                    "task_id": f"{dataset_name}__{file_path.stem}_{turn_index:03d}",
+                    "instruction": _render_apibank_history(history[:turn_index]),
+                    "tools": [_apibank_tool_schema(source_root, name, param_dict) for name in api_names],
+                    "expected_tool_calls": [
+                        {
+                            "name": api_name,
+                            "arguments": dict(param_dict),
+                            "argument_options": {key: [value] for key, value in dict(param_dict).items()},
+                        }
+                    ],
+                    "metadata": {
+                        "source_format": "official_api_bank",
+                        "source_path": str(file_path),
+                        "source_dir": str(source_dir),
+                        "source_root": str(source_root),
+                        "level": level,
+                        "turn_index": turn_index,
+                        "api_name": api_name,
+                        "expected_result": item.get("result"),
+                    },
+                }
+            )
+    return rows
+
+
+def _load_apibank_dataset_dict(dataset_name: str):
+    from datasets import Dataset, DatasetDict
+
+    rows: list[dict[str, Any]] = []
+    for row in _load_apibank_rows(dataset_name):
+        rendered = dict(row)
+        for key in ("tools", "expected_tool_calls", "metadata"):
+            rendered[key] = json.dumps(rendered.get(key) or ([] if key != "metadata" else {}), ensure_ascii=False, sort_keys=True)
+        rows.append(rendered)
+    return DatasetDict({"test": Dataset.from_list(rows)})
+
+
+def apibank_prompt(line: dict, task_name: str | None = None) -> Doc:
+    instruction = _normalize_rwkv_text(line.get("instruction"))
+    tools = _bfcl_json_list_field(line.get("tools"))
+    expected_tool_calls = _bfcl_json_list_field(line.get("expected_tool_calls"))
+    metadata = _bfcl_json_mapping_field(line.get("metadata"))
+    system_prompt = "\n".join(
+        [
+            "Tools:",
+            _render_bfcl_tool_catalog([tool for tool in tools if isinstance(tool, Mapping)]),
+            "Output JSON schema:",
+            _render_bfcl_output_schema(),
+            "Return exactly one JSON value that validates against the schema.",
+            "For one tool call, return one JSON object.",
+            "Each arguments object must contain only final argument values for that tool.",
+            "API-Bank date convention: if a month/day or relative date has no explicit year and the conversation does not state today's date, use year 2023.",
+            "For dates and times, use only dates/times stated or implied by the conversation or function outputs; do not use the real current date.",
+            "Do not copy tool schemas, descriptions, type/items/properties/required/default fields, or wrapper objects into arguments.",
+            "Use only listed tool names.",
+            "Return no prose, no markdown, and no extra text outside the JSON value.",
+        ]
+    )
+    query = f"System: {system_prompt}\n\nUser: {instruction}\n\nJSON:"
+    return Doc(
+        task_name=task_name,
+        query=query,
+        choices=[json.dumps(expected_tool_calls, ensure_ascii=False, sort_keys=True)],
+        gold_index=0,
+        specific={
+            "task_id": line.get("task_id"),
+            "instruction": instruction,
+            "tools": json.dumps(tools, ensure_ascii=False, sort_keys=True),
+            "expected_tool_calls": json.dumps(expected_tool_calls, ensure_ascii=False, sort_keys=True),
+            "metadata": json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+            "prompt_chars": len(query),
+        },
+    )
+
+
+def _apibank_source_root_from_metadata(metadata: Mapping[str, Any]) -> Path:
+    source_root = str(metadata.get("source_root") or "").strip()
+    if source_root:
+        return Path(source_root).expanduser().resolve()
+    source_dir = Path(str(metadata.get("source_dir") or "")).expanduser()
+    if source_dir.name == "level-1-given-desc" and source_dir.parent.name == "lv1-lv2-samples":
+        return source_dir.parent.parent.resolve()
+    return _apibank_source_root()
+
+
+def evaluate_apibank_calls(record: Mapping[str, Any], decoded_calls: Sequence[Mapping[str, Any]], *, parse_error: str | None = None) -> dict[str, Any]:
+    expected_calls = _bfcl_json_list_field(record.get("expected_tool_calls"))
+    expected = expected_calls[0] if expected_calls and isinstance(expected_calls[0], Mapping) else None
+    expected_name = str(expected.get("name") or "") if expected else ""
+    metadata = _bfcl_json_mapping_field(record.get("metadata"))
+    expected_result = _normalize_apibank_expected_result(expected_name, metadata.get("expected_result"))
+    details: dict[str, Any] = {
+        "expected_tool_calls": expected_calls,
+        "decoded_tool_calls": [
+            {"name": str(item.get("name") or ""), "arguments": dict(item.get("arguments") or {})}
+            for item in decoded_calls
+            if isinstance(item, Mapping)
+        ],
+        "parse_error": parse_error or "",
+    }
+    if parse_error:
+        return {"score": 0.0, "passed": False, "reason": parse_error, "details": details}
+    if not expected or not decoded_calls:
+        return {"score": 0.0, "passed": False, "reason": "missing_call", "details": details}
+    actual = decoded_calls[0]
+    actual_name = str(actual.get("name") or "").strip()
+    actual_args = actual.get("arguments")
+    if not isinstance(actual_args, Mapping):
+        actual_args = {}
+    if actual_name != expected_name:
+        return {"score": 0.0, "passed": False, "reason": f"api_name_mismatch:{actual_name}!={expected_name}", "details": details}
+
+    sandbox = ApiBankSandbox(_apibank_source_root_from_metadata(metadata))
+    call_result = sandbox.api_call(actual_name, dict(actual_args))
+    details["execution_result"] = dict(call_result)
+    details["expected_result"] = expected_result
+    if not call_result["success"]:
+        return {"score": 0.0, "passed": False, "reason": call_result["error"] or "api_execution_failed", "details": details}
+    try:
+        ok = sandbox.check_api_call_correctness(actual_name, copy.deepcopy(call_result["result"]), copy.deepcopy(expected_result))
+    except Exception as exc:  # noqa: BLE001
+        details["check_error"] = str(exc)
+        ok = False
+    return {"score": 1.0 if ok else 0.0, "passed": bool(ok), "reason": "" if ok else "api_result_mismatch", "details": details}
+
+
+class ApiBankAccuracy(SampleLevelComputation):
+    def compute(self, doc: Doc, model_response, **kwargs) -> float:
+        record = dict(doc.specific or {})
+        for prediction in model_response.final_text:
+            try:
+                decoded_calls = decode_bfcl_tool_call_response(prediction)
+                result = evaluate_apibank_calls(record, decoded_calls)
+            except Exception:
+                continue
+            if bool(result.get("passed")):
+                return 1.0
+        return 0.0
+
+
+APIBANK_ACCURACY = SampleLevelMetric(
+    metric_name="apibank_accuracy",
+    sample_level_fn=ApiBankAccuracy(),
+    category=SamplingMethod.GENERATIVE,
+    corpus_level_fn=_mean,
+    higher_is_better=True,
+)
+
+
 def _install_longcodeqa_data_files_patch() -> None:
     """Scope LightEval 0.13 dataset patches to custom rwkv-skills datasets."""
 
@@ -1682,6 +2224,11 @@ def _install_longcodeqa_data_files_patch() -> None:
             if dataset_name is None and len(args) > 1:
                 dataset_name = args[1]
             return _load_bfcl_dataset_dict(str(dataset_name or ""))
+        if path == APIBANK_LIGHTEVAL_DATASET:
+            dataset_name = kwargs.get("name")
+            if dataset_name is None and len(args) > 1:
+                dataset_name = args[1]
+            return _load_apibank_dataset_dict(str(dataset_name or ""))
         return original_load_dataset(*args, **kwargs)
 
     patched_load_dataset._helicopter_rwkv_skills_patch = True  # type: ignore[attr-defined]
@@ -2394,6 +2941,23 @@ def _hf_bfcl_ast_task(name: str) -> LightevalTaskConfig:
     )
 
 
+def _hf_apibank_task(name: str) -> LightevalTaskConfig:
+    return LightevalTaskConfig(
+        name=f"rwkv_skills:{name}",
+        prompt_function=apibank_prompt,
+        hf_repo=APIBANK_LIGHTEVAL_DATASET,
+        hf_subset=name,
+        hf_avail_splits=["test"],
+        evaluation_splits=["test"],
+        few_shots_split=None,
+        few_shots_select=None,
+        generation_size=512,
+        metrics=[APIBANK_ACCURACY],
+        stop_sequence=["\nUser:", "\nSystem:", "\nAssistant:"],
+        version=0,
+    )
+
+
 _install_longcodeqa_data_files_patch()
 
 
@@ -2412,6 +2976,7 @@ TASKS_TABLE = [
     _hf_longcodeqa_task(),
     *[_hf_longbench_task(dataset) for dataset in LONG_BENCH_DATASETS],
     *[_hf_bfcl_ast_task(name) for name in BFCL_AST_TASKS],
+    *[_hf_apibank_task(name) for name in APIBANK_TASKS],
     *[_hf_math_task(name, task) for name, task in HF_MATH_TASKS.items()],
     _hf_answer_judge_task(),
     _hf_svamp_task(),

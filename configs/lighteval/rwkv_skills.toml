@@ -76,23 +76,23 @@ reason = "AgentBench KG requires an interactive tool/agent environment adapter."
 
 [benchmarks.apibank_l1]
 field = "function_calling"
-status = "needs_adapter"
-reason = "APIBank requires a function-calling custom task adapter."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:apibank_l1"]
 
 [benchmarks.apibank_l2]
 field = "function_calling"
-status = "needs_adapter"
-reason = "APIBank requires a function-calling custom task adapter."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:apibank_l2"]
 
 [benchmarks.apibank_level1]
 field = "function_calling"
-status = "needs_adapter"
-reason = "APIBank requires a function-calling custom task adapter."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:apibank_level1"]
 
 [benchmarks.apibank_level2]
 field = "function_calling"
-status = "needs_adapter"
-reason = "APIBank requires a function-calling custom task adapter."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:apibank_level2"]
 
 [benchmarks.bfcl_exec_multiple]
 field = "function_calling"

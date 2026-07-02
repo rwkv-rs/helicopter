@@ -441,6 +441,10 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(suite["benchmarks"]["mbpp"]["lighteval_tasks"], ["rwkv_skills:mbpp"])
         self.assertEqual(suite["benchmarks"]["mbpp_plus"]["lighteval_tasks"], ["rwkv_skills:mbpp_plus"])
         self.assertEqual(suite["benchmarks"]["longcodeqa"]["lighteval_tasks"], ["rwkv_skills:longcodeqa"])
+        self.assertEqual(suite["benchmarks"]["apibank_l1"]["lighteval_tasks"], ["rwkv_skills:apibank_l1"])
+        self.assertEqual(suite["benchmarks"]["apibank_l2"]["lighteval_tasks"], ["rwkv_skills:apibank_l2"])
+        self.assertEqual(suite["benchmarks"]["apibank_level1"]["lighteval_tasks"], ["rwkv_skills:apibank_level1"])
+        self.assertEqual(suite["benchmarks"]["apibank_level2"]["lighteval_tasks"], ["rwkv_skills:apibank_level2"])
         self.assertEqual(suite["benchmarks"]["bfcl_simple_python"]["lighteval_tasks"], ["rwkv_skills:bfcl_simple_python"])
         self.assertEqual(suite["benchmarks"]["bfcl_multiple"]["lighteval_tasks"], ["rwkv_skills:bfcl_multiple"])
         self.assertEqual(suite["benchmarks"]["bfcl_exec_simple_ast"]["lighteval_tasks"], ["rwkv_skills:bfcl_exec_simple_ast"])
@@ -594,6 +598,10 @@ class CommandPlanTests(unittest.TestCase):
         self.assertIn("rwkv_skills:longcodeqa", registry._task_registry)
         self.assertIn("rwkv_skills:longbench_narrativeqa", registry._task_registry)
         self.assertIn("rwkv_skills:longbench_repobench_p", registry._task_registry)
+        self.assertIn("rwkv_skills:apibank_l1", registry._task_registry)
+        self.assertIn("rwkv_skills:apibank_l2", registry._task_registry)
+        self.assertIn("rwkv_skills:apibank_level1", registry._task_registry)
+        self.assertIn("rwkv_skills:apibank_level2", registry._task_registry)
         self.assertIn("rwkv_skills:bfcl_simple_python", registry._task_registry)
         self.assertIn("rwkv_skills:bfcl_multiple", registry._task_registry)
         self.assertIn("rwkv_skills:bfcl_exec_simple_ast", registry._task_registry)
@@ -743,6 +751,30 @@ class CommandPlanTests(unittest.TestCase):
                 {"final_text": [module.json.dumps(rows[0]["expected_tool_calls"], ensure_ascii=False)]},
             )()
             self.assertEqual(module.BfclAstAccuracy().compute(doc, response), 1.0, dataset_name)
+
+    def test_rwkv_skills_apibank_prompt_loads_and_scores_with_official_sandbox(self) -> None:
+        if importlib.util.find_spec("lighteval") is None:
+            self.skipTest("LightEval is not installed")
+
+        custom_tasks = ROOT / "src/cli/helicopter_cli/lighteval_rwkv_skills_tasks.py"
+        spec = importlib.util.spec_from_file_location("rwkv_skills_lighteval_tasks", custom_tasks)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        for dataset_name in ("apibank_l1", "apibank_l2", "apibank_level1", "apibank_level2"):
+            rows = module._load_apibank_rows(dataset_name)
+            self.assertGreater(len(rows), 0)
+            doc = module.apibank_prompt(rows[0], f"rwkv_skills:{dataset_name}")
+            self.assertIn("API-Bank date convention", doc.query)
+            self.assertIn("\n\nJSON:", doc.query)
+            response = type(
+                "Response",
+                (),
+                {"final_text": [module.json.dumps(rows[0]["expected_tool_calls"], ensure_ascii=False)]},
+            )()
+            self.assertEqual(module.ApiBankAccuracy().compute(doc, response), 1.0, dataset_name)
 
     def test_rwkv_skills_svamp_prompt_combines_body_question_and_normalizes_answer(self) -> None:
         if importlib.util.find_spec("lighteval") is None:
