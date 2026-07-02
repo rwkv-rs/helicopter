@@ -579,6 +579,7 @@ class CommandPlanTests(unittest.TestCase):
                 "polymath",
                 "svamp",
                 "supergpqa",
+                "wmt24pp",
             }.issubset({task.name for task in lighteval_rwkv_skills_tasks.TASKS_TABLE})
         )
 
@@ -590,6 +591,27 @@ class CommandPlanTests(unittest.TestCase):
 
     def test_comp_math_static_data_file_is_packaged(self) -> None:
         self.assertTrue(Path(lighteval_rwkv_skills_tasks.COMP_MATH_24_25_PATH).is_file())
+
+    def test_wmt24pp_task_uses_default_target_languages(self) -> None:
+        self.assertEqual(lighteval_rwkv_skills_tasks.WMT24PP_TARGET_LANGUAGES, ("de_DE", "es_MX", "fr_FR", "it_IT", "ja_JP"))
+        self.assertEqual(len(lighteval_rwkv_skills_tasks.WMT24PP_URLS), 5)
+        self.assertIn("en-ja_JP.jsonl", lighteval_rwkv_skills_tasks.WMT24PP_URLS[-1])
+
+    def test_wmt24pp_prompt_builds_translation_doc(self) -> None:
+        doc = lighteval_rwkv_skills_tasks.wmt24pp_prompt(
+            {
+                "lp": "en-de_DE",
+                "source": "Good morning.",
+                "target": "Guten Morgen.",
+            },
+            "wmt24pp",
+        )
+
+        self.assertIsNotNone(doc)
+        assert doc is not None
+        self.assertEqual(doc.choices, ["Guten Morgen."])
+        self.assertIn("from English to German", doc.query)
+        self.assertTrue(doc.query.endswith("German:"))
 
     def test_free_answer_prompt_normalizes_numeric_answers(self) -> None:
         doc = lighteval_rwkv_skills_tasks.free_answer_prompt(
