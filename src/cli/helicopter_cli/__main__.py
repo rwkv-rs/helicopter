@@ -148,6 +148,13 @@ def build_parser() -> argparse.ArgumentParser:
     suite_adapter.add_argument("--tau-max-errors", type=int)
     suite_adapter.add_argument("--tau-history-max-chars", type=int)
     suite_adapter.add_argument("--tau-prompt-max-chars", type=int)
+    suite_adapter.add_argument("--tau-user-model")
+    suite_adapter.add_argument("--tau-user-base-url")
+    suite_adapter.add_argument("--tau-user-api-key")
+    suite_adapter.add_argument("--tau-user-temperature", type=float)
+    suite_adapter.add_argument("--tau-judge-model")
+    suite_adapter.add_argument("--tau-judge-base-url")
+    suite_adapter.add_argument("--tau-judge-api-key")
     suite_adapter.set_defaults(plan_builder=build_suite_adapter_plan)
 
     lighteval_tasks = eval_subparsers.add_parser("lighteval-tasks", help="list or inspect LightEval tasks")

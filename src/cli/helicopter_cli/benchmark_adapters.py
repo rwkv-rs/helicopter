@@ -50,8 +50,15 @@ _FENCED_BLOCK_RE = re.compile(r"```(?:diff|patch)?\s*(.*?)```", re.IGNORECASE | 
 _JSON_FENCED_BLOCK_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
 
 TAU_ADAPTER_BENCHMARKS: dict[str, dict[str, str]] = {
+    "tau2_bench_airline": {"domain": "airline", "version": "tau_v2"},
+    "tau2_bench_retail": {"domain": "retail", "version": "tau_v2"},
+    "tau2_bench_telecom": {"domain": "telecom", "version": "tau_v2"},
+    "tau3_bench_airline": {"domain": "airline", "version": "tau_v3"},
+    "tau3_bench_banking_knowledge": {"domain": "banking_knowledge", "version": "tau_v3"},
     "tau3_bench_mock": {"domain": "mock", "version": "tau3_light"},
     "tau3_bench_mock_long_context": {"domain": "mock", "version": "tau3_light_long_context"},
+    "tau3_bench_retail": {"domain": "retail", "version": "tau_v3"},
+    "tau3_bench_telecom": {"domain": "telecom", "version": "tau_v3"},
 }
 
 TAU3_LIGHT_MOCK_TASK_IDS = frozenset(
@@ -96,6 +103,13 @@ class TauGenerationStage:
     finish_reason: str
     parsed_name: str = ""
     parse_error: str = ""
+
+
+@dataclass(frozen=True)
+class TauExternalModelConfig:
+    api_key: str
+    model_name: str
+    base_url: str | None = None
 
 
 def load_suite(path: str | Path) -> dict[str, Any]:
@@ -333,6 +347,177 @@ def _dump_model(value: Any) -> dict[str, Any]:
         return dict(value)
     except Exception:
         return {"value": str(value)}
+
+
+def _parse_env_assignment(line: str) -> tuple[str, str] | None:
+    text = line.strip()
+    if not text or text.startswith("#"):
+        return None
+    if text.startswith("export "):
+        text = text.removeprefix("export ").strip()
+    key, separator, value = text.partition("=")
+    if not separator:
+        return None
+    key = key.strip()
+    if not key or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+        return None
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        value = value[1:-1]
+    return key, value
+
+
+def load_adapter_env_file(path: str | None = None) -> str | None:
+    candidates = [
+        path,
+        os.environ.get("HELICOPTER_ENV_FILE"),
+        ".env",
+        str(Path.home() / "GitHub/rwkv-skills/.env"),
+        str(Path.home() / "rwkv-skills/.env"),
+    ]
+    loaded_paths: list[str] = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        target = Path(candidate).expanduser().resolve()
+        if not target.is_file():
+            continue
+        for line in target.read_text(encoding="utf-8").splitlines():
+            parsed = _parse_env_assignment(line)
+            if parsed is None:
+                continue
+            key, value = parsed
+            os.environ.setdefault(key, value)
+        loaded_paths.append(str(target))
+    return os.pathsep.join(loaded_paths) if loaded_paths else None
+
+
+def _first_env(*names: str) -> str | None:
+    for name in names:
+        value = os.environ.get(name)
+        if value is None:
+            continue
+        text = value.strip()
+        if text:
+            return text
+    return None
+
+
+def _first_value(*values: str | None) -> str | None:
+    for value in values:
+        if value is None:
+            continue
+        text = value.strip()
+        if text:
+            return text
+    return None
+
+
+def _normalize_openai_base_url(value: str | None) -> str | None:
+    if value is None:
+        return None
+    text = value.strip().rstrip("/")
+    if not text:
+        return None
+    suffix = "/chat/completions"
+    if text.endswith(suffix):
+        text = text[: -len(suffix)].rstrip("/")
+    return text or None
+
+
+def resolve_tau_user_model_config(args: argparse.Namespace) -> TauExternalModelConfig:
+    api_key = _first_value(
+        getattr(args, "tau_user_api_key", None),
+        _first_env("USER_API_KEY", "API_KEY", "OPENAI_API_KEY"),
+    )
+    model_name = _first_value(
+        getattr(args, "tau_user_model", None),
+        _first_env("USER_MODEL_NAME", "model_name", "MODEL_NAME"),
+    )
+    base_url = _first_value(
+        getattr(args, "tau_user_base_url", None),
+        _first_env("USER_BASE_URL", "OPENAI_BASE_URL", "API_BASE", "BASE_URL"),
+    )
+    missing = []
+    if not api_key:
+        missing.append("USER_API_KEY")
+    if not model_name:
+        missing.append("USER_MODEL_NAME")
+    if missing:
+        raise ValueError(
+            "official TAU adapters require user simulator config in .env: "
+            + ", ".join(missing)
+        )
+    return TauExternalModelConfig(
+        api_key=str(api_key),
+        model_name=str(model_name),
+        base_url=_normalize_openai_base_url(base_url),
+    )
+
+
+def resolve_tau_judge_model_config(
+    args: argparse.Namespace,
+    *,
+    default_model: TauExternalModelConfig,
+) -> TauExternalModelConfig:
+    explicit_model = _first_value(getattr(args, "tau_judge_model", None), _first_env("JUDGE_MODEL"))
+    model_name = explicit_model or default_model.model_name
+    api_key = _first_value(
+        getattr(args, "tau_judge_api_key", None),
+        _first_env("JUDGE_API_KEY"),
+        default_model.api_key if explicit_model is None else None,
+    )
+    base_url = _first_value(
+        getattr(args, "tau_judge_base_url", None),
+        _first_env("JUDGE_BASE_URL"),
+        default_model.base_url if explicit_model is None else None,
+    )
+    if not api_key:
+        raise ValueError("official TAU adapters require JUDGE_API_KEY in .env or a user-model fallback")
+    return TauExternalModelConfig(
+        api_key=str(api_key),
+        model_name=str(model_name),
+        base_url=_normalize_openai_base_url(base_url),
+    )
+
+
+def _tau_litellm_model_name(model_config: TauExternalModelConfig) -> str:
+    model_name = str(model_config.model_name or "").strip()
+    if model_name.startswith("openai/"):
+        return model_name.removeprefix("openai/")
+    if not model_name or "/" in model_name:
+        return model_name
+    base_url = _normalize_openai_base_url(model_config.base_url) or ""
+    if "api.deepseek.com" in base_url and model_name.startswith("deepseek-"):
+        return f"deepseek/{model_name}"
+    return model_name
+
+
+def _tau_litellm_provider_args(model_config: TauExternalModelConfig) -> dict[str, str]:
+    model_name = str(model_config.model_name or "").strip()
+    base_url = _normalize_openai_base_url(model_config.base_url) or ""
+    if "api.deepseek.com" in base_url:
+        return {}
+    if model_name.startswith("openai/") or (base_url and "/" not in model_name):
+        return {"custom_llm_provider": "openai"}
+    return {}
+
+
+def _tau_openai_temperature(value: float) -> float:
+    return max(0.001, float(value))
+
+
+def _tau_timeout_args() -> dict[str, float]:
+    value = _first_env("RWKV_TAU_LLM_TIMEOUT_S", "RWKV_TAU_USER_TIMEOUT_S", "RWKV_LLM_TIMEOUT_S")
+    if not value:
+        return {}
+    try:
+        parsed = float(value)
+    except ValueError:
+        return {}
+    if parsed <= 0:
+        return {}
+    return {"timeout": parsed}
 
 
 def _resolve_tau_bench_root(raw_root: str | None = None) -> Path:
@@ -588,6 +773,19 @@ def _tau3_mock_long_context_rows() -> list[dict[str, Any]]:
     ]
 
 
+def _normalize_official_tau_task_row(task: Any, *, domain: str, version: str, index: int) -> dict[str, Any]:
+    payload = _dump_model(task)
+    task_id = str(getattr(task, "id", None) or payload.get("id") or index)
+    return {
+        "task_id": task_id,
+        "domain": domain,
+        "index": int(index),
+        "instruction": _tau_task_instruction(payload),
+        "task": payload,
+        "benchmark_version": version,
+    }
+
+
 def load_tau_adapter_records(
     benchmark_name: str,
     entry: Mapping[str, Any],
@@ -599,19 +797,28 @@ def load_tau_adapter_records(
     if benchmark_name not in TAU_ADAPTER_BENCHMARKS:
         raise ValueError(f"unsupported tau adapter benchmark: {benchmark_name}")
     root = _ensure_tau2_runtime_path(tau_bench_root, tau_data_root)
+    adapter_spec = TAU_ADAPTER_BENCHMARKS[benchmark_name]
+    domain = str(entry.get("tau_domain") or adapter_spec["domain"])
+    version = str(entry.get("tau_version") or adapter_spec["version"])
     if benchmark_name == "tau3_bench_mock_long_context":
         rows = _tau3_mock_long_context_rows()
     else:
         registry_module = __import__("tau2.registry", fromlist=["registry"])
         registry = getattr(registry_module, "registry")
-        get_tasks = registry.get_tasks_loader("mock")
+        get_tasks = registry.get_tasks_loader(domain)
         raw_tasks = get_tasks("base" if split in {"test", "base"} else split)
         rows = []
-        for task in raw_tasks:
-            payload = _dump_model(task)
-            if str(payload.get("id") or "") not in TAU3_LIGHT_MOCK_TASK_IDS:
-                continue
-            rows.append(_sanitize_tau3_light_mock_task(payload, index=len(rows)))
+        if benchmark_name == "tau3_bench_mock":
+            for task in raw_tasks:
+                payload = _dump_model(task)
+                if str(payload.get("id") or "") not in TAU3_LIGHT_MOCK_TASK_IDS:
+                    continue
+                rows.append(_sanitize_tau3_light_mock_task(payload, index=len(rows)))
+        else:
+            rows = [
+                _normalize_official_tau_task_row(task, domain=domain, version=version, index=index)
+                for index, task in enumerate(raw_tasks)
+            ]
     records = []
     for row in rows:
         records.append(
@@ -953,6 +1160,81 @@ class StaticStopTauUser:
         return user_message, state
 
 
+def _is_lightweight_tau_record(record: TauAdapterRecord) -> bool:
+    return str(record.benchmark_version).strip().lower() in {
+        "tau3_light",
+        "tau3_light_long_context",
+        "tau_v3_light",
+    }
+
+
+def _tau_environment_kwargs(domain: str) -> dict[str, Any]:
+    if str(domain).strip().lower() == "banking_knowledge":
+        return {"retrieval_variant": "bm25"}
+    return {}
+
+
+def _build_tau_user(
+    *,
+    task: Any,
+    environment: Any,
+    user_model: TauExternalModelConfig | None,
+    temperature: float,
+) -> Any:
+    if user_model is None:
+        return StaticStopTauUser()
+    user_module = __import__("tau2.user.user_simulator", fromlist=["UserSimulator"])
+    UserSimulator = getattr(user_module, "UserSimulator")
+    try:
+        user_tools = environment.get_user_tools()
+    except Exception:  # noqa: BLE001
+        user_tools = None
+    return UserSimulator(
+        tools=user_tools,
+        instructions=str(getattr(task, "user_scenario", "")),
+        llm=_tau_litellm_model_name(user_model),
+        llm_args={
+            "temperature": _tau_openai_temperature(temperature),
+            "stream": False,
+            "api_key": user_model.api_key,
+            "api_base": user_model.base_url,
+            **_tau_litellm_provider_args(user_model),
+            **_tau_timeout_args(),
+        },
+    )
+
+
+def configure_tau_judge(judge_model: TauExternalModelConfig | None) -> None:
+    if judge_model is None:
+        return
+    model_name = _tau_litellm_model_name(judge_model)
+    if not model_name or not judge_model.api_key:
+        return
+    llm_args: dict[str, Any] = {
+        "temperature": _tau_openai_temperature(0.0),
+        "stream": False,
+        "api_key": judge_model.api_key,
+        "response_format": {"type": "json_object"},
+    }
+    if judge_model.base_url:
+        llm_args["api_base"] = judge_model.base_url
+    llm_args.update(_tau_litellm_provider_args(judge_model))
+    llm_args.update(_tau_timeout_args())
+    for module_name in ("tau2.config", "tau2.evaluator.evaluator_nl_assertions"):
+        try:
+            module = __import__(module_name, fromlist=["DEFAULT_LLM_NL_ASSERTIONS"])
+        except Exception:  # noqa: BLE001
+            continue
+        setattr(module, "DEFAULT_LLM_NL_ASSERTIONS", model_name)
+        setattr(module, "DEFAULT_LLM_NL_ASSERTIONS_ARGS", dict(llm_args))
+
+
+def _task_uses_nl_assertions(task: Any) -> bool:
+    criteria = getattr(task, "evaluation_criteria", None)
+    assertions = getattr(criteria, "nl_assertions", None)
+    return bool(assertions)
+
+
 def _normalize_tau_task_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     normalized = dict(payload)
     criteria = normalized.get("evaluation_criteria")
@@ -981,6 +1263,7 @@ def _tau_task_needs_initial_user(task_payload: Mapping[str, Any]) -> bool:
 
 
 def run_tau_adapter(name: str, entry: Mapping[str, Any], args: argparse.Namespace, run_root: Path) -> dict[str, Any]:
+    env_file_loaded = load_adapter_env_file(getattr(args, "env_file", None))
     split = str(getattr(args, "split", None) or entry.get("split") or "base")
     records = load_tau_adapter_records(
         name,
@@ -990,6 +1273,13 @@ def run_tau_adapter(name: str, entry: Mapping[str, Any], args: argparse.Namespac
         tau_data_root=args.tau_data_root,
     )
     selected = select_records(records, max_samples=args.max_samples, sample_seed=args.sample_seed)
+    official_records = [record for _dataset_index, record in selected if not _is_lightweight_tau_record(record)]
+    user_model: TauExternalModelConfig | None = None
+    judge_model: TauExternalModelConfig | None = None
+    if official_records:
+        user_model = resolve_tau_user_model_config(args)
+        judge_model = resolve_tau_judge_model_config(args, default_model=user_model)
+        configure_tau_judge(judge_model)
     benchmark_dir = run_root / name
     benchmark_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1007,7 +1297,15 @@ def run_tau_adapter(name: str, entry: Mapping[str, Any], args: argparse.Namespac
     eval_rows: list[dict[str, Any]] = []
     for ordinal, (dataset_index, record) in enumerate(selected):
         task = Task.model_validate(_normalize_tau_task_payload(record.task))
-        environment = registry.get_env_constructor(record.domain)(solo_mode=False)
+        env_kwargs = _tau_environment_kwargs(record.domain)
+        env_constructor = registry.get_env_constructor(record.domain)
+        try:
+            environment = env_constructor(solo_mode=False, **env_kwargs)
+        except TypeError:
+            if env_kwargs:
+                environment = env_constructor(solo_mode=False)
+            else:
+                raise
         agent = EndpointTauAgent(
             base_url=args.base_url,
             api_key=args.api_key,
@@ -1020,10 +1318,18 @@ def run_tau_adapter(name: str, entry: Mapping[str, Any], args: argparse.Namespac
             history_max_chars=args.tau_history_max_chars,
             prompt_max_chars=args.tau_prompt_max_chars,
         )
-        user = StaticStopTauUser(
-            initial_content=record.instruction,
-            send_initial=_tau_task_needs_initial_user(record.task),
-        )
+        if _is_lightweight_tau_record(record):
+            user = StaticStopTauUser(
+                initial_content=record.instruction,
+                send_initial=_tau_task_needs_initial_user(record.task),
+            )
+        else:
+            user = _build_tau_user(
+                task=task,
+                environment=environment,
+                user_model=user_model,
+                temperature=args.tau_user_temperature,
+            )
         orchestrator = Orchestrator(
             domain=record.domain,
             agent=agent,
@@ -1040,13 +1346,18 @@ def run_tau_adapter(name: str, entry: Mapping[str, Any], args: argparse.Namespac
         runtime_error = ""
         try:
             simulation = orchestrator.run()
+            evaluation_type = (
+                EvaluationType.ALL_WITH_NL_ASSERTIONS
+                if _task_uses_nl_assertions(task)
+                else EvaluationType.ALL
+            )
             reward_info = evaluate_simulation(
                 simulation=simulation,
                 task=task,
-                evaluation_type=EvaluationType.ALL,
+                evaluation_type=evaluation_type,
                 solo_mode=False,
                 domain=record.domain,
-                env_kwargs={},
+                env_kwargs=env_kwargs,
             )
             simulation.reward_info = reward_info
             reward = float(getattr(reward_info, "reward", 0.0))
@@ -1125,6 +1436,9 @@ def run_tau_adapter(name: str, entry: Mapping[str, Any], args: argparse.Namespac
         "parse_error_count": parse_error_count,
         "parse_error_rate": (parse_error_count / len(eval_rows)) if eval_rows else 0.0,
         "split": split,
+        "env_file_loaded": env_file_loaded,
+        "external_user_model": user_model.model_name if user_model is not None else None,
+        "external_judge_model": judge_model.model_name if judge_model is not None else None,
         "completions_path": str(completions_path),
         "eval_path": str(eval_path),
     }
@@ -1294,6 +1608,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--api-key", default=os.environ.get("OPENAI_API_KEY", "EMPTY"))
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--env-file")
     parser.add_argument("--run-id")
     parser.add_argument("--split", default="test")
     parser.add_argument("--max-samples", type=int)
@@ -1312,6 +1627,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tau-max-errors", type=int, default=4)
     parser.add_argument("--tau-history-max-chars", type=int, default=16000)
     parser.add_argument("--tau-prompt-max-chars", type=int, default=24576)
+    parser.add_argument("--tau-user-model")
+    parser.add_argument("--tau-user-base-url")
+    parser.add_argument("--tau-user-api-key")
+    parser.add_argument("--tau-user-temperature", type=float, default=0.0)
+    parser.add_argument("--tau-judge-model")
+    parser.add_argument("--tau-judge-base-url")
+    parser.add_argument("--tau-judge-api-key")
     return parser
 
 

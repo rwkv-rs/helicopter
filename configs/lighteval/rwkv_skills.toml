@@ -258,28 +258,28 @@ reason = "MCP-Bench requires MCP server orchestration and tool-call scoring."
 
 [benchmarks.tau2_bench_airline]
 field = "function_calling"
-status = "needs_adapter"
-reason = "TAU2 requires an interactive environment adapter."
+status = "adapter"
+adapter = "tau"
 
 [benchmarks.tau2_bench_retail]
 field = "function_calling"
-status = "needs_adapter"
-reason = "TAU2 requires an interactive environment adapter."
+status = "adapter"
+adapter = "tau"
 
 [benchmarks.tau2_bench_telecom]
 field = "function_calling"
-status = "needs_adapter"
-reason = "TAU2 requires an interactive environment adapter."
+status = "adapter"
+adapter = "tau"
 
 [benchmarks.tau3_bench_airline]
 field = "function_calling"
-status = "needs_adapter"
-reason = "TAU3 requires an interactive environment adapter."
+status = "adapter"
+adapter = "tau"
 
 [benchmarks.tau3_bench_banking_knowledge]
 field = "function_calling"
-status = "needs_adapter"
-reason = "TAU3 requires an interactive environment adapter."
+status = "adapter"
+adapter = "tau"
 
 [benchmarks.tau3_bench_mock]
 field = "function_calling"
@@ -299,13 +299,13 @@ split = "base"
 
 [benchmarks.tau3_bench_retail]
 field = "function_calling"
-status = "needs_adapter"
-reason = "TAU3 requires an interactive environment adapter."
+status = "adapter"
+adapter = "tau"
 
 [benchmarks.tau3_bench_telecom]
 field = "function_calling"
-status = "needs_adapter"
-reason = "TAU3 requires an interactive environment adapter."
+status = "adapter"
+adapter = "tau"
 
 [benchmarks.tau_bench_airline]
 field = "function_calling"

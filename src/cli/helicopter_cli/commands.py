@@ -526,6 +526,7 @@ def build_suite_adapter_plan(
     for benchmark in benchmarks:
         command.extend(["--benchmark", benchmark])
     for option, value in (
+        ("--env-file", getattr(args, "env_file", None)),
         ("--run-id", getattr(args, "run_id", None)),
         ("--split", getattr(args, "split", None)),
         ("--max-samples", getattr(args, "max_samples", None)),
@@ -543,6 +544,13 @@ def build_suite_adapter_plan(
         ("--tau-max-errors", getattr(args, "tau_max_errors", None)),
         ("--tau-history-max-chars", getattr(args, "tau_history_max_chars", None)),
         ("--tau-prompt-max-chars", getattr(args, "tau_prompt_max_chars", None)),
+        ("--tau-user-model", getattr(args, "tau_user_model", None)),
+        ("--tau-user-base-url", getattr(args, "tau_user_base_url", None)),
+        ("--tau-user-api-key", getattr(args, "tau_user_api_key", None)),
+        ("--tau-user-temperature", getattr(args, "tau_user_temperature", None)),
+        ("--tau-judge-model", getattr(args, "tau_judge_model", None)),
+        ("--tau-judge-base-url", getattr(args, "tau_judge_base_url", None)),
+        ("--tau-judge-api-key", getattr(args, "tau_judge_api_key", None)),
     ):
         append_cli_option(command, option, value)
     append_cli_flag(command, "--swebench-run-harness", getattr(args, "swebench_run_harness", None))

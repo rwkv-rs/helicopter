@@ -14,7 +14,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     import tomli as tomllib  # type: ignore[no-redef]
 
-from helicopter_cli import commands, config, env
+from helicopter_cli import benchmark_adapters, commands, config, env
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -146,6 +146,7 @@ def suite_adapter_args(**overrides: object) -> Namespace:
         "adapter_model_name": None,
         "base_url": None,
         "api_key": None,
+        "env_file": None,
         "output_dir": None,
         "run_id": None,
         "split": None,
@@ -165,6 +166,13 @@ def suite_adapter_args(**overrides: object) -> Namespace:
         "tau_max_errors": None,
         "tau_history_max_chars": None,
         "tau_prompt_max_chars": None,
+        "tau_user_model": None,
+        "tau_user_base_url": None,
+        "tau_user_api_key": None,
+        "tau_user_temperature": None,
+        "tau_judge_model": None,
+        "tau_judge_base_url": None,
+        "tau_judge_api_key": None,
     }
     values.update(overrides)
     return Namespace(**values)
@@ -490,6 +498,17 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(suite["benchmarks"]["tau3_bench_mock"]["tau_domain"], "mock")
         self.assertEqual(suite["benchmarks"]["tau3_bench_mock_long_context"]["status"], "adapter")
         self.assertEqual(suite["benchmarks"]["tau3_bench_mock_long_context"]["adapter"], "tau")
+        for benchmark in (
+            "tau2_bench_airline",
+            "tau2_bench_retail",
+            "tau2_bench_telecom",
+            "tau3_bench_airline",
+            "tau3_bench_banking_knowledge",
+            "tau3_bench_retail",
+            "tau3_bench_telecom",
+        ):
+            self.assertEqual(suite["benchmarks"][benchmark]["status"], "adapter")
+            self.assertEqual(suite["benchmarks"][benchmark]["adapter"], "tau")
         self.assertEqual(suite["benchmarks"]["longcodeqa"]["lighteval_tasks"], ["rwkv_skills:longcodeqa"])
         self.assertEqual(suite["benchmarks"]["apibank_l1"]["lighteval_tasks"], ["rwkv_skills:apibank_l1"])
         self.assertEqual(suite["benchmarks"]["apibank_l2"]["lighteval_tasks"], ["rwkv_skills:apibank_l2"])
@@ -681,11 +700,17 @@ class CommandPlanTests(unittest.TestCase):
         plan = commands.build_suite_adapter_plan(
             suite_adapter_args(
                 benchmark=["tau3_bench_mock"],
+                env_file="tests/fixtures/tau.env",
                 max_samples=1,
                 sample_seed=7,
                 max_tokens=96,
                 tau_max_steps=3,
                 tau_history_max_chars=4096,
+                tau_user_model="user-model",
+                tau_user_base_url="https://user.example/v1",
+                tau_user_temperature=0.2,
+                tau_judge_model="judge-model",
+                tau_judge_base_url="https://judge.example/v1",
                 output_dir="results/tau_adapter_test",
                 run_id="unit-tau",
             ),
@@ -700,11 +725,41 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(options["--max-samples"], "1")
         self.assertEqual(options["--sample-seed"], "7")
         self.assertEqual(options["--max-tokens"], "96")
+        self.assertEqual(options["--env-file"], "tests/fixtures/tau.env")
         self.assertEqual(options["--tau-max-steps"], "3")
         self.assertEqual(options["--tau-history-max-chars"], "4096")
+        self.assertEqual(options["--tau-user-model"], "user-model")
+        self.assertEqual(options["--tau-user-base-url"], "https://user.example/v1")
+        self.assertEqual(options["--tau-user-temperature"], "0.2")
+        self.assertEqual(options["--tau-judge-model"], "judge-model")
+        self.assertEqual(options["--tau-judge-base-url"], "https://judge.example/v1")
         self.assertEqual(options["--run-id"], "unit-tau")
         self.assertEqual(options["--output-dir"], str(ROOT / "results/tau_adapter_test"))
         self.assertEqual(plan.env["OPENAI_API_KEY"], "EMPTY")
+
+    def test_adapter_env_file_loads_tau_model_keys_without_overriding_existing_env(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env_path = Path(directory) / ".env"
+            env_path.write_text(
+                "\n".join(
+                    [
+                        "USER_API_KEY=from-file",
+                        "USER_MODEL_NAME=user-model",
+                        "USER_BASE_URL=https://user.example/v1/chat/completions",
+                        "JUDGE_API_KEY=judge-key",
+                        "JUDGE_MODEL=judge-model",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {"USER_API_KEY": "from-env"}, clear=True):
+                loaded = benchmark_adapters.load_adapter_env_file(str(env_path))
+
+                self.assertIn(str(env_path), loaded or "")
+                self.assertEqual(os.environ["USER_API_KEY"], "from-env")
+                self.assertEqual(os.environ["USER_MODEL_NAME"], "user-model")
+                self.assertEqual(os.environ["JUDGE_MODEL"], "judge-model")
 
     def test_swebench_adapter_loads_local_rows_and_extracts_patches(self) -> None:
         from helicopter_cli import benchmark_adapters
