@@ -440,6 +440,7 @@ class CommandPlanTests(unittest.TestCase):
         )
         self.assertEqual(suite["benchmarks"]["mbpp"]["lighteval_tasks"], ["rwkv_skills:mbpp"])
         self.assertEqual(suite["benchmarks"]["mbpp_plus"]["lighteval_tasks"], ["rwkv_skills:mbpp_plus"])
+        self.assertEqual(suite["benchmarks"]["longcodeqa"]["lighteval_tasks"], ["rwkv_skills:longcodeqa"])
         self.assertEqual(suite["benchmarks"]["gsm8k"]["lighteval_tasks"], ["gsm8k"])
         self.assertEqual(
             suite["benchmarks"]["gaokao2023en"]["lighteval_tasks"],
@@ -578,6 +579,7 @@ class CommandPlanTests(unittest.TestCase):
         self.assertIn("rwkv_skills:human_eval_plus", registry._task_registry)
         self.assertIn("rwkv_skills:mbpp", registry._task_registry)
         self.assertIn("rwkv_skills:mbpp_plus", registry._task_registry)
+        self.assertIn("rwkv_skills:longcodeqa", registry._task_registry)
         self.assertIn("rwkv_skills:algebra222", registry._task_registry)
         self.assertIn("rwkv_skills:gaokao2023en", registry._task_registry)
         self.assertIn("rwkv_skills:amc23", registry._task_registry)
@@ -616,6 +618,50 @@ class CommandPlanTests(unittest.TestCase):
         self.assertIsNone(module._extract_choice_letter("Option E", max_choices=4))
         self.assertEqual(module._extract_judgement("Judgement: Yes"), "yes")
         self.assertEqual(module._extract_judgement("No, the answer does not match."), "no")
+
+    def test_rwkv_skills_longcodeqa_prompt_budgets_context_and_scores_letter(self) -> None:
+        if importlib.util.find_spec("lighteval") is None:
+            self.skipTest("LightEval is not installed")
+
+        custom_tasks = ROOT / "src/cli/helicopter_cli/lighteval_rwkv_skills_tasks.py"
+        spec = importlib.util.spec_from_file_location("rwkv_skills_lighteval_tasks", custom_tasks)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        repo_text = "irrelevant implementation detail\n" * 400
+        repo_text += "\ndef target_status():\n    return 'deprecated'\n"
+        question = (
+            "Question:\n"
+            "What is the current status returned by `target_status`?\n"
+            "A) active\n"
+            "B) deprecated\n"
+            "C) experimental\n"
+            "D) unknown\n"
+        )
+        with mock.patch.dict(os.environ, {"RWKV_LIGHTEVAL_LONGCODEQA_MAX_PROMPT_CHARS": "2200"}):
+            doc = module.longcodeqa_prompt(
+                {
+                    "repo": "demo/repo",
+                    "repo_text": repo_text,
+                    "question": question,
+                    "prompt_goal": "Use the repository context to answer.",
+                    "correct_letter": "B",
+                },
+                "rwkv_skills:longcodeqa",
+            )
+
+        self.assertLessEqual(len(doc.query), 2200)
+        self.assertIn("target_status", doc.query)
+        self.assertEqual(doc.choices, [" A", " B", " C", " D"])
+        self.assertEqual(doc.gold_index, 1)
+        self.assertEqual(
+            module.extract_longcodeqa_answer('{"name":"final_answer","arguments":{"answer":"B"}}', allowed_letters=("A", "B", "C", "D")),
+            "B",
+        )
+        response = type("Response", (), {"final_text": ['{"arguments":{"answer":"B"}}']})()
+        self.assertEqual(module.LongCodeQALetterMatch().compute(doc, response), 1.0)
 
     def test_rwkv_skills_svamp_prompt_combines_body_question_and_normalizes_answer(self) -> None:
         if importlib.util.find_spec("lighteval") is None:

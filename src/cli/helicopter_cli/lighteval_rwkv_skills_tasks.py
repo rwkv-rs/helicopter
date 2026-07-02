@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import faulthandler
 import io
+import json
 import linecache
 import multiprocessing
 import os
@@ -14,7 +15,7 @@ import tempfile
 import traceback
 from pathlib import Path
 from string import ascii_uppercase
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 from inspect_ai.dataset import Sample
 from inspect_ai.solver import generate, prompt_template
@@ -138,6 +139,12 @@ WMT24PP_TARGET_LANGUAGES = {
 
 HUMANEVAL_TIMEOUT_SECONDS = 3.0
 MBPP_TIMEOUT_SECONDS = 3.0
+LONGCODEQA_HF_REPO = "Steefano/LCB"
+LONGCODEQA_DATA_FILE = "LongCodeQA.zip"
+LONGCODEQA_LIGHTEVAL_DATASET = "rwkv_skills_longcodeqa_hf_zip"
+LONGCODEQA_DEFAULT_MAX_PROMPT_CHARS = 12_000
+LONGCODEQA_CHUNK_CHARS = 1_200
+LONGCODEQA_CHUNK_OVERLAP_CHARS = 160
 _THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DOTALL)
 _FENCED_CODE_RE = re.compile(
     r"```[ \t]*(?:python|py)?[^\S\r\n]*\r?\n(?P<code>.*?)```",
@@ -146,6 +153,43 @@ _FENCED_CODE_RE = re.compile(
 _DEF_RE = re.compile(r"def\s+(?P<name>[\w_]+)\s*\(")
 _LEADING_END_THINK_RE = re.compile(r"^[\s\r\n]*</think>[ \t]*\r?\n?", re.IGNORECASE)
 _STANDALONE_CODE_FENCE_RE = re.compile(r"^[ \t]*```[ \t]*(?:python|py)?[ \t]*$", re.IGNORECASE)
+_LONGCODEQA_CHOICE_LINE_RE = re.compile(r"^\s*([A-Z])\)", re.MULTILINE)
+_LONGCODEQA_ANSWER_PREFIX_RE = re.compile(
+    r"(?:final\s+answer|correct\s+answer|answer)\s*(?:is)?\s*[:\-]?\s*(?:\*\*)?\s*\(?([A-Z])\)?(?:\*\*)?\b",
+    re.IGNORECASE,
+)
+_LONGCODEQA_FENCED_BLOCK_RE = re.compile(r"^\s*```(?:json|text)?\s*(.*?)\s*```\s*$", re.IGNORECASE | re.DOTALL)
+_LONGCODEQA_INLINE_BOLD_CHOICE_RE = re.compile(r"\*\*\s*\(?([A-Z])\)?\s*[\).:]", re.IGNORECASE)
+_LONGCODEQA_STOPWORDS = {
+    "about",
+    "after",
+    "also",
+    "because",
+    "before",
+    "between",
+    "code",
+    "current",
+    "does",
+    "from",
+    "have",
+    "into",
+    "more",
+    "question",
+    "repo",
+    "repository",
+    "should",
+    "than",
+    "that",
+    "their",
+    "there",
+    "this",
+    "what",
+    "when",
+    "where",
+    "which",
+    "with",
+    "would",
+}
 
 MATH_PROMPT_TEMPLATE = """
 Solve the following math problem step by step. The last line of your
@@ -475,6 +519,242 @@ MULTIPLE_CHOICE_LETTER_MATCH = SampleLevelMetric(
     corpus_level_fn=_mean,
     higher_is_better=True,
 )
+
+
+def _normalize_newlines(text: object) -> str:
+    return str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _longcodeqa_max_prompt_chars() -> int:
+    raw = os.getenv("RWKV_LIGHTEVAL_LONGCODEQA_MAX_PROMPT_CHARS", "")
+    try:
+        value = int(raw)
+    except ValueError:
+        value = LONGCODEQA_DEFAULT_MAX_PROMPT_CHARS
+    return max(2_000, value)
+
+
+def _longcodeqa_choice_letters(question: object) -> tuple[str, ...]:
+    matches = [match.group(1).upper() for match in _LONGCODEQA_CHOICE_LINE_RE.finditer(str(question or ""))]
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for letter in matches:
+        if letter in seen:
+            continue
+        seen.add(letter)
+        ordered.append(letter)
+    return tuple(ordered or ascii_uppercase[:4])
+
+
+def _longcodeqa_terms(question: str) -> list[str]:
+    terms: list[str] = []
+    seen: set[str] = set()
+    for term in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", question.lower()):
+        if term in _LONGCODEQA_STOPWORDS or term in seen:
+            continue
+        seen.add(term)
+        terms.append(term)
+    return terms
+
+
+def _iter_overlapping_chunks(text: str, *, chunk_chars: int, overlap_chars: int) -> list[str]:
+    if not text:
+        return []
+    if len(text) <= chunk_chars:
+        return [text]
+    chunks: list[str] = []
+    step = max(1, chunk_chars - overlap_chars)
+    for start in range(0, len(text), step):
+        chunk = text[start : start + chunk_chars]
+        if chunk:
+            chunks.append(chunk)
+        if start + chunk_chars >= len(text):
+            break
+    return chunks
+
+
+def _middle_truncate_text(text: str, max_chars: int) -> str:
+    if max_chars <= 0:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    notice = "\n[... middle truncated to fit prompt budget ...]\n"
+    if max_chars <= len(notice) + 8:
+        return text[:max_chars]
+    head = max_chars // 2
+    tail = max_chars - head - len(notice)
+    return text[:head] + notice + text[-tail:]
+
+
+def _longcodeqa_context_excerpt(repo_text: str, question: str, *, max_chars: int) -> str:
+    if len(repo_text) <= max_chars:
+        return repo_text
+    chunks = _iter_overlapping_chunks(
+        repo_text,
+        chunk_chars=LONGCODEQA_CHUNK_CHARS,
+        overlap_chars=LONGCODEQA_CHUNK_OVERLAP_CHARS,
+    )
+    terms = _longcodeqa_terms(question)
+    if not chunks or not terms:
+        return _middle_truncate_text(repo_text, max_chars)
+
+    scored: list[tuple[int, int, str]] = []
+    for index, chunk in enumerate(chunks):
+        lowered = chunk.lower()
+        score = sum(lowered.count(term) for term in terms)
+        if score:
+            scored.append((score, index, chunk))
+    if not scored:
+        return _middle_truncate_text(repo_text, max_chars)
+
+    selected: list[tuple[int, str]] = []
+    used = 0
+    separator_chars = len("\n\n[... selected repository excerpt ...]\n")
+    for _score, index, chunk in sorted(scored, key=lambda item: (-item[0], item[1])):
+        added = len(chunk) + (separator_chars if selected else 0)
+        if used + added > max_chars:
+            continue
+        selected.append((index, chunk))
+        used += added
+    if not selected:
+        return _middle_truncate_text(scored[0][2], max_chars)
+
+    selected.sort(key=lambda item: item[0])
+    excerpt = "\n\n[... selected repository excerpt ...]\n".join(chunk for _index, chunk in selected)
+    return _middle_truncate_text(excerpt, max_chars)
+
+
+def _longcodeqa_answer_contract(prompt: str, allowed_letters: Sequence[str]) -> str:
+    choices = ", ".join(allowed_letters)
+    return (
+        f"{prompt.rstrip()}\n\n"
+        f"Answer with exactly one option letter from: {choices}. Do not explain.\n"
+        "Answer:"
+    )
+
+
+def _extract_longcodeqa_json_answer(text: str, *, allowed_letters: set[str]) -> str:
+    stripped = text.strip()
+    if not stripped.startswith(("{", "[")):
+        return ""
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError:
+        return ""
+    return _extract_longcodeqa_letter_from_value(payload, allowed_letters=allowed_letters)
+
+
+def _extract_longcodeqa_letter_from_value(value: object, *, allowed_letters: set[str]) -> str:
+    if isinstance(value, str):
+        candidate = value.strip().upper()
+        return candidate if len(candidate) == 1 and candidate in allowed_letters else ""
+    if isinstance(value, Mapping):
+        for key in ("answer", "choice", "letter", "prediction", "final_answer"):
+            if key in value:
+                letter = _extract_longcodeqa_letter_from_value(value[key], allowed_letters=allowed_letters)
+                if letter:
+                    return letter
+        arguments = value.get("arguments")
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                arguments = None
+        if isinstance(arguments, Mapping):
+            letter = _extract_longcodeqa_letter_from_value(arguments, allowed_letters=allowed_letters)
+            if letter:
+                return letter
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for item in value:
+            letter = _extract_longcodeqa_letter_from_value(item, allowed_letters=allowed_letters)
+            if letter:
+                return letter
+    return ""
+
+
+def extract_longcodeqa_answer(text: str, *, allowed_letters: Sequence[str]) -> str:
+    body = _normalize_newlines(text).strip()
+    if body.startswith("Assistant:"):
+        body = body[len("Assistant:") :].strip()
+    body = _THINK_BLOCK_RE.sub("", body).strip()
+    fence_match = _LONGCODEQA_FENCED_BLOCK_RE.match(body)
+    if fence_match:
+        body = fence_match.group(1).strip()
+    allowed = {letter.upper() for letter in allowed_letters}
+
+    json_letter = _extract_longcodeqa_json_answer(body, allowed_letters=allowed)
+    if json_letter:
+        return json_letter
+
+    lines = [line.strip() for line in body.splitlines() if line.strip()]
+    for line in reversed(lines):
+        match = _LONGCODEQA_ANSWER_PREFIX_RE.search(line)
+        if match and match.group(1).upper() in allowed:
+            return match.group(1).upper()
+    for line in reversed(lines):
+        stripped = line.strip().strip("`").strip()
+        match = re.fullmatch(r"\(?([A-Z])\)?[\.\)]?", stripped, flags=re.IGNORECASE)
+        if match and match.group(1).upper() in allowed:
+            return match.group(1).upper()
+    stripped = body.lstrip()
+    match = re.match(r"\(?([A-Z])\)?[\.\):,\s]", stripped, flags=re.IGNORECASE)
+    if match and match.group(1).upper() in allowed:
+        return match.group(1).upper()
+    bold_letters = [
+        match.group(1).upper()
+        for match in _LONGCODEQA_INLINE_BOLD_CHOICE_RE.finditer(body)
+        if match.group(1).upper() in allowed
+    ]
+    if bold_letters and len(set(bold_letters)) == 1:
+        return bold_letters[0]
+    return ""
+
+
+class LongCodeQALetterMatch(SampleLevelComputation):
+    def compute(self, doc: Doc, model_response, **kwargs) -> float:
+        allowed_letters = [choice.strip().upper() for choice in doc.choices]
+        gold_letter = allowed_letters[int(doc.gold_index)]
+        for prediction in model_response.final_text:
+            if extract_longcodeqa_answer(prediction, allowed_letters=allowed_letters) == gold_letter:
+                return 1.0
+        return 0.0
+
+
+LONGCODEQA_LETTER_MATCH = SampleLevelMetric(
+    metric_name="longcodeqa_accuracy",
+    sample_level_fn=LongCodeQALetterMatch(),
+    category=SamplingMethod.GENERATIVE,
+    corpus_level_fn=_mean,
+    higher_is_better=True,
+)
+
+
+def _install_longcodeqa_data_files_patch() -> None:
+    """Scope a LightEval 0.13 compatibility patch to the LongCodeQA zip dataset."""
+
+    import lighteval.tasks.lighteval_task as lighteval_task_module
+
+    original_load_dataset = lighteval_task_module.load_dataset
+    if getattr(original_load_dataset, "_helicopter_longcodeqa_patch", False):
+        return
+
+    def patched_load_dataset(*args, **kwargs):
+        path = kwargs.get("path")
+        if path is None and args:
+            path = args[0]
+        if path == LONGCODEQA_LIGHTEVAL_DATASET:
+            from datasets import load_dataset as datasets_load_dataset
+
+            return datasets_load_dataset(
+                LONGCODEQA_HF_REPO,
+                data_files={"test": LONGCODEQA_DATA_FILE},
+                revision=kwargs.get("revision"),
+            )
+        return original_load_dataset(*args, **kwargs)
+
+    patched_load_dataset._helicopter_longcodeqa_patch = True  # type: ignore[attr-defined]
+    patched_load_dataset._helicopter_original_load_dataset = original_load_dataset  # type: ignore[attr-defined]
+    lighteval_task_module.load_dataset = patched_load_dataset
 
 
 def _mean_annotation_score(annotations: object) -> float | None:
@@ -827,6 +1107,51 @@ def mbpp_prompt(line: dict, task_name: str | None = None) -> Doc:
     )
 
 
+def longcodeqa_prompt(line: dict, task_name: str | None = None) -> Doc:
+    question = _normalize_newlines(line.get("question")).strip()
+    repo_text = _normalize_newlines(line.get("repo_text"))
+    prompt_goal = _normalize_newlines(line.get("prompt_goal")).strip() or (
+        "You are provided repository context and a multiple-choice question about it."
+    )
+    allowed_letters = _longcodeqa_choice_letters(question)
+    gold_letter = str(line.get("correct_letter") or "").strip().upper()
+    if gold_letter not in allowed_letters:
+        gold_letter = allowed_letters[0]
+
+    max_chars = _longcodeqa_max_prompt_chars()
+    empty_prompt = _longcodeqa_answer_contract(
+        f"{prompt_goal}\nRepository:\n\n{question}",
+        allowed_letters,
+    )
+    context_budget = max(0, max_chars - len(empty_prompt) - 32)
+    context = _longcodeqa_context_excerpt(repo_text, question, max_chars=context_budget)
+    query = _longcodeqa_answer_contract(
+        f"{prompt_goal}\nRepository:\n{context}\n\n{question}",
+        allowed_letters,
+    )
+    if len(query) > max_chars:
+        overflow = len(query) - max_chars
+        context = _middle_truncate_text(context, max(0, len(context) - overflow - 64))
+        query = _longcodeqa_answer_contract(
+            f"{prompt_goal}\nRepository:\n{context}\n\n{question}",
+            allowed_letters,
+        )
+
+    return Doc(
+        task_name=task_name,
+        query=query,
+        choices=[f" {letter}" for letter in allowed_letters],
+        gold_index=allowed_letters.index(gold_letter),
+        specific={
+            "repo": line.get("repo"),
+            "context_chars": len(repo_text),
+            "prompt_chars": len(query),
+            "correct_letter": gold_letter,
+            "is_hard": line.get("is_hard"),
+        },
+    )
+
+
 def answer_judge_prompt(line: dict, task_name: str | None = None) -> Doc | None:
     mean_score = _mean_annotation_score(line.get("annotations"))
     if mean_score is None:
@@ -1040,6 +1365,26 @@ def _hf_mbpp_task(name: str, metric: SampleLevelMetric) -> LightevalTaskConfig:
     )
 
 
+def _hf_longcodeqa_task() -> LightevalTaskConfig:
+    return LightevalTaskConfig(
+        name="rwkv_skills:longcodeqa",
+        prompt_function=longcodeqa_prompt,
+        hf_repo=LONGCODEQA_LIGHTEVAL_DATASET,
+        hf_subset=None,
+        hf_avail_splits=["test"],
+        evaluation_splits=["test"],
+        few_shots_split=None,
+        few_shots_select=None,
+        generation_size=16,
+        metrics=[LONGCODEQA_LETTER_MATCH],
+        stop_sequence=["\n"],
+        version=0,
+    )
+
+
+_install_longcodeqa_data_files_patch()
+
+
 TASKS_TABLE = [
     _hf_human_eval_task("human_eval", "openai/openai_humaneval"),
     _hf_human_eval_task("human_eval_cn", str(LOCAL_DATA_ROOT / "human_eval_cn")),
@@ -1052,6 +1397,7 @@ TASKS_TABLE = [
     _hf_human_eval_task("human_eval_plus", "evalplus/humanevalplus"),
     _hf_mbpp_task("mbpp", MBPP_PASS_AT_1),
     _hf_mbpp_task("mbpp_plus", MBPP_PLUS_PASS_AT_1),
+    _hf_longcodeqa_task(),
     *[_hf_math_task(name, task) for name, task in HF_MATH_TASKS.items()],
     _hf_answer_judge_task(),
     _hf_svamp_task(),

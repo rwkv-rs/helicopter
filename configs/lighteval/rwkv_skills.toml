@@ -181,8 +181,8 @@ reason = "LongBench QA balanced requires the rwkv-skills long-context prompt/rou
 
 [benchmarks.longcodeqa]
 field = "function_calling"
-status = "needs_adapter"
-reason = "LongCodeQA requires the rwkv-skills long-context coding adapter."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:longcodeqa"]
 
 [benchmarks.mcp_bench]
 field = "function_calling"
