@@ -440,6 +440,13 @@ class CommandPlanTests(unittest.TestCase):
             suite["benchmarks"]["omni_math"]["lighteval_tasks"],
             ["rwkv_skills:omni_math"],
         )
+        self.assertEqual(
+            suite["benchmarks"]["college_math"]["lighteval_tasks"],
+            ["rwkv_skills:college_math"],
+        )
+        self.assertEqual(suite["benchmarks"]["svamp"]["lighteval_tasks"], ["rwkv_skills:svamp"])
+        self.assertEqual(len(suite["benchmarks"]["polymath"]["lighteval_tasks"]), 18)
+        self.assertIn("rwkv_skills:polymath_zh", suite["benchmarks"]["polymath"]["lighteval_tasks"])
         self.assertEqual(len(suite["benchmarks"]["mmmlu"]["lighteval_tasks"]), 14)
         self.assertIn("rwkv_skills:mmmlu_zh", suite["benchmarks"]["mmmlu"]["lighteval_tasks"])
 
@@ -548,6 +555,10 @@ class CommandPlanTests(unittest.TestCase):
         self.assertIn("rwkv_skills:hmmt_feb25", registry._task_registry)
         self.assertIn("rwkv_skills:math_odyssey", registry._task_registry)
         self.assertIn("rwkv_skills:omni_math", registry._task_registry)
+        self.assertIn("rwkv_skills:college_math", registry._task_registry)
+        self.assertIn("rwkv_skills:svamp", registry._task_registry)
+        self.assertIn("rwkv_skills:polymath_en", registry._task_registry)
+        self.assertIn("rwkv_skills:polymath_zh", registry._task_registry)
         self.assertIn("rwkv_skills:supergpqa", registry._task_registry)
         self.assertIn("rwkv_skills:mmmlu_ar", registry._task_registry)
         self.assertIn("rwkv_skills:mmmlu_zh", registry._task_registry)
@@ -567,6 +578,33 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(module._extract_choice_letter("Answer: C", max_choices=4), "C")
         self.assertEqual(module._extract_choice_letter("D. No", max_choices=4), "D")
         self.assertIsNone(module._extract_choice_letter("Option E", max_choices=4))
+
+    def test_rwkv_skills_svamp_prompt_combines_body_question_and_normalizes_answer(self) -> None:
+        if importlib.util.find_spec("lighteval") is None:
+            self.skipTest("LightEval is not installed")
+
+        custom_tasks = ROOT / "src/cli/helicopter_cli/lighteval_rwkv_skills_tasks.py"
+        spec = importlib.util.spec_from_file_location("rwkv_skills_lighteval_tasks", custom_tasks)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        doc = module.svamp_prompt(
+            {
+                "ID": "chal-1",
+                "Body": "Each pack costs 76 dollars",
+                "Question": "What is the price after a 25 dollar discount?",
+                "Equation": "( 76.0 - 25.0 )",
+                "Answer": 51.0,
+                "Type": "Subtraction",
+            },
+            "rwkv_skills:svamp",
+        )
+
+        self.assertIn("Each pack costs 76 dollars. What is the price", doc.query)
+        self.assertEqual(doc.choices, ["51"])
+        self.assertEqual(doc.specific["id"], "chal-1")
 
     def test_takeoff_plan_uses_verl_module_entrypoint_and_default_overrides(self) -> None:
         loaded_config = load_example_config()

@@ -414,8 +414,8 @@ lighteval_tasks = ["rwkv_skills:brumo25"]
 
 [benchmarks.college_math]
 field = "maths"
-status = "needs_adapter"
-reason = "No same-contract CollegeMath HF/LightEval task has been verified yet."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:college_math"]
 
 [benchmarks.comp_math_24_25]
 field = "maths"
@@ -465,7 +465,7 @@ lighteval_tasks = ["rwkv_skills:math_odyssey"]
 [benchmarks.mawps]
 field = "maths"
 status = "needs_adapter"
-reason = "No direct MAWPS task was found in the current LightEval registry snapshot."
+reason = "rwkv-skills MAWPS uses the 2065-row ToRA MAWPS JSONL union; verified HF Hub candidates do not match that row count, and the installed LightEval task API cannot load data_files directly."
 
 [benchmarks.minerva_math]
 field = "maths"
@@ -484,8 +484,27 @@ lighteval_tasks = ["rwkv_skills:omni_math"]
 
 [benchmarks.polymath]
 field = "maths"
-status = "needs_adapter"
-reason = "No direct PolyMath task was found in the current LightEval registry snapshot."
+status = "direct"
+lighteval_tasks = [
+  "rwkv_skills:polymath_ar",
+  "rwkv_skills:polymath_bn",
+  "rwkv_skills:polymath_de",
+  "rwkv_skills:polymath_en",
+  "rwkv_skills:polymath_es",
+  "rwkv_skills:polymath_fr",
+  "rwkv_skills:polymath_id",
+  "rwkv_skills:polymath_it",
+  "rwkv_skills:polymath_ja",
+  "rwkv_skills:polymath_ko",
+  "rwkv_skills:polymath_ms",
+  "rwkv_skills:polymath_pt",
+  "rwkv_skills:polymath_ru",
+  "rwkv_skills:polymath_sw",
+  "rwkv_skills:polymath_te",
+  "rwkv_skills:polymath_th",
+  "rwkv_skills:polymath_vi",
+  "rwkv_skills:polymath_zh",
+]
 
 [benchmarks.simpleqa]
 field = "maths"
@@ -494,5 +513,5 @@ lighteval_tasks = ["simpleqa"]
 
 [benchmarks.svamp]
 field = "maths"
-status = "needs_adapter"
-reason = "No direct SVAMP task was found in the current LightEval registry snapshot."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:svamp"]

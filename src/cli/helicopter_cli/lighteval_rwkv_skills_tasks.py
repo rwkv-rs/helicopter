@@ -30,6 +30,10 @@ HF_MATH_TASKS = {
         "repo": "MathArena/brumo_2025",
         "split": "train",
     },
+    "college_math": {
+        "repo": "di-zhang-fdu/College_Math_Test",
+        "split": "test",
+    },
     "gaokao2023en": {
         "repo": "test-time-compute/test_gaokao2023en",
         "split": "test",
@@ -51,6 +55,27 @@ HF_MATH_TASKS = {
         "split": "test",
     },
 }
+
+HF_POLYMATH_LANGUAGES = (
+    "ar",
+    "bn",
+    "de",
+    "en",
+    "es",
+    "fr",
+    "id",
+    "it",
+    "ja",
+    "ko",
+    "ms",
+    "pt",
+    "ru",
+    "sw",
+    "te",
+    "th",
+    "vi",
+    "zh",
+)
 
 HF_MULTIPLE_CHOICE_TASKS = {
     "supergpqa": {
@@ -228,18 +253,72 @@ def mmmlu_prompt(line: dict, task_name: str | None = None) -> Doc:
     )
 
 
-def _hf_math_task(name: str, task: dict[str, str]) -> LightevalTaskConfig:
-    split = task["split"]
+def svamp_prompt(line: dict, task_name: str | None = None) -> Doc:
+    body = str(line.get("Body") or "").strip()
+    question = str(line.get("Question") or "").strip()
+    if body and question:
+        full_question = f"{body.rstrip('.')}. {question}"
+    else:
+        full_question = body or question
+    return Doc(
+        task_name=task_name,
+        query=f"Question: {full_question}\nAnswer:",
+        choices=[_format_answer(line.get("Answer", ""))],
+        gold_index=0,
+        specific={
+            "id": line.get("ID"),
+            "type": line.get("Type"),
+            "equation": line.get("Equation"),
+        },
+    )
+
+
+def _hf_math_task(name: str, task: dict[str, object]) -> LightevalTaskConfig:
+    split = str(task["split"])
     return LightevalTaskConfig(
         name=f"rwkv_skills:{name}",
         prompt_function=qwen_math_prompt,
         sample_fields=record_to_sample,
         solver=[prompt_template(MATH_PROMPT_TEMPLATE), generate(cache=True)],
         scorer=math_scorer(),
-        hf_repo=task["repo"],
-        hf_subset=None,
+        hf_repo=str(task["repo"]),
+        hf_subset=task.get("subset"),
         hf_avail_splits=[split],
         evaluation_splits=[split],
+        few_shots_split=None,
+        few_shots_select=None,
+        generation_size=512,
+        metrics=[Metrics.expr_gold_metric],
+        stop_sequence=["Question:"],
+        version=0,
+    )
+
+
+def _hf_svamp_task() -> LightevalTaskConfig:
+    return LightevalTaskConfig(
+        name="rwkv_skills:svamp",
+        prompt_function=svamp_prompt,
+        hf_repo="tongyx361/svamp",
+        hf_subset=None,
+        hf_avail_splits=["test"],
+        evaluation_splits=["test"],
+        few_shots_split=None,
+        few_shots_select=None,
+        generation_size=512,
+        metrics=[Metrics.expr_gold_metric],
+        stop_sequence=["Question:"],
+        version=0,
+    )
+
+
+def _hf_polymath_task(language: str) -> LightevalTaskConfig:
+    return LightevalTaskConfig(
+        name=f"rwkv_skills:polymath_{language}",
+        prompt_function=qwen_math_prompt,
+        hf_repo="Qwen/PolyMath",
+        hf_subset=language,
+        hf_avail_splits=["top", "high", "medium", "low"],
+        evaluation_splits=["top", "high", "medium", "low"],
         few_shots_split=None,
         few_shots_select=None,
         generation_size=512,
@@ -286,6 +365,8 @@ def _hf_mmmlu_task(name: str, subset: str) -> LightevalTaskConfig:
 
 TASKS_TABLE = [
     *[_hf_math_task(name, task) for name, task in HF_MATH_TASKS.items()],
+    _hf_svamp_task(),
+    *[_hf_polymath_task(language) for language in HF_POLYMATH_LANGUAGES],
     *[_hf_multiple_choice_task(name, task) for name, task in HF_MULTIPLE_CHOICE_TASKS.items()],
     *[_hf_mmmlu_task(name, subset) for name, subset in HF_MMMLU_TASKS.items()],
 ]
