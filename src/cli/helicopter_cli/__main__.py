@@ -274,6 +274,20 @@ def handle_eval_run_catalog(args: argparse.Namespace, *, root: Any, **_: Any) ->
     return 0
 
 
+def handle_eval_compare_samples(args: argparse.Namespace, **_: Any) -> int:
+    from helicopter_eval.sample_compare import compare_sample_runs
+
+    payload = compare_sample_runs(
+        baseline_manifest_path=args.baseline_manifest,
+        candidate_manifest_path=args.candidate_manifest,
+        baseline_results_path=args.baseline_results,
+        candidate_results_path=args.candidate_results,
+        max_examples=int(args.max_examples),
+    )
+    print_json(payload)
+    return 0
+
+
 def handle_eval_run_free_response(args: argparse.Namespace, *, root: Any, **_: Any) -> int:
     from helicopter_eval.free_response import FreeResponseRunConfig, dry_run_summary, run_free_response
 
@@ -392,6 +406,17 @@ def build_parser() -> argparse.ArgumentParser:
     eval_runnable.add_argument("--field", action="append", help="filter by benchmark field")
     eval_runnable.add_argument("--json", action="store_true")
     eval_runnable.set_defaults(handler=handle_eval_runnable)
+
+    eval_compare_samples = eval_subparsers.add_parser(
+        "compare-samples",
+        help="compare two sample manifests and optional result JSONL files",
+    )
+    eval_compare_samples.add_argument("--baseline-manifest", required=True)
+    eval_compare_samples.add_argument("--candidate-manifest", required=True)
+    eval_compare_samples.add_argument("--baseline-results")
+    eval_compare_samples.add_argument("--candidate-results")
+    eval_compare_samples.add_argument("--max-examples", type=int, default=20)
+    eval_compare_samples.set_defaults(handler=handle_eval_compare_samples)
 
     eval_run = eval_subparsers.add_parser("run", help="run a implemented benchmark and write scoreboard DB rows")
     add_common_options(eval_run)

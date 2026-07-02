@@ -32,6 +32,7 @@ from helicopter_eval import (
     mcp_bench,
     multiple_choice,
     openai_client,
+    sample_compare,
     swe_bench,
     tau_bench,
     toolalpaca,
@@ -1614,6 +1615,90 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(records[0]["preview"]["question"], "question 2")
         self.assertIn("question", records[0]["content_sha256"])
         self.assertIn("sample_identity_sha256", payload)
+
+    def test_compare_sample_runs_aligns_results_through_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            baseline_manifest = root / "baseline.manifest.jsonl"
+            candidate_manifest = root / "candidate.manifest.jsonl"
+            baseline_results = root / "baseline.results.jsonl"
+            candidate_results = root / "candidate.results.jsonl"
+            manifest_rows = [
+                {"sample_index": index, "sample_sha256": key, "preview": {"question": f"q{index}"}}
+                for index, key in enumerate(("a", "b", "c"))
+            ]
+            baseline_manifest.write_text(
+                "\n".join(json.dumps(row) for row in manifest_rows) + "\n",
+                encoding="utf-8",
+            )
+            candidate_manifest.write_text(
+                "\n".join(json.dumps(row) for row in manifest_rows) + "\n",
+                encoding="utf-8",
+            )
+            baseline_results.write_text(
+                "\n".join(
+                    json.dumps(row)
+                    for row in (
+                        {"sample_index": 0, "is_passed": True, "answer": "A"},
+                        {"sample_index": 1, "is_passed": False, "answer": "wrong"},
+                        {"sample_index": 2, "task_id": "old-task-c", "is_passed": True, "answer": "C"},
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            candidate_results.write_text(
+                "\n".join(
+                    json.dumps(row)
+                    for row in (
+                        {"sample_index": 0, "is_passed": True, "answer": "A"},
+                        {"sample_index": 1, "is_passed": True, "answer": "B"},
+                        {"sample_index": 2, "task_id": "new-task-c", "is_passed": False, "answer": "wrong"},
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            payload = sample_compare.compare_sample_runs(
+                baseline_manifest_path=baseline_manifest,
+                candidate_manifest_path=candidate_manifest,
+                baseline_results_path=baseline_results,
+                candidate_results_path=candidate_results,
+            )
+
+        self.assertTrue(payload["manifest"]["same_order"])
+        self.assertEqual(payload["results"]["matched"], 3)
+        self.assertEqual(payload["results"]["baseline_passed"], 2)
+        self.assertEqual(payload["results"]["candidate_passed"], 2)
+        self.assertEqual(payload["results"]["both_passed"], 1)
+        self.assertEqual(payload["results"]["baseline_only_passed"], 1)
+        self.assertEqual(payload["results"]["candidate_only_passed"], 1)
+        self.assertEqual(payload["results"]["pass_disagreements"], 2)
+
+    def test_compare_samples_cli_outputs_manifest_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "sample.manifest.jsonl"
+            manifest.write_text(
+                json.dumps({"sample_index": 0, "sample_sha256": "same"}) + "\n",
+                encoding="utf-8",
+            )
+            args = Namespace(
+                baseline_manifest=str(manifest),
+                candidate_manifest=str(manifest),
+                baseline_results=None,
+                candidate_results=None,
+                max_examples=20,
+            )
+
+            with mock.patch.object(cli_main, "print_json") as print_json:
+                rc = cli_main.handle_eval_compare_samples(args)
+
+        self.assertEqual(rc, 0)
+        payload = print_json.call_args.args[0]
+        self.assertTrue(payload["manifest"]["same_order"])
+        self.assertEqual(payload["manifest"]["baseline_total"], 1)
 
     def test_longbench_prompt_preserves_rwkv_skills_line_breaks(self) -> None:
         sample = longbench.LongBenchSample(
