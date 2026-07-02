@@ -304,7 +304,7 @@ def suite_adapter_benchmarks(
     explicit = {name for name in explicit_benchmarks if name}
     for name, entry in entries:
         adapter = str(entry.get("adapter") or "").strip()
-        if adapter == "swebench":
+        if adapter in {"swebench", "tau"}:
             selected.append(name)
             continue
         if name in explicit:
@@ -537,6 +537,12 @@ def build_suite_adapter_plan(
         ("--swebench-prompt-profile", getattr(args, "swebench_prompt_profile", None)),
         ("--swebench-harness-workers", getattr(args, "swebench_harness_workers", None)),
         ("--swebench-harness-timeout-s", getattr(args, "swebench_harness_timeout_s", None)),
+        ("--tau-bench-root", getattr(args, "tau_bench_root", None)),
+        ("--tau-data-root", getattr(args, "tau_data_root", None)),
+        ("--tau-max-steps", getattr(args, "tau_max_steps", None)),
+        ("--tau-max-errors", getattr(args, "tau_max_errors", None)),
+        ("--tau-history-max-chars", getattr(args, "tau_history_max_chars", None)),
+        ("--tau-prompt-max-chars", getattr(args, "tau_prompt_max_chars", None)),
     ):
         append_cli_option(command, option, value)
     append_cli_flag(command, "--swebench-run-harness", getattr(args, "swebench_run_harness", None))

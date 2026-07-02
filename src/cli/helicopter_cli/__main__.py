@@ -142,6 +142,12 @@ def build_parser() -> argparse.ArgumentParser:
     suite_adapter.add_argument("--swebench-run-harness", action="store_true", default=None)
     suite_adapter.add_argument("--swebench-harness-workers", type=int)
     suite_adapter.add_argument("--swebench-harness-timeout-s", type=float)
+    suite_adapter.add_argument("--tau-bench-root")
+    suite_adapter.add_argument("--tau-data-root")
+    suite_adapter.add_argument("--tau-max-steps", type=int)
+    suite_adapter.add_argument("--tau-max-errors", type=int)
+    suite_adapter.add_argument("--tau-history-max-chars", type=int)
+    suite_adapter.add_argument("--tau-prompt-max-chars", type=int)
     suite_adapter.set_defaults(plan_builder=build_suite_adapter_plan)
 
     lighteval_tasks = eval_subparsers.add_parser("lighteval-tasks", help="list or inspect LightEval tasks")

@@ -159,6 +159,12 @@ def suite_adapter_args(**overrides: object) -> Namespace:
         "swebench_run_harness": None,
         "swebench_harness_workers": None,
         "swebench_harness_timeout_s": None,
+        "tau_bench_root": None,
+        "tau_data_root": None,
+        "tau_max_steps": None,
+        "tau_max_errors": None,
+        "tau_history_max_chars": None,
+        "tau_prompt_max_chars": None,
     }
     values.update(overrides)
     return Namespace(**values)
@@ -479,6 +485,11 @@ class CommandPlanTests(unittest.TestCase):
             suite["benchmarks"]["swe_bench_lite"]["harness_dataset"],
             "princeton-nlp/SWE-bench_Lite",
         )
+        self.assertEqual(suite["benchmarks"]["tau3_bench_mock"]["status"], "adapter")
+        self.assertEqual(suite["benchmarks"]["tau3_bench_mock"]["adapter"], "tau")
+        self.assertEqual(suite["benchmarks"]["tau3_bench_mock"]["tau_domain"], "mock")
+        self.assertEqual(suite["benchmarks"]["tau3_bench_mock_long_context"]["status"], "adapter")
+        self.assertEqual(suite["benchmarks"]["tau3_bench_mock_long_context"]["adapter"], "tau")
         self.assertEqual(suite["benchmarks"]["longcodeqa"]["lighteval_tasks"], ["rwkv_skills:longcodeqa"])
         self.assertEqual(suite["benchmarks"]["apibank_l1"]["lighteval_tasks"], ["rwkv_skills:apibank_l1"])
         self.assertEqual(suite["benchmarks"]["apibank_l2"]["lighteval_tasks"], ["rwkv_skills:apibank_l2"])
@@ -664,6 +675,37 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(options["--output-dir"], str(ROOT / "results/swebench_adapter_test"))
         self.assertEqual(plan.env["OPENAI_API_KEY"], "EMPTY")
 
+    def test_suite_adapter_plan_runs_tau_adapter(self) -> None:
+        loaded_config = load_example_config()
+
+        plan = commands.build_suite_adapter_plan(
+            suite_adapter_args(
+                benchmark=["tau3_bench_mock"],
+                max_samples=1,
+                sample_seed=7,
+                max_tokens=96,
+                tau_max_steps=3,
+                tau_history_max_chars=4096,
+                output_dir="results/tau_adapter_test",
+                run_id="unit-tau",
+            ),
+            root=ROOT,
+            env={},
+            config=loaded_config,
+        )
+
+        self.assertEqual(plan.command[1:3], ["-m", "helicopter_cli.benchmark_adapters"])
+        options = command_options(plan.command)
+        self.assertEqual(options["--benchmark"], "tau3_bench_mock")
+        self.assertEqual(options["--max-samples"], "1")
+        self.assertEqual(options["--sample-seed"], "7")
+        self.assertEqual(options["--max-tokens"], "96")
+        self.assertEqual(options["--tau-max-steps"], "3")
+        self.assertEqual(options["--tau-history-max-chars"], "4096")
+        self.assertEqual(options["--run-id"], "unit-tau")
+        self.assertEqual(options["--output-dir"], str(ROOT / "results/tau_adapter_test"))
+        self.assertEqual(plan.env["OPENAI_API_KEY"], "EMPTY")
+
     def test_swebench_adapter_loads_local_rows_and_extracts_patches(self) -> None:
         from helicopter_cli import benchmark_adapters
 
@@ -700,6 +742,31 @@ class CommandPlanTests(unittest.TestCase):
         self.assertNotIn("gold patch", prompt)
         completion = "text\n```diff\ndiff --git a/pkg.py b/pkg.py\n--- a/pkg.py\n+++ b/pkg.py\n@@\n-pass\n+ok\n```"
         self.assertTrue(benchmark_adapters.extract_swebench_patch(completion).startswith("diff --git a/pkg.py"))
+
+    def test_tau_adapter_parses_prefilled_json_and_builds_light_rows(self) -> None:
+        from helicopter_cli import benchmark_adapters
+
+        name, arguments = benchmark_adapters.parse_tau_agent_decision(
+            '"name":"assistant.create_task","arguments":{"user_id":"user_1","title":"Important Meeting"}}'
+        )
+        self.assertEqual(name, "create_task")
+        self.assertEqual(arguments["user_id"], "user_1")
+
+        name, arguments = benchmark_adapters.parse_tau_agent_decision(
+            '```json\n{"name":"final_answer","arguments":{"answer":"done"}}\n```'
+        )
+        self.assertEqual(name, "respond")
+        self.assertEqual(arguments["content"], "done")
+
+        name, arguments = benchmark_adapters.parse_tau_agent_decision(
+            '{"name":"respond","arguments":{},"content":"###STOP###"}'
+        )
+        self.assertEqual(name, "respond")
+        self.assertEqual(arguments["content"], "###STOP###")
+
+        rows = benchmark_adapters._tau3_mock_long_context_rows()
+        self.assertEqual([row["task_id"] for row in rows], ["mock_long_context_create_task", "mock_long_context_update_task"])
+        self.assertIn("message_history", rows[0]["task"]["initial_state"])
 
     def test_lighteval_multilingual_registry_loads_when_eval_deps_installed(self) -> None:
         if importlib.util.find_spec("lighteval") is None:

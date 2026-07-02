@@ -283,13 +283,19 @@ reason = "TAU3 requires an interactive environment adapter."
 
 [benchmarks.tau3_bench_mock]
 field = "function_calling"
-status = "needs_adapter"
-reason = "TAU3 requires an interactive environment adapter."
+status = "adapter"
+adapter = "tau"
+tau_version = "tau3_light"
+tau_domain = "mock"
+split = "base"
 
 [benchmarks.tau3_bench_mock_long_context]
 field = "function_calling"
-status = "needs_adapter"
-reason = "TAU3 long-context mode requires an interactive environment and routing adapter."
+status = "adapter"
+adapter = "tau"
+tau_version = "tau3_light"
+tau_domain = "mock"
+split = "base"
 
 [benchmarks.tau3_bench_retail]
 field = "function_calling"
