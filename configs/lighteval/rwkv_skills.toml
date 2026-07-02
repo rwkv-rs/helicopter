@@ -238,18 +238,25 @@ lighteval_tasks = ["rwkv_skills:longcodeqa"]
 
 [benchmarks.mcp_bench]
 field = "function_calling"
-status = "needs_adapter"
-reason = "MCP-Bench all includes multi-server tasks that still need full runtime/API-key verification."
+status = "adapter"
+adapter = "mcp_bench"
+task_files = [
+  "mcpbench_tasks_single_runner_format.json",
+  "mcpbench_tasks_multi_2server_runner_format.json",
+  "mcpbench_tasks_multi_3server_runner_format.json",
+]
 
 [benchmarks.mcp_bench_multi_2server]
 field = "function_calling"
-status = "needs_adapter"
-reason = "MCP-Bench multi-server tasks still need full runtime/API-key verification."
+status = "adapter"
+adapter = "mcp_bench"
+task_files = ["mcpbench_tasks_multi_2server_runner_format.json"]
 
 [benchmarks.mcp_bench_multi_3server]
 field = "function_calling"
-status = "needs_adapter"
-reason = "MCP-Bench multi-server tasks still need full runtime/API-key verification."
+status = "adapter"
+adapter = "mcp_bench"
+task_files = ["mcpbench_tasks_multi_3server_runner_format.json"]
 
 [benchmarks.mcp_bench_single]
 field = "function_calling"

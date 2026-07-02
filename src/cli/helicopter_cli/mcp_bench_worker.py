@@ -34,8 +34,17 @@ def load_api_keys(path: Path) -> dict[str, str]:
         if not text or text.startswith("#") or "=" not in text:
             continue
         key, value = text.split("=", 1)
-        payload[key.strip()] = value.strip()
+        payload[key.strip()] = value.strip().strip("\"'")
     return payload
+
+
+def valid_api_key_value(value: str | None) -> bool:
+    if value is None:
+        return False
+    text = str(value).strip().strip("\"'")
+    if not text:
+        return False
+    return text.upper() not in {"YOUR_KEY_HERE", "YOUR_TOKEN_HERE", "CHANGE_ME", "TODO", "NONE", "NULL"}
 
 
 def resolve_cwd(runtime_root: Path, raw_cwd: str) -> Path:
@@ -56,7 +65,7 @@ def load_server_configs(runtime_root: Path, server_names: list[str]) -> list[dic
             raise ValueError(f"server config not found: {server_name}")
         env = dict(os.environ)
         for key in raw.get("env", []) or []:
-            if key in api_keys:
+            if valid_api_key_value(api_keys.get(key)):
                 env[key] = api_keys[key]
         configs.append(
             {

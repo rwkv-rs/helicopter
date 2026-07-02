@@ -535,11 +535,9 @@ class CommandPlanTests(unittest.TestCase):
             self.assertEqual(suite["benchmarks"][benchmark]["adapter"], "tau")
         self.assertEqual(suite["benchmarks"]["tau_bench_telecom"]["status"], "needs_adapter")
         self.assertIn("official tau-bench v1", suite["benchmarks"]["tau_bench_telecom"]["reason"])
-        self.assertEqual(suite["benchmarks"]["mcp_bench_single"]["status"], "adapter")
-        self.assertEqual(suite["benchmarks"]["mcp_bench_single"]["adapter"], "mcp_bench")
-        for benchmark in ("mcp_bench", "mcp_bench_multi_2server", "mcp_bench_multi_3server"):
-            self.assertEqual(suite["benchmarks"][benchmark]["status"], "needs_adapter")
-            self.assertIn("MCP-Bench", suite["benchmarks"][benchmark]["reason"])
+        for benchmark in ("mcp_bench", "mcp_bench_single", "mcp_bench_multi_2server", "mcp_bench_multi_3server"):
+            self.assertEqual(suite["benchmarks"][benchmark]["status"], "adapter")
+            self.assertEqual(suite["benchmarks"][benchmark]["adapter"], "mcp_bench")
         self.assertEqual(suite["benchmarks"]["longcodeqa"]["lighteval_tasks"], ["rwkv_skills:longcodeqa"])
         self.assertEqual(suite["benchmarks"]["apibank_l1"]["lighteval_tasks"], ["rwkv_skills:apibank_l1"])
         self.assertEqual(suite["benchmarks"]["apibank_l2"]["lighteval_tasks"], ["rwkv_skills:apibank_l2"])
@@ -903,6 +901,66 @@ class CommandPlanTests(unittest.TestCase):
         assert decision.tool_call is not None
         self.assertEqual(decision.tool_call.full_name, "convert_temperature")
         self.assertEqual(decision.tool_call.arguments["from_unit"], "°C")
+
+    def test_mcp_bench_detects_missing_required_tool_servers(self) -> None:
+        from helicopter_cli import benchmark_adapters
+
+        missing = benchmark_adapters._mcp_missing_tool_servers(
+            ("Paper Search", "Call for Papers", "Wikipedia"),
+            {
+                "Wikipedia:search_wikipedia": {"description": "search"},
+                "Wikipedia:get_article": {"description": "article"},
+            },
+        )
+
+        self.assertEqual(missing, ["Paper Search", "Call for Papers"])
+
+    def test_mcp_bench_detects_missing_or_placeholder_api_keys(self) -> None:
+        from helicopter_cli import benchmark_adapters
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            servers_dir = root / "mcp_servers"
+            servers_dir.mkdir()
+            (servers_dir / "commands.json").write_text(
+                json.dumps(
+                    {
+                        "Google Maps": {"env": ["GOOGLE_MAPS_API_KEY"]},
+                        "Wikipedia": {"env": []},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (servers_dir / "api_key").write_text("GOOGLE_MAPS_API_KEY = YOUR_KEY_HERE\n", encoding="utf-8")
+
+            with mock.patch.dict(os.environ, {}, clear=True):
+                self.assertEqual(
+                    benchmark_adapters._mcp_missing_required_env(root, ("Google Maps", "Wikipedia")),
+                    {"Google Maps": ["GOOGLE_MAPS_API_KEY"]},
+                )
+            with mock.patch.dict(os.environ, {"GOOGLE_MAPS_API_KEY": "real-key"}, clear=True):
+                self.assertEqual(
+                    benchmark_adapters._mcp_missing_required_env(root, ("Google Maps", "Wikipedia")),
+                    {},
+                )
+
+    def test_mcp_bench_worker_does_not_override_env_with_placeholder_api_key(self) -> None:
+        from helicopter_cli import mcp_bench_worker
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            servers_dir = root / "mcp_servers"
+            servers_dir.mkdir()
+            (servers_dir / "commands.json").write_text(
+                json.dumps({"Google Maps": {"cmd": "node index.js", "env": ["GOOGLE_MAPS_API_KEY"], "cwd": ""}}),
+                encoding="utf-8",
+            )
+            (servers_dir / "api_key").write_text("GOOGLE_MAPS_API_KEY = YOUR_KEY_HERE\n", encoding="utf-8")
+
+            with mock.patch.dict(os.environ, {"GOOGLE_MAPS_API_KEY": "real-key"}, clear=True):
+                config = mcp_bench_worker.load_server_configs(root, ["Google Maps"])[0]
+
+        self.assertEqual(config["env"]["GOOGLE_MAPS_API_KEY"], "real-key")
 
     def test_tau_adapter_parses_prefilled_json_and_builds_light_rows(self) -> None:
         from helicopter_cli import benchmark_adapters

@@ -1114,7 +1114,7 @@ def _extract_json_object_text(text: str) -> str:
                 depth -= 1
                 if depth == 0:
                     return candidate[start:index + 1]
-    raise ValueError(f"no JSON object found in tau completion: {cleaned[:200]}")
+    raise ValueError(f"no JSON object found in completion: {cleaned[:200]}")
 
 
 def parse_tau_agent_decision(text: str) -> tuple[str, dict[str, Any]]:
@@ -2115,6 +2115,58 @@ def _mcp_presented_task(record: McpBenchRecord) -> str:
     return record.task.fuzzy_description.strip() or record.task.task_description.strip()
 
 
+def _mcp_missing_tool_servers(servers: Sequence[str], available_tools: Mapping[str, Any]) -> list[str]:
+    tool_names = [str(name) for name in available_tools]
+    missing: list[str] = []
+    for server in servers:
+        prefix = f"{server}:"
+        if not any(name.startswith(prefix) for name in tool_names):
+            missing.append(str(server))
+    return missing
+
+
+def _load_mcp_api_key_file(runtime_root: Path) -> dict[str, str]:
+    path = runtime_root / "mcp_servers" / "api_key"
+    if not path.is_file():
+        return {}
+    values: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip().strip("\"'")
+    return values
+
+
+def _valid_mcp_env_value(value: str | None) -> bool:
+    if value is None:
+        return False
+    text = str(value).strip().strip("\"'")
+    if not text:
+        return False
+    return text.upper() not in {"YOUR_KEY_HERE", "YOUR_TOKEN_HERE", "CHANGE_ME", "TODO", "NONE", "NULL"}
+
+
+def _mcp_missing_required_env(runtime_root: Path, servers: Sequence[str]) -> dict[str, list[str]]:
+    commands_path = runtime_root / "mcp_servers" / "commands.json"
+    if not commands_path.is_file():
+        return {}
+    commands = json.loads(commands_path.read_text(encoding="utf-8"))
+    api_keys = _load_mcp_api_key_file(runtime_root)
+    missing: dict[str, list[str]] = {}
+    for server in servers:
+        raw = commands.get(server)
+        if not isinstance(raw, Mapping):
+            continue
+        keys = [str(item).strip() for item in raw.get("env", []) or [] if str(item).strip()]
+        for key in keys:
+            if _valid_mcp_env_value(os.environ.get(key)) or _valid_mcp_env_value(api_keys.get(key)):
+                continue
+            missing.setdefault(str(server), []).append(key)
+    return missing
+
+
 def _render_mcp_tool_catalog(available_tools: Mapping[str, Any], *, max_schema_chars: int) -> str:
     rendered: list[dict[str, Any]] = []
     for full_name, raw_tool in sorted(available_tools.items()):
@@ -2325,9 +2377,19 @@ def run_mcp_bench_adapter(name: str, entry: Mapping[str, Any], args: argparse.Na
             evaluation: dict[str, Any] = {}
             judge_error = ""
             try:
+                missing_env = _mcp_missing_required_env(runtime_root, record.servers)
+                if missing_env:
+                    rendered_missing = ", ".join(
+                        f"{server}({', '.join(keys)})" for server, keys in sorted(missing_env.items())
+                    )
+                    raise RuntimeError(f"MCP-Bench required API key(s) are not configured: {rendered_missing}")
                 available_tools = worker.open_task(record)
                 if not available_tools:
                     raise RuntimeError("MCP-Bench worker returned no tools")
+                missing_servers = _mcp_missing_tool_servers(record.servers, available_tools)
+                if missing_servers:
+                    missing_text = ", ".join(missing_servers)
+                    raise RuntimeError(f"MCP-Bench worker returned no tools for required server(s): {missing_text}")
                 for round_num in range(1, max_rounds + 1):
                     prompt = _build_mcp_planning_prompt(
                         record,
