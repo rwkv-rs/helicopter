@@ -349,8 +349,23 @@ lighteval_tasks = ["mmlu_redux_2"]
 
 [benchmarks.mmmlu]
 field = "knowledge"
-status = "needs_adapter"
-reason = "LightEval has several multilingual MMLU families; the rwkv-skills MMMLU contract needs an explicit mapping choice."
+status = "direct"
+lighteval_tasks = [
+  "rwkv_skills:mmmlu_ar",
+  "rwkv_skills:mmmlu_bn",
+  "rwkv_skills:mmmlu_de",
+  "rwkv_skills:mmmlu_es",
+  "rwkv_skills:mmmlu_fr",
+  "rwkv_skills:mmmlu_hi",
+  "rwkv_skills:mmmlu_id",
+  "rwkv_skills:mmmlu_it",
+  "rwkv_skills:mmmlu_ja",
+  "rwkv_skills:mmmlu_ko",
+  "rwkv_skills:mmmlu_pt",
+  "rwkv_skills:mmmlu_sw",
+  "rwkv_skills:mmmlu_yo",
+  "rwkv_skills:mmmlu_zh",
+]
 
 [benchmarks.supergpqa]
 field = "knowledge"

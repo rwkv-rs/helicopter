@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import re
 from string import ascii_uppercase
 
 from inspect_ai.dataset import Sample
 from inspect_ai.solver import generate, prompt_template
 
 from lighteval.metrics.metrics import Metrics, math_scorer
+from lighteval.metrics.metrics_sample import SampleLevelComputation
+from lighteval.metrics.utils.metric_utils import SampleLevelMetric, SamplingMethod
 from lighteval.tasks.lighteval_task import LightevalTaskConfig
 from lighteval.tasks.requests import Doc
 
@@ -56,6 +59,23 @@ HF_MULTIPLE_CHOICE_TASKS = {
     },
 }
 
+HF_MMMLU_TASKS = {
+    "mmmlu_ar": "AR_XY",
+    "mmmlu_bn": "BN_BD",
+    "mmmlu_de": "DE_DE",
+    "mmmlu_es": "ES_LA",
+    "mmmlu_fr": "FR_FR",
+    "mmmlu_hi": "HI_IN",
+    "mmmlu_id": "ID_ID",
+    "mmmlu_it": "IT_IT",
+    "mmmlu_ja": "JA_JP",
+    "mmmlu_ko": "KO_KR",
+    "mmmlu_pt": "PT_BR",
+    "mmmlu_sw": "SW_KE",
+    "mmmlu_yo": "YO_NG",
+    "mmmlu_zh": "ZH_CN",
+}
+
 MATH_PROMPT_TEMPLATE = """
 Solve the following math problem step by step. The last line of your
 response should be of the form "ANSWER: $ANSWER" (without quotes)
@@ -69,6 +89,42 @@ the problem, and you do not need to use a \\boxed command.
 
 Reasoning:
 """.strip()
+
+
+def _mean(values: list[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
+def _extract_choice_letter(text: str, *, max_choices: int) -> str | None:
+    valid = set(ascii_uppercase[:max_choices])
+    normalized = text.strip().upper()
+    marker = re.search(r"\b(?:ANSWER|ANS|OPTION)(?:\s+IS)?\s*[:\-\)]?\s*([A-Z])\b", normalized)
+    if marker and marker.group(1) in valid:
+        return marker.group(1)
+    for match in re.finditer(r"(?:^|[^A-Z])([A-Z])(?:\s*(?:[.)\]:-]|$))", normalized):
+        if match.group(1) in valid:
+            return match.group(1)
+    return None
+
+
+class MultipleChoiceLetterMatch(SampleLevelComputation):
+    def compute(self, doc: Doc, model_response, **kwargs) -> float:
+        gold_indices = doc.gold_index if isinstance(doc.gold_index, list) else [doc.gold_index]
+        gold_letters = {ascii_uppercase[index] for index in gold_indices}
+        for prediction in model_response.final_text:
+            letter = _extract_choice_letter(prediction, max_choices=len(doc.choices))
+            if letter in gold_letters:
+                return 1.0
+        return 0.0
+
+
+MULTIPLE_CHOICE_LETTER_MATCH = SampleLevelMetric(
+    metric_name="mc_letter_match",
+    sample_level_fn=MultipleChoiceLetterMatch(),
+    category=SamplingMethod.GENERATIVE,
+    corpus_level_fn=_mean,
+    higher_is_better=True,
+)
 
 
 def _question(record: dict) -> str:
@@ -157,6 +213,21 @@ def supergpqa_prompt(line: dict, task_name: str | None = None) -> Doc:
     )
 
 
+def mmmlu_prompt(line: dict, task_name: str | None = None) -> Doc:
+    choices = [str(line[letter]).strip() for letter in ascii_uppercase[:4]]
+    gold_index = ascii_uppercase.index(str(line["Answer"]).strip().upper())
+    query = f"Question: {line['Question']}"
+    query += "".join(f"\n{letter}. {choice}" for letter, choice in zip(ascii_uppercase, choices))
+    query += "\nAnswer:"
+    return Doc(
+        task_name=task_name,
+        query=query,
+        choices=[f" {letter}" for letter in ascii_uppercase[:4]],
+        gold_index=gold_index,
+        specific={"subject": line.get("Subject")},
+    )
+
+
 def _hf_math_task(name: str, task: dict[str, str]) -> LightevalTaskConfig:
     split = task["split"]
     return LightevalTaskConfig(
@@ -190,7 +261,24 @@ def _hf_multiple_choice_task(name: str, task: dict[str, str]) -> LightevalTaskCo
         few_shots_split=None,
         few_shots_select=None,
         generation_size=5,
-        metrics=[Metrics.exact_match],
+        metrics=[MULTIPLE_CHOICE_LETTER_MATCH],
+        stop_sequence=["\n"],
+        version=0,
+    )
+
+
+def _hf_mmmlu_task(name: str, subset: str) -> LightevalTaskConfig:
+    return LightevalTaskConfig(
+        name=f"rwkv_skills:{name}",
+        prompt_function=mmmlu_prompt,
+        hf_repo="openai/MMMLU",
+        hf_subset=subset,
+        hf_avail_splits=["test"],
+        evaluation_splits=["test"],
+        few_shots_split=None,
+        few_shots_select=None,
+        generation_size=5,
+        metrics=[MULTIPLE_CHOICE_LETTER_MATCH],
         stop_sequence=["\n"],
         version=0,
     )
@@ -199,4 +287,5 @@ def _hf_multiple_choice_task(name: str, task: dict[str, str]) -> LightevalTaskCo
 TASKS_TABLE = [
     *[_hf_math_task(name, task) for name, task in HF_MATH_TASKS.items()],
     *[_hf_multiple_choice_task(name, task) for name, task in HF_MULTIPLE_CHOICE_TASKS.items()],
+    *[_hf_mmmlu_task(name, subset) for name, subset in HF_MMMLU_TASKS.items()],
 ]

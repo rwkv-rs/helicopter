@@ -440,6 +440,8 @@ class CommandPlanTests(unittest.TestCase):
             suite["benchmarks"]["omni_math"]["lighteval_tasks"],
             ["rwkv_skills:omni_math"],
         )
+        self.assertEqual(len(suite["benchmarks"]["mmmlu"]["lighteval_tasks"]), 14)
+        self.assertIn("rwkv_skills:mmmlu_zh", suite["benchmarks"]["mmmlu"]["lighteval_tasks"])
 
     def test_lighteval_suite_requires_explicit_mapped_only_for_partial_mapping(self) -> None:
         loaded_config = load_example_config()
@@ -498,6 +500,25 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(plan.command[6], "ceval_zho_mcf")
         self.assertIn("--load-tasks-multilingual", plan.command)
 
+    def test_lighteval_suite_maps_mmmlu_to_generative_custom_tasks(self) -> None:
+        loaded_config = load_example_config()
+
+        plan = commands.build_lighteval_suite_plan(
+            lighteval_suite_args(mapped_only=True, benchmark=["mmmlu"], max_samples=1),
+            root=ROOT,
+            env={},
+            config=loaded_config,
+        )
+
+        tasks = set(plan.command[6].split(","))
+        self.assertEqual(len(tasks), 14)
+        self.assertIn("rwkv_skills:mmmlu_ar", tasks)
+        self.assertIn("rwkv_skills:mmmlu_zh", tasks)
+        self.assertEqual(
+            command_options(plan.command)["--custom-tasks"],
+            str(ROOT / "src/cli/helicopter_cli/lighteval_rwkv_skills_tasks.py"),
+        )
+
     def test_lighteval_multilingual_registry_loads_when_eval_deps_installed(self) -> None:
         if importlib.util.find_spec("lighteval") is None:
             self.skipTest("LightEval is not installed")
@@ -528,6 +549,24 @@ class CommandPlanTests(unittest.TestCase):
         self.assertIn("rwkv_skills:math_odyssey", registry._task_registry)
         self.assertIn("rwkv_skills:omni_math", registry._task_registry)
         self.assertIn("rwkv_skills:supergpqa", registry._task_registry)
+        self.assertIn("rwkv_skills:mmmlu_ar", registry._task_registry)
+        self.assertIn("rwkv_skills:mmmlu_zh", registry._task_registry)
+
+    def test_rwkv_skills_multiple_choice_metric_extracts_answer_letters(self) -> None:
+        if importlib.util.find_spec("lighteval") is None:
+            self.skipTest("LightEval is not installed")
+
+        custom_tasks = ROOT / "src/cli/helicopter_cli/lighteval_rwkv_skills_tasks.py"
+        spec = importlib.util.spec_from_file_location("rwkv_skills_lighteval_tasks", custom_tasks)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        self.assertEqual(module._extract_choice_letter("答案: B", max_choices=4), "B")
+        self.assertEqual(module._extract_choice_letter("Answer: C", max_choices=4), "C")
+        self.assertEqual(module._extract_choice_letter("D. No", max_choices=4), "D")
+        self.assertIsNone(module._extract_choice_letter("Option E", max_choices=4))
 
     def test_takeoff_plan_uses_verl_module_entrypoint_and_default_overrides(self) -> None:
         loaded_config = load_example_config()
