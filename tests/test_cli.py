@@ -551,6 +551,80 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(doc.choices, [" A", " B", " C", " D", " E"])
         self.assertIn("E. four", doc.query)
 
+    def test_rwkv_skills_custom_tasks_include_direct_math_ids(self) -> None:
+        self.assertTrue(
+            {
+                "algebra222",
+                "beyond_aime",
+                "brumo25",
+                "hmmt_feb25",
+                "math_odyssey",
+                "mawps",
+                "omni_math",
+                "svamp",
+                "supergpqa",
+            }.issubset({task.name for task in lighteval_rwkv_skills_tasks.TASKS_TABLE})
+        )
+
+    def test_free_answer_prompt_normalizes_numeric_answers(self) -> None:
+        doc = lighteval_rwkv_skills_tasks.free_answer_prompt(
+            {
+                "question": "What is 40 + 3?",
+                "final_answer": 43.0,
+            },
+            "algebra222",
+        )
+
+        self.assertIsNotNone(doc)
+        assert doc is not None
+        self.assertEqual(doc.choices, ["43"])
+        self.assertIn("Question: What is 40 + 3?", doc.query)
+
+    def test_free_answer_prompt_builds_svamp_problem(self) -> None:
+        doc = lighteval_rwkv_skills_tasks.free_answer_prompt(
+            {
+                "Body": "Each pack costs 76 dollars.",
+                "Question": "How much after a 25 dollar discount?",
+                "Answer": 51.0,
+            },
+            "svamp",
+        )
+
+        self.assertIsNotNone(doc)
+        assert doc is not None
+        self.assertIn("Each pack costs 76 dollars. How much", doc.query)
+        self.assertEqual(doc.choices, ["51"])
+
+    def test_free_answer_prompt_extracts_math_odyssey_sparse_row(self) -> None:
+        doc = lighteval_rwkv_skills_tasks.free_answer_prompt(
+            {
+                "Problem_1": {
+                    "question": "\\begin{problem}Compute $1+1$.\\end{problem}",
+                    "answer": "$2$.",
+                },
+                "Problem_2": None,
+            },
+            "math_odyssey",
+        )
+
+        self.assertIsNotNone(doc)
+        assert doc is not None
+        self.assertIn("Compute $1+1$.", doc.query)
+        self.assertEqual(doc.choices, ["2"])
+
+    def test_free_answer_prompt_keeps_empty_gold_rows(self) -> None:
+        doc = lighteval_rwkv_skills_tasks.free_answer_prompt(
+            {
+                "problem": "This source row has no gold answer.",
+                "answer": "",
+            },
+            "omni_math",
+        )
+
+        self.assertIsNotNone(doc)
+        assert doc is not None
+        self.assertEqual(doc.choices, [""])
+
     def test_lighteval_tasks_loads_rwkv_skills_registry_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "benchmark_registry.py"
