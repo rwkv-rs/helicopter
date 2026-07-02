@@ -178,7 +178,12 @@ def handle_eval_run(args: argparse.Namespace, *, root: Any, **_: Any) -> int:
 
 
 def handle_eval_run_catalog(args: argparse.Namespace, *, root: Any, **_: Any) -> int:
-    from helicopter_eval.catalog_runner import dry_run_catalog_spec, resolve_catalog_run_spec, run_catalog_spec
+    from helicopter_eval.catalog_runner import (
+        dry_run_catalog_spec,
+        export_catalog_sample_manifest,
+        resolve_catalog_run_spec,
+        run_catalog_spec,
+    )
 
     catalog = load_rwkv_skills_catalog()
     try:
@@ -195,6 +200,14 @@ def handle_eval_run_catalog(args: argparse.Namespace, *, root: Any, **_: Any) ->
         "limit": args.limit,
         "sample_size": getattr(args, "sample_size", None),
         "sample_seed": int(getattr(args, "sample_seed", 42)),
+        "longbench_source_path": getattr(args, "longbench_source_path", None),
+        "longbench_infer_protocol": getattr(args, "longbench_infer_protocol", None),
+        "longbench_temperature": getattr(args, "longbench_temperature", None),
+        "longbench_top_p": getattr(args, "longbench_top_p", None),
+        "longbench_presence_penalty": getattr(args, "longbench_presence_penalty", None),
+        "longbench_frequency_penalty": getattr(args, "longbench_frequency_penalty", None),
+        "longbench_seed_requests": bool(getattr(args, "longbench_seed_requests", False)),
+        "longbench_stop_suffixes": tuple(getattr(args, "longbench_stop_suffix", None) or ()),
         "agentbench_controller_url": getattr(args, "agentbench_controller_url", None),
         "mcp_runtime_root": getattr(args, "mcp_runtime_root", None),
         "mcp_worker_script": getattr(args, "mcp_worker_script", None),
@@ -221,11 +234,31 @@ def handle_eval_run_catalog(args: argparse.Namespace, *, root: Any, **_: Any) ->
         "tau_prompt_max_chars": getattr(args, "tau_prompt_max_chars", None),
     }
     try:
-        payload = (
-            dry_run_catalog_spec(spec, **kwargs)
-            if args.dry_run
-            else run_catalog_spec(spec, repo_root=root, **kwargs)
-        )
+        write_sample_manifest = getattr(args, "write_sample_manifest", None)
+        if write_sample_manifest:
+            payload = export_catalog_sample_manifest(
+                spec,
+                output_path=str(write_sample_manifest),
+                base_url=kwargs["base_url"],
+                model=kwargs["model"],
+                limit=kwargs["limit"],
+                sample_size=kwargs["sample_size"],
+                sample_seed=kwargs["sample_seed"],
+                longbench_source_path=kwargs["longbench_source_path"],
+                longbench_infer_protocol=kwargs["longbench_infer_protocol"],
+                longbench_temperature=kwargs["longbench_temperature"],
+                longbench_top_p=kwargs["longbench_top_p"],
+                longbench_presence_penalty=kwargs["longbench_presence_penalty"],
+                longbench_frequency_penalty=kwargs["longbench_frequency_penalty"],
+                longbench_seed_requests=kwargs["longbench_seed_requests"],
+                longbench_stop_suffixes=kwargs["longbench_stop_suffixes"],
+            )
+        else:
+            payload = (
+                dry_run_catalog_spec(spec, **kwargs)
+                if args.dry_run
+                else run_catalog_spec(spec, repo_root=root, **kwargs)
+            )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     print_json(payload)
@@ -376,6 +409,27 @@ def build_parser() -> argparse.ArgumentParser:
     eval_run_catalog.add_argument("--limit", type=int)
     eval_run_catalog.add_argument("--sample-size", type=int, help="randomly sample N free-response rows")
     eval_run_catalog.add_argument("--sample-seed", type=int, default=42, help="seed for --sample-size")
+    eval_run_catalog.add_argument("--longbench-source-path", help="LongBench JSONL manifest or local source root")
+    eval_run_catalog.add_argument("--write-sample-manifest", help="write the resolved LongBench sample manifest and exit")
+    eval_run_catalog.add_argument(
+        "--longbench-infer-protocol",
+        choices=("chat", "completions"),
+        help="LongBench infer request protocol",
+    )
+    eval_run_catalog.add_argument("--longbench-temperature", type=float, help="LongBench generation temperature")
+    eval_run_catalog.add_argument("--longbench-top-p", type=float, help="LongBench generation top_p")
+    eval_run_catalog.add_argument("--longbench-presence-penalty", type=float, help="LongBench presence penalty")
+    eval_run_catalog.add_argument("--longbench-frequency-penalty", type=float, help="LongBench frequency penalty")
+    eval_run_catalog.add_argument(
+        "--longbench-seed-requests",
+        action="store_true",
+        help="send rwkv-skills-compatible per-sample seeds for LongBench",
+    )
+    eval_run_catalog.add_argument(
+        "--longbench-stop-suffix",
+        action="append",
+        help="LongBench stop suffix; repeat to pass multiple suffixes",
+    )
     eval_run_catalog.add_argument("--agentbench-controller-url", help="AgentBench controller API URL")
     eval_run_catalog.add_argument("--mcp-runtime-root", help="MCP-Bench official runtime root")
     eval_run_catalog.add_argument("--mcp-worker-script", help="MCP-Bench worker script path")

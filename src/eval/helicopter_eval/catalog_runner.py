@@ -31,7 +31,15 @@ RunKind = Literal[
 
 
 _SAMPLE_SIZE_SUPPORTED_KINDS = frozenset(
-    {"free_response", "multiple_choice", "code_generation", "instruction_following", "translation", "longcodeqa"}
+    {
+        "free_response",
+        "multiple_choice",
+        "code_generation",
+        "instruction_following",
+        "translation",
+        "longcodeqa",
+        "longbench",
+    }
 )
 
 
@@ -1006,6 +1014,14 @@ def dry_run_catalog_spec(
     limit: int | None,
     sample_size: int | None = None,
     sample_seed: int = 42,
+    longbench_source_path: str | None = None,
+    longbench_infer_protocol: str | None = None,
+    longbench_temperature: float | None = None,
+    longbench_top_p: float | None = None,
+    longbench_presence_penalty: float | None = None,
+    longbench_frequency_penalty: float | None = None,
+    longbench_seed_requests: bool = False,
+    longbench_stop_suffixes: tuple[str, ...] = (),
     agentbench_controller_url: str | None = None,
     mcp_runtime_root: str | None = None,
     mcp_worker_script: str | None = None,
@@ -1040,6 +1056,14 @@ def dry_run_catalog_spec(
         limit=limit,
         sample_size=sample_size,
         sample_seed=sample_seed,
+        longbench_source_path=longbench_source_path,
+        longbench_infer_protocol=longbench_infer_protocol,
+        longbench_temperature=longbench_temperature,
+        longbench_top_p=longbench_top_p,
+        longbench_presence_penalty=longbench_presence_penalty,
+        longbench_frequency_penalty=longbench_frequency_penalty,
+        longbench_seed_requests=longbench_seed_requests,
+        longbench_stop_suffixes=longbench_stop_suffixes,
         agentbench_controller_url=agentbench_controller_url,
         mcp_runtime_root=mcp_runtime_root,
         mcp_worker_script=mcp_worker_script,
@@ -1155,6 +1179,14 @@ def run_catalog_spec(
     repo_root: Path,
     sample_size: int | None = None,
     sample_seed: int = 42,
+    longbench_source_path: str | None = None,
+    longbench_infer_protocol: str | None = None,
+    longbench_temperature: float | None = None,
+    longbench_top_p: float | None = None,
+    longbench_presence_penalty: float | None = None,
+    longbench_frequency_penalty: float | None = None,
+    longbench_seed_requests: bool = False,
+    longbench_stop_suffixes: tuple[str, ...] = (),
     agentbench_controller_url: str | None = None,
     mcp_runtime_root: str | None = None,
     mcp_worker_script: str | None = None,
@@ -1189,6 +1221,14 @@ def run_catalog_spec(
         limit=limit,
         sample_size=sample_size,
         sample_seed=sample_seed,
+        longbench_source_path=longbench_source_path,
+        longbench_infer_protocol=longbench_infer_protocol,
+        longbench_temperature=longbench_temperature,
+        longbench_top_p=longbench_top_p,
+        longbench_presence_penalty=longbench_presence_penalty,
+        longbench_frequency_penalty=longbench_frequency_penalty,
+        longbench_seed_requests=longbench_seed_requests,
+        longbench_stop_suffixes=longbench_stop_suffixes,
         agentbench_controller_url=agentbench_controller_url,
         mcp_runtime_root=mcp_runtime_root,
         mcp_worker_script=mcp_worker_script,
@@ -1295,6 +1335,49 @@ def run_catalog_spec(
     return run_multiple_choice(config, repo_root=repo_root)
 
 
+def export_catalog_sample_manifest(
+    spec: CatalogRunSpec,
+    *,
+    base_url: str,
+    model: str,
+    limit: int | None,
+    output_path: str,
+    sample_size: int | None = None,
+    sample_seed: int = 42,
+    longbench_source_path: str | None = None,
+    longbench_infer_protocol: str | None = None,
+    longbench_temperature: float | None = None,
+    longbench_top_p: float | None = None,
+    longbench_presence_penalty: float | None = None,
+    longbench_frequency_penalty: float | None = None,
+    longbench_seed_requests: bool = False,
+    longbench_stop_suffixes: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    if spec.status != "implemented" or spec.kind is None:
+        raise RuntimeError(f"{spec.benchmark} is not runnable yet: {spec.reason}")
+    if spec.kind != "longbench":
+        raise ValueError("--write-sample-manifest is only supported for longbench benchmarks")
+    config = _run_config(
+        spec,
+        base_url=base_url,
+        model=model,
+        limit=limit,
+        sample_size=sample_size,
+        sample_seed=sample_seed,
+        longbench_source_path=longbench_source_path,
+        longbench_infer_protocol=longbench_infer_protocol,
+        longbench_temperature=longbench_temperature,
+        longbench_top_p=longbench_top_p,
+        longbench_presence_penalty=longbench_presence_penalty,
+        longbench_frequency_penalty=longbench_frequency_penalty,
+        longbench_seed_requests=longbench_seed_requests,
+        longbench_stop_suffixes=longbench_stop_suffixes,
+    )
+    from .longbench import export_sample_manifest
+
+    return export_sample_manifest(config, output_path)
+
+
 def _run_config(
     spec: CatalogRunSpec,
     *,
@@ -1303,6 +1386,14 @@ def _run_config(
     limit: int | None,
     sample_size: int | None = None,
     sample_seed: int = 42,
+    longbench_source_path: str | None = None,
+    longbench_infer_protocol: str | None = None,
+    longbench_temperature: float | None = None,
+    longbench_top_p: float | None = None,
+    longbench_presence_penalty: float | None = None,
+    longbench_frequency_penalty: float | None = None,
+    longbench_seed_requests: bool = False,
+    longbench_stop_suffixes: tuple[str, ...] = (),
     agentbench_controller_url: str | None = None,
     mcp_runtime_root: str | None = None,
     mcp_worker_script: str | None = None,
@@ -1330,6 +1421,10 @@ def _run_config(
 ) -> Any:
     if sample_size is not None and spec.kind not in _SAMPLE_SIZE_SUPPORTED_KINDS:
         raise ValueError(f"--sample-size is not supported for {spec.kind} benchmark: {spec.benchmark}")
+    if longbench_source_path is not None and spec.kind != "longbench":
+        raise ValueError("--longbench-source-path is only supported for longbench benchmarks")
+    if longbench_infer_protocol is not None and longbench_infer_protocol not in {"chat", "completions"}:
+        raise ValueError("--longbench-infer-protocol must be one of: chat, completions")
     if spec.kind == "free_response":
         from .free_response import FreeResponseRunConfig
         from .gsm8k import REFERENCE_ANSWER_FIXES
@@ -1514,9 +1609,19 @@ def _run_config(
             model=model,
             benchmark=spec.benchmark,
             limit=limit,
+            sample_size=sample_size,
+            sample_seed=sample_seed,
             split=str(spec.source_split),
+            source_path=longbench_source_path,
             include_datasets=include_datasets,
             balance_by_dataset=balance_by_dataset,
+            infer_protocol=longbench_infer_protocol or "chat",
+            temperature=0.0 if longbench_temperature is None else float(longbench_temperature),
+            top_p=1.0 if longbench_top_p is None else float(longbench_top_p),
+            presence_penalty=0.0 if longbench_presence_penalty is None else float(longbench_presence_penalty),
+            frequency_penalty=0.0 if longbench_frequency_penalty is None else float(longbench_frequency_penalty),
+            seed_requests=bool(longbench_seed_requests),
+            stop_suffixes=tuple(longbench_stop_suffixes),
             max_tokens=int(spec.max_tokens or 128),
             scoreboard_dataset=spec.dataset_slug,
             job_name=spec.job_name or "function_longbench",

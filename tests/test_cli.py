@@ -941,7 +941,7 @@ class CommandPlanTests(unittest.TestCase):
     def test_run_catalog_rejects_sample_size_for_unsupported_kind(self) -> None:
         args = Namespace(
             dry_run=True,
-            benchmark="longbench",
+            benchmark="browsecomp",
             base_url=None,
             model=None,
             limit=None,
@@ -1267,6 +1267,219 @@ class CommandPlanTests(unittest.TestCase):
         self.assertFalse(payload["balance_by_dataset"])
         self.assertIn("hotpotqa", payload["include_datasets"])
         self.assertEqual(payload["scoreboard_dataset"], "longbench_qa_test_limit2")
+
+    def test_run_catalog_longbench_dry_run_supports_sample_size(self) -> None:
+        args = Namespace(
+            dry_run=True,
+            benchmark="longbench_qa",
+            base_url=None,
+            model=None,
+            limit=None,
+            sample_size=3,
+            sample_seed=7,
+        )
+
+        with mock.patch.object(cli_main, "print_json") as print_json:
+            rc = cli_main.handle_eval_run_catalog(args, root=ROOT)
+
+        self.assertEqual(rc, 0)
+        payload = print_json.call_args.args[0]
+        self.assertEqual(payload["scoreboard_dataset"], "longbench_qa_test_sample3_seed7")
+        self.assertEqual(payload["sample_size"], 3)
+        self.assertEqual(payload["sample_seed"], 7)
+
+    def test_run_catalog_longbench_dry_run_uses_manifest_source_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "shared-longbench.jsonl"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "task_id": "hotpotqa-0",
+                        "dataset": "hotpotqa",
+                        "input": "question",
+                        "context": "context",
+                        "answers": ["answer"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            args = Namespace(
+                dry_run=True,
+                benchmark="longbench_qa",
+                base_url=None,
+                model=None,
+                limit=None,
+                sample_size=3,
+                sample_seed=7,
+                longbench_source_path=str(manifest),
+            )
+
+            with mock.patch.object(cli_main, "print_json") as print_json:
+                rc = cli_main.handle_eval_run_catalog(args, root=ROOT)
+
+        self.assertEqual(rc, 0)
+        payload = print_json.call_args.args[0]
+        self.assertEqual(payload["source"], str(manifest))
+        self.assertEqual(payload["scoreboard_dataset"], "longbench_qa_test_sample3_seed7")
+
+    def test_run_catalog_longbench_dry_run_exposes_comparison_infer_config(self) -> None:
+        args = Namespace(
+            dry_run=True,
+            benchmark="longbench_qa",
+            base_url=None,
+            model=None,
+            limit=None,
+            sample_size=None,
+            sample_seed=42,
+            longbench_source_path="/tmp/longbench_qa_test.jsonl",
+            longbench_infer_protocol="completions",
+            longbench_temperature=0.25,
+            longbench_top_p=0.35,
+            longbench_presence_penalty=0.65,
+            longbench_frequency_penalty=0.25,
+            longbench_seed_requests=True,
+            longbench_stop_suffix=["\nUser:", "\nSystem:", "\nAssistant:"],
+        )
+
+        with mock.patch.object(cli_main, "print_json") as print_json:
+            rc = cli_main.handle_eval_run_catalog(args, root=ROOT)
+
+        self.assertEqual(rc, 0)
+        payload = print_json.call_args.args[0]
+        self.assertEqual(payload["infer_protocol"], "completions")
+        self.assertEqual(payload["presence_penalty"], 0.65)
+        self.assertEqual(payload["frequency_penalty"], 0.25)
+        self.assertTrue(payload["seed_requests"])
+        self.assertEqual(payload["stop_suffixes"], ["\nUser:", "\nSystem:", "\nAssistant:"])
+
+    def test_longbench_random_sampling_is_deterministic_and_traceable(self) -> None:
+        run_config = longbench.LongBenchRunConfig(
+            base_url="http://127.0.0.1:29082",
+            model="rwkv7-g1d-0.4b-20260210-ctx8192",
+            sample_size=3,
+            sample_seed=7,
+            include_datasets=("toy",),
+        )
+        rows = [
+            (
+                "toy",
+                {
+                    "id": f"task-{index}",
+                    "context": f"context {index}",
+                    "input": f"question {index}",
+                    "answers": [f"answer {index}"],
+                    "length": 100 + index,
+                    "category": "debug",
+                },
+            )
+            for index in range(10)
+        ]
+
+        with mock.patch.object(longbench, "_iter_hf_rows", return_value=iter(rows)):
+            samples = longbench.load_samples(run_config)
+
+        self.assertEqual([sample.sample_index for sample in samples], [0, 1, 2])
+        self.assertEqual([sample.metadata["original_sample_index"] for sample in samples], [2, 5, 6])
+        self.assertEqual([sample.metadata["dataset_sample_index"] for sample in samples], [2, 5, 6])
+        self.assertEqual([sample.metadata["source_id"] for sample in samples], ["task-2", "task-5", "task-6"])
+        self.assertEqual([sample.metadata["longbench_dataset"] for sample in samples], ["toy", "toy", "toy"])
+        self.assertEqual(longbench.scoreboard_dataset_name(run_config), "longbench_test_sample3_seed7")
+
+    def test_longbench_sample_size_above_source_total_keeps_full_dataset_name(self) -> None:
+        run_config = longbench.LongBenchRunConfig(
+            base_url="http://127.0.0.1:29082",
+            model="rwkv7-g1d-0.4b-20260210-ctx8192",
+            sample_size=500,
+            sample_seed=42,
+            scoreboard_dataset="longbench_test",
+            include_datasets=("toy",),
+        )
+        rows = [
+            (
+                "toy",
+                {
+                    "id": f"task-{index}",
+                    "context": "context",
+                    "input": "question",
+                    "answers": ["answer"],
+                },
+            )
+            for index in range(3)
+        ]
+
+        with mock.patch.object(longbench, "_iter_hf_rows", return_value=iter(rows)):
+            loaded = longbench._load_samples(run_config)
+
+        self.assertFalse(loaded.sample_applied)
+        self.assertEqual(len(loaded.samples), 3)
+        self.assertEqual(
+            longbench.scoreboard_dataset_name(run_config, sample_applied=loaded.sample_applied),
+            "longbench_test",
+        )
+
+    def test_longbench_sample_manifest_round_trips_source_identity(self) -> None:
+        run_config = longbench.LongBenchRunConfig(
+            base_url="http://127.0.0.1:29082",
+            model="rwkv7-g1d-0.4b-20260210-ctx8192",
+            sample_size=3,
+            sample_seed=7,
+            include_datasets=("toy",),
+        )
+        rows = [
+            (
+                "toy",
+                {
+                    "id": f"task-{index}",
+                    "context": f"context {index}",
+                    "input": f"question {index}",
+                    "answers": [f"answer {index}"],
+                    "length": 100 + index,
+                    "category": "debug",
+                },
+            )
+            for index in range(10)
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "sample.jsonl"
+            with mock.patch.object(longbench, "_iter_hf_rows", return_value=iter(rows)):
+                payload = longbench.export_sample_manifest(run_config, manifest)
+
+            self.assertEqual(payload["total"], 3)
+            first_row = json.loads(manifest.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(first_row["dataset"], "toy")
+            self.assertEqual(first_row["input"], "question 2")
+            self.assertEqual(first_row["original_sample_index"], 2)
+
+            loaded = longbench.load_samples(
+                longbench.LongBenchRunConfig(
+                    base_url="http://127.0.0.1:29082",
+                    model="rwkv7-g1d-0.4b-20260210-ctx8192",
+                    source_path=str(manifest),
+                    include_datasets=("toy",),
+                )
+            )
+
+        self.assertEqual([sample.sample_index for sample in loaded], [0, 1, 2])
+        self.assertEqual([sample.task_id for sample in loaded], ["task-2", "task-5", "task-6"])
+        self.assertEqual([sample.metadata["original_sample_index"] for sample in loaded], [2, 5, 6])
+        self.assertEqual([sample.metadata["source_id"] for sample in loaded], ["task-2", "task-5", "task-6"])
+
+    def test_longbench_prompt_preserves_rwkv_skills_line_breaks(self) -> None:
+        sample = longbench.LongBenchSample(
+            sample_index=0,
+            task_id="task-0",
+            dataset="toy",
+            question="What is asked?",
+            context="Line one.\n\nLine two.",
+            answers=("answer",),
+        )
+
+        prompt = longbench.build_prompt(sample, prompt_max_chars=512)
+
+        self.assertIn("reading task.\nAnswer the question", prompt)
+        self.assertIn("Context:\nLine one.\nLine two.", prompt)
+        self.assertIn("\nQuestion:\nWhat is asked?", prompt)
 
     def test_longbench_scores_exact_and_f1(self) -> None:
         self.assertEqual(longbench.normalize_answer("Answer: The Eiffel Tower"), "The Eiffel Tower")
