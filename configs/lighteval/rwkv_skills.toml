@@ -318,8 +318,8 @@ lighteval_tasks = ["rwkv_skills:toolalpaca_eval_simulated"]
 
 [benchmarks.arena_hard_v2]
 field = "instruction_following"
-status = "needs_adapter"
-reason = "No direct Arena-Hard task was found in the current LightEval registry snapshot."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:arena_hard_v2"]
 
 [benchmarks.flores200]
 field = "instruction_following"

@@ -295,6 +295,14 @@ BFCL_V3_FUNC_DOC_FILE_MAPPING = {
     "MemoryAPI_vector": "memory_vector.json",
     "MemoryAPI_rec_sum": "memory_rec_sum.json",
 }
+ARENA_HARD_LIGHTEVAL_DATASET = "rwkv_skills_arena_hard"
+ARENA_HARD_QUESTIONS_URL = "https://raw.githubusercontent.com/lm-sys/arena-hard-auto/main/data/arena-hard-v0.1/question.jsonl"
+ARENA_HARD_BASELINE_URL = (
+    "https://raw.githubusercontent.com/lm-sys/arena-hard-auto/main/data/arena-hard-v0.1/model_answer/gpt-4-0314.jsonl"
+)
+ARENA_HARD_DEFAULT_CACHE = "/tmp/helicopter-arena-hard"
+ARENA_HARD_MIN_CACHE_ROWS = 400
+ARENA_HARD_DOWNLOAD_TIMEOUT_SECONDS = 60
 BROWSECOMP_LIGHTEVAL_DATASET = "rwkv_skills_browsecomp"
 BROWSECOMP_TASKS = {
     "browsecomp": {"locale": "en", "kind": "browsecomp"},
@@ -5430,6 +5438,270 @@ BROWSECOMP_F1 = SampleLevelMetric(
 )
 
 
+def _arena_hard_cache_root() -> Path:
+    return Path(os.environ.get("RWKV_LIGHTEVAL_ARENA_HARD_CACHE", ARENA_HARD_DEFAULT_CACHE)).expanduser().resolve()
+
+
+def _arena_hard_source_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    env_source = os.environ.get("RWKV_LIGHTEVAL_ARENA_HARD_SOURCE")
+    if env_source:
+        candidates.append(Path(env_source).expanduser())
+    candidates.append(_arena_hard_cache_root())
+    return candidates
+
+
+def _arena_hard_required_paths(root: Path) -> tuple[Path, Path]:
+    return root / "question.jsonl", root / "gpt-4-0314.jsonl"
+
+
+def _arena_hard_jsonl_looks_complete(path: Path, *, min_rows: int = ARENA_HARD_MIN_CACHE_ROWS) -> bool:
+    if not path.exists() or path.stat().st_size <= 0:
+        return False
+    rows = 0
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            for line in file:
+                text = line.strip()
+                if not text:
+                    continue
+                json.loads(text)
+                rows += 1
+    except (OSError, json.JSONDecodeError):
+        return False
+    return rows >= min_rows
+
+
+def _arena_hard_data_root() -> Path:
+    for candidate in _arena_hard_source_candidates():
+        question_path, baseline_path = _arena_hard_required_paths(candidate)
+        if _arena_hard_jsonl_looks_complete(question_path) and _arena_hard_jsonl_looks_complete(baseline_path):
+            return candidate.resolve()
+    return _download_arena_hard_source()
+
+
+def _download_url_to_file(url: str, destination: Path, *, timeout: int) -> None:
+    temporary = destination.with_name(f"{destination.name}.tmp")
+    with urllib.request.urlopen(url, timeout=timeout) as response, temporary.open("wb") as file:
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            file.write(chunk)
+    os.replace(temporary, destination)
+
+
+def _download_arena_hard_source() -> Path:
+    root = _arena_hard_cache_root()
+    root.mkdir(parents=True, exist_ok=True)
+    downloads = (
+        (ARENA_HARD_QUESTIONS_URL, root / "question.jsonl"),
+        (ARENA_HARD_BASELINE_URL, root / "gpt-4-0314.jsonl"),
+    )
+    for url, destination in downloads:
+        if _arena_hard_jsonl_looks_complete(destination):
+            continue
+        _download_url_to_file(url, destination, timeout=ARENA_HARD_DOWNLOAD_TIMEOUT_SECONDS)
+        if not _arena_hard_jsonl_looks_complete(destination):
+            raise ValueError(f"Arena-Hard download did not produce a complete JSONL cache: {destination}")
+    return root.resolve()
+
+
+def _arena_hard_baseline_answer(value: object) -> str:
+    if isinstance(value, Mapping):
+        function_payload = value.get("function") or value.get("function_call")
+        if isinstance(function_payload, Mapping):
+            nested = _arena_hard_baseline_answer(function_payload)
+            if nested:
+                return nested
+        arguments = value.get("arguments")
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                arguments = {}
+        if isinstance(arguments, Mapping):
+            nested = _arena_hard_baseline_answer(arguments)
+            if nested:
+                return nested
+        for key in ("answer", "final_answer", "response", "output", "content"):
+            raw = value.get(key)
+            if isinstance(raw, str) and raw.strip():
+                return raw.strip()
+    return str(value).strip() if isinstance(value, str) else ""
+
+
+def _load_arena_hard_baseline(path: Path) -> dict[str, str]:
+    answers: dict[str, str] = {}
+    for row in _read_json_or_jsonl_items(path):
+        if not isinstance(row, Mapping):
+            continue
+        uid = str(row.get("uid") or "").strip()
+        if not uid:
+            continue
+        answer_text = ""
+        for message in _coerce_list(row.get("messages")):
+            if not isinstance(message, Mapping) or str(message.get("role") or "").lower() != "assistant":
+                continue
+            answer_text = _arena_hard_baseline_answer(message.get("content"))
+            break
+        if answer_text:
+            answers[uid] = answer_text
+    return answers
+
+
+def _load_arena_hard_rows(dataset_name: str = "arena_hard_v2") -> list[dict[str, Any]]:
+    if dataset_name != "arena_hard_v2":
+        raise ValueError(f"unknown Arena-Hard dataset: {dataset_name}")
+    data_root = _arena_hard_data_root()
+    question_path, baseline_path = _arena_hard_required_paths(data_root)
+    baseline_answers = _load_arena_hard_baseline(baseline_path)
+    rows: list[dict[str, Any]] = []
+    for index, payload in enumerate(_read_json_or_jsonl_items(question_path)):
+        if not isinstance(payload, Mapping):
+            continue
+        uid = str(payload.get("uid") or f"arena_hard_{index:04d}")
+        prompt = _normalize_rwkv_text(payload.get("prompt"))
+        baseline_answer = _normalize_rwkv_text(baseline_answers.get(uid, ""))
+        if not prompt or not baseline_answer:
+            continue
+        rows.append(
+            {
+                "task_id": uid,
+                "question": prompt,
+                "baseline_answer": baseline_answer,
+                "answer": baseline_answer,
+                "category": str(payload.get("category") or "arena-hard-v0.1"),
+                "cluster": str(payload.get("cluster") or ""),
+                "metadata": {
+                    "official_source": "lm-sys/arena-hard-auto",
+                    "baseline_model": "gpt-4-0314",
+                    "direct_lighteval_mode": "baseline_similarity_not_official_judge",
+                    "question_path": str(question_path),
+                    "baseline_path": str(baseline_path),
+                },
+            }
+        )
+    if not rows:
+        raise ValueError(f"{dataset_name} did not yield any Arena-Hard rows")
+    return rows
+
+
+def _load_arena_hard_dataset_dict(dataset_name: str):
+    from datasets import Dataset, DatasetDict
+
+    rows: list[dict[str, Any]] = []
+    for row in _load_arena_hard_rows(dataset_name):
+        rendered = dict(row)
+        rendered["metadata"] = json.dumps(rendered.get("metadata") or {}, ensure_ascii=False, sort_keys=True)
+        rows.append(rendered)
+    return DatasetDict({"test": Dataset.from_list(rows)})
+
+
+def arena_hard_prompt(line: dict, task_name: str | None = None) -> Doc:
+    question = _normalize_rwkv_text(line.get("question") or line.get("prompt"))
+    baseline_answer = _normalize_rwkv_text(line.get("baseline_answer") or line.get("answer"))
+    metadata = _bfcl_json_mapping_field(line.get("metadata"))
+    instruction = "\n".join(
+        [
+            "Follow the user instruction below.",
+            "Provide a complete, helpful answer. Do not mention evaluation metadata.",
+            "",
+            f"User instruction:\n{question}",
+            "",
+            "Answer:",
+        ]
+    )
+    return Doc(
+        task_name=task_name,
+        query=instruction,
+        choices=[baseline_answer],
+        gold_index=0,
+        specific={
+            "task_id": line.get("task_id"),
+            "question": question,
+            "baseline_answer": baseline_answer,
+            "category": line.get("category"),
+            "cluster": line.get("cluster"),
+            "metadata": json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+            "prompt_chars": len(instruction),
+        },
+    )
+
+
+def extract_arena_hard_answer(text: str) -> str:
+    normalized = _strip_json_fence(_normalize_rwkv_text(text))
+    if not normalized:
+        return ""
+    try:
+        payload = json.loads(_extract_bfcl_json_value_text(normalized))
+        answer = _arena_hard_baseline_answer(payload)
+        if answer:
+            return answer
+    except Exception:
+        pass
+    patterns = [r"Final Answer\s*:\s*(.+)", r"Answer\s*:\s*(.+)"]
+    for pattern in patterns:
+        matches = re.findall(pattern, normalized, flags=re.IGNORECASE | re.DOTALL)
+        if matches:
+            return _normalize_rwkv_text(matches[-1])
+    return normalized
+
+
+def _arena_hard_tokens(text: str) -> list[str]:
+    normalized = unicodedata.normalize("NFKC", str(text or "")).lower()
+    return re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]", normalized)
+
+
+def arena_hard_token_f1(prediction: str, reference: str) -> float:
+    pred_tokens = _arena_hard_tokens(extract_arena_hard_answer(prediction))
+    ref_tokens = _arena_hard_tokens(reference)
+    if not pred_tokens or not ref_tokens:
+        return 1.0 if pred_tokens == ref_tokens else 0.0
+    common = Counter(pred_tokens) & Counter(ref_tokens)
+    overlap = sum(common.values())
+    if overlap <= 0:
+        return 0.0
+    precision = overlap / len(pred_tokens)
+    recall = overlap / len(ref_tokens)
+    return 2 * precision * recall / (precision + recall)
+
+
+class ArenaHardBaselineTokenF1(SampleLevelComputation):
+    def compute(self, doc: Doc, model_response, **kwargs) -> float:
+        reference = str(dict(doc.specific or {}).get("baseline_answer") or doc.choices[int(doc.gold_index)])
+        best = 0.0
+        for prediction in model_response.final_text:
+            best = max(best, arena_hard_token_f1(prediction, reference))
+        return best
+
+
+class ArenaHardNonEmpty(SampleLevelComputation):
+    def compute(self, doc: Doc, model_response, **kwargs) -> float:
+        for prediction in model_response.final_text:
+            if extract_arena_hard_answer(prediction).strip():
+                return 1.0
+        return 0.0
+
+
+ARENA_HARD_BASELINE_TOKEN_F1 = SampleLevelMetric(
+    metric_name="arena_hard_baseline_token_f1",
+    sample_level_fn=ArenaHardBaselineTokenF1(),
+    category=SamplingMethod.GENERATIVE,
+    corpus_level_fn=_mean,
+    higher_is_better=True,
+)
+
+
+ARENA_HARD_NONEMPTY = SampleLevelMetric(
+    metric_name="arena_hard_nonempty",
+    sample_level_fn=ArenaHardNonEmpty(),
+    category=SamplingMethod.GENERATIVE,
+    corpus_level_fn=_mean,
+    higher_is_better=True,
+)
+
+
 def _install_longcodeqa_data_files_patch() -> None:
     """Scope LightEval 0.13 dataset patches to custom rwkv-skills datasets."""
 
@@ -5471,6 +5743,11 @@ def _install_longcodeqa_data_files_patch() -> None:
             if dataset_name is None and len(args) > 1:
                 dataset_name = args[1]
             return _load_browsecomp_dataset_dict(str(dataset_name or ""))
+        if path == ARENA_HARD_LIGHTEVAL_DATASET:
+            dataset_name = kwargs.get("name")
+            if dataset_name is None and len(args) > 1:
+                dataset_name = args[1]
+            return _load_arena_hard_dataset_dict(str(dataset_name or "arena_hard_v2"))
         if path == APIBANK_LIGHTEVAL_DATASET:
             dataset_name = kwargs.get("name")
             if dataset_name is None and len(args) > 1:
@@ -6300,6 +6577,23 @@ def _hf_browsecomp_task(name: str) -> LightevalTaskConfig:
     )
 
 
+def _hf_arena_hard_task() -> LightevalTaskConfig:
+    return LightevalTaskConfig(
+        name="rwkv_skills:arena_hard_v2",
+        prompt_function=arena_hard_prompt,
+        hf_repo=ARENA_HARD_LIGHTEVAL_DATASET,
+        hf_subset="arena_hard_v2",
+        hf_avail_splits=["test"],
+        evaluation_splits=["test"],
+        few_shots_split=None,
+        few_shots_select=None,
+        generation_size=2048,
+        metrics=[ARENA_HARD_BASELINE_TOKEN_F1, ARENA_HARD_NONEMPTY],
+        stop_sequence=["\nUser:", "\nSystem:", "\nAssistant:"],
+        version=0,
+    )
+
+
 _install_longcodeqa_data_files_patch()
 
 
@@ -6321,6 +6615,7 @@ TASKS_TABLE = [
     *[_hf_bfcl_exec_task(name) for name in BFCL_EXEC_TASKS],
     *[_hf_bfcl_v3_task(name) for name in BFCL_V3_TASKS],
     *[_hf_browsecomp_task(name) for name in BROWSECOMP_TASKS],
+    _hf_arena_hard_task(),
     *[_hf_apibank_task(name) for name in APIBANK_TASKS],
     *[_hf_toolalpaca_task(name) for name in TOOLALPACA_TASKS],
     *[_hf_complexfuncbench_task(name) for name in COMPLEXFUNCBENCH_TASKS],
