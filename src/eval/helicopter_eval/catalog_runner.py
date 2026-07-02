@@ -1435,44 +1435,117 @@ def run_catalog_spec(
 def export_catalog_sample_manifest(
     spec: CatalogRunSpec,
     *,
-    base_url: str,
-    model: str,
-    limit: int | None,
     output_path: str,
-    sample_size: int | None = None,
-    sample_seed: int = 42,
-    longbench_source_path: str | None = None,
-    longbench_infer_protocol: str | None = None,
-    longbench_temperature: float | None = None,
-    longbench_top_p: float | None = None,
-    longbench_presence_penalty: float | None = None,
-    longbench_frequency_penalty: float | None = None,
-    longbench_seed_requests: bool = False,
-    longbench_stop_suffixes: tuple[str, ...] = (),
+    **run_config_kwargs: Any,
 ) -> dict[str, Any]:
     if spec.status != "implemented" or spec.kind is None:
         raise RuntimeError(f"{spec.benchmark} is not runnable yet: {spec.reason}")
-    if spec.kind != "longbench":
-        raise ValueError("--write-sample-manifest is only supported for longbench benchmarks")
-    config = _run_config(
-        spec,
-        base_url=base_url,
-        model=model,
-        limit=limit,
-        sample_size=sample_size,
-        sample_seed=sample_seed,
-        longbench_source_path=longbench_source_path,
-        longbench_infer_protocol=longbench_infer_protocol,
-        longbench_temperature=longbench_temperature,
-        longbench_top_p=longbench_top_p,
-        longbench_presence_penalty=longbench_presence_penalty,
-        longbench_frequency_penalty=longbench_frequency_penalty,
-        longbench_seed_requests=longbench_seed_requests,
-        longbench_stop_suffixes=longbench_stop_suffixes,
-    )
-    from .longbench import export_sample_manifest
+    config = _run_config(spec, **run_config_kwargs)
+    if spec.kind == "longbench":
+        from .longbench import export_sample_manifest
 
-    return export_sample_manifest(config, output_path)
+        return export_sample_manifest(config, output_path)
+    load_samples, dataset_name = _sample_manifest_loader(spec.kind)
+    samples = load_samples(config)
+    from .sample_manifest import write_sample_manifest
+
+    source = {
+        "dataset_name": spec.dataset_name,
+        "source_type": spec.source_type,
+        "source_url": spec.source_url,
+        "source_urls": spec.source_urls,
+        "source_path": spec.source_path,
+        "source_split": spec.source_split,
+        "row_adapter": spec.row_adapter,
+    }
+    return write_sample_manifest(
+        samples,
+        output_path,
+        config=config,
+        dataset=dataset_name(config),
+        kind=spec.kind,
+        source=source,
+    )
+
+
+def _sample_manifest_loader(kind: RunKind):
+    if kind == "free_response":
+        from .free_response import load_samples, scoreboard_dataset_name
+
+        return load_samples, scoreboard_dataset_name
+    if kind == "multiple_choice":
+        from .multiple_choice import load_samples, scoreboard_dataset_name
+
+        return load_samples, scoreboard_dataset_name
+    if kind == "instruction_following":
+        from .instruction_following import load_samples, scoreboard_dataset_name
+
+        return load_samples, scoreboard_dataset_name
+    if kind == "code_generation":
+        from .code_generation import load_samples, scoreboard_dataset_name
+
+        return load_samples, scoreboard_dataset_name
+    if kind == "swe_bench":
+        from .swe_bench import load_samples, scoreboard_dataset_name
+
+        return load_samples, scoreboard_dataset_name
+    if kind == "tau_bench":
+        from .tau_bench import load_samples, scoreboard_dataset_name
+
+        return load_samples, scoreboard_dataset_name
+    if kind == "longcodeqa":
+        from .longcodeqa import load_samples, scoreboard_dataset_name
+
+        return load_samples, scoreboard_dataset_name
+    if kind == "arena_hard":
+        from .arena_hard import load_samples, scoreboard_dataset_name
+
+        return load_samples, scoreboard_dataset_name
+    if kind == "agentbench":
+        from .agentbench import load_samples, scoreboard_dataset_name
+
+        return load_samples, scoreboard_dataset_name
+    if kind == "mcp_bench":
+        from .mcp_bench import load_samples, scoreboard_dataset_name
+
+        return load_samples, scoreboard_dataset_name
+    if kind == "browsecomp":
+        from .browsecomp import load_samples, scoreboard_dataset_name
+
+        return load_samples, scoreboard_dataset_name
+    if kind == "browsecomp_plus":
+        from .browsecomp_plus import load_samples, scoreboard_dataset_name
+
+        return load_samples, scoreboard_dataset_name
+    if kind == "apibank":
+        from .apibank import load_samples, scoreboard_dataset_name
+
+        return load_samples, scoreboard_dataset_name
+    if kind == "bfcl_ast":
+        from .bfcl_ast import load_samples, scoreboard_dataset_name
+
+        return load_samples, scoreboard_dataset_name
+    if kind == "bfcl_exec":
+        from .bfcl_exec import load_samples, scoreboard_dataset_name
+
+        return load_samples, scoreboard_dataset_name
+    if kind == "bfcl_v3":
+        from .bfcl_v3 import load_samples, scoreboard_dataset_name
+
+        return load_samples, scoreboard_dataset_name
+    if kind == "toolalpaca":
+        from .toolalpaca import load_samples, scoreboard_dataset_name
+
+        return load_samples, scoreboard_dataset_name
+    if kind == "translation":
+        from .translation import load_samples, scoreboard_dataset_name
+
+        return load_samples, scoreboard_dataset_name
+    if kind == "complexfuncbench":
+        from .complexfuncbench import load_samples, scoreboard_dataset_name
+
+        return load_samples, scoreboard_dataset_name
+    raise ValueError(f"--write-sample-manifest is not supported for {kind} benchmarks")
 
 
 def _run_config(

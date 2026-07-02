@@ -260,19 +260,7 @@ def handle_eval_run_catalog(args: argparse.Namespace, *, root: Any, **_: Any) ->
             payload = export_catalog_sample_manifest(
                 spec,
                 output_path=str(write_sample_manifest),
-                base_url=kwargs["base_url"],
-                model=kwargs["model"],
-                limit=kwargs["limit"],
-                sample_size=kwargs["sample_size"],
-                sample_seed=kwargs["sample_seed"],
-                longbench_source_path=kwargs["longbench_source_path"],
-                longbench_infer_protocol=kwargs["longbench_infer_protocol"],
-                longbench_temperature=kwargs["longbench_temperature"],
-                longbench_top_p=kwargs["longbench_top_p"],
-                longbench_presence_penalty=kwargs["longbench_presence_penalty"],
-                longbench_frequency_penalty=kwargs["longbench_frequency_penalty"],
-                longbench_seed_requests=kwargs["longbench_seed_requests"],
-                longbench_stop_suffixes=kwargs["longbench_stop_suffixes"],
+                **kwargs,
             )
         else:
             payload = (
@@ -428,10 +416,10 @@ def build_parser() -> argparse.ArgumentParser:
     eval_run_catalog.add_argument("--base-url", help="OpenAI-compatible vLLM base URL")
     eval_run_catalog.add_argument("--model", help="served model name")
     eval_run_catalog.add_argument("--limit", type=int)
-    eval_run_catalog.add_argument("--sample-size", type=int, help="randomly sample N free-response rows")
+    eval_run_catalog.add_argument("--sample-size", type=int, help="randomly sample N benchmark rows")
     eval_run_catalog.add_argument("--sample-seed", type=int, default=42, help="seed for --sample-size")
     eval_run_catalog.add_argument("--longbench-source-path", help="LongBench JSONL manifest or local source root")
-    eval_run_catalog.add_argument("--write-sample-manifest", help="write the resolved LongBench sample manifest and exit")
+    eval_run_catalog.add_argument("--write-sample-manifest", help="write the resolved sample manifest and exit")
     eval_run_catalog.add_argument(
         "--longbench-infer-protocol",
         choices=("chat", "completions"),

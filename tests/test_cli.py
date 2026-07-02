@@ -1580,6 +1580,41 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual([sample.metadata["original_sample_index"] for sample in loaded], [2, 5, 6])
         self.assertEqual([sample.metadata["source_id"] for sample in loaded], ["task-2", "task-5", "task-6"])
 
+    def test_catalog_free_response_sample_manifest_uses_selected_rows(self) -> None:
+        catalog = eval_catalog.load_rwkv_skills_catalog()
+        spec = catalog_runner.resolve_catalog_run_spec(catalog.benchmarks_by_name["gsm8k"])
+        rows = [
+            {
+                "question": f"question {index}",
+                "answer": f"work #### {index}",
+            }
+            for index in range(10)
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "gsm8k.manifest.jsonl"
+            with mock.patch.object(free_response, "_iter_rows", return_value=iter(rows)):
+                payload = catalog_runner.export_catalog_sample_manifest(
+                    spec,
+                    output_path=str(manifest),
+                    base_url="http://127.0.0.1:29082",
+                    model="rwkv7-g1d-0.4b-20260210-ctx8192",
+                    limit=None,
+                    sample_size=3,
+                    sample_seed=7,
+                )
+
+            lines = manifest.read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(payload["total"], 3)
+        self.assertEqual(payload["dataset"], "gsm8k_test_sample3_seed7")
+        self.assertEqual(len(lines), 3)
+        records = [json.loads(line) for line in lines]
+        self.assertEqual([row["source_sample_index"] for row in records], [2, 5, 6])
+        self.assertEqual([row["sample_index"] for row in records], [0, 1, 2])
+        self.assertEqual(records[0]["preview"]["question"], "question 2")
+        self.assertIn("question", records[0]["content_sha256"])
+        self.assertIn("sample_identity_sha256", payload)
+
     def test_longbench_prompt_preserves_rwkv_skills_line_breaks(self) -> None:
         sample = longbench.LongBenchSample(
             sample_index=0,
