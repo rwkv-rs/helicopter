@@ -606,6 +606,10 @@ class CommandPlanTests(unittest.TestCase):
                 "longbench_qa",
                 "longbench_qa_balanced",
                 "longcodeqa",
+                "mcp_bench",
+                "mcp_bench_multi_2server",
+                "mcp_bench_multi_3server",
+                "mcp_bench_single",
                 "math_odyssey",
                 "mawps",
                 "mbpp",
@@ -632,6 +636,19 @@ class CommandPlanTests(unittest.TestCase):
 
     def test_comp_math_static_data_file_is_packaged(self) -> None:
         self.assertTrue(Path(lighteval_rwkv_skills_tasks.COMP_MATH_24_25_PATH).is_file())
+
+    def test_mcpbench_static_data_files_are_packaged(self) -> None:
+        expected_counts = {
+            "mcp_bench": 104,
+            "mcp_bench_single": 56,
+            "mcp_bench_multi_2server": 30,
+            "mcp_bench_multi_3server": 18,
+        }
+        for name, expected_count in expected_counts.items():
+            path = Path(lighteval_rwkv_skills_tasks.MCP_BENCH_PATHS[name])
+            self.assertTrue(path.is_file(), name)
+            with path.open(encoding="utf-8") as fh:
+                self.assertEqual(sum(1 for _line in fh), expected_count, name)
 
     def test_wmt24pp_task_uses_default_target_languages(self) -> None:
         self.assertEqual(lighteval_rwkv_skills_tasks.WMT24PP_TARGET_LANGUAGES, ("de_DE", "es_MX", "fr_FR", "it_IT", "ja_JP"))
@@ -1261,6 +1278,42 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(f1.compute(response, doc), 1.0)
         self.assertEqual(nonempty.compute(response, doc), 1.0)
         self.assertEqual(nonempty.compute(ModelResponse(text=["I cannot produce a patch."]), doc), 0.0)
+
+    def test_mcpbench_prompt_scores_static_plan(self) -> None:
+        doc = lighteval_rwkv_skills_tasks.mcpbench_prompt(
+            {
+                "task_id": "weather_data_000",
+                "instruction": "Find the hourly forecast for Seattle using only Weather Data.",
+                "task_file": "mcpbench_tasks_single_runner_format.json",
+                "server_name": "Weather Data",
+                "servers": ["Weather Data"],
+                "combination_name": "Single Server: Weather Data",
+                "combination_type": "single_server",
+                "official_source": "Accenture/mcp-bench",
+                "official_source_revision": "revision",
+                "official_source_path": "tasks/mcpbench_tasks_single_runner_format.json",
+                "task": {
+                    "task_id": "weather_data_000",
+                    "task_description": "Use Weather Data:getForecast with latitude and longitude for Seattle.",
+                    "dependency_analysis": "Call geocoding first, then use the coordinates in Weather Data:getForecast.",
+                },
+            },
+            "mcp_bench_single",
+        )
+
+        self.assertIsNotNone(doc)
+        assert doc is not None
+        self.assertIn("MCP-Bench", doc.query)
+        self.assertIn("Weather Data", doc.query)
+        self.assertEqual(doc.specific["sample_id"], "weather_data_000")
+        self.assertEqual(doc.specific["servers"], ["Weather Data"])
+
+        f1 = lighteval_rwkv_skills_tasks.McpBenchStaticPlanF1()
+        nonempty = lighteval_rwkv_skills_tasks.McpBenchResponseNonEmpty()
+        response = ModelResponse(text=[doc.specific["reference_plans"][0]])
+        self.assertEqual(f1.compute(response, doc), 1.0)
+        self.assertEqual(nonempty.compute(response, doc), 1.0)
+        self.assertEqual(nonempty.compute(ModelResponse(text=[""]), doc), 0.0)
 
     def test_lighteval_export_prefers_specific_sample_id(self) -> None:
         row = lighteval_export.export_rows_from_frame(
