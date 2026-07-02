@@ -6,17 +6,13 @@ build-backend = "setuptools.build_meta"
 name = "helicopter"
 version = "0.1.0"
 requires-python = ">=3.12,<3.13"
-dependencies = [
-  "tortoise-orm[asyncpg]>=0.25.1,<0.26.0",
-]
+dependencies = []
 
 [project.scripts]
 helicopter = "helicopter_cli.__main__:main"
 
 [dependency-groups]
 rwkv = [
-  "addict",
-  "absl-py>=2.3.1",
   "accelerate",
   "aiohttp>=3.13.3",
   "anthropic>=0.71.0",
@@ -29,13 +25,10 @@ rwkv = [
   "codetiming",
   "compressed-tensors==0.17.0",
   "datasets",
-  "deepdiff",
   "deepspeed",
   "depyf==0.20.0",
   "dill",
-  "docstring-parser",
   "einops",
-  "evalplus @ git+https://github.com/evalplus/evalplus@c91370f",
   "fastapi[standard]>=0.133.0,<0.137.0",
   "fastsafetensors>=0.3.2",
   "filelock>=3.16.1",
@@ -45,22 +38,17 @@ rwkv = [
   "huggingface-hub",
   "hydra-core",
   "ijson",
-  "immutabledict>=2.2.5",
   "jinja2",
   "jsonschema>=4.23.0",
-  "langdetect>=1.0.9",
   "diskcache==5.6.3",
   "lark==1.2.2",
-  "litellm",
   "llguidance>=1.7.0,<1.8.0",
   "lm-format-enforcer==0.11.3",
-  "loguru",
   "mcp",
   "mistral_common[image]>=1.11.5",
   "model-hosting-container-standards>=0.1.14,<1.0.0",
   "msgspec",
   "ninja",
-  "nltk>=3.9.1",
   "numba==0.65.0",
   "numpy>=2.0.0",
   "nvidia-cudnn-frontend>=1.19.1",
@@ -113,7 +101,6 @@ rwkv = [
   "tiktoken>=0.6.0",
   "tokenizers>=0.21.1",
   "tokenspeed-mla==0.1.2",
-  "toml",
   "torch==2.11.0",
   "torchaudio==2.11.0",
   "torchdata",
@@ -140,9 +127,5 @@ full = [
 package = true
 
 [tool.setuptools.packages.find]
-where = ["src/cli", "src/eval"]
-include = ["helicopter_cli*", "helicopter_eval*"]
-
-[tool.setuptools.package-data]
-helicopter_cli = ["data/*.json"]
-helicopter_eval = ["data/free_response/*.json", "data/free_response/*.jsonl"]
+where = ["src/cli"]
+include = ["helicopter_cli*"]

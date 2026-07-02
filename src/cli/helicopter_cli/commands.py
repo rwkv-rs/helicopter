@@ -8,26 +8,11 @@ from typing import Any
 
 from .config import dataset_root, resolve_model_path, table
 from .env import env_value, pick
-from .eval_catalog import load_rwkv_skills_catalog
 from .paths import resolve_path
 
 
 WKV_MODES = ("fp16", "fp32io16")
 EMB_DEVICES = ("cpu", "gpu")
-VLLM_INFER_RUNTIME_ENV_KEYS = frozenset(
-    {
-        "VLLM_ENABLE_V1_MULTIPROCESSING",
-        "VLLM_USE_FLASHINFER_SAMPLER",
-        "VLLM_USE_RAPID_SAMPLER",
-        "VLLM_USE_V2_MODEL_RUNNER",
-        "VLLM_WSL2_ENABLE_PIN_MEMORY",
-    }
-)
-VLLM_EVAL_INFER_ENV_DEFAULTS = {
-    "VLLM_USE_FLASHINFER_SAMPLER": "0",
-    "VLLM_USE_RAPID_SAMPLER": "0",
-    "VLLM_WSL2_ENABLE_PIN_MEMORY": "1",
-}
 
 
 @dataclass
@@ -109,51 +94,8 @@ def apply_rwkv_env(
         command_env["VLLM_RWKV7_EMB_DEVICE"] = emb_device
 
 
-def strip_vllm_env(env: dict[str, str], *, allow: frozenset[str] = frozenset()) -> dict[str, str]:
-    return {key: value for key, value in env.items() if not key.startswith("VLLM_") or key in allow}
-
-
-def apply_vllm_runtime_env(
-    shown_env: dict[str, str],
-    *,
-    source_env: dict[str, str],
-    allow: frozenset[str],
-    defaults: dict[str, str] | None = None,
-) -> None:
-    if defaults is not None:
-        for key, value in defaults.items():
-            shown_env[key] = source_env.get(key, value)
-    for key in sorted(allow):
-        if key in source_env:
-            shown_env[key] = source_env[key]
-
-
-def resolve_vllm_rwkv_path(config: dict[str, Any], *, root: Path, env: dict[str, str]) -> Path:
-    paths = table(config, "paths")
-    return resolve_path(
-        str(
-            pick(
-                paths.get("vllm_rwkv_path"),
-                env_value(env, "HELICOPTER_VLLM_RWKV_PATH", "VLLM_RWKV_PATH"),
-                "src/infer/vllm-rwkv",
-            )
-        ),
-        root=root,
-        env=env,
-    )
-
-
-def apply_vllm_rwkv_runtime_path(
-    command_env: dict[str, str],
-    shown_env: dict[str, str],
-    *,
-    vllm_rwkv_path: Path,
-) -> None:
-    current_pythonpath = command_env.get("PYTHONPATH")
-    command_env["PYTHONPATH"] = (
-        f"{vllm_rwkv_path}{os.pathsep}{current_pythonpath}" if current_pythonpath else str(vllm_rwkv_path)
-    )
-    shown_env["PYTHONPATH"] = command_env["PYTHONPATH"]
+def strip_vllm_env(env: dict[str, str]) -> dict[str, str]:
+    return {key: value for key, value in env.items() if not key.startswith("VLLM_")}
 
 
 def takeoff_value(
@@ -451,9 +393,6 @@ def build_infer_plan(
 
     if not args.dry_run and not model_path.is_file():
         raise SystemExit(f"RWKV checkpoint not found: {model_path}")
-    vllm_rwkv_path = resolve_vllm_rwkv_path(config, root=root, env=env)
-    if not args.dry_run and not vllm_rwkv_path.is_dir():
-        raise SystemExit(f"vllm-rwkv repository not found: {vllm_rwkv_path}")
 
     command = [
         "vllm",
@@ -511,74 +450,8 @@ def build_infer_plan(
 
     shown_env: dict[str, str] = {}
     apply_rwkv_env(shown_env, wkv_mode=wkv_mode, emb_device=emb_device)
-    apply_vllm_runtime_env(shown_env, source_env=env, allow=VLLM_INFER_RUNTIME_ENV_KEYS)
-    plan_env = strip_vllm_env(env, allow=VLLM_INFER_RUNTIME_ENV_KEYS)
+    plan_env = strip_vllm_env(env)
     plan_env.update(shown_env)
-    apply_vllm_rwkv_runtime_path(plan_env, shown_env, vllm_rwkv_path=vllm_rwkv_path)
-    return CommandPlan(command=command, cwd=root, shown_env=shown_env, env=plan_env)
-
-
-def build_eval_infer_plan(
-    args: Any,
-    *,
-    root: Path,
-    env: dict[str, str],
-    config: dict[str, Any],
-) -> CommandPlan:
-    catalog = load_rwkv_skills_catalog()
-    defaults = catalog.inference_defaults
-    model_path = resolve_path(str(pick(args.model_path, defaults.model_path)), root=root, env=env)
-    model_name = str(pick(args.served_model_name, defaults.model_name))
-    host = str(pick(args.host, defaults.host))
-    port = str(pick(args.port, defaults.port))
-    max_model_len = int(pick(args.max_model_len, defaults.max_model_len))
-    tensor_parallel_size = int(pick(args.tensor_parallel_size, defaults.tensor_parallel_size))
-    wkv_mode = str(pick(args.wkv_mode, defaults.wkv_mode))
-    emb_device = str(pick(args.emb_device, defaults.emb_device))
-    vllm_rwkv_path = resolve_vllm_rwkv_path(config, root=root, env=env)
-
-    if not args.dry_run and not model_path.is_file():
-        raise SystemExit(f"RWKV checkpoint not found: {model_path}")
-    if not args.dry_run and not vllm_rwkv_path.is_dir():
-        raise SystemExit(f"vllm-rwkv repository not found: {vllm_rwkv_path}")
-
-    command = [
-        "vllm",
-        "serve",
-        str(model_path),
-        "--host",
-        host,
-        "--port",
-        port,
-        "--tokenizer-mode",
-        "rwkv",
-        "--load-format",
-        "auto",
-        "--served-model-name",
-        model_name,
-        "--max-model-len",
-        str(max_model_len),
-        "--tensor-parallel-size",
-        str(tensor_parallel_size),
-    ]
-    if args.gpu_memory_utilization is not None:
-        command.extend(["--gpu-memory-utilization", str(args.gpu_memory_utilization)])
-    if args.max_num_seqs is not None:
-        command.extend(["--max-num-seqs", str(args.max_num_seqs)])
-    if args.max_num_batched_tokens is not None:
-        command.extend(["--max-num-batched-tokens", str(args.max_num_batched_tokens)])
-
-    shown_env: dict[str, str] = {}
-    apply_rwkv_env(shown_env, wkv_mode=wkv_mode, emb_device=emb_device)
-    apply_vllm_runtime_env(
-        shown_env,
-        source_env=env,
-        allow=VLLM_INFER_RUNTIME_ENV_KEYS,
-        defaults=VLLM_EVAL_INFER_ENV_DEFAULTS,
-    )
-    plan_env = strip_vllm_env(env, allow=VLLM_INFER_RUNTIME_ENV_KEYS)
-    plan_env.update(shown_env)
-    apply_vllm_rwkv_runtime_path(plan_env, shown_env, vllm_rwkv_path=vllm_rwkv_path)
     return CommandPlan(command=command, cwd=root, shown_env=shown_env, env=plan_env)
 
 
@@ -615,7 +488,11 @@ def build_takeoff_plan(
         root=root,
         env=env,
     )
-    vllm_rwkv_path = resolve_vllm_rwkv_path(config, root=root, env=env)
+    vllm_rwkv_path = resolve_path(
+        str(pick(paths.get("vllm_rwkv_path"), env_value(env, "HELICOPTER_VLLM_RWKV_PATH", "VLLM_RWKV_PATH"), "src/infer/vllm-rwkv")),
+        root=root,
+        env=env,
+    )
 
     has_train_files = "train_files" in dataset or env_value(env, "TRAIN_FILES") is not None
     has_val_files = "val_files" in dataset or env_value(env, "VAL_FILES") is not None
@@ -670,7 +547,11 @@ def build_takeoff_plan(
     shown_env["RWKV_LM_PATH"] = str(rwkv_lm_path)
     plan_env = strip_vllm_env(env)
     plan_env.update(shown_env)
-    apply_vllm_rwkv_runtime_path(plan_env, shown_env, vllm_rwkv_path=vllm_rwkv_path)
+    current_pythonpath = plan_env.get("PYTHONPATH")
+    plan_env["PYTHONPATH"] = (
+        f"{vllm_rwkv_path}{os.pathsep}{current_pythonpath}" if current_pythonpath else str(vllm_rwkv_path)
+    )
+    shown_env["PYTHONPATH"] = plan_env["PYTHONPATH"]
 
     command = [
         python,

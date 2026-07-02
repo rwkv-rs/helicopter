@@ -636,7 +636,7 @@ class ScoreboardStore:
                 }
             )
         context = {"stages": stages, "sampling_config": payload.get("sampling_config", {})}
-        for key in ("stats", "agent_result", "agent_info", "agent_trace", "task_id", "domain", "instruction", "metadata"):
+        for key in ("stats", "agent_result", "agent_info", "agent_trace", "task_id", "domain", "instruction"):
             if key in payload:
                 context[key] = payload[key]
         sanitized = sanitize_json(context)
