@@ -555,16 +555,33 @@ class CommandPlanTests(unittest.TestCase):
         self.assertTrue(
             {
                 "algebra222",
+                "amc23",
+                "answer_judge",
                 "beyond_aime",
                 "brumo25",
+                "college_math",
+                "comp_math_24_25",
+                "gaokao2023en",
+                "hendrycks_math",
                 "hmmt_feb25",
                 "math_odyssey",
                 "mawps",
+                "minerva_math",
                 "omni_math",
+                "polymath",
                 "svamp",
                 "supergpqa",
             }.issubset({task.name for task in lighteval_rwkv_skills_tasks.TASKS_TABLE})
         )
+
+    def test_polymath_task_aggregates_all_languages_and_levels(self) -> None:
+        self.assertEqual(len(lighteval_rwkv_skills_tasks.POLYMATH_LANGUAGES), 18)
+        self.assertEqual(len(lighteval_rwkv_skills_tasks.POLYMATH_LEVELS), 4)
+        self.assertEqual(len(lighteval_rwkv_skills_tasks.POLYMATH_URLS), 72)
+        self.assertIn("zh/low.parquet", lighteval_rwkv_skills_tasks.POLYMATH_URLS[-1])
+
+    def test_comp_math_static_data_file_is_packaged(self) -> None:
+        self.assertTrue(Path(lighteval_rwkv_skills_tasks.COMP_MATH_24_25_PATH).is_file())
 
     def test_free_answer_prompt_normalizes_numeric_answers(self) -> None:
         doc = lighteval_rwkv_skills_tasks.free_answer_prompt(
@@ -624,6 +641,48 @@ class CommandPlanTests(unittest.TestCase):
         self.assertIsNotNone(doc)
         assert doc is not None
         self.assertEqual(doc.choices, [""])
+
+    def test_free_answer_prompt_extracts_boxed_solution_when_answer_missing(self) -> None:
+        doc = lighteval_rwkv_skills_tasks.free_answer_prompt(
+            {
+                "problem": "Find x.",
+                "solution": "Solving gives \\\\boxed{1.6}.",
+            },
+            "minerva_math",
+        )
+
+        self.assertIsNotNone(doc)
+        assert doc is not None
+        self.assertEqual(doc.choices, ["1.6"])
+
+    def test_free_answer_prompt_extracts_nested_boxed_solution(self) -> None:
+        doc = lighteval_rwkv_skills_tasks.free_answer_prompt(
+            {
+                "problem": "Find x.",
+                "solution": "Solving gives \\\\boxed{\\\\frac{1}{2}}.",
+            },
+            "minerva_math",
+        )
+
+        self.assertIsNotNone(doc)
+        assert doc is not None
+        self.assertEqual(doc.choices, ["\\\\frac{1}{2}"])
+
+    def test_answer_judge_prompt_uses_mean_annotation_score(self) -> None:
+        doc = lighteval_rwkv_skills_tasks.answer_judge_prompt(
+            {
+                "question": "What is 2 + 2?",
+                "gt_answer": "4",
+                "gen_answer": "four",
+                "annotations": [{"score": "1"}, {"score": "0"}, {"score": "1"}],
+            },
+            "answer_judge",
+        )
+
+        self.assertIsNotNone(doc)
+        assert doc is not None
+        self.assertEqual(doc.choices, ["Judgement: Yes"])
+        self.assertIn("Return exactly `Judgement: Yes` or `Judgement: No`.", doc.query)
 
     def test_lighteval_tasks_loads_rwkv_skills_registry_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -133,3 +133,6 @@ package = true
 [tool.setuptools.packages.find]
 where = ["src/cli"]
 include = ["helicopter_cli*"]
+
+[tool.setuptools.package-data]
+helicopter_cli = ["lighteval_data/*.jsonl"]
