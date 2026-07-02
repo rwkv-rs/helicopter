@@ -428,6 +428,12 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(len(suite["benchmarks"]), 95)
         self.assertIn("gsm8k", suite["benchmarks"])
         self.assertEqual(suite["benchmarks"]["human_eval"]["lighteval_tasks"], ["rwkv_skills:human_eval"])
+        self.assertEqual(
+            suite["benchmarks"]["human_eval_plus"]["lighteval_tasks"],
+            ["rwkv_skills:human_eval_plus"],
+        )
+        self.assertEqual(suite["benchmarks"]["mbpp"]["lighteval_tasks"], ["rwkv_skills:mbpp"])
+        self.assertEqual(suite["benchmarks"]["mbpp_plus"]["lighteval_tasks"], ["rwkv_skills:mbpp_plus"])
         self.assertEqual(suite["benchmarks"]["gsm8k"]["lighteval_tasks"], ["gsm8k"])
         self.assertEqual(
             suite["benchmarks"]["gaokao2023en"]["lighteval_tasks"],
@@ -560,6 +566,9 @@ class CommandPlanTests(unittest.TestCase):
         registry = Registry(custom_tasks=str(custom_tasks))
 
         self.assertIn("rwkv_skills:human_eval", registry._task_registry)
+        self.assertIn("rwkv_skills:human_eval_plus", registry._task_registry)
+        self.assertIn("rwkv_skills:mbpp", registry._task_registry)
+        self.assertIn("rwkv_skills:mbpp_plus", registry._task_registry)
         self.assertIn("rwkv_skills:algebra222", registry._task_registry)
         self.assertIn("rwkv_skills:gaokao2023en", registry._task_registry)
         self.assertIn("rwkv_skills:amc23", registry._task_registry)
@@ -691,6 +700,43 @@ class CommandPlanTests(unittest.TestCase):
             )["passed"]
         )
         self.assertFalse(module._check_humaneval_correctness(problem, "    return a - b", timeout=1.0)["passed"])
+
+    def test_rwkv_skills_mbpp_prompt_and_base_plus_executors(self) -> None:
+        if importlib.util.find_spec("lighteval") is None:
+            self.skipTest("LightEval is not installed")
+
+        custom_tasks = ROOT / "src/cli/helicopter_cli/lighteval_rwkv_skills_tasks.py"
+        spec = importlib.util.spec_from_file_location("rwkv_skills_lighteval_tasks", custom_tasks)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        problem = {
+            "task_id": "2",
+            "prompt": "Write a function named inc that increments an integer.",
+            "code": "def inc(x):\n    return x + 1\n",
+            "source_file": "unit",
+            "test_imports": [],
+            "test_list": ["assert inc(1) == 2"],
+            "test": "assert inc(1) == 2\nassert inc(2) == 3\n",
+        }
+        doc = module.mbpp_prompt(problem, "rwkv_skills:mbpp")
+
+        self.assertIn("Write a Python function", doc.query)
+        self.assertEqual(doc.choices, ["def inc(x):\n    return x + 1\n"])
+        self.assertEqual(doc.specific["task_id"], "Mbpp/2")
+        public_only = "```python\ndef inc(x):\n    return 2\n```"
+        correct = "def inc(x):\n    return x + 1\n"
+        self.assertTrue(
+            module._check_mbpp_correctness(doc.specific, public_only, include_plus_tests=False, timeout=1.0)["passed"]
+        )
+        self.assertFalse(
+            module._check_mbpp_correctness(doc.specific, public_only, include_plus_tests=True, timeout=1.0)["passed"]
+        )
+        self.assertTrue(
+            module._check_mbpp_correctness(doc.specific, correct, include_plus_tests=True, timeout=1.0)["passed"]
+        )
 
     def test_rwkv_skills_comp_math_static_data_is_packaged(self) -> None:
         data_file = ROOT / "benchmarks/lighteval_data/comp_math_24_25/test.jsonl"

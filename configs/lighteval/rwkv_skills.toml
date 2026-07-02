@@ -21,8 +21,8 @@ reason = "Requires a custom LightEval task for the rwkv-skills HumanEval fix dat
 
 [benchmarks.human_eval_plus]
 field = "coding"
-status = "needs_adapter"
-reason = "Requires a custom LightEval task or EvalPlus-compatible adapter."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:human_eval_plus"]
 
 [benchmarks.livecodebench]
 field = "coding"
@@ -31,13 +31,13 @@ lighteval_tasks = ["lcb:codegeneration"]
 
 [benchmarks.mbpp]
 field = "coding"
-status = "needs_adapter"
-reason = "No direct MBPP task was found in the current LightEval registry snapshot."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:mbpp"]
 
 [benchmarks.mbpp_plus]
 field = "coding"
-status = "needs_adapter"
-reason = "Requires an MBPP+ custom task or EvalPlus-compatible adapter."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:mbpp_plus"]
 
 [benchmarks.swe_bench]
 field = "coding"

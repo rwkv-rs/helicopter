@@ -133,6 +133,7 @@ WMT24PP_TARGET_LANGUAGES = {
 }
 
 HUMANEVAL_TIMEOUT_SECONDS = 3.0
+MBPP_TIMEOUT_SECONDS = 3.0
 _THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DOTALL)
 _FENCED_CODE_RE = re.compile(
     r"```[ \t]*(?:python|py)?[^\S\r\n]*\r?\n(?P<code>.*?)```",
@@ -212,6 +213,33 @@ def _build_humaneval_check_program(problem: dict[str, Any], completion: str) -> 
     return f"{solution}\n{test}\ncheck({entry_point})"
 
 
+def _check_python_program_correctness(
+    task_id: object,
+    check_program: str,
+    *,
+    timeout: float,
+    completion_id: int | None = None,
+) -> dict[str, Any]:
+    result_queue: multiprocessing.Queue[str] = multiprocessing.Queue()
+    process = multiprocessing.Process(
+        target=_unsafe_execute_python,
+        args=(check_program, timeout, result_queue),
+    )
+    process.start()
+    process.join(timeout=timeout + 1)
+    if process.is_alive():
+        process.kill()
+        process.join()
+
+    result = result_queue.get() if not result_queue.empty() else "timed out"
+    return {
+        "task_id": task_id,
+        "passed": result == "passed",
+        "result": result,
+        "completion_id": completion_id,
+    }
+
+
 def _check_humaneval_correctness(
     problem: dict[str, Any],
     completion: str,
@@ -229,27 +257,15 @@ def _check_humaneval_correctness(
             "completion_id": completion_id,
         }
 
-    result_queue: multiprocessing.Queue[str] = multiprocessing.Queue()
-    process = multiprocessing.Process(
-        target=_unsafe_execute_humaneval,
-        args=(check_program, timeout, result_queue),
+    return _check_python_program_correctness(
+        problem.get("task_id"),
+        check_program,
+        timeout=timeout,
+        completion_id=completion_id,
     )
-    process.start()
-    process.join(timeout=timeout + 1)
-    if process.is_alive():
-        process.kill()
-        process.join()
-
-    result = result_queue.get() if not result_queue.empty() else "timed out"
-    return {
-        "task_id": problem.get("task_id"),
-        "passed": result == "passed",
-        "result": result,
-        "completion_id": completion_id,
-    }
 
 
-def _unsafe_execute_humaneval(check_program: str, timeout: float, result_queue: multiprocessing.Queue) -> None:
+def _unsafe_execute_python(check_program: str, timeout: float, result_queue: multiprocessing.Queue) -> None:
     with _create_tempdir():
         import shutil
 
@@ -509,6 +525,90 @@ HUMANEVAL_PASS_AT_1 = SampleLevelMetric(
 )
 
 
+def _mbpp_task_id(line: dict[str, Any]) -> str:
+    task_id = str(line.get("task_id") or "").strip()
+    return task_id if "/" in task_id else f"Mbpp/{task_id}"
+
+
+def _build_mbpp_check_program(problem: dict[str, Any], completion: str, *, include_plus_tests: bool) -> str:
+    code = extract_code_completion(completion).rstrip()
+    if include_plus_tests:
+        tests = str(problem.get("test") or "").strip()
+        return f"{code}\n{tests}\n"
+
+    imports = problem.get("test_imports") or []
+    import_block = "\n".join(str(item) for item in imports if item)
+    test_list = problem.get("test_list") or []
+    if isinstance(test_list, str):
+        test_block = test_list
+    else:
+        test_block = "\n".join(str(item) for item in test_list)
+    return "\n".join(part for part in (import_block, code, test_block) if part).rstrip() + "\n"
+
+
+def _check_mbpp_correctness(
+    problem: dict[str, Any],
+    completion: str,
+    *,
+    include_plus_tests: bool,
+    timeout: float = MBPP_TIMEOUT_SECONDS,
+    completion_id: int | None = None,
+) -> dict[str, Any]:
+    try:
+        check_program = _build_mbpp_check_program(problem, completion, include_plus_tests=include_plus_tests)
+    except BaseException as exc:  # noqa: BLE001
+        return {
+            "task_id": problem.get("task_id"),
+            "passed": False,
+            "result": f"failed: {type(exc).__name__}: {exc}",
+            "completion_id": completion_id,
+        }
+    return _check_python_program_correctness(
+        problem.get("task_id"),
+        check_program,
+        timeout=timeout,
+        completion_id=completion_id,
+    )
+
+
+class MbppPassAt1(SampleLevelComputation):
+    def __init__(self, *, include_plus_tests: bool) -> None:
+        self.include_plus_tests = include_plus_tests
+
+    def compute(self, doc: Doc, model_response, **kwargs) -> float:
+        problem = dict(doc.specific or {})
+        for completion_id, prediction in enumerate(model_response.final_text):
+            result = _check_mbpp_correctness(
+                problem,
+                prediction,
+                include_plus_tests=self.include_plus_tests,
+                completion_id=completion_id,
+            )
+            if result["passed"]:
+                return 1.0
+        return 0.0
+
+
+MBPP_PASS_AT_1 = SampleLevelMetric(
+    metric_name="pass@1",
+    sample_level_fn=MbppPassAt1(include_plus_tests=False),
+    category=SamplingMethod.GENERATIVE,
+    corpus_level_fn=_mean,
+    higher_is_better=True,
+    batched_compute=False,
+)
+
+
+MBPP_PLUS_PASS_AT_1 = SampleLevelMetric(
+    metric_name="pass@1",
+    sample_level_fn=MbppPassAt1(include_plus_tests=True),
+    category=SamplingMethod.GENERATIVE,
+    corpus_level_fn=_mean,
+    higher_is_better=True,
+    batched_compute=False,
+)
+
+
 def _question(record: dict) -> str:
     for key in ("question", "problem", "problem_statement", "prompt", "input"):
         value = record.get(key)
@@ -646,6 +746,29 @@ def human_eval_prompt(line: dict, task_name: str | None = None) -> Doc:
             "canonical_solution": line.get("canonical_solution"),
             "test": line.get("test"),
             "entry_point": line.get("entry_point"),
+        },
+    )
+
+
+def mbpp_prompt(line: dict, task_name: str | None = None) -> Doc:
+    prompt = str(line.get("prompt") or line.get("text") or "").strip()
+    return Doc(
+        task_name=task_name,
+        query=(
+            "Write a Python function that satisfies the problem statement. "
+            "Return only executable Python code; do not explain.\n\n"
+            f"Problem:\n{prompt}"
+        ),
+        choices=[str(line.get("code") or "")],
+        gold_index=0,
+        specific={
+            "task_id": _mbpp_task_id(line),
+            "prompt": line.get("prompt") or line.get("text"),
+            "code": line.get("code"),
+            "source_file": line.get("source_file"),
+            "test_imports": line.get("test_imports") or [],
+            "test_list": line.get("test_list") or [],
+            "test": line.get("test") or "",
         },
     )
 
@@ -823,11 +946,11 @@ def _hf_wmt24pp_task(target_language: str) -> LightevalTaskConfig:
     )
 
 
-def _hf_human_eval_task() -> LightevalTaskConfig:
+def _hf_human_eval_task(name: str, repo: str) -> LightevalTaskConfig:
     return LightevalTaskConfig(
-        name="rwkv_skills:human_eval",
+        name=f"rwkv_skills:{name}",
         prompt_function=human_eval_prompt,
-        hf_repo="openai/openai_humaneval",
+        hf_repo=repo,
         hf_subset=None,
         hf_avail_splits=["test"],
         evaluation_splits=["test"],
@@ -840,8 +963,28 @@ def _hf_human_eval_task() -> LightevalTaskConfig:
     )
 
 
+def _hf_mbpp_task(name: str, metric: SampleLevelMetric) -> LightevalTaskConfig:
+    return LightevalTaskConfig(
+        name=f"rwkv_skills:{name}",
+        prompt_function=mbpp_prompt,
+        hf_repo="evalplus/mbppplus",
+        hf_subset=None,
+        hf_avail_splits=["test"],
+        evaluation_splits=["test"],
+        few_shots_split=None,
+        few_shots_select=None,
+        generation_size=1024,
+        metrics=[metric],
+        stop_sequence=[],
+        version=0,
+    )
+
+
 TASKS_TABLE = [
-    _hf_human_eval_task(),
+    _hf_human_eval_task("human_eval", "openai/openai_humaneval"),
+    _hf_human_eval_task("human_eval_plus", "evalplus/humanevalplus"),
+    _hf_mbpp_task("mbpp", MBPP_PASS_AT_1),
+    _hf_mbpp_task("mbpp_plus", MBPP_PLUS_PASS_AT_1),
     *[_hf_math_task(name, task) for name, task in HF_MATH_TASKS.items()],
     _hf_answer_judge_task(),
     _hf_svamp_task(),
