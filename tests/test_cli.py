@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import tempfile
 import unittest
@@ -130,6 +131,34 @@ def lighteval_suite_args(**overrides: object) -> Namespace:
         "results_org": None,
         "job_id": None,
         "extra": None,
+    }
+    values.update(overrides)
+    return Namespace(**values)
+
+
+def suite_adapter_args(**overrides: object) -> Namespace:
+    values = {
+        "model": "g1d-0.4b",
+        "suite": "rwkv_skills",
+        "field": None,
+        "benchmark": None,
+        "lighteval_model_name": None,
+        "adapter_model_name": None,
+        "base_url": None,
+        "api_key": None,
+        "output_dir": None,
+        "run_id": None,
+        "split": None,
+        "max_samples": None,
+        "sample_seed": None,
+        "max_tokens": None,
+        "temperature": None,
+        "timeout_s": None,
+        "swebench_max_context_chars": None,
+        "swebench_prompt_profile": None,
+        "swebench_run_harness": None,
+        "swebench_harness_workers": None,
+        "swebench_harness_timeout_s": None,
     }
     values.update(overrides)
     return Namespace(**values)
@@ -440,6 +469,16 @@ class CommandPlanTests(unittest.TestCase):
         )
         self.assertEqual(suite["benchmarks"]["mbpp"]["lighteval_tasks"], ["rwkv_skills:mbpp"])
         self.assertEqual(suite["benchmarks"]["mbpp_plus"]["lighteval_tasks"], ["rwkv_skills:mbpp_plus"])
+        self.assertEqual(suite["benchmarks"]["swe_bench_lite"]["status"], "adapter")
+        self.assertEqual(suite["benchmarks"]["swe_bench_lite"]["adapter"], "swebench")
+        self.assertEqual(
+            suite["benchmarks"]["swe_bench_lite"]["hf_dataset"],
+            "princeton-nlp/SWE-bench_Lite",
+        )
+        self.assertEqual(
+            suite["benchmarks"]["swe_bench_lite"]["harness_dataset"],
+            "princeton-nlp/SWE-bench_Lite",
+        )
         self.assertEqual(suite["benchmarks"]["longcodeqa"]["lighteval_tasks"], ["rwkv_skills:longcodeqa"])
         self.assertEqual(suite["benchmarks"]["apibank_l1"]["lighteval_tasks"], ["rwkv_skills:apibank_l1"])
         self.assertEqual(suite["benchmarks"]["apibank_l2"]["lighteval_tasks"], ["rwkv_skills:apibank_l2"])
@@ -594,6 +633,73 @@ class CommandPlanTests(unittest.TestCase):
             command_options(plan.command)["--custom-tasks"],
             str(ROOT / "src/cli/helicopter_cli/lighteval_rwkv_skills_tasks.py"),
         )
+
+    def test_suite_adapter_plan_runs_swebench_adapter(self) -> None:
+        loaded_config = load_example_config()
+
+        plan = commands.build_suite_adapter_plan(
+            suite_adapter_args(
+                benchmark=["swe_bench_lite"],
+                max_samples=1,
+                sample_seed=500,
+                max_tokens=64,
+                output_dir="results/swebench_adapter_test",
+                run_id="unit",
+            ),
+            root=ROOT,
+            env={},
+            config=loaded_config,
+        )
+
+        self.assertEqual(plan.command[1:3], ["-m", "helicopter_cli.benchmark_adapters"])
+        options = command_options(plan.command)
+        self.assertEqual(options["--suite-path"], str(ROOT / "configs/lighteval/rwkv_skills.toml"))
+        self.assertEqual(options["--model-name"], "g1d-0.4b")
+        self.assertEqual(options["--base-url"], "http://127.0.0.1:8000/v1")
+        self.assertEqual(options["--benchmark"], "swe_bench_lite")
+        self.assertEqual(options["--max-samples"], "1")
+        self.assertEqual(options["--sample-seed"], "500")
+        self.assertEqual(options["--max-tokens"], "64")
+        self.assertEqual(options["--run-id"], "unit")
+        self.assertEqual(options["--output-dir"], str(ROOT / "results/swebench_adapter_test"))
+        self.assertEqual(plan.env["OPENAI_API_KEY"], "EMPTY")
+
+    def test_swebench_adapter_loads_local_rows_and_extracts_patches(self) -> None:
+        from helicopter_cli import benchmark_adapters
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "swe.jsonl"
+            source.write_text(
+                json.dumps(
+                    {
+                        "instance_id": "demo__1",
+                        "repo": "demo/repo",
+                        "base_commit": "abc123",
+                        "problem_statement": "Fix the failing add_one helper.",
+                        "retrieved_context": "def add_one(x): return x",
+                        "patch": "gold patch must not be shown",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {"HELICOPTER_SWEBENCH_SOURCE": str(source)}):
+                rows = benchmark_adapters.load_swebench_records(
+                    "swe_bench_lite",
+                    {
+                        "hf_dataset": "princeton-nlp/SWE-bench_Lite",
+                        "harness_dataset": "princeton-nlp/SWE-bench_Lite",
+                    },
+                    split="test",
+                )
+
+        self.assertEqual(len(rows), 1)
+        prompt = benchmark_adapters.build_swebench_prompt(rows[0], max_context_chars=80)
+        self.assertIn("demo__1", prompt)
+        self.assertIn("def add_one", prompt)
+        self.assertNotIn("gold patch", prompt)
+        completion = "text\n```diff\ndiff --git a/pkg.py b/pkg.py\n--- a/pkg.py\n+++ b/pkg.py\n@@\n-pass\n+ok\n```"
+        self.assertTrue(benchmark_adapters.extract_swebench_patch(completion).startswith("diff --git a/pkg.py"))
 
     def test_lighteval_multilingual_registry_loads_when_eval_deps_installed(self) -> None:
         if importlib.util.find_spec("lighteval") is None:

@@ -11,6 +11,7 @@ from .commands import (
     build_lighteval_plan,
     build_lighteval_suite_plan,
     build_lighteval_tasks_plan,
+    build_suite_adapter_plan,
     build_takeoff_plan,
     prepend_venv_path,
 )
@@ -117,6 +118,31 @@ def build_parser() -> argparse.ArgumentParser:
     suite.add_argument("--job-id", type=int)
     suite.add_argument("--extra", action="append", help="extra argument passed to LightEval")
     suite.set_defaults(plan_builder=build_lighteval_suite_plan)
+
+    suite_adapter = eval_subparsers.add_parser("suite-adapter", help="run adapter-backed suite benchmarks")
+    add_common_options(suite_adapter)
+    suite_adapter.add_argument("model", help="model alias from configs")
+    suite_adapter.add_argument("suite", help="suite alias from [lighteval_suites], e.g. rwkv_skills")
+    suite_adapter.add_argument("--field", action="append", help="limit to a suite field; repeatable")
+    suite_adapter.add_argument("--benchmark", action="append", help="limit to an adapter benchmark name; repeatable")
+    suite_adapter.add_argument("--lighteval-model-name", help="model name passed to the OpenAI-compatible endpoint")
+    suite_adapter.add_argument("--adapter-model-name", help="adapter output model_name_or_path; defaults to served model name")
+    suite_adapter.add_argument("--base-url", help="OpenAI-compatible endpoint base URL")
+    suite_adapter.add_argument("--api-key", help="API key passed through OPENAI_API_KEY")
+    suite_adapter.add_argument("--output-dir")
+    suite_adapter.add_argument("--run-id")
+    suite_adapter.add_argument("--split", default=None)
+    suite_adapter.add_argument("--max-samples", type=int)
+    suite_adapter.add_argument("--sample-seed", type=int)
+    suite_adapter.add_argument("--max-tokens", type=int)
+    suite_adapter.add_argument("--temperature", type=float)
+    suite_adapter.add_argument("--timeout-s", type=float)
+    suite_adapter.add_argument("--swebench-max-context-chars", type=int)
+    suite_adapter.add_argument("--swebench-prompt-profile", choices=("normal", "naive"))
+    suite_adapter.add_argument("--swebench-run-harness", action="store_true", default=None)
+    suite_adapter.add_argument("--swebench-harness-workers", type=int)
+    suite_adapter.add_argument("--swebench-harness-timeout-s", type=float)
+    suite_adapter.set_defaults(plan_builder=build_suite_adapter_plan)
 
     lighteval_tasks = eval_subparsers.add_parser("lighteval-tasks", help="list or inspect LightEval tasks")
     add_common_options(lighteval_tasks)

@@ -294,6 +294,28 @@ def lighteval_suite_task_string(
     return ",".join(dict.fromkeys(tasks)), load_multilingual
 
 
+def suite_adapter_benchmarks(
+    entries: list[tuple[str, dict[str, Any]]],
+    *,
+    explicit_benchmarks: tuple[str, ...] = (),
+) -> list[str]:
+    selected: list[str] = []
+    non_adapters: list[str] = []
+    explicit = {name for name in explicit_benchmarks if name}
+    for name, entry in entries:
+        adapter = str(entry.get("adapter") or "").strip()
+        if adapter == "swebench":
+            selected.append(name)
+            continue
+        if name in explicit:
+            non_adapters.append(name)
+    if non_adapters:
+        raise SystemExit(f"selected benchmarks are not configured as adapters: {', '.join(non_adapters)}")
+    if not selected:
+        raise SystemExit("suite adapter selection has no adapter-backed benchmarks to run")
+    return selected
+
+
 def build_lighteval_model_args(
     args: Any,
     *,
@@ -449,6 +471,87 @@ def build_lighteval_suite_plan(
         }
     )
     return build_lighteval_plan(forwarded, root=root, env=env, config=config)
+
+
+def build_suite_adapter_plan(
+    args: Any,
+    *,
+    root: Path,
+    env: dict[str, str],
+    config: dict[str, Any],
+) -> CommandPlan:
+    suite = load_lighteval_suite(config, args.suite, root=root, env=env)
+    entries = lighteval_suite_entries(
+        suite,
+        fields=tuple(getattr(args, "field", None) or ()),
+        benchmarks=tuple(getattr(args, "benchmark", None) or ()),
+    )
+    benchmarks = suite_adapter_benchmarks(
+        entries,
+        explicit_benchmarks=tuple(getattr(args, "benchmark", None) or ()),
+    )
+    python = python_executable(config, root=root, env=env)
+    model = resolve_model_entry(config, args.model)
+    lighteval = table(config, "lighteval")
+    served_model_name = str(
+        pick(
+            getattr(args, "adapter_model_name", None),
+            getattr(args, "lighteval_model_name", None),
+            model.get("served_model_name"),
+            model.get("requested_name"),
+            args.model,
+        )
+    )
+    base_url = local_openai_base_url(config, env, args)
+    output_dir = str(
+        resolve_path(
+            str(pick(getattr(args, "output_dir", None), lighteval.get("adapter_output_dir"), "results/adapters")),
+            root=root,
+            env=env,
+        )
+    )
+    command = [
+        python,
+        "-m",
+        "helicopter_cli.benchmark_adapters",
+        "--suite-path",
+        str(suite["_path"]),
+        "--model-name",
+        served_model_name,
+        "--base-url",
+        base_url,
+        "--output-dir",
+        output_dir,
+    ]
+    for benchmark in benchmarks:
+        command.extend(["--benchmark", benchmark])
+    for option, value in (
+        ("--run-id", getattr(args, "run_id", None)),
+        ("--split", getattr(args, "split", None)),
+        ("--max-samples", getattr(args, "max_samples", None)),
+        ("--sample-seed", getattr(args, "sample_seed", None)),
+        ("--max-tokens", getattr(args, "max_tokens", None)),
+        ("--temperature", getattr(args, "temperature", None)),
+        ("--timeout-s", getattr(args, "timeout_s", None)),
+        ("--swebench-max-context-chars", getattr(args, "swebench_max_context_chars", None)),
+        ("--swebench-prompt-profile", getattr(args, "swebench_prompt_profile", None)),
+        ("--swebench-harness-workers", getattr(args, "swebench_harness_workers", None)),
+        ("--swebench-harness-timeout-s", getattr(args, "swebench_harness_timeout_s", None)),
+    ):
+        append_cli_option(command, option, value)
+    append_cli_flag(command, "--swebench-run-harness", getattr(args, "swebench_run_harness", None))
+
+    plan_env = strip_vllm_env(env)
+    api_key = pick(
+        getattr(args, "api_key", None),
+        env_value(env, "HELICOPTER_EVAL_API_KEY", "OPENAI_API_KEY"),
+        lighteval.get("api_key"),
+    )
+    if not api_key and is_local_base_url(base_url):
+        api_key = "EMPTY"
+    if api_key:
+        plan_env["OPENAI_API_KEY"] = str(api_key)
+    return CommandPlan(command=command, cwd=root, shown_env={"PYTHON": python}, env=plan_env)
 
 
 def build_lighteval_tasks_plan(

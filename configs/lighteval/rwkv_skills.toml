@@ -41,28 +41,38 @@ lighteval_tasks = ["rwkv_skills:mbpp_plus"]
 
 [benchmarks.swe_bench]
 field = "coding"
-status = "needs_adapter"
-reason = "SWE-Bench is agentic patch generation, not a direct LightEval endpoint task."
+status = "adapter"
+adapter = "swebench"
+hf_dataset = "princeton-nlp/SWE-bench"
+harness_dataset = "princeton-nlp/SWE-bench"
 
 [benchmarks.swe_bench_lite]
 field = "coding"
-status = "needs_adapter"
-reason = "SWE-Bench Lite is agentic patch generation, not a direct LightEval endpoint task."
+status = "adapter"
+adapter = "swebench"
+hf_dataset = "princeton-nlp/SWE-bench_Lite"
+harness_dataset = "princeton-nlp/SWE-bench_Lite"
 
 [benchmarks.swe_bench_lite_bm25_13k]
 field = "coding"
-status = "needs_adapter"
-reason = "Requires the rwkv-skills retrieval/context adapter before LightEval can run it."
+status = "adapter"
+adapter = "swebench"
+hf_dataset = "princeton-nlp/SWE-bench_Lite_bm25_13K"
+harness_dataset = "princeton-nlp/SWE-bench_Lite"
 
 [benchmarks.swe_bench_lite_oracle]
 field = "coding"
-status = "needs_adapter"
-reason = "Requires the rwkv-skills oracle-context adapter before LightEval can run it."
+status = "adapter"
+adapter = "swebench"
+hf_dataset = "princeton-nlp/SWE-bench_Lite_oracle"
+harness_dataset = "princeton-nlp/SWE-bench_Lite"
 
 [benchmarks.swe_bench_verified]
 field = "coding"
-status = "needs_adapter"
-reason = "SWE-Bench Verified is agentic patch generation, not a direct LightEval endpoint task."
+status = "adapter"
+adapter = "swebench"
+hf_dataset = "princeton-nlp/SWE-bench_Verified"
+harness_dataset = "princeton-nlp/SWE-bench_Verified"
 
 [benchmarks.agentbench_db]
 field = "function_calling"
