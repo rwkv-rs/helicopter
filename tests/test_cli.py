@@ -452,6 +452,13 @@ class CommandPlanTests(unittest.TestCase):
             suite["benchmarks"]["bfcl_exec_multiple_ast"]["lighteval_tasks"],
             ["rwkv_skills:bfcl_exec_multiple_ast"],
         )
+        self.assertEqual(suite["benchmarks"]["bfcl_exec_simple"]["lighteval_tasks"], ["rwkv_skills:bfcl_exec_simple"])
+        self.assertEqual(suite["benchmarks"]["bfcl_exec_multiple"]["lighteval_tasks"], ["rwkv_skills:bfcl_exec_multiple"])
+        self.assertEqual(suite["benchmarks"]["bfcl_exec_parallel"]["lighteval_tasks"], ["rwkv_skills:bfcl_exec_parallel"])
+        self.assertEqual(
+            suite["benchmarks"]["bfcl_exec_parallel_multiple"]["lighteval_tasks"],
+            ["rwkv_skills:bfcl_exec_parallel_multiple"],
+        )
         self.assertEqual(len(suite["benchmarks"]["longbench"]["lighteval_tasks"]), 21)
         self.assertEqual(len(suite["benchmarks"]["longbench_qa"]["lighteval_tasks"]), 9)
         self.assertEqual(len(suite["benchmarks"]["longbench_qa_balanced"]["lighteval_tasks"]), 9)
@@ -606,6 +613,10 @@ class CommandPlanTests(unittest.TestCase):
         self.assertIn("rwkv_skills:bfcl_multiple", registry._task_registry)
         self.assertIn("rwkv_skills:bfcl_exec_simple_ast", registry._task_registry)
         self.assertIn("rwkv_skills:bfcl_exec_multiple_ast", registry._task_registry)
+        self.assertIn("rwkv_skills:bfcl_exec_simple", registry._task_registry)
+        self.assertIn("rwkv_skills:bfcl_exec_multiple", registry._task_registry)
+        self.assertIn("rwkv_skills:bfcl_exec_parallel", registry._task_registry)
+        self.assertIn("rwkv_skills:bfcl_exec_parallel_multiple", registry._task_registry)
         self.assertIn("rwkv_skills:algebra222", registry._task_registry)
         self.assertIn("rwkv_skills:gaokao2023en", registry._task_registry)
         self.assertIn("rwkv_skills:amc23", registry._task_registry)
@@ -751,6 +762,35 @@ class CommandPlanTests(unittest.TestCase):
                 {"final_text": [module.json.dumps(rows[0]["expected_tool_calls"], ensure_ascii=False)]},
             )()
             self.assertEqual(module.BfclAstAccuracy().compute(doc, response), 1.0, dataset_name)
+
+    def test_rwkv_skills_bfcl_exec_prompt_loads_and_scores_by_execution(self) -> None:
+        if importlib.util.find_spec("lighteval") is None:
+            self.skipTest("LightEval is not installed")
+
+        custom_tasks = ROOT / "src/cli/helicopter_cli/lighteval_rwkv_skills_tasks.py"
+        spec = importlib.util.spec_from_file_location("rwkv_skills_lighteval_tasks", custom_tasks)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        for dataset_name in (
+            "bfcl_exec_simple",
+            "bfcl_exec_multiple",
+            "bfcl_exec_parallel",
+            "bfcl_exec_parallel_multiple",
+        ):
+            rows = module._load_bfcl_exec_rows(dataset_name)
+            self.assertGreater(len(rows), 0)
+            doc = module.bfcl_exec_prompt(rows[0], f"rwkv_skills:{dataset_name}")
+            self.assertIn("execution results", doc.query)
+            self.assertIn("\n\nJSON:", doc.query)
+            response = type(
+                "Response",
+                (),
+                {"final_text": [module.json.dumps(rows[0]["expected_tool_calls"], ensure_ascii=False)]},
+            )()
+            self.assertEqual(module.BfclExecAccuracy().compute(doc, response), 1.0, dataset_name)
 
     def test_rwkv_skills_apibank_prompt_loads_and_scores_with_official_sandbox(self) -> None:
         if importlib.util.find_spec("lighteval") is None:

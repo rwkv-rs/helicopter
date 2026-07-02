@@ -96,8 +96,8 @@ lighteval_tasks = ["rwkv_skills:apibank_level2"]
 
 [benchmarks.bfcl_exec_multiple]
 field = "function_calling"
-status = "needs_adapter"
-reason = "BFCL execution tasks require function-call execution semantics."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:bfcl_exec_multiple"]
 
 [benchmarks.bfcl_exec_multiple_ast]
 field = "function_calling"
@@ -106,18 +106,18 @@ lighteval_tasks = ["rwkv_skills:bfcl_exec_multiple_ast"]
 
 [benchmarks.bfcl_exec_parallel]
 field = "function_calling"
-status = "needs_adapter"
-reason = "BFCL parallel execution requires the rwkv-skills parallel candidate routing semantics."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:bfcl_exec_parallel"]
 
 [benchmarks.bfcl_exec_parallel_multiple]
 field = "function_calling"
-status = "needs_adapter"
-reason = "BFCL parallel execution requires the rwkv-skills parallel candidate routing semantics."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:bfcl_exec_parallel_multiple"]
 
 [benchmarks.bfcl_exec_simple]
 field = "function_calling"
-status = "needs_adapter"
-reason = "BFCL execution tasks require function-call execution semantics."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:bfcl_exec_simple"]
 
 [benchmarks.bfcl_exec_simple_ast]
 field = "function_calling"
