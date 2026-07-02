@@ -10,9 +10,12 @@ import os
 import platform
 import re
 import signal
+import string
 import sys
 import tempfile
 import traceback
+import unicodedata
+from collections import Counter
 from pathlib import Path
 from string import ascii_uppercase
 from typing import Any, Mapping, Sequence
@@ -142,9 +145,44 @@ MBPP_TIMEOUT_SECONDS = 3.0
 LONGCODEQA_HF_REPO = "Steefano/LCB"
 LONGCODEQA_DATA_FILE = "LongCodeQA.zip"
 LONGCODEQA_LIGHTEVAL_DATASET = "rwkv_skills_longcodeqa_hf_zip"
-LONGCODEQA_DEFAULT_MAX_PROMPT_CHARS = 12_000
+LONGCODEQA_DEFAULT_MAX_PROMPT_CHARS = 8_000
 LONGCODEQA_CHUNK_CHARS = 1_200
 LONGCODEQA_CHUNK_OVERLAP_CHARS = 160
+LONG_BENCH_HF_REPO = "THUDM/LongBench"
+LONG_BENCH_DATASETS = (
+    "narrativeqa",
+    "qasper",
+    "multifieldqa_en",
+    "multifieldqa_zh",
+    "hotpotqa",
+    "2wikimqa",
+    "musique",
+    "dureader",
+    "gov_report",
+    "qmsum",
+    "multi_news",
+    "vcsum",
+    "trec",
+    "triviaqa",
+    "samsum",
+    "lsht",
+    "passage_count",
+    "passage_retrieval_en",
+    "passage_retrieval_zh",
+    "lcc",
+    "repobench-p",
+)
+LONG_BENCH_QA_DATASETS = (
+    "narrativeqa",
+    "qasper",
+    "multifieldqa_en",
+    "multifieldqa_zh",
+    "hotpotqa",
+    "2wikimqa",
+    "musique",
+    "dureader",
+    "triviaqa",
+)
 _THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DOTALL)
 _FENCED_CODE_RE = re.compile(
     r"```[ \t]*(?:python|py)?[^\S\r\n]*\r?\n(?P<code>.*?)```",
@@ -160,6 +198,9 @@ _LONGCODEQA_ANSWER_PREFIX_RE = re.compile(
 )
 _LONGCODEQA_FENCED_BLOCK_RE = re.compile(r"^\s*```(?:json|text)?\s*(.*?)\s*```\s*$", re.IGNORECASE | re.DOTALL)
 _LONGCODEQA_INLINE_BOLD_CHOICE_RE = re.compile(r"\*\*\s*\(?([A-Z])\)?\s*[\).:]", re.IGNORECASE)
+_LONG_BENCH_ANSWER_PREFIX_RE = re.compile(r"^\s*(?:final\s+answer|answer)\s*[:\-]\s*", re.IGNORECASE)
+_LONG_BENCH_ROLE_PREFIX_RE = re.compile(r"^\s*Assistant\s*:\s*", re.IGNORECASE)
+_LONG_BENCH_WORD_OR_CJK_RE = re.compile(r"[A-Za-z0-9]+|[\u4e00-\u9fff]")
 _LONGCODEQA_STOPWORDS = {
     "about",
     "after",
@@ -729,6 +770,153 @@ LONGCODEQA_LETTER_MATCH = SampleLevelMetric(
 )
 
 
+def _longbench_task_suffix(dataset: str) -> str:
+    return dataset.replace("-", "_")
+
+
+def _coerce_string_list(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        stripped = value.strip()
+        return [stripped] if stripped else []
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        items: list[str] = []
+        for item in value:
+            items.extend(_coerce_string_list(item))
+        return items
+    stripped = str(value).strip()
+    return [stripped] if stripped else []
+
+
+def _strip_longbench_json_fence(text: str) -> str:
+    stripped = str(text or "").strip()
+    for _ in range(3):
+        before = stripped
+        stripped = _LONG_BENCH_ROLE_PREFIX_RE.sub("", stripped, count=1).strip()
+        if stripped.startswith("```"):
+            stripped = re.sub(r"^```[ \t]*(?:json)?[^\S\r\n]*\r?\n?", "", stripped, count=1, flags=re.IGNORECASE)
+        if stripped.endswith("```"):
+            stripped = stripped[:-3].rstrip()
+        if stripped == before:
+            break
+    return stripped
+
+
+def _longbench_answer_from_mapping(payload: Mapping[str, object]) -> str | None:
+    value = payload.get("answer")
+    if value is not None:
+        answer = _normalize_newlines(value).strip()
+        return answer or None
+    arguments = payload.get("arguments")
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except json.JSONDecodeError:
+            arguments = None
+    if isinstance(arguments, Mapping) and arguments.get("answer") is not None:
+        answer = _normalize_newlines(arguments.get("answer")).strip()
+        return answer or None
+    return None
+
+
+def normalize_longbench_answer(text: str) -> str:
+    body = _THINK_BLOCK_RE.sub("", str(text or "")).strip()
+    if not body:
+        return ""
+    stripped = _strip_longbench_json_fence(body)
+    if stripped.lstrip().startswith("{"):
+        try:
+            payload, _end = json.JSONDecoder().raw_decode(stripped.lstrip())
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, Mapping):
+            answer = _longbench_answer_from_mapping(payload)
+            if answer:
+                return answer
+    lines = [line.strip() for line in stripped.splitlines() if line.strip()]
+    for line in reversed(lines):
+        match = _LONG_BENCH_ANSWER_PREFIX_RE.match(line)
+        if match:
+            answer = line[match.end() :].strip().strip("`")
+            if answer:
+                return answer
+    return _LONG_BENCH_ANSWER_PREFIX_RE.sub("", lines[-1]).strip().strip("`") if lines else ""
+
+
+def _normalize_for_longbench_match(text: str) -> str:
+    normalized = unicodedata.normalize("NFKC", str(text or "")).lower()
+    normalized = normalized.translate(str.maketrans("", "", string.punctuation))
+    normalized = re.sub(r"\b(a|an|the)\b", " ", normalized)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _longbench_tokens(text: str) -> list[str]:
+    return _LONG_BENCH_WORD_OR_CJK_RE.findall(_normalize_for_longbench_match(text))
+
+
+def _longbench_f1(prediction: str, reference: str) -> float:
+    pred_tokens = _longbench_tokens(prediction)
+    ref_tokens = _longbench_tokens(reference)
+    if not pred_tokens and not ref_tokens:
+        return 1.0
+    if not pred_tokens or not ref_tokens:
+        return 0.0
+    common = Counter(pred_tokens) & Counter(ref_tokens)
+    overlap = sum(common.values())
+    if overlap == 0:
+        return 0.0
+    precision = overlap / len(pred_tokens)
+    recall = overlap / len(ref_tokens)
+    return 2 * precision * recall / (precision + recall)
+
+
+def _longbench_best_scores(prediction: str, references: Sequence[str]) -> tuple[float, float]:
+    normalized_prediction = normalize_longbench_answer(prediction)
+    best_f1 = 0.0
+    exact = 0.0
+    for reference in references:
+        ref = str(reference or "").strip()
+        if not ref:
+            continue
+        if _normalize_for_longbench_match(normalized_prediction) == _normalize_for_longbench_match(ref):
+            exact = 1.0
+            best_f1 = 1.0
+            break
+        best_f1 = max(best_f1, _longbench_f1(normalized_prediction, ref))
+    return exact, best_f1
+
+
+class LongBenchExactMatch(SampleLevelComputation):
+    def compute(self, doc: Doc, model_response, **kwargs) -> float:
+        references = [str(choice) for choice in doc.choices]
+        return max((_longbench_best_scores(prediction, references)[0] for prediction in model_response.final_text), default=0.0)
+
+
+class LongBenchF1(SampleLevelComputation):
+    def compute(self, doc: Doc, model_response, **kwargs) -> float:
+        references = [str(choice) for choice in doc.choices]
+        return max((_longbench_best_scores(prediction, references)[1] for prediction in model_response.final_text), default=0.0)
+
+
+LONG_BENCH_EXACT_MATCH = SampleLevelMetric(
+    metric_name="longbench_exact_match",
+    sample_level_fn=LongBenchExactMatch(),
+    category=SamplingMethod.GENERATIVE,
+    corpus_level_fn=_mean,
+    higher_is_better=True,
+)
+
+
+LONG_BENCH_F1 = SampleLevelMetric(
+    metric_name="longbench_f1",
+    sample_level_fn=LongBenchF1(),
+    category=SamplingMethod.GENERATIVE,
+    corpus_level_fn=_mean,
+    higher_is_better=True,
+)
+
+
 def _install_longcodeqa_data_files_patch() -> None:
     """Scope a LightEval 0.13 compatibility patch to the LongCodeQA zip dataset."""
 
@@ -1152,6 +1340,52 @@ def longcodeqa_prompt(line: dict, task_name: str | None = None) -> Doc:
     )
 
 
+def longbench_prompt(line: dict, task_name: str | None = None) -> Doc:
+    question = _normalize_newlines(line.get("input")).strip()
+    context = _normalize_newlines(line.get("context"))
+    answers = _coerce_string_list(line.get("answers"))
+    if not answers:
+        answers = [""]
+    classes = _coerce_string_list(line.get("all_classes"))
+    language = str(line.get("language") or "").lower()
+
+    max_chars = _longcodeqa_max_prompt_chars()
+    lines = [
+        "You are evaluating a long-context reading task.",
+        "Answer the question using only the provided context.",
+        "Return only the concise final answer. Do not include analysis, markdown, citations, or extra text.",
+    ]
+    if classes:
+        lines.append("If labels/classes are provided, answer with exactly one allowed label.")
+        lines.append("Allowed labels/classes: " + ", ".join(classes))
+    if language.startswith("zh"):
+        lines.append("If the question is Chinese, answer in Chinese.")
+    instruction = "\n".join(lines)
+    empty_prompt = f"{instruction}\n\nContext:\n\nQuestion:\n{question}\n\nAnswer:"
+    context_budget = max(0, max_chars - len(empty_prompt) - 32)
+    rendered_context = _longcodeqa_context_excerpt(context, question, max_chars=context_budget)
+    query = f"{instruction}\n\nContext:\n{rendered_context}\n\nQuestion:\n{question}\n\nAnswer:"
+    if len(query) > max_chars:
+        overflow = len(query) - max_chars
+        rendered_context = _middle_truncate_text(rendered_context, max(0, len(rendered_context) - overflow - 64))
+        query = f"{instruction}\n\nContext:\n{rendered_context}\n\nQuestion:\n{question}\n\nAnswer:"
+
+    return Doc(
+        task_name=task_name,
+        query=query,
+        choices=answers,
+        gold_index=0,
+        specific={
+            "id": line.get("_id") or line.get("task_id"),
+            "dataset": line.get("dataset"),
+            "language": line.get("language"),
+            "length": line.get("length"),
+            "context_chars": len(context),
+            "prompt_chars": len(query),
+        },
+    )
+
+
 def answer_judge_prompt(line: dict, task_name: str | None = None) -> Doc | None:
     mean_score = _mean_annotation_score(line.get("annotations"))
     if mean_score is None:
@@ -1378,7 +1612,24 @@ def _hf_longcodeqa_task() -> LightevalTaskConfig:
         generation_size=16,
         metrics=[LONGCODEQA_LETTER_MATCH],
         stop_sequence=["\n"],
-        version=0,
+        version=1,
+    )
+
+
+def _hf_longbench_task(dataset: str) -> LightevalTaskConfig:
+    return LightevalTaskConfig(
+        name=f"rwkv_skills:longbench_{_longbench_task_suffix(dataset)}",
+        prompt_function=longbench_prompt,
+        hf_repo=LONG_BENCH_HF_REPO,
+        hf_subset=dataset,
+        hf_avail_splits=["test"],
+        evaluation_splits=["test"],
+        few_shots_split=None,
+        few_shots_select=None,
+        generation_size=256,
+        metrics=[LONG_BENCH_EXACT_MATCH, LONG_BENCH_F1],
+        stop_sequence=["\nUser:", "\nSystem:", "\nAssistant:"],
+        version=1,
     )
 
 
@@ -1398,6 +1649,7 @@ TASKS_TABLE = [
     _hf_mbpp_task("mbpp", MBPP_PASS_AT_1),
     _hf_mbpp_task("mbpp_plus", MBPP_PLUS_PASS_AT_1),
     _hf_longcodeqa_task(),
+    *[_hf_longbench_task(dataset) for dataset in LONG_BENCH_DATASETS],
     *[_hf_math_task(name, task) for name, task in HF_MATH_TASKS.items()],
     _hf_answer_judge_task(),
     _hf_svamp_task(),

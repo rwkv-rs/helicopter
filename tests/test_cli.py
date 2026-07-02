@@ -441,6 +441,11 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(suite["benchmarks"]["mbpp"]["lighteval_tasks"], ["rwkv_skills:mbpp"])
         self.assertEqual(suite["benchmarks"]["mbpp_plus"]["lighteval_tasks"], ["rwkv_skills:mbpp_plus"])
         self.assertEqual(suite["benchmarks"]["longcodeqa"]["lighteval_tasks"], ["rwkv_skills:longcodeqa"])
+        self.assertEqual(len(suite["benchmarks"]["longbench"]["lighteval_tasks"]), 21)
+        self.assertEqual(len(suite["benchmarks"]["longbench_qa"]["lighteval_tasks"]), 9)
+        self.assertEqual(len(suite["benchmarks"]["longbench_qa_balanced"]["lighteval_tasks"]), 9)
+        self.assertIn("rwkv_skills:longbench_narrativeqa", suite["benchmarks"]["longbench"]["lighteval_tasks"])
+        self.assertIn("rwkv_skills:longbench_repobench_p", suite["benchmarks"]["longbench"]["lighteval_tasks"])
         self.assertEqual(suite["benchmarks"]["gsm8k"]["lighteval_tasks"], ["gsm8k"])
         self.assertEqual(
             suite["benchmarks"]["gaokao2023en"]["lighteval_tasks"],
@@ -580,6 +585,8 @@ class CommandPlanTests(unittest.TestCase):
         self.assertIn("rwkv_skills:mbpp", registry._task_registry)
         self.assertIn("rwkv_skills:mbpp_plus", registry._task_registry)
         self.assertIn("rwkv_skills:longcodeqa", registry._task_registry)
+        self.assertIn("rwkv_skills:longbench_narrativeqa", registry._task_registry)
+        self.assertIn("rwkv_skills:longbench_repobench_p", registry._task_registry)
         self.assertIn("rwkv_skills:algebra222", registry._task_registry)
         self.assertIn("rwkv_skills:gaokao2023en", registry._task_registry)
         self.assertIn("rwkv_skills:amc23", registry._task_registry)
@@ -662,6 +669,40 @@ class CommandPlanTests(unittest.TestCase):
         )
         response = type("Response", (), {"final_text": ['{"arguments":{"answer":"B"}}']})()
         self.assertEqual(module.LongCodeQALetterMatch().compute(doc, response), 1.0)
+
+    def test_rwkv_skills_longbench_prompt_budgets_context_and_scores_f1(self) -> None:
+        if importlib.util.find_spec("lighteval") is None:
+            self.skipTest("LightEval is not installed")
+
+        custom_tasks = ROOT / "src/cli/helicopter_cli/lighteval_rwkv_skills_tasks.py"
+        spec = importlib.util.spec_from_file_location("rwkv_skills_lighteval_tasks", custom_tasks)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        context = "noise\n" * 500
+        context += "\nThe target project status is deprecated and stable.\n"
+        with mock.patch.dict(os.environ, {"RWKV_LIGHTEVAL_LONGCODEQA_MAX_PROMPT_CHARS": "2200"}):
+            doc = module.longbench_prompt(
+                {
+                    "_id": "row-1",
+                    "dataset": "narrativeqa",
+                    "input": "What is the target project status?",
+                    "context": context,
+                    "answers": ["deprecated and stable"],
+                    "all_classes": [],
+                    "language": "en",
+                    "length": len(context),
+                },
+                "rwkv_skills:longbench_narrativeqa",
+            )
+
+        self.assertLessEqual(len(doc.query), 2200)
+        self.assertIn("target project status", doc.query)
+        response = type("Response", (), {"final_text": ['{"answer":"deprecated and stable"}']})()
+        self.assertEqual(module.LongBenchExactMatch().compute(doc, response), 1.0)
+        self.assertEqual(module.LongBenchF1().compute(doc, response), 1.0)
 
     def test_rwkv_skills_svamp_prompt_combines_body_question_and_normalizes_answer(self) -> None:
         if importlib.util.find_spec("lighteval") is None:

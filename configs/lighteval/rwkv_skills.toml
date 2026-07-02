@@ -166,18 +166,60 @@ reason = "ComplexFuncBench requires a function-calling custom task adapter."
 
 [benchmarks.longbench]
 field = "function_calling"
-status = "needs_adapter"
-reason = "LongBench requires the rwkv-skills long-context prompt/router adapter."
+status = "direct"
+lighteval_tasks = [
+  "rwkv_skills:longbench_narrativeqa",
+  "rwkv_skills:longbench_qasper",
+  "rwkv_skills:longbench_multifieldqa_en",
+  "rwkv_skills:longbench_multifieldqa_zh",
+  "rwkv_skills:longbench_hotpotqa",
+  "rwkv_skills:longbench_2wikimqa",
+  "rwkv_skills:longbench_musique",
+  "rwkv_skills:longbench_dureader",
+  "rwkv_skills:longbench_gov_report",
+  "rwkv_skills:longbench_qmsum",
+  "rwkv_skills:longbench_multi_news",
+  "rwkv_skills:longbench_vcsum",
+  "rwkv_skills:longbench_trec",
+  "rwkv_skills:longbench_triviaqa",
+  "rwkv_skills:longbench_samsum",
+  "rwkv_skills:longbench_lsht",
+  "rwkv_skills:longbench_passage_count",
+  "rwkv_skills:longbench_passage_retrieval_en",
+  "rwkv_skills:longbench_passage_retrieval_zh",
+  "rwkv_skills:longbench_lcc",
+  "rwkv_skills:longbench_repobench_p",
+]
 
 [benchmarks.longbench_qa]
 field = "function_calling"
-status = "needs_adapter"
-reason = "LongBench QA requires the rwkv-skills long-context prompt/router adapter."
+status = "direct"
+lighteval_tasks = [
+  "rwkv_skills:longbench_narrativeqa",
+  "rwkv_skills:longbench_qasper",
+  "rwkv_skills:longbench_multifieldqa_en",
+  "rwkv_skills:longbench_multifieldqa_zh",
+  "rwkv_skills:longbench_hotpotqa",
+  "rwkv_skills:longbench_2wikimqa",
+  "rwkv_skills:longbench_musique",
+  "rwkv_skills:longbench_dureader",
+  "rwkv_skills:longbench_triviaqa",
+]
 
 [benchmarks.longbench_qa_balanced]
 field = "function_calling"
-status = "needs_adapter"
-reason = "LongBench QA balanced requires the rwkv-skills long-context prompt/router adapter."
+status = "direct"
+lighteval_tasks = [
+  "rwkv_skills:longbench_narrativeqa",
+  "rwkv_skills:longbench_qasper",
+  "rwkv_skills:longbench_multifieldqa_en",
+  "rwkv_skills:longbench_multifieldqa_zh",
+  "rwkv_skills:longbench_hotpotqa",
+  "rwkv_skills:longbench_2wikimqa",
+  "rwkv_skills:longbench_musique",
+  "rwkv_skills:longbench_dureader",
+  "rwkv_skills:longbench_triviaqa",
+]
 
 [benchmarks.longcodeqa]
 field = "function_calling"
