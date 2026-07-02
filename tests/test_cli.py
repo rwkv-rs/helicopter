@@ -444,6 +444,10 @@ class CommandPlanTests(unittest.TestCase):
             suite["benchmarks"]["college_math"]["lighteval_tasks"],
             ["rwkv_skills:college_math"],
         )
+        self.assertEqual(
+            suite["benchmarks"]["comp_math_24_25"]["lighteval_tasks"],
+            ["rwkv_skills:comp_math_24_25"],
+        )
         self.assertEqual(suite["benchmarks"]["svamp"]["lighteval_tasks"], ["rwkv_skills:svamp"])
         self.assertEqual(len(suite["benchmarks"]["polymath"]["lighteval_tasks"]), 18)
         self.assertIn("rwkv_skills:polymath_zh", suite["benchmarks"]["polymath"]["lighteval_tasks"])
@@ -556,6 +560,7 @@ class CommandPlanTests(unittest.TestCase):
         self.assertIn("rwkv_skills:math_odyssey", registry._task_registry)
         self.assertIn("rwkv_skills:omni_math", registry._task_registry)
         self.assertIn("rwkv_skills:college_math", registry._task_registry)
+        self.assertIn("rwkv_skills:comp_math_24_25", registry._task_registry)
         self.assertIn("rwkv_skills:svamp", registry._task_registry)
         self.assertIn("rwkv_skills:polymath_en", registry._task_registry)
         self.assertIn("rwkv_skills:polymath_zh", registry._task_registry)
@@ -605,6 +610,13 @@ class CommandPlanTests(unittest.TestCase):
         self.assertIn("Each pack costs 76 dollars. What is the price", doc.query)
         self.assertEqual(doc.choices, ["51"])
         self.assertEqual(doc.specific["id"], "chal-1")
+
+    def test_rwkv_skills_comp_math_static_data_is_packaged(self) -> None:
+        data_file = ROOT / "benchmarks/lighteval_data/comp_math_24_25/test.jsonl"
+
+        self.assertTrue(data_file.exists())
+        with data_file.open("r", encoding="utf-8") as handle:
+            self.assertEqual(sum(1 for line in handle if line.strip()), 256)
 
     def test_takeoff_plan_uses_verl_module_entrypoint_and_default_overrides(self) -> None:
         loaded_config = load_example_config()

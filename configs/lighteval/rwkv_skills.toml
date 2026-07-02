@@ -419,8 +419,8 @@ lighteval_tasks = ["rwkv_skills:college_math"]
 
 [benchmarks.comp_math_24_25]
 field = "maths"
-status = "needs_adapter"
-reason = "No direct COMP Math 24-25 task was found in the current LightEval registry snapshot."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:comp_math_24_25"]
 
 [benchmarks.gaokao2023en]
 field = "maths"

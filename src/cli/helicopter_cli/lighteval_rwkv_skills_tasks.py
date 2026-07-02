@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from string import ascii_uppercase
 
 from inspect_ai.dataset import Sample
@@ -12,6 +13,8 @@ from lighteval.metrics.utils.metric_utils import SampleLevelMetric, SamplingMeth
 from lighteval.tasks.lighteval_task import LightevalTaskConfig
 from lighteval.tasks.requests import Doc
 
+
+LOCAL_DATA_ROOT = Path(__file__).resolve().parents[3] / "benchmarks/lighteval_data"
 
 HF_MATH_TASKS = {
     "algebra222": {
@@ -32,6 +35,10 @@ HF_MATH_TASKS = {
     },
     "college_math": {
         "repo": "di-zhang-fdu/College_Math_Test",
+        "split": "test",
+    },
+    "comp_math_24_25": {
+        "repo": str(LOCAL_DATA_ROOT / "comp_math_24_25"),
         "split": "test",
     },
     "gaokao2023en": {
