@@ -141,18 +141,18 @@ lighteval_tasks = ["rwkv_skills:bfcl_v3"]
 
 [benchmarks.browsecomp]
 field = "function_calling"
-status = "needs_adapter"
-reason = "No direct BrowseComp task was found in the current LightEval registry snapshot."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:browsecomp"]
 
 [benchmarks.browsecomp_plus]
 field = "function_calling"
-status = "needs_adapter"
-reason = "No direct BrowseComp-Plus task was found in the current LightEval registry snapshot."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:browsecomp_plus"]
 
 [benchmarks.browsecomp_zh]
 field = "function_calling"
-status = "needs_adapter"
-reason = "No direct Chinese BrowseComp task was found in the current LightEval registry snapshot."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:browsecomp_zh"]
 
 [benchmarks.complexfuncbench_official]
 field = "function_calling"

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import contextlib
 import ast
+import base64
 import copy
+import csv
 import faulthandler
 import hashlib
 import importlib
@@ -22,11 +24,13 @@ import tempfile
 import traceback
 import unicodedata
 import urllib.request
+import zipfile
 from collections import Counter, defaultdict
 from pathlib import Path
 from string import ascii_uppercase
 from types import ModuleType, SimpleNamespace
 from typing import Any, Callable, Iterator, Mapping, Sequence
+import xml.etree.ElementTree as ET
 
 from inspect_ai.dataset import Sample
 from inspect_ai.solver import generate, prompt_template
@@ -291,6 +295,16 @@ BFCL_V3_FUNC_DOC_FILE_MAPPING = {
     "MemoryAPI_vector": "memory_vector.json",
     "MemoryAPI_rec_sum": "memory_rec_sum.json",
 }
+BROWSECOMP_LIGHTEVAL_DATASET = "rwkv_skills_browsecomp"
+BROWSECOMP_TASKS = {
+    "browsecomp": {"locale": "en", "kind": "browsecomp"},
+    "browsecomp_zh": {"locale": "zh", "kind": "browsecomp_zh"},
+    "browsecomp_plus": {"locale": "en", "kind": "browsecomp_plus"},
+}
+BROWSECOMP_CSV_URL = "https://openaipublic.blob.core.windows.net/simple-evals/browse_comp_test_set.csv"
+BROWSECOMP_ZH_XLSX_URL = "https://raw.githubusercontent.com/PALIN2018/BrowseComp-ZH/main/data/browsecomp-zh-encrypted.xlsx"
+BROWSECOMP_PLUS_HF_REPO = "Tevatron/browsecomp-plus"
+BROWSECOMP_DEFAULT_CACHE = "/tmp/helicopter-browsecomp"
 APIBANK_LIGHTEVAL_DATASET = "rwkv_skills_apibank"
 APIBANK_REPO_URL = "https://github.com/AlibabaResearch/DAMO-ConvAI.git"
 APIBANK_REPO_REVISION = "main"
@@ -4931,6 +4945,491 @@ BFCL_V3_CALL_ACCURACY = SampleLevelMetric(
 )
 
 
+def _browsecomp_cache_root() -> Path:
+    return Path(os.environ.get("RWKV_LIGHTEVAL_BROWSECOMP_CACHE", BROWSECOMP_DEFAULT_CACHE)).expanduser().resolve()
+
+
+def _browsecomp_manifest_candidates(dataset_name: str) -> tuple[Path, ...]:
+    candidates: list[Path] = []
+    env_key = f"RWKV_LIGHTEVAL_{dataset_name.upper()}_SOURCE"
+    for raw in (
+        os.environ.get(env_key),
+        os.environ.get("RWKV_LIGHTEVAL_BROWSECOMP_SOURCE") if dataset_name == "browsecomp" else None,
+        os.environ.get("RWKV_LIGHTEVAL_BROWSECOMP_ZH_SOURCE") if dataset_name == "browsecomp_zh" else None,
+        os.environ.get("RWKV_LIGHTEVAL_BROWSECOMP_PLUS_SOURCE") if dataset_name == "browsecomp_plus" else None,
+    ):
+        if raw:
+            candidates.append(Path(raw).expanduser())
+    repo_root = Path(__file__).resolve().parents[3]
+    candidates.extend(
+        [
+            repo_root / "benchmarks" / "lighteval_data" / dataset_name / "test.jsonl",
+            _browsecomp_cache_root() / dataset_name / "test.jsonl",
+            Path("/home/chase/GitHub/rwkv-skills/data") / dataset_name / "test.jsonl",
+        ]
+    )
+    return tuple(dict.fromkeys(path.expanduser().resolve() for path in candidates))
+
+
+def _browsecomp_manifest_path(dataset_name: str) -> Path | None:
+    for candidate in _browsecomp_manifest_candidates(dataset_name):
+        if candidate.is_file():
+            return candidate.resolve()
+    return None
+
+
+def _browsecomp_source_candidates(dataset_name: str) -> tuple[Path, ...]:
+    candidates: list[Path] = []
+    if dataset_name == "browsecomp":
+        candidates.extend(
+            [
+                _browsecomp_cache_root() / "openai-simple-evals" / "browse_comp_test_set.csv",
+                Path("/home/chase/GitHub/rwkv-skills/data/cache/browsecomp/openai-simple-evals/browse_comp_test_set.csv"),
+                Path("/tmp/rwkv-official-refs/openai/simple-evals/browse_comp_test_set.csv"),
+            ]
+        )
+    elif dataset_name == "browsecomp_zh":
+        candidates.extend(
+            [
+                _browsecomp_cache_root() / "BrowseComp-ZH" / "data" / "browsecomp-zh-encrypted.xlsx",
+                Path("/home/chase/GitHub/rwkv-skills/data/cache/browsecomp_zh/BrowseComp-ZH/data/browsecomp-zh-encrypted.xlsx"),
+                Path("/tmp/rwkv-official-refs/BrowseComp-ZH/data/browsecomp-zh-encrypted.xlsx"),
+                Path("/tmp/ref-BrowseComp-ZH/data/browsecomp-zh-encrypted.xlsx"),
+            ]
+        )
+    return tuple(dict.fromkeys(path.expanduser().resolve() for path in candidates))
+
+
+def _browsecomp_source_path(dataset_name: str) -> Path:
+    for candidate in _browsecomp_source_candidates(dataset_name):
+        if candidate.is_file():
+            return candidate.resolve()
+    if dataset_name == "browsecomp":
+        target = _browsecomp_cache_root() / "openai-simple-evals" / "browse_comp_test_set.csv"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        urllib.request.urlretrieve(BROWSECOMP_CSV_URL, target)
+        return target.resolve()
+    if dataset_name == "browsecomp_zh":
+        target = _browsecomp_cache_root() / "BrowseComp-ZH" / "data" / "browsecomp-zh-encrypted.xlsx"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        urllib.request.urlretrieve(BROWSECOMP_ZH_XLSX_URL, target)
+        return target.resolve()
+    raise FileNotFoundError(f"{dataset_name} requires a materialized decrypted test.jsonl source")
+
+
+def _browsecomp_repeat_bytes(raw: bytes, target_len: int) -> Iterator[int]:
+    if not raw:
+        return iter(())
+    return (raw[index % len(raw)] for index in range(target_len))
+
+
+def _browsecomp_decrypt_xor_base64(ciphertext_b64: str, password: str) -> str:
+    ciphertext = base64.b64decode(str(ciphertext_b64 or "").strip())
+    digest = hashlib.sha256(str(password or "").encode("utf-8")).digest()
+    plaintext = bytes(lhs ^ rhs for lhs, rhs in zip(ciphertext, _browsecomp_repeat_bytes(digest, len(ciphertext))))
+    return plaintext.decode("utf-8")
+
+
+def _load_browsecomp_csv_rows(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh)
+        for index, row in enumerate(reader):
+            canary = str(row.get("canary") or "")
+            rows.append(
+                {
+                    "task_id": f"browsecomp_{index:04d}",
+                    "question": _browsecomp_decrypt_xor_base64(str(row.get("problem") or ""), canary),
+                    "answer": _browsecomp_decrypt_xor_base64(str(row.get("answer") or ""), canary),
+                    "topic": str(row.get("problem_topic") or "").strip(),
+                    "locale": "en",
+                    "metadata": {
+                        "source_format": "official_browsecomp_csv",
+                        "official_source": "openai/simple-evals BrowseComp",
+                        "source_path": str(path),
+                        "source_url": BROWSECOMP_CSV_URL,
+                    },
+                }
+            )
+    return rows
+
+
+def _browsecomp_xml_unescape(text: str) -> str:
+    return (
+        str(text or "")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", '"')
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+    )
+
+
+def _browsecomp_cell_column_name(cell_ref: str) -> str:
+    return "".join(ch for ch in str(cell_ref or "") if ch.isalpha())
+
+
+def _browsecomp_load_shared_strings(zf: zipfile.ZipFile) -> list[str]:
+    try:
+        text = zf.read("xl/sharedStrings.xml").decode("utf-8")
+    except KeyError:
+        return []
+    root = ET.fromstring(text)
+    ns = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    shared: list[str] = []
+    for item in root.findall("x:si", ns):
+        shared.append("".join(node.text or "" for node in item.findall(".//x:t", ns)))
+    return shared
+
+
+def _browsecomp_parse_sheet_row(row: ET.Element, shared_strings: Sequence[str], ns: Mapping[str, str]) -> dict[str, str]:
+    cells: dict[str, str] = {}
+    for cell in row.findall("x:c", ns):
+        column = _browsecomp_cell_column_name(str(cell.attrib.get("r") or ""))
+        cell_type = str(cell.attrib.get("t") or "")
+        value = ""
+        if cell_type == "s":
+            raw = cell.findtext("x:v", default="", namespaces=ns)
+            if raw.isdigit():
+                index = int(raw)
+                if 0 <= index < len(shared_strings):
+                    value = shared_strings[index]
+        elif cell_type == "inlineStr":
+            value = "".join(node.text or "" for node in cell.findall(".//x:t", ns))
+        else:
+            value = cell.findtext("x:v", default="", namespaces=ns) or ""
+        cells[column] = _browsecomp_xml_unescape(value)
+    return cells
+
+
+def _browsecomp_load_xlsx_rows(path: Path) -> list[dict[str, str]]:
+    with zipfile.ZipFile(path) as zf:
+        shared_strings = _browsecomp_load_shared_strings(zf)
+        text = zf.read("xl/worksheets/sheet1.xml").decode("utf-8")
+    root = ET.fromstring(text)
+    ns = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    sheet_rows = root.findall(".//x:sheetData/x:row", ns)
+    if not sheet_rows:
+        return []
+    header_row = _browsecomp_parse_sheet_row(sheet_rows[0], shared_strings, ns)
+    ordered_headers = {column: value for column, value in header_row.items() if value}
+    parsed_rows: list[dict[str, str]] = []
+    for row in sheet_rows[1:]:
+        cells = _browsecomp_parse_sheet_row(row, shared_strings, ns)
+        payload = {header: cells.get(column, "") for column, header in ordered_headers.items()}
+        if any(value.strip() for value in payload.values()):
+            parsed_rows.append(payload)
+    return parsed_rows
+
+
+def _load_browsecomp_zh_xlsx_rows(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for index, row in enumerate(_browsecomp_load_xlsx_rows(path)):
+        canary = str(row.get("canary") or "")
+        question = _browsecomp_decrypt_xor_base64(str(row.get("Question") or ""), canary) if row.get("Question") else ""
+        answer = _browsecomp_decrypt_xor_base64(str(row.get("Answer") or ""), canary) if row.get("Answer") else ""
+        if not question.strip() or not answer.strip():
+            continue
+        rows.append(
+            {
+                "task_id": f"browsecomp_zh_{index:04d}",
+                "question": question,
+                "answer": answer,
+                "topic": "",
+                "locale": "zh",
+                "metadata": {
+                    "source_format": "official_browsecomp_zh_xlsx",
+                    "official_source": "PALIN2018/BrowseComp-ZH",
+                    "source_path": str(path),
+                    "source_url": BROWSECOMP_ZH_XLSX_URL,
+                },
+            }
+        )
+    return rows
+
+
+def _load_browsecomp_manifest_rows(path: Path, dataset_name: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for index, item in enumerate(_read_json_or_jsonl_items(path)):
+        if not isinstance(item, Mapping):
+            continue
+        metadata = dict(item.get("metadata") or {}) if isinstance(item.get("metadata"), Mapping) else {}
+        question = str(item.get("question") or item.get("instruction") or metadata.get("query") or "").strip()
+        answer = str(item.get("answer") or metadata.get("answer") or "").strip()
+        if not question or not answer:
+            continue
+        rows.append(
+            {
+                "task_id": str(item.get("task_id") or f"{dataset_name}_{index:04d}"),
+                "question": question,
+                "answer": answer,
+                "topic": str(item.get("topic") or metadata.get("topic") or "").strip(),
+                "locale": str(item.get("locale") or BROWSECOMP_TASKS[dataset_name]["locale"]),
+                "metadata": {
+                    **metadata,
+                    "source_path": str(path),
+                    "source_format": metadata.get("source_format") or f"materialized_{dataset_name}",
+                    "official_source": (
+                        BROWSECOMP_PLUS_HF_REPO
+                        if dataset_name == "browsecomp_plus"
+                        else metadata.get("official_source", "")
+                    ),
+                },
+            }
+        )
+    return rows
+
+
+def _load_browsecomp_rows(dataset_name: str) -> list[dict[str, Any]]:
+    if dataset_name not in BROWSECOMP_TASKS:
+        raise ValueError(f"unknown BrowseComp dataset: {dataset_name}")
+    manifest_path = _browsecomp_manifest_path(dataset_name)
+    if manifest_path is not None:
+        rows = _load_browsecomp_manifest_rows(manifest_path, dataset_name)
+    elif dataset_name == "browsecomp":
+        rows = _load_browsecomp_csv_rows(_browsecomp_source_path(dataset_name))
+    elif dataset_name == "browsecomp_zh":
+        rows = _load_browsecomp_zh_xlsx_rows(_browsecomp_source_path(dataset_name))
+    else:
+        searched = ", ".join(str(path) for path in _browsecomp_manifest_candidates(dataset_name))
+        raise FileNotFoundError(
+            f"{dataset_name} requires a decrypted materialized JSONL source; searched: {searched}. "
+            f"The public {BROWSECOMP_PLUS_HF_REPO} query set is obfuscated."
+        )
+    normalized_rows: list[dict[str, Any]] = []
+    for row in rows:
+        question = _normalize_rwkv_text(row.get("question"))
+        answer = _normalize_rwkv_text(row.get("answer"))
+        if not question or not answer:
+            continue
+        metadata = dict(row.get("metadata") or {})
+        metadata.setdefault("direct_lighteval_mode", "closed_book_final_answer")
+        metadata.setdefault("dataset_name", dataset_name)
+        normalized_rows.append(
+            {
+                "task_id": str(row.get("task_id") or f"{dataset_name}_{len(normalized_rows):04d}"),
+                "question": question,
+                "answer": answer,
+                "topic": str(row.get("topic") or ""),
+                "locale": str(row.get("locale") or BROWSECOMP_TASKS[dataset_name]["locale"]),
+                "metadata": metadata,
+            }
+        )
+    if not normalized_rows:
+        raise ValueError(f"{dataset_name} did not yield any BrowseComp rows")
+    return normalized_rows
+
+
+def _load_browsecomp_dataset_dict(dataset_name: str):
+    from datasets import Dataset, DatasetDict
+
+    rows: list[dict[str, Any]] = []
+    for row in _load_browsecomp_rows(dataset_name):
+        rendered = dict(row)
+        rendered["metadata"] = json.dumps(rendered.get("metadata") or {}, ensure_ascii=False, sort_keys=True)
+        rows.append(rendered)
+    return DatasetDict({"test": Dataset.from_list(rows)})
+
+
+def browsecomp_prompt(line: dict, task_name: str | None = None) -> Doc:
+    question = _normalize_rwkv_text(line.get("question") or line.get("instruction"))
+    answer = _normalize_rwkv_text(line.get("answer"))
+    locale = str(line.get("locale") or "en").strip().lower()
+    metadata = _bfcl_json_mapping_field(line.get("metadata"))
+    if locale == "zh":
+        instruction = "\n".join(
+            [
+                "请回答下面的 BrowseComp 问题。",
+                "给出你最具体、最简洁的最终答案。",
+                "最后一行必须使用格式：最终答案: <答案>",
+                "",
+                f"问题:\n{question}",
+            ]
+        )
+    else:
+        label = "BrowseComp-Plus" if "plus" in str(task_name or "") else "BrowseComp"
+        instruction = "\n".join(
+            [
+                f"Answer the following {label} question.",
+                "Provide the most specific concise final answer you can.",
+                "The last line must use this format: Exact Answer: <answer>",
+                "",
+                f"Question:\n{question}",
+            ]
+        )
+    return Doc(
+        task_name=task_name,
+        query=instruction,
+        choices=[answer],
+        gold_index=0,
+        specific={
+            "task_id": line.get("task_id"),
+            "question": question,
+            "answer": answer,
+            "locale": locale,
+            "metadata": json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+            "prompt_chars": len(instruction),
+        },
+    )
+
+
+def _browsecomp_json_answer(value: Any) -> str:
+    if isinstance(value, Mapping):
+        function_payload = value.get("function")
+        if not isinstance(function_payload, Mapping):
+            function_payload = value.get("function_call")
+        if isinstance(function_payload, Mapping):
+            nested = _browsecomp_json_answer(function_payload)
+            if nested:
+                return nested
+        arguments = value.get("arguments")
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                arguments = {}
+        if isinstance(arguments, Mapping):
+            nested = _browsecomp_json_answer(arguments)
+            if nested:
+                return nested
+        for key in ("answer", "final_answer", "exact_answer", "response", "output"):
+            raw = value.get(key)
+            if isinstance(raw, str) and raw.strip():
+                return raw.strip()
+    if isinstance(value, list):
+        for item in value:
+            nested = _browsecomp_json_answer(item)
+            if nested:
+                return nested
+    return ""
+
+
+def extract_browsecomp_answer(text: str, *, locale: str) -> str:
+    normalized = _strip_json_fence(_normalize_rwkv_text(text))
+    if not normalized:
+        return ""
+    try:
+        payload = json.loads(_extract_bfcl_json_value_text(normalized))
+        answer = _browsecomp_json_answer(payload)
+        if answer:
+            return answer
+    except Exception:
+        pass
+    patterns = (
+        [r"最终答案\s*[:：]\s*(.+)", r"答案\s*[:：]\s*(.+)"]
+        if locale.strip().lower() == "zh"
+        else [r"Exact Answer\s*:\s*(.+)", r"Final Answer\s*:\s*(.+)", r"Answer\s*:\s*(.+)"]
+    )
+    for pattern in patterns:
+        matches = re.findall(pattern, normalized, flags=re.IGNORECASE)
+        if matches:
+            return _normalize_rwkv_text(matches[-1])
+    lines = [line.strip() for line in normalized.splitlines() if line.strip()]
+    return lines[-1] if lines else normalized
+
+
+def normalize_browsecomp_answer(text: str) -> str:
+    normalized = unicodedata.normalize("NFKC", str(text or "")).lower()
+    normalized = re.sub(r"\b(?:the|a|an)\b", " ", normalized)
+    kept: list[str] = []
+    for char in normalized:
+        category = unicodedata.category(char)
+        if category.startswith(("P", "S")):
+            kept.append(" ")
+        else:
+            kept.append(char)
+    return " ".join("".join(kept).split())
+
+
+def _browsecomp_token_f1(prediction: str, reference: str) -> float:
+    pred_tokens = normalize_browsecomp_answer(prediction).split()
+    ref_tokens = normalize_browsecomp_answer(reference).split()
+    if not pred_tokens or not ref_tokens:
+        return 1.0 if pred_tokens == ref_tokens else 0.0
+    common = Counter(pred_tokens) & Counter(ref_tokens)
+    overlap = sum(common.values())
+    if overlap <= 0:
+        return 0.0
+    precision = overlap / len(pred_tokens)
+    recall = overlap / len(ref_tokens)
+    return 2 * precision * recall / (precision + recall)
+
+
+def score_browsecomp_answer(prediction: str, reference: str, *, locale: str) -> dict[str, float]:
+    extracted = extract_browsecomp_answer(prediction, locale=locale)
+    pred_norm = normalize_browsecomp_answer(extracted)
+    ref_norm = normalize_browsecomp_answer(reference)
+    exact = 1.0 if pred_norm and pred_norm == ref_norm else 0.0
+    contains = 0.0
+    if pred_norm and ref_norm and (ref_norm in pred_norm or pred_norm in ref_norm):
+        contains = 1.0
+    return {
+        "exact_match": exact,
+        "contains_match": max(exact, contains),
+        "f1": _browsecomp_token_f1(extracted, reference),
+    }
+
+
+class BrowseCompExactMatch(SampleLevelComputation):
+    def compute(self, doc: Doc, model_response, **kwargs) -> float:
+        record = dict(doc.specific or {})
+        locale = str(record.get("locale") or "en")
+        reference = str(record.get("answer") or doc.choices[int(doc.gold_index)])
+        for prediction in model_response.final_text:
+            if score_browsecomp_answer(prediction, reference, locale=locale)["exact_match"] >= 1.0:
+                return 1.0
+        return 0.0
+
+
+class BrowseCompContainsMatch(SampleLevelComputation):
+    def compute(self, doc: Doc, model_response, **kwargs) -> float:
+        record = dict(doc.specific or {})
+        locale = str(record.get("locale") or "en")
+        reference = str(record.get("answer") or doc.choices[int(doc.gold_index)])
+        best = 0.0
+        for prediction in model_response.final_text:
+            best = max(best, score_browsecomp_answer(prediction, reference, locale=locale)["contains_match"])
+        return best
+
+
+class BrowseCompF1(SampleLevelComputation):
+    def compute(self, doc: Doc, model_response, **kwargs) -> float:
+        record = dict(doc.specific or {})
+        locale = str(record.get("locale") or "en")
+        reference = str(record.get("answer") or doc.choices[int(doc.gold_index)])
+        best = 0.0
+        for prediction in model_response.final_text:
+            best = max(best, score_browsecomp_answer(prediction, reference, locale=locale)["f1"])
+        return best
+
+
+BROWSECOMP_EXACT_MATCH = SampleLevelMetric(
+    metric_name="browsecomp_exact_match",
+    sample_level_fn=BrowseCompExactMatch(),
+    category=SamplingMethod.GENERATIVE,
+    corpus_level_fn=_mean,
+    higher_is_better=True,
+)
+
+
+BROWSECOMP_CONTAINS_MATCH = SampleLevelMetric(
+    metric_name="browsecomp_contains_match",
+    sample_level_fn=BrowseCompContainsMatch(),
+    category=SamplingMethod.GENERATIVE,
+    corpus_level_fn=_mean,
+    higher_is_better=True,
+)
+
+
+BROWSECOMP_F1 = SampleLevelMetric(
+    metric_name="browsecomp_f1",
+    sample_level_fn=BrowseCompF1(),
+    category=SamplingMethod.GENERATIVE,
+    corpus_level_fn=_mean,
+    higher_is_better=True,
+)
+
+
 def _install_longcodeqa_data_files_patch() -> None:
     """Scope LightEval 0.13 dataset patches to custom rwkv-skills datasets."""
 
@@ -4967,6 +5466,11 @@ def _install_longcodeqa_data_files_patch() -> None:
             if dataset_name is None and len(args) > 1:
                 dataset_name = args[1]
             return _load_bfcl_v3_dataset_dict(str(dataset_name or ""))
+        if path == BROWSECOMP_LIGHTEVAL_DATASET:
+            dataset_name = kwargs.get("name")
+            if dataset_name is None and len(args) > 1:
+                dataset_name = args[1]
+            return _load_browsecomp_dataset_dict(str(dataset_name or ""))
         if path == APIBANK_LIGHTEVAL_DATASET:
             dataset_name = kwargs.get("name")
             if dataset_name is None and len(args) > 1:
@@ -5779,6 +6283,23 @@ def _hf_bfcl_v3_task(name: str) -> LightevalTaskConfig:
     )
 
 
+def _hf_browsecomp_task(name: str) -> LightevalTaskConfig:
+    return LightevalTaskConfig(
+        name=f"rwkv_skills:{name}",
+        prompt_function=browsecomp_prompt,
+        hf_repo=BROWSECOMP_LIGHTEVAL_DATASET,
+        hf_subset=name,
+        hf_avail_splits=["test"],
+        evaluation_splits=["test"],
+        few_shots_split=None,
+        few_shots_select=None,
+        generation_size=512,
+        metrics=[BROWSECOMP_EXACT_MATCH, BROWSECOMP_CONTAINS_MATCH, BROWSECOMP_F1],
+        stop_sequence=["\nQuestion:", "\n问题:", "\nUser:", "\nSystem:", "\nAssistant:"],
+        version=0,
+    )
+
+
 _install_longcodeqa_data_files_patch()
 
 
@@ -5799,6 +6320,7 @@ TASKS_TABLE = [
     *[_hf_bfcl_ast_task(name) for name in BFCL_AST_TASKS],
     *[_hf_bfcl_exec_task(name) for name in BFCL_EXEC_TASKS],
     *[_hf_bfcl_v3_task(name) for name in BFCL_V3_TASKS],
+    *[_hf_browsecomp_task(name) for name in BROWSECOMP_TASKS],
     *[_hf_apibank_task(name) for name in APIBANK_TASKS],
     *[_hf_toolalpaca_task(name) for name in TOOLALPACA_TASKS],
     *[_hf_complexfuncbench_task(name) for name in COMPLEXFUNCBENCH_TASKS],

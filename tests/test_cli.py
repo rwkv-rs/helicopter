@@ -462,6 +462,9 @@ class CommandPlanTests(unittest.TestCase):
             ["rwkv_skills:complexfuncbench_subset"],
         )
         self.assertEqual(suite["benchmarks"]["bfcl_v3"]["lighteval_tasks"], ["rwkv_skills:bfcl_v3"])
+        self.assertEqual(suite["benchmarks"]["browsecomp"]["lighteval_tasks"], ["rwkv_skills:browsecomp"])
+        self.assertEqual(suite["benchmarks"]["browsecomp_plus"]["lighteval_tasks"], ["rwkv_skills:browsecomp_plus"])
+        self.assertEqual(suite["benchmarks"]["browsecomp_zh"]["lighteval_tasks"], ["rwkv_skills:browsecomp_zh"])
         self.assertEqual(suite["benchmarks"]["bfcl_simple_python"]["lighteval_tasks"], ["rwkv_skills:bfcl_simple_python"])
         self.assertEqual(suite["benchmarks"]["bfcl_multiple"]["lighteval_tasks"], ["rwkv_skills:bfcl_multiple"])
         self.assertEqual(suite["benchmarks"]["bfcl_exec_simple_ast"]["lighteval_tasks"], ["rwkv_skills:bfcl_exec_simple_ast"])
@@ -520,7 +523,7 @@ class CommandPlanTests(unittest.TestCase):
 
         with self.assertRaises(SystemExit) as raised:
             commands.build_lighteval_suite_plan(
-                lighteval_suite_args(benchmark=["gsm8k", "browsecomp"]),
+                lighteval_suite_args(benchmark=["gsm8k", "mcp_bench"]),
                 root=ROOT,
                 env={},
                 config=loaded_config,
@@ -631,6 +634,9 @@ class CommandPlanTests(unittest.TestCase):
         self.assertIn("rwkv_skills:complexfuncbench_official", registry._task_registry)
         self.assertIn("rwkv_skills:complexfuncbench_subset", registry._task_registry)
         self.assertIn("rwkv_skills:bfcl_v3", registry._task_registry)
+        self.assertIn("rwkv_skills:browsecomp", registry._task_registry)
+        self.assertIn("rwkv_skills:browsecomp_plus", registry._task_registry)
+        self.assertIn("rwkv_skills:browsecomp_zh", registry._task_registry)
         self.assertIn("rwkv_skills:bfcl_simple_python", registry._task_registry)
         self.assertIn("rwkv_skills:bfcl_multiple", registry._task_registry)
         self.assertIn("rwkv_skills:bfcl_exec_simple_ast", registry._task_registry)
@@ -913,6 +919,37 @@ class CommandPlanTests(unittest.TestCase):
         )()
         self.assertEqual(module.BfclV3SuccessRate().compute(doc, response), 1.0)
         self.assertEqual(module.BfclV3CallAccuracy().compute(doc, response), 1.0)
+
+    def test_rwkv_skills_browsecomp_prompt_loads_and_scores_golden_answers(self) -> None:
+        if importlib.util.find_spec("lighteval") is None:
+            self.skipTest("LightEval is not installed")
+
+        custom_tasks = ROOT / "src/cli/helicopter_cli/lighteval_rwkv_skills_tasks.py"
+        spec = importlib.util.spec_from_file_location("rwkv_skills_lighteval_tasks", custom_tasks)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        for dataset_name in ("browsecomp", "browsecomp_plus", "browsecomp_zh"):
+            rows = module._load_browsecomp_rows(dataset_name)
+            self.assertGreater(len(rows), 0)
+            doc = module.browsecomp_prompt(rows[0], f"rwkv_skills:{dataset_name}")
+            self.assertIn("BrowseComp", doc.query)
+            self.assertIn(rows[0]["question"][:32], doc.query)
+            answer_text = (
+                f"最终答案: {rows[0]['answer']}"
+                if dataset_name == "browsecomp_zh"
+                else f"Exact Answer: {rows[0]['answer']}"
+            )
+            response = type(
+                "Response",
+                (),
+                {"final_text": [answer_text]},
+            )()
+            self.assertEqual(module.BrowseCompExactMatch().compute(doc, response), 1.0, dataset_name)
+            self.assertEqual(module.BrowseCompContainsMatch().compute(doc, response), 1.0, dataset_name)
+            self.assertEqual(module.BrowseCompF1().compute(doc, response), 1.0, dataset_name)
 
     def test_rwkv_skills_svamp_prompt_combines_body_question_and_normalizes_answer(self) -> None:
         if importlib.util.find_spec("lighteval") is None:
