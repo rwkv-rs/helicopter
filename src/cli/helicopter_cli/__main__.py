@@ -7,6 +7,7 @@ from .commands import (
     LIGHTEVAL_BACKENDS,
     WKV_MODES,
     build_infer_plan,
+    build_lighteval_export_plan,
     build_lighteval_plan,
     build_lighteval_suite_plan,
     build_lighteval_tasks_plan,
@@ -126,6 +127,13 @@ def build_parser() -> argparse.ArgumentParser:
     lighteval_tasks.add_argument("--num-samples", type=int)
     lighteval_tasks.add_argument("--show-config", action="store_true", default=None)
     lighteval_tasks.set_defaults(plan_builder=build_lighteval_tasks_plan)
+
+    lighteval_export = eval_subparsers.add_parser("lighteval-export", help="export LightEval details parquet to per-sample records")
+    add_common_options(lighteval_export)
+    lighteval_export.add_argument("details", nargs="+", help="LightEval details parquet file or directory")
+    lighteval_export.add_argument("--output", help="output file; defaults to stdout")
+    lighteval_export.add_argument("--format", choices=("jsonl", "csv"), default="jsonl")
+    lighteval_export.set_defaults(plan_builder=build_lighteval_export_plan)
 
     return parser
 

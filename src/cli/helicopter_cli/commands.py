@@ -131,6 +131,24 @@ def config_vllm_env(infer: dict[str, Any]) -> dict[str, str]:
     return parsed
 
 
+def infer_settings(config: dict[str, Any], model: dict[str, Any]) -> dict[str, Any]:
+    base = table(config, "infer")
+    model_infer = model.get("infer", {})
+    if model_infer is None:
+        return dict(base)
+    if not isinstance(model_infer, dict):
+        raise SystemExit("model infer settings must be a TOML table")
+    merged = {**base, **model_infer}
+    base_env = base.get("vllm_env", {})
+    model_env = model_infer.get("vllm_env", {})
+    if isinstance(base_env, dict) or isinstance(model_env, dict):
+        merged["vllm_env"] = {
+            **(base_env if isinstance(base_env, dict) else {}),
+            **(model_env if isinstance(model_env, dict) else {}),
+        }
+    return merged
+
+
 def takeoff_value(
     takeoff: dict[str, Any],
     env: dict[str, str],
@@ -457,6 +475,22 @@ def build_lighteval_tasks_plan(
     return CommandPlan(command=command, cwd=root, shown_env={"PYTHON": python}, env=strip_vllm_env(env))
 
 
+def build_lighteval_export_plan(
+    args: Any,
+    *,
+    root: Path,
+    env: dict[str, str],
+    config: dict[str, Any],
+) -> CommandPlan:
+    python = python_executable(config, root=root, env=env)
+    command = [python, "-m", "helicopter_cli.lighteval_export"]
+    for detail in args.details:
+        command.append(str(resolve_path(str(detail), root=root, env=env)))
+    append_cli_option(command, "--output", getattr(args, "output", None))
+    append_cli_option(command, "--format", getattr(args, "format", None))
+    return CommandPlan(command=command, cwd=root, shown_env={"PYTHON": python}, env=strip_vllm_env(env))
+
+
 def build_grpo_hydra_overrides(
     *,
     model_path: Path,
@@ -712,7 +746,7 @@ def build_infer_plan(
     config: dict[str, Any],
 ) -> CommandPlan:
     model_path, model = resolve_model_path(config, args.model, root=root, env=env)
-    infer = table(config, "infer")
+    infer = infer_settings(config, model)
     runtime = table(config, "runtime")
     gpu = table(config, "gpu")
 

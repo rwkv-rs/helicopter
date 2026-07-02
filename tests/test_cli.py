@@ -134,6 +134,16 @@ def lighteval_suite_args(**overrides: object) -> Namespace:
     return Namespace(**values)
 
 
+def lighteval_export_args(**overrides: object) -> Namespace:
+    values = {
+        "details": ["results/lighteval/details/run"],
+        "output": None,
+        "format": "jsonl",
+    }
+    values.update(overrides)
+    return Namespace(**values)
+
+
 def command_options(command: list[str]) -> dict[str, str | bool]:
     options: dict[str, str | bool] = {}
     index = 0
@@ -314,6 +324,33 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(plan.shown_env["VLLM_WSL2_ENABLE_PIN_MEMORY"], "1")
         self.assertEqual(plan.env["VLLM_WSL2_ENABLE_PIN_MEMORY"], "1")
 
+    def test_infer_plan_uses_model_specific_0_4b_runtime(self) -> None:
+        loaded_config = load_example_config()
+
+        plan = commands.build_infer_plan(
+            infer_args(model="g1d-0.4b"),
+            root=ROOT,
+            env={},
+            config=loaded_config,
+        )
+
+        options = command_options(plan.command)
+        self.assertEqual(options["--served-model-name"], "g1d-0.4b")
+        self.assertEqual(options["--gpu-memory-utilization"], "0.45")
+        self.assertEqual(options["--max-model-len"], "8192")
+        self.assertEqual(options["--max-num-seqs"], "8")
+        self.assertEqual(options["--max-num-batched-tokens"], "8192")
+        self.assertEqual(
+            plan.shown_env,
+            {
+                "VLLM_RWKV7_EMB_DEVICE": "gpu",
+                "VLLM_RWKV7_WKV_MODE": "fp16",
+                "VLLM_USE_FLASHINFER_SAMPLER": "0",
+                "VLLM_USE_RAPID_SAMPLER": "0",
+                "VLLM_WSL2_ENABLE_PIN_MEMORY": "1",
+            },
+        )
+
     def test_lighteval_plan_uses_official_litellm_endpoint(self) -> None:
         loaded_config = load_example_config()
 
@@ -362,6 +399,22 @@ class CommandPlanTests(unittest.TestCase):
 
         self.assertEqual(plan.command[1:5], ["-m", "lighteval", "tasks", "list"])
         self.assertIn("--load-tasks-multilingual", plan.command)
+
+    def test_lighteval_export_plan_exports_details(self) -> None:
+        loaded_config = load_example_config()
+
+        plan = commands.build_lighteval_export_plan(
+            lighteval_export_args(output="tmp/gsm8k.jsonl"),
+            root=ROOT,
+            env={},
+            config=loaded_config,
+        )
+
+        self.assertEqual(plan.command[1:3], ["-m", "helicopter_cli.lighteval_export"])
+        self.assertIn(str(ROOT / "results/lighteval/details/run"), plan.command)
+        options = command_options(plan.command)
+        self.assertEqual(options["--output"], "tmp/gsm8k.jsonl")
+        self.assertEqual(options["--format"], "jsonl")
 
     def test_rwkv_skills_lighteval_suite_manifest_covers_registry_count(self) -> None:
         suite_path = ROOT / "configs/lighteval/rwkv_skills.toml"
