@@ -571,6 +571,7 @@ class CommandPlanTests(unittest.TestCase):
                 "beyond_aime",
                 "brumo25",
                 "browsecomp",
+                "browsecomp_plus",
                 "browsecomp_zh",
                 "college_math",
                 "comp_math_24_25",
@@ -728,6 +729,39 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(doc.specific["topic"], topic)
         metric = lighteval_rwkv_skills_tasks.BrowseCompF1()
         self.assertEqual(metric.compute(ModelResponse(text=["最终答案: 示例答案"]), doc), 1.0)
+
+    def test_browsecomp_plus_prompt_decrypts_hf_row(self) -> None:
+        canary = lighteval_rwkv_skills_tasks.BROWSECOMP_PLUS_CANARY
+        query = "Which town hosts the example festival?"
+        answer = "Ozalj"
+        evidence = "The example festival is hosted in Ozalj every summer."
+        doc = lighteval_rwkv_skills_tasks.browsecomp_plus_prompt(
+            {
+                "query_id": "unit-1",
+                "query": self._browsecomp_encrypt(query, canary),
+                "answer": self._browsecomp_encrypt(answer, canary),
+                "gold_docs": [
+                    {
+                        "docid": self._browsecomp_encrypt("doc-1", canary),
+                        "text": self._browsecomp_encrypt(evidence, canary),
+                        "url": self._browsecomp_encrypt("https://example.test/doc", canary),
+                    }
+                ],
+                "evidence_docs": [],
+                "negative_docs": [],
+            },
+            "browsecomp_plus",
+        )
+
+        self.assertIsNotNone(doc)
+        assert doc is not None
+        self.assertIn(query, doc.query)
+        self.assertIn(evidence, doc.query)
+        self.assertEqual(doc.specific["references"], [answer])
+        self.assertEqual(doc.specific["query_id"], "unit-1")
+        self.assertEqual(doc.specific["mode"], "oracle_context")
+        metric = lighteval_rwkv_skills_tasks.BrowseCompExactMatch()
+        self.assertEqual(metric.compute(ModelResponse(text=["Exact Answer: Ozalj"]), doc), 1.0)
 
     def test_free_answer_prompt_normalizes_numeric_answers(self) -> None:
         doc = lighteval_rwkv_skills_tasks.free_answer_prompt(
