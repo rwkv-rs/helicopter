@@ -39,6 +39,7 @@ def infer_args(**overrides: object) -> Namespace:
         "max_num_seqs": None,
         "max_num_batched_tokens": None,
         "enable_auto_tool_choice": None,
+        "vllm_env": None,
     }
     values.update(overrides)
     return Namespace(**values)
@@ -278,6 +279,40 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(plan.cwd, ROOT)
         self.assertEqual(plan.shown_env, {})
         self.assertEqual({key for key in plan.env if key.startswith("VLLM_")}, set())
+
+    def test_infer_plan_allows_explicit_vllm_env(self) -> None:
+        loaded_config = load_example_config()
+
+        plan = commands.build_infer_plan(
+            infer_args(vllm_env=["VLLM_WSL2_ENABLE_PIN_MEMORY=1"]),
+            root=ROOT,
+            env={
+                "WEIGHT_PATH": "/weights/RWKV",
+                "VLLM_USE_V2_MODEL_RUNNER": "0",
+            },
+            config=loaded_config,
+        )
+
+        self.assertEqual(plan.shown_env["VLLM_WSL2_ENABLE_PIN_MEMORY"], "1")
+        self.assertEqual(plan.env["VLLM_WSL2_ENABLE_PIN_MEMORY"], "1")
+        self.assertNotIn("VLLM_USE_V2_MODEL_RUNNER", plan.env)
+
+    def test_infer_plan_accepts_configured_vllm_env(self) -> None:
+        loaded_config = load_example_config()
+        loaded_config["infer"] = {
+            **loaded_config["infer"],
+            "vllm_env": {"VLLM_WSL2_ENABLE_PIN_MEMORY": 1},
+        }
+
+        plan = commands.build_infer_plan(
+            infer_args(),
+            root=ROOT,
+            env={"WEIGHT_PATH": "/weights/RWKV"},
+            config=loaded_config,
+        )
+
+        self.assertEqual(plan.shown_env["VLLM_WSL2_ENABLE_PIN_MEMORY"], "1")
+        self.assertEqual(plan.env["VLLM_WSL2_ENABLE_PIN_MEMORY"], "1")
 
     def test_lighteval_plan_uses_official_litellm_endpoint(self) -> None:
         loaded_config = load_example_config()

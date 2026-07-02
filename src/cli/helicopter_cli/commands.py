@@ -105,6 +105,32 @@ def strip_vllm_env(env: dict[str, str]) -> dict[str, str]:
     return {key: value for key, value in env.items() if not key.startswith("VLLM_")}
 
 
+def parse_vllm_env_overrides(values: list[str] | None) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for value in values or []:
+        key, separator, env_value = value.partition("=")
+        if not separator or not key:
+            raise SystemExit(f"invalid --vllm-env value: {value!r}; expected KEY=VALUE")
+        if not key.startswith("VLLM_"):
+            raise SystemExit(f"invalid --vllm-env key: {key}; key must start with VLLM_")
+        parsed[key] = env_value
+    return parsed
+
+
+def config_vllm_env(infer: dict[str, Any]) -> dict[str, str]:
+    value = infer.get("vllm_env", {})
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise SystemExit("[infer].vllm_env must be a TOML table")
+    parsed: dict[str, str] = {}
+    for key, env_value in value.items():
+        if not str(key).startswith("VLLM_"):
+            raise SystemExit(f"invalid [infer].vllm_env key: {key}; key must start with VLLM_")
+        parsed[str(key)] = str(env_value)
+    return parsed
+
+
 def takeoff_value(
     takeoff: dict[str, Any],
     env: dict[str, str],
@@ -765,7 +791,10 @@ def build_infer_plan(
     if auto_tool_choice if isinstance(auto_tool_choice, bool) else str(auto_tool_choice).strip().lower() in {"1", "true", "yes", "on"}:
         command.append("--enable-auto-tool-choice")
 
-    shown_env: dict[str, str] = {}
+    shown_env = {
+        **config_vllm_env(infer),
+        **parse_vllm_env_overrides(args.vllm_env),
+    }
     apply_rwkv_env(shown_env, wkv_mode=wkv_mode, emb_device=emb_device)
     plan_env = strip_vllm_env(env)
     plan_env.update(shown_env)

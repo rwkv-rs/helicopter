@@ -43,6 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
     infer.add_argument("--max-num-seqs", type=int)
     infer.add_argument("--max-num-batched-tokens", type=int)
     infer.add_argument("--enable-auto-tool-choice", action="store_true", default=None)
+    infer.add_argument("--vllm-env", action="append", help="explicit VLLM_* environment override, e.g. VLLM_WSL2_ENABLE_PIN_MEMORY=1")
     infer.set_defaults(plan_builder=build_infer_plan)
 
     takeoff = subparsers.add_parser("takeoff", help="start verl training for an RWKV model")
