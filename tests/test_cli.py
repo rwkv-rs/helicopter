@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import os
 import tempfile
 import unittest
@@ -569,6 +570,12 @@ class CommandPlanTests(unittest.TestCase):
                 "amc23",
                 "answer_judge",
                 "beyond_aime",
+                "bfcl_exec_multiple",
+                "bfcl_exec_multiple_ast",
+                "bfcl_exec_parallel",
+                "bfcl_exec_parallel_multiple",
+                "bfcl_exec_simple",
+                "bfcl_exec_simple_ast",
                 "brumo25",
                 "browsecomp",
                 "browsecomp_plus",
@@ -762,6 +769,97 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(doc.specific["mode"], "oracle_context")
         metric = lighteval_rwkv_skills_tasks.BrowseCompExactMatch()
         self.assertEqual(metric.compute(ModelResponse(text=["Exact Answer: Ozalj"]), doc), 1.0)
+
+    def test_bfcl_prompt_scores_json_tool_call_against_ast_ground_truth(self) -> None:
+        doc = lighteval_rwkv_skills_tasks.bfcl_prompt(
+            {
+                "id": "exec_multiple_0",
+                "question": [[{"role": "user", "content": "Compute a binomial probability."}]],
+                "function": [
+                    {
+                        "name": "calc_binomial_probability",
+                        "description": "Calculate binomial probability.",
+                        "parameters": {"type": "object", "properties": {}},
+                    }
+                ],
+                "execution_result_type": ["exact_match"],
+                "ground_truth": ["calc_binomial_probability(n=20, k=5, p=1/6)"],
+            },
+            "bfcl_exec_multiple",
+        )
+
+        self.assertIsNotNone(doc)
+        assert doc is not None
+        self.assertIn("Available functions:", doc.query)
+        self.assertEqual(doc.specific["sample_id"], "exec_multiple_0")
+        metric = lighteval_rwkv_skills_tasks.BFCLAccuracy()
+        self.assertEqual(
+            metric.compute(
+                ModelResponse(
+                    text=['{"name":"calc_binomial_probability","arguments":{"n":20,"k":5,"p":0.1666666667}}']
+                ),
+                doc,
+            ),
+            1.0,
+        )
+
+    def test_bfcl_metric_matches_parallel_calls_orderlessly(self) -> None:
+        doc = lighteval_rwkv_skills_tasks.bfcl_prompt(
+            {
+                "id": "exec_parallel_0",
+                "question": [[{"role": "user", "content": "Run three probability calculations."}]],
+                "function": [{"name": "calc_binomial_probability", "parameters": {"type": "object"}}],
+                "ground_truth": [
+                    "calc_binomial_probability(n=10, k=3, p=0.3)",
+                    "calc_binomial_probability(n=15, k=5, p=0.3)",
+                ],
+            },
+            "bfcl_exec_parallel",
+        )
+
+        self.assertIsNotNone(doc)
+        assert doc is not None
+        metric = lighteval_rwkv_skills_tasks.BFCLAccuracy()
+        response = ModelResponse(
+            text=[
+                json.dumps(
+                    [
+                        {"name": "calc_binomial_probability", "arguments": {"n": 15, "k": 5, "p": 0.3}},
+                        {"name": "calc_binomial_probability", "arguments": {"n": 10, "k": 3, "p": 0.3}},
+                    ]
+                )
+            ]
+        )
+        self.assertEqual(metric.compute(response, doc), 1.0)
+
+    def test_bfcl_metric_extracts_multiple_tool_call_blocks(self) -> None:
+        doc = lighteval_rwkv_skills_tasks.bfcl_prompt(
+            {
+                "id": "exec_parallel_asin",
+                "question": [[{"role": "user", "content": "Get ratings for two products."}]],
+                "function": [{"name": "get_rating_by_amazon_ASIN", "parameters": {"type": "object"}}],
+                "ground_truth": [
+                    "get_rating_by_amazon_ASIN(ASIN='B08PPDJWC8')",
+                    "get_rating_by_amazon_ASIN(ASIN='B07ZPKBL9V')",
+                ],
+            },
+            "bfcl_exec_parallel",
+        )
+
+        self.assertIsNotNone(doc)
+        assert doc is not None
+        metric = lighteval_rwkv_skills_tasks.BFCLAccuracy()
+        response = ModelResponse(
+            text=[
+                "<tool_call>\n"
+                '{"name":"get_rating_by_amazon_ASIN","arguments":"{\\"ASIN\\":\\"B08PPDJWC8\\"}"}'
+                "\n</tool_call>\n"
+                "<tool_call>\n"
+                '{"name":"get_rating_by_amazon_ASIN","arguments":"{\\"ASIN\\":\\"B07ZPKBL9V\\"}"}'
+                "\n</tool_call>"
+            ]
+        )
+        self.assertEqual(metric.compute(response, doc), 1.0)
 
     def test_free_answer_prompt_normalizes_numeric_answers(self) -> None:
         doc = lighteval_rwkv_skills_tasks.free_answer_prompt(
