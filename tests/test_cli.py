@@ -427,6 +427,7 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(suite["source_count"], 95)
         self.assertEqual(len(suite["benchmarks"]), 95)
         self.assertIn("gsm8k", suite["benchmarks"])
+        self.assertEqual(suite["benchmarks"]["human_eval"]["lighteval_tasks"], ["rwkv_skills:human_eval"])
         self.assertEqual(suite["benchmarks"]["gsm8k"]["lighteval_tasks"], ["gsm8k"])
         self.assertEqual(
             suite["benchmarks"]["gaokao2023en"]["lighteval_tasks"],
@@ -558,6 +559,7 @@ class CommandPlanTests(unittest.TestCase):
         custom_tasks = ROOT / "src/cli/helicopter_cli/lighteval_rwkv_skills_tasks.py"
         registry = Registry(custom_tasks=str(custom_tasks))
 
+        self.assertIn("rwkv_skills:human_eval", registry._task_registry)
         self.assertIn("rwkv_skills:algebra222", registry._task_registry)
         self.assertIn("rwkv_skills:gaokao2023en", registry._task_registry)
         self.assertIn("rwkv_skills:amc23", registry._task_registry)
@@ -652,6 +654,43 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(doc.choices, ["ohayo gozaimasu"])
         self.assertIn("Translate English to Japanese", doc.instruction)
         self.assertEqual(doc.specific["segment_id"], 7)
+
+    def test_rwkv_skills_human_eval_prompt_and_executor(self) -> None:
+        if importlib.util.find_spec("lighteval") is None:
+            self.skipTest("LightEval is not installed")
+
+        custom_tasks = ROOT / "src/cli/helicopter_cli/lighteval_rwkv_skills_tasks.py"
+        spec = importlib.util.spec_from_file_location("rwkv_skills_lighteval_tasks", custom_tasks)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        problem = {
+            "task_id": "HumanEval/test",
+            "prompt": "def add(a: int, b: int) -> int:\n",
+            "canonical_solution": "    return a + b\n",
+            "test": "def check(candidate):\n    assert candidate(2, 3) == 5\n",
+            "entry_point": "add",
+        }
+        doc = module.human_eval_prompt(problem, "rwkv_skills:human_eval")
+
+        self.assertIn("```python\ndef add", doc.query)
+        self.assertEqual(doc.choices, ["    return a + b\n"])
+        self.assertEqual(doc.specific["entry_point"], "add")
+        self.assertEqual(
+            module.extract_code_completion("<think>plan</think>\n```python\n    return a + b\n```"),
+            "    return a + b",
+        )
+        self.assertTrue(module._check_humaneval_correctness(problem, "    return a + b", timeout=1.0)["passed"])
+        self.assertTrue(
+            module._check_humaneval_correctness(
+                problem,
+                "```python\ndef add(a: int, b: int) -> int:\n    return a + b\n```",
+                timeout=1.0,
+            )["passed"]
+        )
+        self.assertFalse(module._check_humaneval_correctness(problem, "    return a - b", timeout=1.0)["passed"])
 
     def test_rwkv_skills_comp_math_static_data_is_packaged(self) -> None:
         data_file = ROOT / "benchmarks/lighteval_data/comp_math_24_25/test.jsonl"

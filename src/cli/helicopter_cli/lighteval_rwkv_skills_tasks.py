@@ -1,8 +1,20 @@
 from __future__ import annotations
 
+import contextlib
+import faulthandler
+import io
+import linecache
+import multiprocessing
+import os
+import platform
 import re
+import signal
+import sys
+import tempfile
+import traceback
 from pathlib import Path
 from string import ascii_uppercase
+from typing import Any
 
 from inspect_ai.dataset import Sample
 from inspect_ai.solver import generate, prompt_template
@@ -120,6 +132,15 @@ WMT24PP_TARGET_LANGUAGES = {
     "ja_JP": "Japanese",
 }
 
+HUMANEVAL_TIMEOUT_SECONDS = 3.0
+_THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DOTALL)
+_FENCED_CODE_RE = re.compile(
+    r"```[ \t]*(?:python|py)?[^\S\r\n]*\r?\n(?P<code>.*?)```",
+    re.IGNORECASE | re.DOTALL,
+)
+_LEADING_END_THINK_RE = re.compile(r"^[\s\r\n]*</think>[ \t]*\r?\n?", re.IGNORECASE)
+_STANDALONE_CODE_FENCE_RE = re.compile(r"^[ \t]*```[ \t]*(?:python|py)?[ \t]*$", re.IGNORECASE)
+
 MATH_PROMPT_TEMPLATE = """
 Solve the following math problem step by step. The last line of your
 response should be of the form "ANSWER: $ANSWER" (without quotes)
@@ -137,6 +158,256 @@ Reasoning:
 
 def _mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
+
+
+def extract_code_completion(text: str) -> str:
+    """Recover executable Python from chatty code benchmark completions."""
+
+    if not text:
+        return ""
+    body = str(text)
+    body = _THINK_BLOCK_RE.sub("", body)
+    body = _LEADING_END_THINK_RE.sub("", body, count=1)
+    matches = list(_FENCED_CODE_RE.finditer(body))
+    if matches:
+        return matches[-1].group("code").strip("\r\n").rstrip()
+    return _strip_standalone_code_fence_edges(body)
+
+
+def _strip_standalone_code_fence_edges(text: str) -> str:
+    lines = str(text or "").rstrip().splitlines()
+    while lines and _STANDALONE_CODE_FENCE_RE.match(lines[0]):
+        lines.pop(0)
+    while lines and _STANDALONE_CODE_FENCE_RE.match(lines[-1]):
+        lines.pop()
+    return "\n".join(lines).rstrip()
+
+
+def _prompt_prefix_before_entrypoint(prompt: str, entry_point: str) -> str:
+    match = re.search(rf"(?m)^def\s+{re.escape(entry_point)}\s*\(", prompt)
+    if not match:
+        return ""
+    return prompt[: match.start()].rstrip()
+
+
+def _solution_source(problem: dict[str, Any], completion: str) -> str:
+    prompt = str(problem.get("prompt") or "")
+    entry_point = str(problem.get("entry_point") or "")
+    code = extract_code_completion(completion)
+    if prompt and code.startswith(prompt):
+        code = code[len(prompt) :].lstrip("\r\n")
+
+    if entry_point and re.search(rf"(?m)^def\s+{re.escape(entry_point)}\s*\(", code):
+        prefix = _prompt_prefix_before_entrypoint(prompt, entry_point)
+        return f"{prefix}\n\n{code}".lstrip() if prefix else code
+    return f"{prompt}{code}"
+
+
+def _build_humaneval_check_program(problem: dict[str, Any], completion: str) -> str:
+    test = str(problem.get("test") or "")
+    entry_point = str(problem.get("entry_point") or "")
+    if not entry_point:
+        raise ValueError("HumanEval problem is missing entry_point")
+    solution = _solution_source(problem, completion).rstrip()
+    return f"{solution}\n{test}\ncheck({entry_point})"
+
+
+def _check_humaneval_correctness(
+    problem: dict[str, Any],
+    completion: str,
+    *,
+    timeout: float = HUMANEVAL_TIMEOUT_SECONDS,
+    completion_id: int | None = None,
+) -> dict[str, Any]:
+    try:
+        check_program = _build_humaneval_check_program(problem, completion)
+    except BaseException as exc:  # noqa: BLE001
+        return {
+            "task_id": problem.get("task_id"),
+            "passed": False,
+            "result": f"failed: {type(exc).__name__}: {exc}",
+            "completion_id": completion_id,
+        }
+
+    result_queue: multiprocessing.Queue[str] = multiprocessing.Queue()
+    process = multiprocessing.Process(
+        target=_unsafe_execute_humaneval,
+        args=(check_program, timeout, result_queue),
+    )
+    process.start()
+    process.join(timeout=timeout + 1)
+    if process.is_alive():
+        process.kill()
+        process.join()
+
+    result = result_queue.get() if not result_queue.empty() else "timed out"
+    return {
+        "task_id": problem.get("task_id"),
+        "passed": result == "passed",
+        "result": result,
+        "completion_id": completion_id,
+    }
+
+
+def _unsafe_execute_humaneval(check_program: str, timeout: float, result_queue: multiprocessing.Queue) -> None:
+    with _create_tempdir():
+        import shutil
+
+        original_rmtree = shutil.rmtree
+        original_rmdir = os.rmdir
+        original_chdir = os.chdir
+
+        reliability_guard()
+        try:
+            exec_globals: dict[str, Any] = {}
+            with _swallow_io():
+                with _time_limit(timeout):
+                    filename = "<helicopter_humaneval>"
+                    linecache.cache[filename] = (
+                        len(check_program),
+                        None,
+                        check_program.splitlines(keepends=True),
+                        filename,
+                    )
+                    exec(compile(check_program, filename, "exec"), exec_globals)
+            result_queue.put("passed")
+        except TimeoutException:
+            result_queue.put("timed out")
+        except BaseException as exc:  # noqa: BLE001
+            exc_type = type(exc).__name__
+            exc_msg = str(exc).strip()
+            header = f"failed: {exc_type}: {exc_msg}" if exc_msg else f"failed: {exc_type}"
+            tb = traceback.format_exc().rstrip()
+            result_queue.put(f"{header}\n{tb}" if tb else header)
+        finally:
+            shutil.rmtree = original_rmtree
+            os.rmdir = original_rmdir
+            os.chdir = original_chdir
+
+
+class TimeoutException(Exception):
+    pass
+
+
+@contextlib.contextmanager
+def _time_limit(seconds: float):
+    def signal_handler(signum, frame):  # noqa: ANN001, ARG001
+        raise TimeoutException("Timed out!")
+
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    signal.signal(signal.SIGALRM, signal_handler)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+
+
+@contextlib.contextmanager
+def _swallow_io():
+    stream = _WriteOnlyStringIO()
+    with contextlib.redirect_stdout(stream):
+        with contextlib.redirect_stderr(stream):
+            with _redirect_stdin(stream):
+                yield
+
+
+@contextlib.contextmanager
+def _create_tempdir():
+    with tempfile.TemporaryDirectory() as dirname:
+        with _chdir(dirname):
+            yield dirname
+
+
+class _WriteOnlyStringIO(io.StringIO):
+    def read(self, *args, **kwargs):  # noqa: ANN002, ARG002
+        raise OSError
+
+    def readline(self, *args, **kwargs):  # noqa: ANN002, ARG002
+        raise OSError
+
+    def readlines(self, *args, **kwargs):  # noqa: ANN002, ARG002
+        raise OSError
+
+    def readable(self, *args, **kwargs):  # noqa: ANN002, ARG002
+        return False
+
+
+class _redirect_stdin(contextlib._RedirectStream):  # type: ignore[attr-defined]
+    _stream = "stdin"
+
+
+@contextlib.contextmanager
+def _chdir(root: str):
+    if root == ".":
+        yield
+        return
+    cwd = os.getcwd()
+    os.chdir(root)
+    try:
+        yield
+    finally:
+        os.chdir(cwd)
+
+
+def reliability_guard(maximum_memory_bytes: int | None = None) -> None:
+    """Disable destructive functions in the child process; this is not a sandbox."""
+
+    if maximum_memory_bytes is not None:
+        import resource
+
+        resource.setrlimit(resource.RLIMIT_AS, (maximum_memory_bytes, maximum_memory_bytes))
+        resource.setrlimit(resource.RLIMIT_DATA, (maximum_memory_bytes, maximum_memory_bytes))
+        if platform.uname().system != "Darwin":
+            resource.setrlimit(resource.RLIMIT_STACK, (maximum_memory_bytes, maximum_memory_bytes))
+
+    faulthandler.disable()
+
+    import builtins
+    import shutil
+    import subprocess
+
+    builtins.exit = None
+    builtins.quit = None
+    os.environ["OMP_NUM_THREADS"] = "1"
+
+    os.kill = None  # type: ignore[assignment]
+    os.system = None  # type: ignore[assignment]
+    os.putenv = None  # type: ignore[assignment]
+    os.remove = None  # type: ignore[assignment]
+    os.removedirs = None  # type: ignore[assignment]
+    os.rmdir = None  # type: ignore[assignment]
+    os.fchdir = None  # type: ignore[assignment]
+    os.setuid = None  # type: ignore[assignment]
+    os.fork = None  # type: ignore[assignment]
+    os.forkpty = None  # type: ignore[assignment]
+    os.killpg = None  # type: ignore[assignment]
+    os.rename = None  # type: ignore[assignment]
+    os.renames = None  # type: ignore[assignment]
+    os.truncate = None  # type: ignore[assignment]
+    os.replace = None  # type: ignore[assignment]
+    os.unlink = None  # type: ignore[assignment]
+    os.fchmod = None  # type: ignore[assignment]
+    os.fchown = None  # type: ignore[assignment]
+    os.chmod = None  # type: ignore[assignment]
+    os.chown = None  # type: ignore[assignment]
+    os.chroot = None  # type: ignore[assignment]
+    os.lchflags = None  # type: ignore[attr-defined]
+    os.lchmod = None  # type: ignore[attr-defined]
+    os.lchown = None  # type: ignore[attr-defined]
+    os.getcwd = None  # type: ignore[assignment]
+    os.chdir = None  # type: ignore[assignment]
+
+    shutil.rmtree = None  # type: ignore[assignment]
+    shutil.move = None  # type: ignore[assignment]
+    shutil.chown = None  # type: ignore[assignment]
+    subprocess.Popen = None  # type: ignore[assignment]
+
+    builtins.help = None
+    sys.modules["ipdb"] = None
+    sys.modules["joblib"] = None
+    sys.modules["resource"] = None
+    sys.modules["psutil"] = None
+    sys.modules["tkinter"] = None
 
 
 def _extract_choice_letter(text: str, *, max_choices: int) -> str | None:
@@ -215,6 +486,26 @@ JUDGEMENT_MATCH = SampleLevelMetric(
     category=SamplingMethod.GENERATIVE,
     corpus_level_fn=_mean,
     higher_is_better=True,
+)
+
+
+class HumanEvalPassAt1(SampleLevelComputation):
+    def compute(self, doc: Doc, model_response, **kwargs) -> float:
+        problem = dict(doc.specific or {})
+        for completion_id, prediction in enumerate(model_response.final_text):
+            result = _check_humaneval_correctness(problem, prediction, completion_id=completion_id)
+            if result["passed"]:
+                return 1.0
+        return 0.0
+
+
+HUMANEVAL_PASS_AT_1 = SampleLevelMetric(
+    metric_name="pass@1",
+    sample_level_fn=HumanEvalPassAt1(),
+    category=SamplingMethod.GENERATIVE,
+    corpus_level_fn=_mean,
+    higher_is_better=True,
+    batched_compute=False,
 )
 
 
@@ -334,6 +625,27 @@ def wmt24pp_prompt(line: dict, task_name: str | None = None) -> Doc:
             "document_id": line.get("document_id"),
             "segment_id": line.get("segment_id"),
             "is_bad_source": line.get("is_bad_source"),
+        },
+    )
+
+
+def human_eval_prompt(line: dict, task_name: str | None = None) -> Doc:
+    prompt = str(line["prompt"]).rstrip()
+    return Doc(
+        task_name=task_name,
+        query=(
+            "Complete the following Python function. Return only executable Python code; "
+            "do not explain.\n\n"
+            f"```python\n{prompt}\n```"
+        ),
+        choices=[str(line.get("canonical_solution") or "")],
+        gold_index=0,
+        specific={
+            "task_id": line.get("task_id"),
+            "prompt": line.get("prompt"),
+            "canonical_solution": line.get("canonical_solution"),
+            "test": line.get("test"),
+            "entry_point": line.get("entry_point"),
         },
     )
 
@@ -511,7 +823,25 @@ def _hf_wmt24pp_task(target_language: str) -> LightevalTaskConfig:
     )
 
 
+def _hf_human_eval_task() -> LightevalTaskConfig:
+    return LightevalTaskConfig(
+        name="rwkv_skills:human_eval",
+        prompt_function=human_eval_prompt,
+        hf_repo="openai/openai_humaneval",
+        hf_subset=None,
+        hf_avail_splits=["test"],
+        evaluation_splits=["test"],
+        few_shots_split=None,
+        few_shots_select=None,
+        generation_size=1024,
+        metrics=[HUMANEVAL_PASS_AT_1],
+        stop_sequence=[],
+        version=0,
+    )
+
+
 TASKS_TABLE = [
+    _hf_human_eval_task(),
     *[_hf_math_task(name, task) for name, task in HF_MATH_TASKS.items()],
     _hf_answer_judge_task(),
     _hf_svamp_task(),

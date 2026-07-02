@@ -6,8 +6,8 @@ custom_tasks = "src/cli/helicopter_cli/lighteval_rwkv_skills_tasks.py"
 
 [benchmarks.human_eval]
 field = "coding"
-status = "needs_adapter"
-reason = "rwkv-skills HumanEval runner is not a direct LightEval task in the endpoint registry."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:human_eval"]
 
 [benchmarks.human_eval_cn]
 field = "coding"
