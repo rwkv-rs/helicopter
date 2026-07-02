@@ -394,8 +394,8 @@ lighteval_tasks = ["rwkv_skills:amc23"]
 
 [benchmarks.answer_judge]
 field = "maths"
-status = "needs_adapter"
-reason = "answer_judge is a rwkv-skills internal judge dataset and needs a custom task."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:answer_judge"]
 
 [benchmarks.asdiv]
 field = "maths"
@@ -464,8 +464,8 @@ lighteval_tasks = ["rwkv_skills:math_odyssey"]
 
 [benchmarks.mawps]
 field = "maths"
-status = "needs_adapter"
-reason = "rwkv-skills MAWPS uses the 2065-row ToRA MAWPS JSONL union; verified HF Hub candidates do not match that row count, and the installed LightEval task API cannot load data_files directly."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:mawps"]
 
 [benchmarks.minerva_math]
 field = "maths"

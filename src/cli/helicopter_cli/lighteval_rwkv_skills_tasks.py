@@ -53,6 +53,10 @@ HF_MATH_TASKS = {
         "repo": "MathOdyssey/MathOdyssey",
         "split": "test",
     },
+    "mawps": {
+        "repo": str(LOCAL_DATA_ROOT / "mawps"),
+        "split": "test",
+    },
     "minerva_math": {
         "repo": "math-ai/minervamath",
         "split": "test",
@@ -153,6 +157,53 @@ class MultipleChoiceLetterMatch(SampleLevelComputation):
 MULTIPLE_CHOICE_LETTER_MATCH = SampleLevelMetric(
     metric_name="mc_letter_match",
     sample_level_fn=MultipleChoiceLetterMatch(),
+    category=SamplingMethod.GENERATIVE,
+    corpus_level_fn=_mean,
+    higher_is_better=True,
+)
+
+
+def _mean_annotation_score(annotations: object) -> float | None:
+    if not isinstance(annotations, list) or not annotations:
+        return None
+    scores: list[float] = []
+    for annotation in annotations:
+        if not isinstance(annotation, dict):
+            continue
+        try:
+            scores.append(float(annotation.get("score")))
+        except (TypeError, ValueError):
+            continue
+    return _mean(scores) if scores else None
+
+
+def _judgement_text(value: bool) -> str:
+    return "Judgement: Yes" if value else "Judgement: No"
+
+
+def _extract_judgement(text: str) -> str | None:
+    normalized = text.strip().lower()
+    marker = re.search(r"\bjudg(?:e)?ment\s*[:\-]\s*(yes|no)\b", normalized)
+    if marker:
+        return marker.group(1)
+    marker = re.search(r"\b(yes|no)\b", normalized)
+    return marker.group(1) if marker else None
+
+
+class JudgementMatch(SampleLevelComputation):
+    def compute(self, doc: Doc, model_response, **kwargs) -> float:
+        gold = _extract_judgement(str(doc.choices[doc.gold_index]))
+        if gold is None:
+            return 0.0
+        for prediction in model_response.final_text:
+            if _extract_judgement(prediction) == gold:
+                return 1.0
+        return 0.0
+
+
+JUDGEMENT_MATCH = SampleLevelMetric(
+    metric_name="judgement_match",
+    sample_level_fn=JudgementMatch(),
     category=SamplingMethod.GENERATIVE,
     corpus_level_fn=_mean,
     higher_is_better=True,
@@ -260,6 +311,35 @@ def mmmlu_prompt(line: dict, task_name: str | None = None) -> Doc:
     )
 
 
+def answer_judge_prompt(line: dict, task_name: str | None = None) -> Doc | None:
+    mean_score = _mean_annotation_score(line.get("annotations"))
+    if mean_score is None:
+        return None
+    expected_judgement = _judgement_text(mean_score > 0.5)
+    query = (
+        "Problem:\n"
+        f"{line.get('question') or ''}\n\n"
+        "Expected answer:\n"
+        f"{line.get('gt_answer') or ''}\n\n"
+        "Predicted answer:\n"
+        f"{line.get('gen_answer') or ''}\n\n"
+        "Decide whether the predicted answer matches the expected answer. "
+        "Return exactly `Judgement: Yes` or `Judgement: No`.\n"
+        "Judgement:"
+    )
+    return Doc(
+        task_name=task_name,
+        query=query,
+        choices=[expected_judgement],
+        gold_index=0,
+        specific={
+            "item_name": line.get("item_name"),
+            "dataset_name": line.get("dataset_name"),
+            "mean_score": mean_score,
+        },
+    )
+
+
 def svamp_prompt(line: dict, task_name: str | None = None) -> Doc:
     body = str(line.get("Body") or "").strip()
     question = str(line.get("Question") or "").strip()
@@ -277,6 +357,23 @@ def svamp_prompt(line: dict, task_name: str | None = None) -> Doc:
             "type": line.get("Type"),
             "equation": line.get("Equation"),
         },
+    )
+
+
+def _hf_answer_judge_task() -> LightevalTaskConfig:
+    return LightevalTaskConfig(
+        name="rwkv_skills:answer_judge",
+        prompt_function=answer_judge_prompt,
+        hf_repo="nvidia/judges-verdict",
+        hf_subset=None,
+        hf_avail_splits=["train"],
+        evaluation_splits=["train"],
+        few_shots_split=None,
+        few_shots_select=None,
+        generation_size=8,
+        metrics=[JUDGEMENT_MATCH],
+        stop_sequence=["\n"],
+        version=0,
     )
 
 
@@ -372,6 +469,7 @@ def _hf_mmmlu_task(name: str, subset: str) -> LightevalTaskConfig:
 
 TASKS_TABLE = [
     *[_hf_math_task(name, task) for name, task in HF_MATH_TASKS.items()],
+    _hf_answer_judge_task(),
     _hf_svamp_task(),
     *[_hf_polymath_task(language) for language in HF_POLYMATH_LANGUAGES],
     *[_hf_multiple_choice_task(name, task) for name, task in HF_MULTIPLE_CHOICE_TASKS.items()],

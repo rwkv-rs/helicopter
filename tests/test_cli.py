@@ -437,6 +437,10 @@ class CommandPlanTests(unittest.TestCase):
             ["rwkv_skills:supergpqa"],
         )
         self.assertEqual(
+            suite["benchmarks"]["answer_judge"]["lighteval_tasks"],
+            ["rwkv_skills:answer_judge"],
+        )
+        self.assertEqual(
             suite["benchmarks"]["omni_math"]["lighteval_tasks"],
             ["rwkv_skills:omni_math"],
         )
@@ -448,6 +452,7 @@ class CommandPlanTests(unittest.TestCase):
             suite["benchmarks"]["comp_math_24_25"]["lighteval_tasks"],
             ["rwkv_skills:comp_math_24_25"],
         )
+        self.assertEqual(suite["benchmarks"]["mawps"]["lighteval_tasks"], ["rwkv_skills:mawps"])
         self.assertEqual(suite["benchmarks"]["svamp"]["lighteval_tasks"], ["rwkv_skills:svamp"])
         self.assertEqual(len(suite["benchmarks"]["polymath"]["lighteval_tasks"]), 18)
         self.assertIn("rwkv_skills:polymath_zh", suite["benchmarks"]["polymath"]["lighteval_tasks"])
@@ -557,7 +562,9 @@ class CommandPlanTests(unittest.TestCase):
         self.assertIn("rwkv_skills:beyond_aime", registry._task_registry)
         self.assertIn("rwkv_skills:brumo25", registry._task_registry)
         self.assertIn("rwkv_skills:hmmt_feb25", registry._task_registry)
+        self.assertIn("rwkv_skills:answer_judge", registry._task_registry)
         self.assertIn("rwkv_skills:math_odyssey", registry._task_registry)
+        self.assertIn("rwkv_skills:mawps", registry._task_registry)
         self.assertIn("rwkv_skills:omni_math", registry._task_registry)
         self.assertIn("rwkv_skills:college_math", registry._task_registry)
         self.assertIn("rwkv_skills:comp_math_24_25", registry._task_registry)
@@ -583,6 +590,8 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(module._extract_choice_letter("Answer: C", max_choices=4), "C")
         self.assertEqual(module._extract_choice_letter("D. No", max_choices=4), "D")
         self.assertIsNone(module._extract_choice_letter("Option E", max_choices=4))
+        self.assertEqual(module._extract_judgement("Judgement: Yes"), "yes")
+        self.assertEqual(module._extract_judgement("No, the answer does not match."), "no")
 
     def test_rwkv_skills_svamp_prompt_combines_body_question_and_normalizes_answer(self) -> None:
         if importlib.util.find_spec("lighteval") is None:
@@ -617,6 +626,18 @@ class CommandPlanTests(unittest.TestCase):
         self.assertTrue(data_file.exists())
         with data_file.open("r", encoding="utf-8") as handle:
             self.assertEqual(sum(1 for line in handle if line.strip()), 256)
+
+    def test_rwkv_skills_mawps_static_data_loads_as_test_split(self) -> None:
+        if importlib.util.find_spec("datasets") is None:
+            self.skipTest("datasets is not installed")
+
+        from datasets import load_dataset
+
+        data_dir = ROOT / "benchmarks/lighteval_data/mawps"
+        dataset = load_dataset(str(data_dir))
+
+        self.assertEqual(len(dataset["test"]), 2065)
+        self.assertEqual(set(dataset["test"].features), {"input", "target"})
 
     def test_takeoff_plan_uses_verl_module_entrypoint_and_default_overrides(self) -> None:
         loaded_config = load_example_config()
