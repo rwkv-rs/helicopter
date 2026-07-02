@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import os
@@ -569,6 +570,10 @@ class CommandPlanTests(unittest.TestCase):
                 "algebra222",
                 "amc23",
                 "answer_judge",
+                "apibank_l1",
+                "apibank_l2",
+                "apibank_level1",
+                "apibank_level2",
                 "beyond_aime",
                 "bfcl_multiple",
                 "bfcl_exec_multiple",
@@ -902,6 +907,171 @@ class CommandPlanTests(unittest.TestCase):
             ),
             1.0,
         )
+
+    def test_apibank_prompt_scores_against_sandbox_result(self) -> None:
+        expected_result = {"input": {"city": "Paris"}, "output": {"weather": "sunny"}, "exception": None}
+        doc = lighteval_rwkv_skills_tasks.apibank_prompt(
+            {
+                "task_id": "apibank_level1__weather_001",
+                "instruction": "User: What is the weather in Paris?",
+                "tools_json": json.dumps(
+                    [
+                        {
+                            "name": "GetWeather",
+                            "description": "Get weather.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"city": {"type": "string"}},
+                                "required": ["city"],
+                            },
+                        }
+                    ]
+                ),
+                "expected_call_json": json.dumps({"name": "GetWeather", "arguments": {"city": "Paris"}}),
+                "expected_result_json": json.dumps(expected_result),
+            },
+            "apibank_level1",
+        )
+
+        self.assertIsNotNone(doc)
+        assert doc is not None
+        self.assertIn("API-Bank", doc.query)
+        self.assertEqual(doc.specific["sample_id"], "apibank_level1__weather_001")
+        self.assertNotIn("expected_tool_calls", doc.specific)
+
+        case = self
+
+        class FakeSandbox:
+            def replay_history(self, source_path, turn_index):
+                case.assertEqual(source_path, "")
+                case.assertEqual(turn_index, 1)
+
+            def api_call(self, name, arguments):
+                case.assertEqual(name, "GetWeather")
+                case.assertEqual(arguments, {"city": "Paris"})
+                return lighteval_rwkv_skills_tasks.ApiBankCallResult(True, expected_result)
+
+            def check_api_call_correctness(self, name, actual, expected):
+                case.assertEqual(name, "GetWeather")
+                return actual == expected
+
+            def _api_info(self, name):
+                case.assertEqual(name, "GetWeather")
+                return {"input_parameters": {"city": {"type": "str"}}}
+
+            @staticmethod
+            def _coerce_arg(value, arg_type):
+                return value
+
+        with mock.patch.object(lighteval_rwkv_skills_tasks, "ApiBankSandbox", return_value=FakeSandbox()):
+            metric = lighteval_rwkv_skills_tasks.APIBankAccuracy()
+            self.assertEqual(
+                metric.compute(
+                    ModelResponse(text=['{"name":"GetWeather","arguments":{"city":"Paris"}}']),
+                    doc,
+                ),
+                1.0,
+            )
+
+    def test_apibank_metric_accepts_gold_arguments_when_official_execution_fails(self) -> None:
+        expected_call = {
+            "name": "CancelTimedSwitch",
+            "arguments": {"device_id": "10000025", "time": "2023-03-19 09:30:00"},
+        }
+        doc = lighteval_rwkv_skills_tasks.apibank_prompt(
+            {
+                "task_id": "apibank_level1__CancelTimedSwitch-level-1-1_002",
+                "instruction": "User: Cancel the timed switch.",
+                "tools_json": json.dumps(
+                    [
+                        {
+                            "name": "CancelTimedSwitch",
+                            "description": "Cancels a timed switch.",
+                            "parameters": {"type": "object", "properties": {}},
+                        }
+                    ]
+                ),
+                "expected_call_json": json.dumps(expected_call),
+                "expected_result_json": json.dumps(
+                    {
+                        "api_name": "CancelTimedSwitch",
+                        "input": {"device_id": "10000025", "time": "2023-03-19 09:30:00"},
+                        "output": "success",
+                        "exception": None,
+                    }
+                ),
+                "source_path": "CancelTimedSwitch-level-1-1.jsonl",
+                "turn_index": 2,
+            },
+            "apibank_level1",
+        )
+        self.assertIsNotNone(doc)
+        assert doc is not None
+
+        case = self
+
+        class FakeSandbox:
+            def replay_history(self, source_path, turn_index):
+                case.assertEqual(source_path, "CancelTimedSwitch-level-1-1.jsonl")
+                case.assertEqual(turn_index, 2)
+
+            def api_call(self, name, arguments):
+                case.assertEqual(name, "CancelTimedSwitch")
+                case.assertEqual(arguments, {"name": "10000025", "time": "2023-03-19 09:30:00"})
+                return lighteval_rwkv_skills_tasks.ApiBankCallResult(False, error="device name does not exist.")
+
+            def _api_info(self, name):
+                case.assertEqual(name, "CancelTimedSwitch")
+                return {"input_parameters": {"name": {"type": "str"}, "time": {"type": "str"}}}
+
+            @staticmethod
+            def _coerce_arg(value, arg_type):
+                return value
+
+        with mock.patch.object(lighteval_rwkv_skills_tasks, "ApiBankSandbox", return_value=FakeSandbox()):
+            metric = lighteval_rwkv_skills_tasks.APIBankAccuracy()
+            self.assertEqual(
+                metric.compute(
+                    ModelResponse(
+                        text=[
+                            '{"name":"CancelTimedSwitch","arguments":'
+                            '{"name":"10000025","time":"2023-03-19 09:30:00"}}'
+                        ]
+                    ),
+                    doc,
+                ),
+                1.0,
+            )
+
+    def test_apibank_checker_falls_back_when_official_checker_raises(self) -> None:
+        class RaisingTool:
+            def check_api_call_correctness(self, actual, expected):
+                raise KeyError("time")
+
+        class FakeSandbox(lighteval_rwkv_skills_tasks.ApiBankSandbox):
+            def __init__(self):
+                pass
+
+            def init_tool(self, api_name):
+                return RaisingTool()
+
+        actual = {
+            "api_name": "DeleteMeeting",
+            "input": {
+                "attendees": ["David Wang", "Amy Chen"],
+                "end_time": "2023-03-27 11:00:00",
+                "location": "Training Room",
+                "meeting_topic": "New Employee Orientation",
+                "start_time": "2023-03-27 09:00:00",
+                "token": "token",
+            },
+            "output": "success",
+            "exception": None,
+        }
+        self.assertTrue(FakeSandbox().check_api_call_correctness("DeleteMeeting", actual, copy.deepcopy(actual)))
+        wrong = copy.deepcopy(actual)
+        wrong["input"]["location"] = "Other Room"
+        self.assertFalse(FakeSandbox().check_api_call_correctness("DeleteMeeting", actual, wrong))
 
     def test_free_answer_prompt_normalizes_numeric_answers(self) -> None:
         doc = lighteval_rwkv_skills_tasks.free_answer_prompt(
