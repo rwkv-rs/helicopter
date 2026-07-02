@@ -445,6 +445,20 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(plan.command[1:5], ["-m", "lighteval", "tasks", "list"])
         self.assertIn("--load-tasks-multilingual", plan.command)
 
+    def test_lighteval_tasks_show_config_uses_local_compat_wrapper(self) -> None:
+        loaded_config = load_example_config()
+
+        plan = commands.build_lighteval_tasks_plan(
+            lighteval_tasks_args(task_action="inspect", tasks="gsm8k", show_config=True, num_samples=1),
+            root=ROOT,
+            env={},
+            config=loaded_config,
+        )
+
+        self.assertEqual(plan.command[1:4], ["-m", "helicopter_cli.lighteval_tasks", "inspect"])
+        self.assertIn("--show-config", plan.command)
+        self.assertEqual(command_options(plan.command)["--num-samples"], "1")
+
     def test_lighteval_export_plan_exports_details(self) -> None:
         loaded_config = load_example_config()
 
