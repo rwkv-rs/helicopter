@@ -33,6 +33,22 @@ OFFICIAL_LIGHTEVAL_ALIASES: dict[str, tuple[str, ...]] = {
     "cmmlu": ("cmmlu_zho_mcf",),
     "ifbench": ("ifbench_test", "ifbench_multiturn"),
     "livecodebench": ("lcb",),
+    "mmmlu": (
+        "openai_mmlu_ara_mcf",
+        "openai_mmlu_ben_mcf",
+        "openai_mmlu_deu_mcf",
+        "openai_mmlu_fra_mcf",
+        "openai_mmlu_hin_mcf",
+        "openai_mmlu_ind_mcf",
+        "openai_mmlu_ita_mcf",
+        "openai_mmlu_jpn_mcf",
+        "openai_mmlu_kor_mcf",
+        "openai_mmlu_por_mcf",
+        "openai_mmlu_spa_mcf",
+        "openai_mmlu_swa_mcf",
+        "openai_mmlu_yor_mcf",
+        "openai_mmlu_zho_mcf",
+    ),
     "mmlu_redux": ("mmlu_redux_2",),
 }
 

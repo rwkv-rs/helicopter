@@ -357,11 +357,20 @@ def build_lighteval_tasks_plan(
     config: dict[str, Any],
 ) -> CommandPlan:
     python = python_executable(config, root=root, env=env)
-    custom_tasks = lighteval_path_arg(getattr(args, "custom_tasks", None), root=root, env=env)
+    lighteval = table(config, "lighteval")
+    custom_tasks = lighteval_path_arg(
+        pick(getattr(args, "custom_tasks", None), lighteval.get("custom_tasks")),
+        root=root,
+        env=env,
+    )
+    load_tasks_multilingual = pick(
+        getattr(args, "load_tasks_multilingual", None),
+        lighteval.get("load_tasks_multilingual"),
+    )
 
     if args.task_action in {"export", "coverage"}:
         command = [python, "-m", "helicopter_cli.lighteval_tasks", args.task_action]
-        append_cli_flag(command, "--load-multilingual", getattr(args, "load_tasks_multilingual", None))
+        append_cli_flag(command, "--load-multilingual", load_tasks_multilingual)
         append_cli_option(command, "--custom-tasks", custom_tasks)
         append_cli_option(command, "--output", getattr(args, "output", None))
         append_cli_option(command, "--format", getattr(args, "format", None))
@@ -384,7 +393,7 @@ def build_lighteval_tasks_plan(
             raise SystemExit("helicopter eval lighteval-tasks inspect requires a task id")
         if bool_value(getattr(args, "show_config", False)):
             command = [python, "-m", "helicopter_cli.lighteval_tasks", "inspect", args.tasks]
-            append_cli_flag(command, "--load-multilingual", getattr(args, "load_tasks_multilingual", None))
+            append_cli_flag(command, "--load-multilingual", load_tasks_multilingual)
             append_cli_option(command, "--num-samples", getattr(args, "num_samples", None))
             append_cli_option(command, "--custom-tasks", custom_tasks)
             append_cli_flag(command, "--show-config", getattr(args, "show_config", None))
@@ -392,12 +401,12 @@ def build_lighteval_tasks_plan(
 
         command = [python, "-m", "lighteval", "tasks", args.task_action]
         command.append(args.tasks)
-        append_cli_flag(command, "--load-multilingual", getattr(args, "load_tasks_multilingual", None))
+        append_cli_flag(command, "--load-multilingual", load_tasks_multilingual)
         append_cli_option(command, "--num-samples", getattr(args, "num_samples", None))
         append_cli_flag(command, "--show-config", getattr(args, "show_config", None))
     else:
         command = [python, "-m", "lighteval", "tasks", args.task_action]
-        append_cli_flag(command, "--load-tasks-multilingual", getattr(args, "load_tasks_multilingual", None))
+        append_cli_flag(command, "--load-tasks-multilingual", load_tasks_multilingual)
 
     append_cli_option(command, "--custom-tasks", custom_tasks)
     return CommandPlan(command=command, cwd=root, shown_env={"PYTHON": python}, env=strip_vllm_env(env))

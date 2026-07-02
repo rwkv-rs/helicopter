@@ -7,7 +7,7 @@ from argparse import Namespace
 from pathlib import Path
 from unittest import mock
 
-from helicopter_cli import commands, config, env, lighteval_tasks
+from helicopter_cli import commands, config, env, lighteval_rwkv_skills_tasks, lighteval_tasks
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -344,6 +344,11 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(options["--output-dir"], str(ROOT / "results/lighteval"))
         self.assertEqual(options["--max-samples"], "3")
         self.assertEqual(options["--dataset-loading-processes"], "1")
+        self.assertEqual(
+            options["--custom-tasks"],
+            str(ROOT / "src/cli/helicopter_cli/lighteval_rwkv_skills_tasks.py"),
+        )
+        self.assertTrue(options["--load-tasks-multilingual"])
         self.assertTrue(options["--save-details"])
         self.assertEqual(plan.env["OPENAI_API_KEY"], "EMPTY")
 
@@ -372,6 +377,10 @@ class CommandPlanTests(unittest.TestCase):
 
         self.assertEqual(plan.command[1:5], ["-m", "lighteval", "tasks", "list"])
         self.assertIn("--load-tasks-multilingual", plan.command)
+        self.assertEqual(
+            command_options(plan.command)["--custom-tasks"],
+            str(ROOT / "src/cli/helicopter_cli/lighteval_rwkv_skills_tasks.py"),
+        )
 
     def test_lighteval_tasks_show_config_uses_local_compat_wrapper(self) -> None:
         loaded_config = load_example_config()
@@ -460,15 +469,22 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(options["--candidate-limit"], "7")
 
     def test_lighteval_tasks_coverage_resolves_registry_rows(self) -> None:
+        mmmlu_targets = lighteval_tasks.OFFICIAL_LIGHTEVAL_ALIASES["mmmlu"]
+
         class FakeRegistry:
             _task_registry = {
                 "gpqa:diamond": object(),
                 "gsm8k": object(),
                 "ifbench_multiturn": object(),
                 "ifbench_test": object(),
+                "supergpqa": object(),
                 "tiny:gsm8k": object(),
             }
-            _task_superset_dict = {"lcb": ("lcb:codegeneration",), "mmlu": ("mmlu:abstract_algebra",)}
+            _task_superset_dict = {
+                "lcb": ("lcb:codegeneration",),
+                "mmlu": ("mmlu:abstract_algebra",),
+                **{target: (f"{target}:abstract_algebra",) for target in mmmlu_targets},
+            }
 
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "benchmarks.txt"
@@ -476,6 +492,8 @@ class CommandPlanTests(unittest.TestCase):
                 "gsm8k,maths\n"
                 "gpqa_diamond,knowledge\n"
                 "mmlu,knowledge\n"
+                "mmmlu,knowledge\n"
+                "supergpqa,knowledge\n"
                 "ifbench,instruction_following\n"
                 "livecodebench,coding\n"
                 "missing_one,maths\n"
@@ -495,17 +513,43 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(rows[1].status, "normalized_task")
         self.assertEqual(rows[1].targets, ("gpqa:diamond",))
         self.assertEqual(rows[2].status, "exact_superset")
-        self.assertEqual(rows[3].status, "alias_task_list")
-        self.assertEqual(rows[3].targets, ("ifbench_test", "ifbench_multiturn"))
-        self.assertEqual(rows[4].status, "alias_superset")
-        self.assertEqual(rows[4].targets, ("lcb",))
-        self.assertEqual(rows[5].status, "missing")
-        self.assertIn("direct\t5\n", lighteval_tasks.format_coverage(rows, "summary"))
+        self.assertEqual(rows[3].status, "alias_superset_list")
+        self.assertEqual(rows[3].targets, mmmlu_targets)
+        self.assertEqual(rows[4].status, "exact_task")
+        self.assertEqual(rows[5].status, "alias_task_list")
+        self.assertEqual(rows[5].targets, ("ifbench_test", "ifbench_multiturn"))
+        self.assertEqual(rows[6].status, "alias_superset")
+        self.assertEqual(rows[6].targets, ("lcb",))
+        self.assertEqual(rows[7].status, "missing")
+        self.assertIn("direct\t7\n", lighteval_tasks.format_coverage(rows, "summary"))
         self.assertIn("not_direct\t1\n", lighteval_tasks.format_coverage(rows, "summary"))
         self.assertEqual(
             lighteval_tasks.format_coverage(rows, "tasks"),
-            "gsm8k\ngpqa:diamond\nmmlu\nifbench_test\nifbench_multiturn\nlcb\n",
+            "gsm8k\n"
+            "gpqa:diamond\n"
+            "mmlu\n"
+            + "".join(f"{target}\n" for target in mmmlu_targets)
+            + "supergpqa\n"
+            "ifbench_test\n"
+            "ifbench_multiturn\n"
+            "lcb\n",
         )
+
+    def test_supergpqa_custom_task_prompt_keeps_all_options(self) -> None:
+        doc = lighteval_rwkv_skills_tasks.supergpqa_prompt(
+            {
+                "question": "Pick the third option.",
+                "options": ["zero", "one", "two", "three", "four"],
+                "answer_letter": "C",
+            },
+            "supergpqa",
+        )
+
+        self.assertIsNotNone(doc)
+        assert doc is not None
+        self.assertEqual(doc.gold_index, 2)
+        self.assertEqual(doc.choices, [" A", " B", " C", " D", " E"])
+        self.assertIn("E. four", doc.query)
 
     def test_lighteval_tasks_loads_rwkv_skills_registry_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
