@@ -590,6 +590,8 @@ class CommandPlanTests(unittest.TestCase):
                 "browsecomp",
                 "browsecomp_plus",
                 "browsecomp_zh",
+                "complexfuncbench_official",
+                "complexfuncbench_subset",
                 "college_math",
                 "comp_math_24_25",
                 "gaokao2023en",
@@ -1128,6 +1130,76 @@ class CommandPlanTests(unittest.TestCase):
                 doc,
             ),
             1.0,
+        )
+
+    def test_complexfuncbench_prompt_scores_matching_parallel_call_turn(self) -> None:
+        doc = lighteval_rwkv_skills_tasks.complexfuncbench_prompt(
+            {
+                "id": "complex-case-1",
+                "functions": [
+                    {
+                        "name": "SearchHotel",
+                        "description": "Search hotels.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"],
+                        },
+                    },
+                    {
+                        "name": "BookHotel",
+                        "description": "Book hotels.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"hotel_id": {"type": "string"}},
+                            "required": ["hotel_id"],
+                        },
+                    },
+                ],
+                "conversations": [
+                    {"role": "user", "content": "Find and book h1 in Paris."},
+                    {
+                        "role": "assistant",
+                        "function_call": [
+                            {"name": "SearchHotel", "arguments": {"city": "Paris"}},
+                            {"name": "BookHotel", "arguments": {"hotel_id": "h1"}},
+                        ],
+                    },
+                    {"role": "observation", "content": [{"hotel_id": "h1"}, {"status": "booked"}]},
+                ],
+            },
+            "complexfuncbench_official",
+        )
+
+        self.assertIsNotNone(doc)
+        assert doc is not None
+        self.assertIn("ComplexFuncBench", doc.query)
+        self.assertIn("SearchHotel", doc.query)
+        self.assertEqual(doc.specific["sample_id"], "complex-case-1__turn_1")
+        metric = lighteval_rwkv_skills_tasks.ComplexFuncBenchCallAccuracy()
+        self.assertEqual(
+            metric.compute(
+                ModelResponse(
+                    text=[
+                        '[{"name":"SearchHotel","arguments":{"city":"Paris"}},'
+                        '{"name":"BookHotel","arguments":{"hotel_id":"h1"}}]'
+                    ]
+                ),
+                doc,
+            ),
+            1.0,
+        )
+        self.assertEqual(
+            metric.compute(
+                ModelResponse(
+                    text=[
+                        '[{"name":"BookHotel","arguments":{"hotel_id":"h1"}},'
+                        '{"name":"SearchHotel","arguments":{"city":"Paris"}}]'
+                    ]
+                ),
+                doc,
+            ),
+            0.0,
         )
 
     def test_free_answer_prompt_normalizes_numeric_answers(self) -> None:
