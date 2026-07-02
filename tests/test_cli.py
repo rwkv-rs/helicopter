@@ -7,6 +7,8 @@ from argparse import Namespace
 from pathlib import Path
 from unittest import mock
 
+from lighteval.models.model_output import ModelResponse
+
 from helicopter_cli import commands, config, env, lighteval_rwkv_skills_tasks, lighteval_tasks
 
 
@@ -551,7 +553,7 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(doc.choices, [" A", " B", " C", " D", " E"])
         self.assertIn("E. four", doc.query)
 
-    def test_rwkv_skills_custom_tasks_include_direct_math_ids(self) -> None:
+    def test_rwkv_skills_custom_tasks_include_direct_math_and_code_ids(self) -> None:
         self.assertTrue(
             {
                 "algebra222",
@@ -564,8 +566,14 @@ class CommandPlanTests(unittest.TestCase):
                 "gaokao2023en",
                 "hendrycks_math",
                 "hmmt_feb25",
+                "human_eval",
+                "human_eval_cn",
+                "human_eval_fix",
+                "human_eval_plus",
                 "math_odyssey",
                 "mawps",
+                "mbpp",
+                "mbpp_plus",
                 "minerva_math",
                 "omni_math",
                 "polymath",
@@ -683,6 +691,78 @@ class CommandPlanTests(unittest.TestCase):
         assert doc is not None
         self.assertEqual(doc.choices, ["Judgement: Yes"])
         self.assertIn("Return exactly `Judgement: Yes` or `Judgement: No`.", doc.query)
+
+    def test_human_eval_prompt_preserves_execution_specifics(self) -> None:
+        doc = lighteval_rwkv_skills_tasks.code_generation_prompt(
+            {
+                "prompt": "def add_one(x):\n    ",
+                "entry_point": "add_one",
+                "test": "def check(candidate):\n    assert candidate(1) == 2",
+            },
+            "human_eval",
+        )
+
+        self.assertIsNotNone(doc)
+        assert doc is not None
+        self.assertEqual(doc.specific["code_kind"], "human_eval")
+        self.assertEqual(doc.specific["entry_point"], "add_one")
+        self.assertIn("Return only executable Python code", doc.query)
+
+    def test_mbpp_prompt_uses_base_test_list_for_base_task(self) -> None:
+        doc = lighteval_rwkv_skills_tasks.code_generation_prompt(
+            {
+                "prompt": "Write a function to add one.",
+                "code": "def add_one(x):\n    return x + 1\n",
+                "test_imports": "[]",
+                "test_list": "['assert add_one(1) == 2']",
+                "test": "raise AssertionError('plus test should not be used')",
+            },
+            "mbpp",
+        )
+
+        self.assertIsNotNone(doc)
+        assert doc is not None
+        self.assertEqual(doc.specific["code_kind"], "mbpp")
+        self.assertEqual(doc.specific["entry_point"], "add_one")
+        self.assertIn("assert add_one(1) == 2", doc.specific["test"])
+        self.assertNotIn("plus test should not be used", doc.specific["test"])
+
+    def test_code_metric_runs_human_eval_style_check(self) -> None:
+        doc = lighteval_rwkv_skills_tasks.code_generation_prompt(
+            {
+                "prompt": "def add_one(x):\n    ",
+                "entry_point": "add_one",
+                "test": "def check(candidate):\n    assert candidate(1) == 2",
+            },
+            "human_eval",
+        )
+
+        self.assertIsNotNone(doc)
+        assert doc is not None
+        metric = lighteval_rwkv_skills_tasks.CodePassAtOne()
+        passed = metric.compute(ModelResponse(text=["return x + 1"]), doc)
+        failed = metric.compute(ModelResponse(text=["return x + 2"]), doc)
+        self.assertEqual(passed, 1.0)
+        self.assertEqual(failed, 0.0)
+
+    def test_code_metric_runs_mbpp_style_assertions(self) -> None:
+        doc = lighteval_rwkv_skills_tasks.code_generation_prompt(
+            {
+                "prompt": "Write a function to add one.",
+                "code": "def add_one(x):\n    return x + 1\n",
+                "test_imports": "[]",
+                "test_list": "['assert add_one(1) == 2']",
+            },
+            "mbpp",
+        )
+
+        self.assertIsNotNone(doc)
+        assert doc is not None
+        metric = lighteval_rwkv_skills_tasks.CodePassAtOne()
+        passed = metric.compute(ModelResponse(text=["def add_one(x):\n    return x + 1"]), doc)
+        failed = metric.compute(ModelResponse(text=["def add_one(x):\n    return x + 2"]), doc)
+        self.assertEqual(passed, 1.0)
+        self.assertEqual(failed, 0.0)
 
     def test_lighteval_tasks_loads_rwkv_skills_registry_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
