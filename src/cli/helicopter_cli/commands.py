@@ -6,13 +6,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .config import dataset_root, resolve_model_path, table
+from .config import dataset_root, resolve_model_entry, resolve_model_path, table
 from .env import env_value, pick
 from .paths import resolve_path
 
 
 WKV_MODES = ("fp16", "fp32io16")
 EMB_DEVICES = ("cpu", "gpu")
+LIGHTEVAL_BACKENDS = ("endpoint-litellm",)
 
 
 @dataclass
@@ -112,6 +113,221 @@ def append_hydra_override(overrides: list[str], key: str, value: Any, *, optiona
     if optional and (value is None or str(value) == ""):
         return
     overrides.append(f"{key}={format_hydra_value(value)}")
+
+
+def bool_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def append_cli_option(command: list[str], option: str, value: Any, *, optional: bool = True) -> None:
+    if optional and (value is None or str(value) == ""):
+        return
+    command.extend([option, str(value)])
+
+
+def append_cli_flag(command: list[str], option: str, value: Any) -> None:
+    if value is not None and bool_value(value):
+        command.append(option)
+
+
+def local_openai_base_url(config: dict[str, Any], env: dict[str, str], args: Any) -> str:
+    lighteval = table(config, "lighteval")
+    runtime = table(config, "runtime")
+    configured = pick(
+        getattr(args, "base_url", None),
+        env_value(env, "HELICOPTER_EVAL_BASE_URL", "OPENAI_BASE_URL"),
+        lighteval.get("base_url"),
+    )
+    if configured:
+        return str(configured).rstrip("/")
+
+    host = str(pick(runtime.get("client_host"), default="127.0.0.1"))
+    port = str(pick(runtime.get("port"), default="8000"))
+    return f"http://{host}:{port}/v1"
+
+
+def is_local_base_url(base_url: str) -> bool:
+    return any(token in base_url for token in ("127.0.0.1", "localhost", "0.0.0.0"))
+
+
+def lighteval_model_name(model_name: str, provider: str | None) -> str:
+    if provider and "/" not in model_name:
+        return f"{provider}/{model_name}"
+    return model_name
+
+
+def lighteval_output_dir(config: dict[str, Any], *, root: Path, env: dict[str, str], args: Any) -> str:
+    lighteval = table(config, "lighteval")
+    value = pick(getattr(args, "output_dir", None), lighteval.get("output_dir"), "results/lighteval")
+    return str(resolve_path(str(value), root=root, env=env))
+
+
+def lighteval_path_arg(value: Any, *, root: Path, env: dict[str, str]) -> str | None:
+    if value is None or str(value) == "":
+        return None
+    text = str(value)
+    suffix = Path(text).suffix.lower()
+    if suffix in {".yaml", ".yml", ".py", ".txt"}:
+        return str(resolve_path(text, root=root, env=env))
+    return text
+
+
+def build_lighteval_model_args(
+    args: Any,
+    *,
+    root: Path,
+    env: dict[str, str],
+    config: dict[str, Any],
+) -> tuple[str, str | None]:
+    raw_model_args = lighteval_path_arg(getattr(args, "model_args", None), root=root, env=env)
+    api_key = pick(
+        getattr(args, "api_key", None),
+        env_value(env, "HELICOPTER_EVAL_API_KEY", "OPENAI_API_KEY"),
+        table(config, "lighteval").get("api_key"),
+    )
+    if raw_model_args:
+        return raw_model_args, str(api_key) if api_key else None
+
+    model = resolve_model_entry(config, args.model)
+    lighteval = table(config, "lighteval")
+    provider = str(pick(getattr(args, "provider", None), lighteval.get("provider"), "openai"))
+    served_model_name = str(
+        pick(
+            getattr(args, "lighteval_model_name", None),
+            model.get("served_model_name"),
+            model.get("requested_name"),
+            args.model,
+        )
+    )
+    model_name = lighteval_model_name(served_model_name, provider)
+    base_url = local_openai_base_url(config, env, args)
+
+    parts = [
+        f"model_name={model_name}",
+        f"provider={provider}",
+        f"base_url={base_url}",
+    ]
+    concurrent_requests = pick(
+        getattr(args, "concurrent_requests", None),
+        env_value(env, "HELICOPTER_EVAL_CONCURRENT_REQUESTS"),
+        lighteval.get("concurrent_requests"),
+    )
+    max_model_length = pick(
+        getattr(args, "max_model_length", None),
+        env_value(env, "HELICOPTER_EVAL_MAX_MODEL_LENGTH"),
+        lighteval.get("max_model_length"),
+        model.get("max_model_len"),
+    )
+    if concurrent_requests is not None:
+        parts.append(f"concurrent_requests={concurrent_requests}")
+    if max_model_length is not None:
+        parts.append(f"max_model_length={max_model_length}")
+
+    if not api_key and is_local_base_url(base_url):
+        api_key = "EMPTY"
+    return ",".join(parts), str(api_key) if api_key else None
+
+
+def build_lighteval_plan(
+    args: Any,
+    *,
+    root: Path,
+    env: dict[str, str],
+    config: dict[str, Any],
+) -> CommandPlan:
+    if args.backend != "endpoint-litellm":
+        raise SystemExit(f"unsupported LightEval backend: {args.backend}")
+
+    lighteval = table(config, "lighteval")
+    python = python_executable(config, root=root, env=env)
+    model_args, api_key = build_lighteval_model_args(args, root=root, env=env, config=config)
+    command = [
+        python,
+        "-m",
+        "lighteval",
+        "endpoint",
+        "litellm",
+        model_args,
+        args.tasks,
+        "--output-dir",
+        lighteval_output_dir(config, root=root, env=env, args=args),
+    ]
+
+    for option, value in (
+        ("--max-samples", pick(getattr(args, "max_samples", None), lighteval.get("max_samples"))),
+        (
+            "--dataset-loading-processes",
+            pick(
+                getattr(args, "dataset_loading_processes", None),
+                lighteval.get("dataset_loading_processes"),
+            ),
+        ),
+        (
+            "--num-fewshot-seeds",
+            pick(getattr(args, "num_fewshot_seeds", None), lighteval.get("num_fewshot_seeds")),
+        ),
+        (
+            "--custom-tasks",
+            lighteval_path_arg(
+                pick(getattr(args, "custom_tasks", None), lighteval.get("custom_tasks")),
+                root=root,
+                env=env,
+            ),
+        ),
+        ("--results-org", pick(getattr(args, "results_org", None), lighteval.get("results_org"))),
+        ("--job-id", getattr(args, "job_id", None)),
+    ):
+        append_cli_option(command, option, value)
+
+    save_details = pick(getattr(args, "save_details", None), lighteval.get("save_details"), True)
+    append_cli_flag(command, "--save-details", save_details)
+    append_cli_flag(
+        command,
+        "--load-tasks-multilingual",
+        pick(getattr(args, "load_tasks_multilingual", None), lighteval.get("load_tasks_multilingual")),
+    )
+    append_cli_flag(command, "--push-to-hub", pick(getattr(args, "push_to_hub", None), lighteval.get("push_to_hub")))
+    append_cli_flag(
+        command,
+        "--public-run",
+        pick(getattr(args, "public_run", None), lighteval.get("public_run")),
+    )
+
+    for extra in getattr(args, "extra", None) or []:
+        command.append(str(extra))
+
+    shown_env = {"PYTHON": python}
+    plan_env = strip_vllm_env(env)
+    if api_key:
+        plan_env["OPENAI_API_KEY"] = api_key
+    return CommandPlan(command=command, cwd=root, shown_env=shown_env, env=plan_env)
+
+
+def build_lighteval_tasks_plan(
+    args: Any,
+    *,
+    root: Path,
+    env: dict[str, str],
+    config: dict[str, Any],
+) -> CommandPlan:
+    python = python_executable(config, root=root, env=env)
+    command = [python, "-m", "lighteval", "tasks", args.task_action]
+    custom_tasks = lighteval_path_arg(getattr(args, "custom_tasks", None), root=root, env=env)
+
+    if args.task_action == "inspect":
+        if not args.tasks:
+            raise SystemExit("helicopter eval lighteval-tasks inspect requires a task id")
+        command.append(args.tasks)
+        append_cli_flag(command, "--load-multilingual", getattr(args, "load_tasks_multilingual", None))
+        append_cli_option(command, "--num-samples", getattr(args, "num_samples", None))
+        append_cli_flag(command, "--show-config", getattr(args, "show_config", None))
+    else:
+        append_cli_flag(command, "--load-tasks-multilingual", getattr(args, "load_tasks_multilingual", None))
+
+    append_cli_option(command, "--custom-tasks", custom_tasks)
+    return CommandPlan(command=command, cwd=root, shown_env={"PYTHON": python}, env=strip_vllm_env(env))
 
 
 def build_grpo_hydra_overrides(

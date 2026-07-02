@@ -4,8 +4,11 @@ import argparse
 
 from .commands import (
     EMB_DEVICES,
+    LIGHTEVAL_BACKENDS,
     WKV_MODES,
     build_infer_plan,
+    build_lighteval_plan,
+    build_lighteval_tasks_plan,
     build_takeoff_plan,
     prepend_venv_path,
 )
@@ -52,6 +55,46 @@ def build_parser() -> argparse.ArgumentParser:
     takeoff.add_argument("--emb-device", choices=EMB_DEVICES)
     takeoff.add_argument("--override", action="append", help="extra Hydra override passed to verl")
     takeoff.set_defaults(plan_builder=build_takeoff_plan)
+
+    eval_parser = subparsers.add_parser("eval", help="run model evaluations")
+    eval_subparsers = eval_parser.add_subparsers(dest="eval_command", required=True)
+
+    lighteval = eval_subparsers.add_parser("lighteval", help="run Hugging Face LightEval")
+    add_common_options(lighteval)
+    lighteval.add_argument("model", help="model alias from configs")
+    lighteval.add_argument("tasks", help="LightEval task string, e.g. 'gsm8k' or 'gsm8k|0'")
+    lighteval.add_argument("--backend", choices=LIGHTEVAL_BACKENDS, default="endpoint-litellm")
+    lighteval.add_argument("--model-args", help="raw LightEval model args string or YAML config path")
+    lighteval.add_argument("--lighteval-model-name", help="model name passed to LightEval/LiteLLM")
+    lighteval.add_argument("--base-url", help="OpenAI-compatible endpoint base URL")
+    lighteval.add_argument("--provider", help="LiteLLM provider prefix; defaults to openai")
+    lighteval.add_argument("--api-key", help="API key passed through OPENAI_API_KEY")
+    lighteval.add_argument("--concurrent-requests", type=int)
+    lighteval.add_argument("--max-model-length", type=int)
+    lighteval.add_argument("--max-samples", type=int)
+    lighteval.add_argument("--output-dir")
+    lighteval.add_argument("--dataset-loading-processes", type=int)
+    lighteval.add_argument("--num-fewshot-seeds", type=int)
+    lighteval.add_argument("--custom-tasks", help="custom LightEval task Python file")
+    lighteval.add_argument("--load-tasks-multilingual", action="store_true", default=None)
+    lighteval.add_argument("--save-details", dest="save_details", action="store_true", default=None)
+    lighteval.add_argument("--no-save-details", dest="save_details", action="store_false")
+    lighteval.add_argument("--push-to-hub", action="store_true", default=None)
+    lighteval.add_argument("--public-run", action="store_true", default=None)
+    lighteval.add_argument("--results-org")
+    lighteval.add_argument("--job-id", type=int)
+    lighteval.add_argument("--extra", action="append", help="extra argument passed to LightEval")
+    lighteval.set_defaults(plan_builder=build_lighteval_plan)
+
+    lighteval_tasks = eval_subparsers.add_parser("lighteval-tasks", help="list or inspect LightEval tasks")
+    add_common_options(lighteval_tasks)
+    lighteval_tasks.add_argument("task_action", choices=("list", "dump", "inspect"))
+    lighteval_tasks.add_argument("tasks", nargs="?", help="task id for inspect")
+    lighteval_tasks.add_argument("--custom-tasks", help="custom LightEval task Python file")
+    lighteval_tasks.add_argument("--load-tasks-multilingual", action="store_true", default=None)
+    lighteval_tasks.add_argument("--num-samples", type=int)
+    lighteval_tasks.add_argument("--show-config", action="store_true", default=None)
+    lighteval_tasks.set_defaults(plan_builder=build_lighteval_tasks_plan)
 
     return parser
 

@@ -55,6 +55,48 @@ def takeoff_args(**overrides: object) -> Namespace:
     return Namespace(**values)
 
 
+def lighteval_args(**overrides: object) -> Namespace:
+    values = {
+        "backend": "endpoint-litellm",
+        "model": "g1g-1.5b",
+        "tasks": "gsm8k",
+        "model_args": None,
+        "lighteval_model_name": None,
+        "base_url": None,
+        "provider": None,
+        "api_key": None,
+        "concurrent_requests": None,
+        "max_model_length": None,
+        "max_samples": None,
+        "output_dir": None,
+        "dataset_loading_processes": None,
+        "num_fewshot_seeds": None,
+        "custom_tasks": None,
+        "load_tasks_multilingual": None,
+        "save_details": None,
+        "push_to_hub": None,
+        "public_run": None,
+        "results_org": None,
+        "job_id": None,
+        "extra": None,
+    }
+    values.update(overrides)
+    return Namespace(**values)
+
+
+def lighteval_tasks_args(**overrides: object) -> Namespace:
+    values = {
+        "task_action": "list",
+        "tasks": None,
+        "custom_tasks": None,
+        "load_tasks_multilingual": None,
+        "num_samples": None,
+        "show_config": None,
+    }
+    values.update(overrides)
+    return Namespace(**values)
+
+
 def command_options(command: list[str]) -> dict[str, str | bool]:
     options: dict[str, str | bool] = {}
     index = 0
@@ -200,6 +242,55 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(plan.cwd, ROOT)
         self.assertEqual(plan.shown_env, {})
         self.assertEqual({key for key in plan.env if key.startswith("VLLM_")}, set())
+
+    def test_lighteval_plan_uses_official_litellm_endpoint(self) -> None:
+        loaded_config = load_example_config()
+
+        plan = commands.build_lighteval_plan(
+            lighteval_args(max_samples=3),
+            root=ROOT,
+            env={},
+            config=loaded_config,
+        )
+
+        self.assertEqual(plan.command[1:5], ["-m", "lighteval", "endpoint", "litellm"])
+        self.assertEqual(plan.command[6], "gsm8k")
+        self.assertIn("model_name=openai/g1g-1.5b", plan.command[5])
+        self.assertIn("provider=openai", plan.command[5])
+        self.assertIn("base_url=http://127.0.0.1:8000/v1", plan.command[5])
+        self.assertIn("max_model_length=8192", plan.command[5])
+        options = command_options(plan.command)
+        self.assertEqual(options["--output-dir"], str(ROOT / "results/lighteval"))
+        self.assertEqual(options["--max-samples"], "3")
+        self.assertEqual(options["--dataset-loading-processes"], "1")
+        self.assertTrue(options["--save-details"])
+        self.assertEqual(plan.env["OPENAI_API_KEY"], "EMPTY")
+
+    def test_lighteval_plan_keeps_api_key_out_of_command(self) -> None:
+        loaded_config = load_example_config()
+
+        plan = commands.build_lighteval_plan(
+            lighteval_args(base_url="https://example.test/v1", api_key="secret-token"),
+            root=ROOT,
+            env={},
+            config=loaded_config,
+        )
+
+        self.assertNotIn("secret-token", " ".join(plan.command))
+        self.assertEqual(plan.env["OPENAI_API_KEY"], "secret-token")
+
+    def test_lighteval_tasks_plan_lists_registry(self) -> None:
+        loaded_config = load_example_config()
+
+        plan = commands.build_lighteval_tasks_plan(
+            lighteval_tasks_args(load_tasks_multilingual=True),
+            root=ROOT,
+            env={},
+            config=loaded_config,
+        )
+
+        self.assertEqual(plan.command[1:5], ["-m", "lighteval", "tasks", "list"])
+        self.assertIn("--load-tasks-multilingual", plan.command)
 
     def test_takeoff_plan_uses_verl_module_entrypoint_and_default_overrides(self) -> None:
         loaded_config = load_example_config()

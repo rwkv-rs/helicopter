@@ -12,6 +12,10 @@ dependencies = []
 helicopter = "helicopter_cli.__main__:main"
 
 [dependency-groups]
+eval = [
+  "lighteval[litellm]>=0.13.0,<0.14.0",
+]
+
 rwkv = [
   "accelerate",
   "aiohttp>=3.13.3",
