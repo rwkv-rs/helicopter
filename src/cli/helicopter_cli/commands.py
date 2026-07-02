@@ -359,6 +359,18 @@ def build_lighteval_tasks_plan(
     python = python_executable(config, root=root, env=env)
     custom_tasks = lighteval_path_arg(getattr(args, "custom_tasks", None), root=root, env=env)
 
+    if args.task_action == "export":
+        command = [python, "-m", "helicopter_cli.lighteval_tasks", "export"]
+        append_cli_flag(command, "--load-multilingual", getattr(args, "load_tasks_multilingual", None))
+        append_cli_option(command, "--custom-tasks", custom_tasks)
+        append_cli_option(command, "--output", getattr(args, "output", None))
+        append_cli_option(command, "--format", getattr(args, "format", None))
+        for pattern in getattr(args, "contains", None) or []:
+            append_cli_option(command, "--contains", pattern, optional=False)
+        append_cli_option(command, "--limit", getattr(args, "limit", None))
+        append_cli_flag(command, "--include-supersets", getattr(args, "include_supersets", None))
+        return CommandPlan(command=command, cwd=root, shown_env={"PYTHON": python}, env=strip_vllm_env(env))
+
     if args.task_action == "inspect":
         if not args.tasks:
             raise SystemExit("helicopter eval lighteval-tasks inspect requires a task id")

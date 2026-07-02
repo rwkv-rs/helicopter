@@ -90,12 +90,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     lighteval_tasks = eval_subparsers.add_parser("lighteval-tasks", help="list or inspect LightEval tasks")
     add_common_options(lighteval_tasks)
-    lighteval_tasks.add_argument("task_action", choices=("list", "dump", "inspect"))
+    lighteval_tasks.add_argument("task_action", choices=("list", "dump", "inspect", "export"))
     lighteval_tasks.add_argument("tasks", nargs="?", help="task id for inspect")
     lighteval_tasks.add_argument("--custom-tasks", help="custom LightEval task Python file")
     lighteval_tasks.add_argument("--load-tasks-multilingual", action="store_true", default=None)
     lighteval_tasks.add_argument("--num-samples", type=int)
     lighteval_tasks.add_argument("--show-config", action="store_true", default=None)
+    lighteval_tasks.add_argument("--output", help="output file for export; defaults to stdout")
+    lighteval_tasks.add_argument("--format", choices=("text", "jsonl"), default="text")
+    lighteval_tasks.add_argument("--contains", action="append", help="case-insensitive task-name filter for export")
+    lighteval_tasks.add_argument("--limit", type=int, help="maximum number of exported tasks")
+    lighteval_tasks.add_argument("--include-supersets", action="store_true", default=None)
     lighteval_tasks.set_defaults(plan_builder=build_lighteval_tasks_plan)
 
     lighteval_export = eval_subparsers.add_parser("lighteval-export", help="export LightEval details parquet to per-sample records")

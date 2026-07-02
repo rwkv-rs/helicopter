@@ -7,7 +7,7 @@ from argparse import Namespace
 from pathlib import Path
 from unittest import mock
 
-from helicopter_cli import commands, config, env
+from helicopter_cli import commands, config, env, lighteval_tasks
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -93,6 +93,11 @@ def lighteval_tasks_args(**overrides: object) -> Namespace:
         "load_tasks_multilingual": None,
         "num_samples": None,
         "show_config": None,
+        "output": None,
+        "format": "text",
+        "contains": None,
+        "limit": None,
+        "include_supersets": None,
     }
     values.update(overrides)
     return Namespace(**values)
@@ -378,6 +383,53 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(plan.command[1:4], ["-m", "helicopter_cli.lighteval_tasks", "inspect"])
         self.assertIn("--show-config", plan.command)
         self.assertEqual(command_options(plan.command)["--num-samples"], "1")
+
+    def test_lighteval_tasks_export_uses_local_registry_wrapper(self) -> None:
+        loaded_config = load_example_config()
+
+        plan = commands.build_lighteval_tasks_plan(
+            lighteval_tasks_args(
+                task_action="export",
+                load_tasks_multilingual=True,
+                output="tmp/tasks.txt",
+                contains=["gsm"],
+                limit=2,
+                include_supersets=True,
+            ),
+            root=ROOT,
+            env={},
+            config=loaded_config,
+        )
+
+        self.assertEqual(plan.command[1:4], ["-m", "helicopter_cli.lighteval_tasks", "export"])
+        self.assertIn("--load-multilingual", plan.command)
+        self.assertIn("--include-supersets", plan.command)
+        options = command_options(plan.command)
+        self.assertEqual(options["--output"], "tmp/tasks.txt")
+        self.assertEqual(options["--contains"], "gsm")
+        self.assertEqual(options["--limit"], "2")
+
+    def test_lighteval_tasks_export_filters_registry_rows(self) -> None:
+        class FakeRegistry:
+            _task_registry = {"gsm8k": object(), "mmlu": object(), "tiny:gsm8k": object()}
+            _task_superset_dict = {"tiny": ("tiny:gsm8k",)}
+
+        with mock.patch.object(lighteval_tasks, "load_registry", return_value=FakeRegistry()):
+            rows = lighteval_tasks.selected_task_rows(
+                Namespace(
+                    custom_tasks=None,
+                    load_multilingual=False,
+                    contains=["gsm"],
+                    limit=None,
+                    include_supersets=True,
+                )
+            )
+
+        self.assertEqual(rows, [("task", "gsm8k"), ("task", "tiny:gsm8k")])
+        self.assertEqual(
+            lighteval_tasks.format_export(rows, "jsonl"),
+            '{"kind": "task", "task": "gsm8k"}\n{"kind": "task", "task": "tiny:gsm8k"}\n',
+        )
 
     def test_lighteval_export_plan_exports_details(self) -> None:
         loaded_config = load_example_config()
