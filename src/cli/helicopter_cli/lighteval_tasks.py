@@ -32,6 +32,7 @@ OFFICIAL_LIGHTEVAL_ALIASES: dict[str, tuple[str, ...]] = {
     "ceval": ("ceval_zho_mcf",),
     "cmmlu": ("cmmlu_zho_mcf",),
     "ifbench": ("ifbench_test", "ifbench_multiturn"),
+    "include": ("include_tgl_mcf",),
     "livecodebench": ("lcb",),
     "mmmlu": (
         "openai_mmlu_ara_mcf",

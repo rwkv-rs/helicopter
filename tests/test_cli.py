@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import os
 import tempfile
 import unittest
@@ -235,6 +237,13 @@ class ConfigResolutionTests(unittest.TestCase):
 
 
 class CommandPlanTests(unittest.TestCase):
+    @staticmethod
+    def _browsecomp_encrypt(text: str, canary: str) -> str:
+        payload = text.encode("utf-8")
+        digest = hashlib.sha256(canary.encode("utf-8")).digest()
+        key = (digest * ((len(payload) // len(digest)) + 1))[: len(payload)]
+        return base64.b64encode(bytes(lhs ^ rhs for lhs, rhs in zip(payload, key))).decode("utf-8")
+
     def test_infer_plan_uses_vllm_rwkv_contract(self) -> None:
         loaded_config = load_example_config()
 
@@ -561,6 +570,8 @@ class CommandPlanTests(unittest.TestCase):
                 "answer_judge",
                 "beyond_aime",
                 "brumo25",
+                "browsecomp",
+                "browsecomp_zh",
                 "college_math",
                 "comp_math_24_25",
                 "gaokao2023en",
@@ -671,6 +682,52 @@ class CommandPlanTests(unittest.TestCase):
         metric = lighteval_rwkv_skills_tasks.LongCodeQAAccuracy()
         self.assertEqual(metric.compute(ModelResponse(text=['{"arguments":{"answer":"B"}}']), doc), 1.0)
         self.assertEqual(metric.compute(ModelResponse(text=["Answer: A"]), doc), 0.0)
+
+    def test_browsecomp_prompt_decrypts_openai_csv_row(self) -> None:
+        canary = "unit-canary"
+        question = "Which city hosted the example event?"
+        answer = "Ozalj"
+        doc = lighteval_rwkv_skills_tasks.browsecomp_prompt(
+            {
+                "problem": self._browsecomp_encrypt(question, canary),
+                "answer": self._browsecomp_encrypt(answer, canary),
+                "problem_topic": "Geography",
+                "canary": canary,
+            },
+            "browsecomp",
+        )
+
+        self.assertIsNotNone(doc)
+        assert doc is not None
+        self.assertIn(question, doc.query)
+        self.assertEqual(doc.specific["references"], [answer])
+        self.assertEqual(doc.specific["locale"], "en")
+        metric = lighteval_rwkv_skills_tasks.BrowseCompExactMatch()
+        self.assertEqual(metric.compute(ModelResponse(text=["Explanation: short\nExact Answer: Ozalj\nConfidence: 90%"]), doc), 1.0)
+
+    def test_browsecomp_zh_prompt_decrypts_hf_parquet_row(self) -> None:
+        canary = "BrowseComp-ZH"
+        question = "这个示例问题的答案是什么？"
+        answer = "示例答案"
+        topic = "示例"
+        doc = lighteval_rwkv_skills_tasks.browsecomp_prompt(
+            {
+                "Question": self._browsecomp_encrypt(question, canary),
+                "Answer": self._browsecomp_encrypt(answer, canary),
+                "Topic": self._browsecomp_encrypt(topic, canary),
+                "canary": canary,
+            },
+            "browsecomp_zh",
+        )
+
+        self.assertIsNotNone(doc)
+        assert doc is not None
+        self.assertIn(question, doc.query)
+        self.assertEqual(doc.specific["references"], [answer])
+        self.assertEqual(doc.specific["locale"], "zh")
+        self.assertEqual(doc.specific["topic"], topic)
+        metric = lighteval_rwkv_skills_tasks.BrowseCompF1()
+        self.assertEqual(metric.compute(ModelResponse(text=["最终答案: 示例答案"]), doc), 1.0)
 
     def test_free_answer_prompt_normalizes_numeric_answers(self) -> None:
         doc = lighteval_rwkv_skills_tasks.free_answer_prompt(
