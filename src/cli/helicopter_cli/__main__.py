@@ -272,6 +272,8 @@ def handle_eval_run_multiple_choice(args: argparse.Namespace, *, root: Any, **_:
         choices_field=str(args.choices_field),
         answer_field=str(args.answer_field),
         limit=args.limit,
+        sample_size=getattr(args, "sample_size", None),
+        sample_seed=int(getattr(args, "sample_seed", 42)),
         split=str(args.split),
         choice_fields=tuple(args.choice_field or ()),
         temperature=float(args.temperature),
@@ -438,6 +440,8 @@ def build_parser() -> argparse.ArgumentParser:
     eval_run_multiple_choice.add_argument("--base-url", help="OpenAI-compatible vLLM base URL")
     eval_run_multiple_choice.add_argument("--model", help="served model name")
     eval_run_multiple_choice.add_argument("--limit", type=int)
+    eval_run_multiple_choice.add_argument("--sample-size", type=int, help="randomly sample N rows")
+    eval_run_multiple_choice.add_argument("--sample-seed", type=int, default=42, help="seed for --sample-size")
     eval_run_multiple_choice.add_argument("--split", default="test")
     eval_run_multiple_choice.add_argument("--temperature", type=float, default=0.0)
     eval_run_multiple_choice.add_argument("--top-p", type=float, default=1.0)

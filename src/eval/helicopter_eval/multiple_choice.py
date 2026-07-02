@@ -31,6 +31,7 @@ class MultipleChoiceSample:
     question: str
     choices: ChoiceSet
     reference_answer: str
+    metadata: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +39,7 @@ class AdaptedChoiceRow:
     question: str
     choices: ChoiceSet
     reference_answer: str
+    metadata: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +52,7 @@ class MultipleChoiceResult:
     reference_answer: str
     is_passed: bool
     fail_reason: str
+    metadata: dict[str, Any] | None = None
 
     def to_scoreboard(self) -> ScoreboardEvalResult:
         return ScoreboardEvalResult(
@@ -60,6 +63,7 @@ class MultipleChoiceResult:
             reference_answer=self.reference_answer,
             is_passed=self.is_passed,
             fail_reason=self.fail_reason,
+            metadata=self.metadata,
         )
 
 
@@ -80,6 +84,8 @@ class MultipleChoiceRunConfig:
     row_adapter: str | None = None
     adapter_seed: int = 42
     split: str = "test"
+    sample_size: int | None = None
+    sample_seed: int = 42
     temperature: float = 0.0
     top_p: float = 1.0
     max_tokens: int = 32
@@ -166,6 +172,8 @@ def scoreboard_dataset_name(config: MultipleChoiceRunConfig) -> str:
     dataset = config.scoreboard_dataset or f"{config.benchmark}_{config.split}"
     if config.limit is not None:
         dataset = f"{dataset}_limit{int(config.limit)}"
+    if config.sample_size is not None:
+        dataset = f"{dataset}_sample{int(config.sample_size)}_seed{int(config.sample_seed)}"
     return dataset
 
 
@@ -402,9 +410,51 @@ def adapt_choice_row(
     )
 
 
+def _sample_metadata(item: Any, *, original_sample_index: int, config: MultipleChoiceRunConfig) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "benchmark": config.benchmark,
+        "dataset_name": config.dataset_name,
+        "dataset_config": config.dataset_config,
+        "split": config.split,
+        "original_sample_index": original_sample_index,
+    }
+    if isinstance(item, dict):
+        for source_key, target_key in (
+            ("id", "source_id"),
+            ("question_id", "source_id"),
+            ("task_id", "source_id"),
+            ("subject", "subject"),
+            ("category", "category"),
+            ("language", "language"),
+            ("source_dataset", "source"),
+            ("error_type", "error_type"),
+        ):
+            value = item.get(source_key)
+            if value is not None and target_key not in metadata:
+                metadata[target_key] = value
+    return metadata
+
+
+def _renumber_samples(samples: Sequence[MultipleChoiceSample]) -> list[MultipleChoiceSample]:
+    return [
+        MultipleChoiceSample(
+            sample_index=index,
+            question=sample.question,
+            choices=sample.choices,
+            reference_answer=sample.reference_answer,
+            metadata=sample.metadata,
+        )
+        for index, sample in enumerate(samples)
+    ]
+
+
 def load_samples(config: MultipleChoiceRunConfig) -> list[MultipleChoiceSample]:
     if config.limit is not None and int(config.limit) < 0:
         raise ValueError("limit must be non-negative")
+    if config.sample_size is not None and int(config.sample_size) < 0:
+        raise ValueError("sample_size must be non-negative")
+    if config.limit is not None and config.sample_size is not None:
+        raise ValueError("limit and sample_size are mutually exclusive")
     limit = None if config.limit is None else int(config.limit)
     samples: list[MultipleChoiceSample] = []
     rng = random.Random(config.adapter_seed)
@@ -414,14 +464,22 @@ def load_samples(config: MultipleChoiceRunConfig) -> list[MultipleChoiceSample]:
         adapted = adapt_choice_row(item, config, rng)
         if adapted is None:
             continue
+        original_sample_index = len(samples)
+        metadata = dict(adapted.metadata or {})
+        metadata.update(_sample_metadata(item, original_sample_index=original_sample_index, config=config))
         samples.append(
             MultipleChoiceSample(
                 sample_index=len(samples),
                 question=adapted.question,
                 choices=adapted.choices,
                 reference_answer=adapted.reference_answer,
+                metadata=metadata,
             )
         )
+    if config.sample_size is not None and int(config.sample_size) < len(samples):
+        sample_rng = random.Random(int(config.sample_seed))
+        samples = sorted(sample_rng.sample(samples, int(config.sample_size)), key=lambda item: item.sample_index)
+        samples = _renumber_samples(samples)
     return samples
 
 
@@ -447,6 +505,7 @@ def generate_completion(sample: MultipleChoiceSample, config: MultipleChoiceRunC
         reference_answer=sample.reference_answer,
         is_passed=is_passed,
         fail_reason="" if is_passed else f"expected {sample.reference_answer}, got {answer}",
+        metadata=sample.metadata,
     )
 
 
@@ -496,7 +555,7 @@ def run_multiple_choice(config: MultipleChoiceRunConfig, *, repo_root: Path) -> 
 
 
 def dry_run_summary(config: MultipleChoiceRunConfig) -> dict[str, Any]:
-    return {
+    payload = {
         "benchmark": config.benchmark,
         "hf_dataset": config.dataset_name,
         "hf_config": config.dataset_config,
@@ -508,3 +567,7 @@ def dry_run_summary(config: MultipleChoiceRunConfig) -> dict[str, Any]:
         "job_name": config.job_name,
         "job_id": job_id(config),
     }
+    if config.sample_size is not None:
+        payload["sample_size"] = config.sample_size
+        payload["sample_seed"] = config.sample_seed
+    return payload

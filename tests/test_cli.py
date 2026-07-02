@@ -1614,6 +1614,39 @@ class CommandPlanTests(unittest.TestCase):
             )
         )
 
+    def test_multiple_choice_random_sampling_is_deterministic_and_traceable(self) -> None:
+        run_config = multiple_choice.MultipleChoiceRunConfig(
+            base_url="http://127.0.0.1:29082",
+            model="rwkv7-g1d-0.4b-20260210-ctx8192",
+            benchmark="toy_choice",
+            dataset_name="org/toy_choice",
+            dataset_config="main",
+            question_field="question",
+            choices_field="choices",
+            answer_field="answer",
+            sample_size=3,
+            sample_seed=7,
+        )
+        rows = [
+            {
+                "id": f"row-{index}",
+                "question": f"q{index}",
+                "choices": ["a", "b", "c", "d"],
+                "answer": index % 4,
+                "subject": "debug",
+            }
+            for index in range(10)
+        ]
+
+        with mock.patch.object(multiple_choice, "_iter_rows", return_value=iter(rows)):
+            samples = multiple_choice.load_samples(run_config)
+
+        self.assertEqual([sample.sample_index for sample in samples], [0, 1, 2])
+        self.assertEqual([sample.metadata["original_sample_index"] for sample in samples], [2, 5, 6])
+        self.assertEqual([sample.metadata["source_id"] for sample in samples], ["row-2", "row-5", "row-6"])
+        self.assertEqual([sample.metadata["subject"] for sample in samples], ["debug", "debug", "debug"])
+        self.assertEqual(multiple_choice.scoreboard_dataset_name(run_config), "toy_choice_test_sample3_seed7")
+
     def test_generic_multiple_choice_dry_run_uses_hf_dataset_config(self) -> None:
         args = Namespace(
             dry_run=True,
@@ -1628,6 +1661,8 @@ class CommandPlanTests(unittest.TestCase):
             base_url=None,
             model=None,
             limit=10,
+            sample_size=None,
+            sample_seed=42,
             split="test",
             temperature=0.0,
             top_p=1.0,

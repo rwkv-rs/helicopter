@@ -1367,6 +1367,8 @@ def _run_config(
             choices_field=spec.choices_field,
             answer_field=spec.answer_field,
             limit=limit,
+            sample_size=sample_size,
+            sample_seed=sample_seed,
             choice_fields=spec.choice_fields,
             row_adapter=spec.row_adapter,
             adapter_seed=spec.adapter_seed,
