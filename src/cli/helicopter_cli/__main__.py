@@ -97,7 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
     lighteval_tasks.add_argument("--num-samples", type=int)
     lighteval_tasks.add_argument("--show-config", action="store_true", default=None)
     lighteval_tasks.add_argument("--output", help="output file for export; defaults to stdout")
-    lighteval_tasks.add_argument("--format", choices=("text", "jsonl", "summary"), default="text")
+    lighteval_tasks.add_argument("--format", choices=("text", "jsonl", "summary", "tasks"), default="text")
     lighteval_tasks.add_argument("--contains", action="append", help="case-insensitive task-name filter for export")
     lighteval_tasks.add_argument("--limit", type=int, help="maximum number of exported tasks")
     lighteval_tasks.add_argument("--include-supersets", action="store_true", default=None)

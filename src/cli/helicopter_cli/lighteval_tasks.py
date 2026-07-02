@@ -26,6 +26,31 @@ class CoverageRow:
     candidates: tuple[str, ...]
 
 
+OFFICIAL_LIGHTEVAL_ALIASES: dict[str, tuple[str, ...]] = {
+    # The source names are rwkv-skills benchmark ids; the target names are
+    # official LightEval task or superset ids verified in the registry.
+    "ceval": ("ceval_zho_mcf",),
+    "cmmlu": ("cmmlu_zho_mcf",),
+    "ifbench": ("ifbench_test", "ifbench_multiturn"),
+    "livecodebench": ("lcb",),
+    "mmlu_redux": ("mmlu_redux_2",),
+}
+
+DIRECT_COVERAGE_STATUSES = {
+    "exact_task",
+    "exact_superset",
+    "normalized_task",
+    "normalized_superset",
+    "compact_task",
+    "compact_superset",
+    "alias_task",
+    "alias_superset",
+    "alias_task_list",
+    "alias_superset_list",
+    "alias_mixed_list",
+}
+
+
 def load_registry(*, tasks: str | None = None, custom_tasks: str | None = None, load_multilingual: bool = False):
     from lighteval.tasks.registry import Registry
 
@@ -315,6 +340,17 @@ def coverage_rows(args: argparse.Namespace) -> list[CoverageRow]:
             status, target_kind, targets = "compact_task", "task", (compact_tasks[compact],)
         elif compact in compact_supersets:
             status, target_kind, targets = "compact_superset", "superset", (compact_supersets[compact],)
+        else:
+            alias_targets = OFFICIAL_LIGHTEVAL_ALIASES.get(norm)
+            if alias_targets and all(target in task_set or target in superset_set for target in alias_targets):
+                target_types = {"task" if target in task_set else "superset" for target in alias_targets}
+                if len(alias_targets) == 1:
+                    target_kind = next(iter(target_types))
+                    status = f"alias_{target_kind}"
+                else:
+                    target_kind = "mixed" if len(target_types) > 1 else next(iter(target_types))
+                    status = f"alias_{target_kind}_list"
+                targets = alias_targets
         candidates = candidate_tasks(name, all_target_names, limit=candidate_limit)
         if status == "missing" and candidates:
             status = "candidate_only"
@@ -334,20 +370,23 @@ def coverage_rows(args: argparse.Namespace) -> list[CoverageRow]:
 def format_coverage(rows: list[CoverageRow], output_format: str) -> str:
     if output_format == "jsonl":
         return "".join(json.dumps(asdict(row), sort_keys=True) + "\n" for row in rows)
+    if output_format == "tasks":
+        seen = set()
+        task_lines = []
+        for row in rows:
+            if row.status not in DIRECT_COVERAGE_STATUSES:
+                continue
+            for target in row.targets:
+                if target not in seen:
+                    seen.add(target)
+                    task_lines.append(target)
+        return "".join(task + "\n" for task in task_lines)
     if output_format == "summary":
-        direct_statuses = {
-            "exact_task",
-            "exact_superset",
-            "normalized_task",
-            "normalized_superset",
-            "compact_task",
-            "compact_superset",
-        }
         status_counts = sorted(
             ((status, sum(1 for row in rows if row.status == status)) for status in {row.status for row in rows}),
             key=lambda item: (-item[1], item[0]),
         )
-        direct_count = sum(1 for row in rows if row.status in direct_statuses)
+        direct_count = sum(1 for row in rows if row.status in DIRECT_COVERAGE_STATUSES)
         lines = [
             f"total\t{len(rows)}",
             f"direct\t{direct_count}",
@@ -409,7 +448,7 @@ def build_parser() -> argparse.ArgumentParser:
     coverage_parser.add_argument("--load-multilingual", action="store_true")
     coverage_parser.add_argument("--custom-tasks")
     coverage_parser.add_argument("--output")
-    coverage_parser.add_argument("--format", choices=("text", "jsonl", "summary"), default="text")
+    coverage_parser.add_argument("--format", choices=("text", "jsonl", "summary", "tasks"), default="text")
     coverage_parser.add_argument("--source", required=True)
     coverage_parser.add_argument(
         "--source-format",

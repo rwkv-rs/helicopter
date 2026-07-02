@@ -461,12 +461,25 @@ class CommandPlanTests(unittest.TestCase):
 
     def test_lighteval_tasks_coverage_resolves_registry_rows(self) -> None:
         class FakeRegistry:
-            _task_registry = {"gpqa:diamond": object(), "gsm8k": object(), "tiny:gsm8k": object()}
-            _task_superset_dict = {"mmlu": ("mmlu:abstract_algebra",)}
+            _task_registry = {
+                "gpqa:diamond": object(),
+                "gsm8k": object(),
+                "ifbench_multiturn": object(),
+                "ifbench_test": object(),
+                "tiny:gsm8k": object(),
+            }
+            _task_superset_dict = {"lcb": ("lcb:codegeneration",), "mmlu": ("mmlu:abstract_algebra",)}
 
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "benchmarks.txt"
-            source.write_text("gsm8k,maths\ngpqa_diamond,knowledge\nmmlu,knowledge\nmissing_one,maths\n")
+            source.write_text(
+                "gsm8k,maths\n"
+                "gpqa_diamond,knowledge\n"
+                "mmlu,knowledge\n"
+                "ifbench,instruction_following\n"
+                "livecodebench,coding\n"
+                "missing_one,maths\n"
+            )
             with mock.patch.object(lighteval_tasks, "load_registry", return_value=FakeRegistry()):
                 rows = lighteval_tasks.coverage_rows(
                     Namespace(
@@ -482,9 +495,17 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(rows[1].status, "normalized_task")
         self.assertEqual(rows[1].targets, ("gpqa:diamond",))
         self.assertEqual(rows[2].status, "exact_superset")
-        self.assertEqual(rows[3].status, "missing")
-        self.assertIn("direct\t3\n", lighteval_tasks.format_coverage(rows, "summary"))
+        self.assertEqual(rows[3].status, "alias_task_list")
+        self.assertEqual(rows[3].targets, ("ifbench_test", "ifbench_multiturn"))
+        self.assertEqual(rows[4].status, "alias_superset")
+        self.assertEqual(rows[4].targets, ("lcb",))
+        self.assertEqual(rows[5].status, "missing")
+        self.assertIn("direct\t5\n", lighteval_tasks.format_coverage(rows, "summary"))
         self.assertIn("not_direct\t1\n", lighteval_tasks.format_coverage(rows, "summary"))
+        self.assertEqual(
+            lighteval_tasks.format_coverage(rows, "tasks"),
+            "gsm8k\ngpqa:diamond\nmmlu\nifbench_test\nifbench_multiturn\nlcb\n",
+        )
 
     def test_lighteval_tasks_loads_rwkv_skills_registry_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
