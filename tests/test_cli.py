@@ -570,12 +570,15 @@ class CommandPlanTests(unittest.TestCase):
                 "amc23",
                 "answer_judge",
                 "beyond_aime",
+                "bfcl_multiple",
                 "bfcl_exec_multiple",
                 "bfcl_exec_multiple_ast",
                 "bfcl_exec_parallel",
                 "bfcl_exec_parallel_multiple",
+                "bfcl_simple_python",
                 "bfcl_exec_simple",
                 "bfcl_exec_simple_ast",
+                "bfcl_v3",
                 "brumo25",
                 "browsecomp",
                 "browsecomp_plus",
@@ -860,6 +863,45 @@ class CommandPlanTests(unittest.TestCase):
             ]
         )
         self.assertEqual(metric.compute(response, doc), 1.0)
+
+    def test_bfcl_prompt_joins_possible_answer_by_id(self) -> None:
+        with mock.patch.object(
+            lighteval_rwkv_skills_tasks,
+            "_bfcl_possible_answers",
+            return_value={
+                "simple_0": [
+                    {
+                        "calculate_triangle_area": {
+                            "base": [10],
+                            "height": [5],
+                            "unit": ["units", ""],
+                        }
+                    }
+                ]
+            },
+        ):
+            doc = lighteval_rwkv_skills_tasks.bfcl_prompt(
+                {
+                    "id": "simple_0",
+                    "question": [[{"role": "user", "content": "Find the triangle area."}]],
+                    "function": [{"name": "calculate_triangle_area", "parameters": {"type": "object"}}],
+                },
+                "bfcl_simple_python",
+            )
+
+        self.assertIsNotNone(doc)
+        assert doc is not None
+        self.assertEqual(doc.specific["sample_id"], "simple_0")
+        self.assertNotIn("expected_calls", doc.specific)
+        self.assertIn("calculate_triangle_area", doc.specific["expected_calls_json"])
+        metric = lighteval_rwkv_skills_tasks.BFCLAccuracy()
+        self.assertEqual(
+            metric.compute(
+                ModelResponse(text=['{"name":"calculate_triangle_area","arguments":{"base":10,"height":5}}']),
+                doc,
+            ),
+            1.0,
+        )
 
     def test_free_answer_prompt_normalizes_numeric_answers(self) -> None:
         doc = lighteval_rwkv_skills_tasks.free_answer_prompt(
