@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import os
 import tempfile
 import unittest
@@ -427,6 +428,10 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(len(suite["benchmarks"]), 95)
         self.assertIn("gsm8k", suite["benchmarks"])
         self.assertEqual(suite["benchmarks"]["gsm8k"]["lighteval_tasks"], ["gsm8k"])
+        self.assertEqual(
+            suite["benchmarks"]["gaokao2023en"]["lighteval_tasks"],
+            ["rwkv_skills:gaokao2023en"],
+        )
 
     def test_lighteval_suite_requires_explicit_mapped_only_for_partial_mapping(self) -> None:
         loaded_config = load_example_config()
@@ -456,6 +461,22 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(set(plan.command[6].split(",")), {"gsm8k", "aime24"})
         self.assertEqual(command_options(plan.command)["--max-samples"], "2")
 
+    def test_lighteval_suite_uses_suite_custom_tasks(self) -> None:
+        loaded_config = load_example_config()
+
+        plan = commands.build_lighteval_suite_plan(
+            lighteval_suite_args(mapped_only=True, benchmark=["gaokao2023en"], max_samples=1),
+            root=ROOT,
+            env={},
+            config=loaded_config,
+        )
+
+        self.assertEqual(plan.command[6], "rwkv_skills:gaokao2023en")
+        self.assertEqual(
+            command_options(plan.command)["--custom-tasks"],
+            str(ROOT / "src/cli/helicopter_cli/lighteval_rwkv_skills_tasks.py"),
+        )
+
     def test_lighteval_suite_enables_multilingual_when_needed(self) -> None:
         loaded_config = load_example_config()
 
@@ -468,6 +489,30 @@ class CommandPlanTests(unittest.TestCase):
 
         self.assertEqual(plan.command[6], "ceval_zho_mcf")
         self.assertIn("--load-tasks-multilingual", plan.command)
+
+    def test_lighteval_multilingual_registry_loads_when_eval_deps_installed(self) -> None:
+        if importlib.util.find_spec("lighteval") is None:
+            self.skipTest("LightEval is not installed")
+
+        self.assertIsNotNone(importlib.util.find_spec("language_data"))
+
+        from lighteval.tasks.registry import Registry
+
+        registry = Registry(load_multilingual=True)
+
+        self.assertTrue(any(name.startswith("ceval_zho_mcf:") for name in registry._task_registry))
+
+    def test_rwkv_skills_custom_lighteval_tasks_load_when_eval_deps_installed(self) -> None:
+        if importlib.util.find_spec("lighteval") is None:
+            self.skipTest("LightEval is not installed")
+
+        from lighteval.tasks.registry import Registry
+
+        custom_tasks = ROOT / "src/cli/helicopter_cli/lighteval_rwkv_skills_tasks.py"
+        registry = Registry(custom_tasks=str(custom_tasks))
+
+        self.assertIn("rwkv_skills:gaokao2023en", registry._task_registry)
+        self.assertIn("rwkv_skills:amc23", registry._task_registry)
 
     def test_takeoff_plan_uses_verl_module_entrypoint_and_default_overrides(self) -> None:
         loaded_config = load_example_config()

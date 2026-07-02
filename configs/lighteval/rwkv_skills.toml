@@ -2,6 +2,7 @@ name = "rwkv_skills"
 source = "/home/chase/GitHub/rwkv-skills/src/eval/benchmark_registry.py"
 source_count = 95
 description = "LightEval mapping for the benchmark set registered by ~/GitHub/rwkv-skills."
+custom_tasks = "src/cli/helicopter_cli/lighteval_rwkv_skills_tasks.py"
 
 [benchmarks.human_eval]
 field = "coding"
@@ -373,8 +374,8 @@ reason = "No direct Algebra222 task was found in the current LightEval registry 
 
 [benchmarks.amc23]
 field = "maths"
-status = "needs_adapter"
-reason = "No direct AMC23 task was found in the current LightEval registry snapshot."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:amc23"]
 
 [benchmarks.answer_judge]
 field = "maths"
@@ -399,7 +400,7 @@ reason = "No direct BRUMO25 task was found in the current LightEval registry sna
 [benchmarks.college_math]
 field = "maths"
 status = "needs_adapter"
-reason = "No direct CollegeMath task was found in the current LightEval registry snapshot."
+reason = "No same-contract CollegeMath HF/LightEval task has been verified yet."
 
 [benchmarks.comp_math_24_25]
 field = "maths"
@@ -408,8 +409,8 @@ reason = "No direct COMP Math 24-25 task was found in the current LightEval regi
 
 [benchmarks.gaokao2023en]
 field = "maths"
-status = "needs_adapter"
-reason = "LightEval has AGIEval Gaokao subsets, but no direct rwkv-skills gaokao2023en task mapping."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:gaokao2023en"]
 
 [benchmarks.gsm8k]
 field = "maths"
@@ -453,8 +454,8 @@ reason = "No direct MAWPS task was found in the current LightEval registry snaps
 
 [benchmarks.minerva_math]
 field = "maths"
-status = "needs_adapter"
-reason = "No direct Minerva Math task was found in the current LightEval registry snapshot."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:minerva_math"]
 
 [benchmarks.olympiadbench]
 field = "maths"

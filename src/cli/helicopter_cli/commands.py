@@ -444,6 +444,7 @@ def build_lighteval_suite_plan(
             **vars(args),
             "backend": "endpoint-litellm",
             "tasks": tasks,
+            "custom_tasks": pick(getattr(args, "custom_tasks", None), suite.get("custom_tasks")),
             "load_tasks_multilingual": bool_value(args.load_tasks_multilingual) or load_multilingual,
         }
     )
