@@ -570,6 +570,10 @@ class CommandPlanTests(unittest.TestCase):
                 "human_eval_cn",
                 "human_eval_fix",
                 "human_eval_plus",
+                "longbench",
+                "longbench_qa",
+                "longbench_qa_balanced",
+                "longcodeqa",
                 "math_odyssey",
                 "mawps",
                 "mbpp",
@@ -612,6 +616,61 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(doc.choices, ["Guten Morgen."])
         self.assertIn("from English to German", doc.query)
         self.assertTrue(doc.query.endswith("German:"))
+
+    def test_longbench_prompt_builds_references_and_truncates_context(self) -> None:
+        doc = lighteval_rwkv_skills_tasks.longbench_prompt(
+            {
+                "dataset": "triviaqa",
+                "input": "What is the answer?",
+                "context": "A" * (lighteval_rwkv_skills_tasks.LONG_CONTEXT_PROMPT_MAX_CHARS + 1000),
+                "answers": ["forty two", "42"],
+            },
+            "longbench_qa",
+        )
+
+        self.assertIsNotNone(doc)
+        assert doc is not None
+        self.assertEqual(doc.specific["references"], ["forty two", "42"])
+        self.assertIn("middle truncated", doc.query)
+        self.assertLess(len(doc.query), lighteval_rwkv_skills_tasks.LONG_CONTEXT_PROMPT_MAX_CHARS + 1000)
+
+    def test_longbench_metric_scores_json_answer(self) -> None:
+        doc = lighteval_rwkv_skills_tasks.longbench_prompt(
+            {
+                "input": "Name it.",
+                "context": "The answer is Ozalj.",
+                "answers": ["Ozalj"],
+            },
+            "longbench_qa",
+        )
+
+        self.assertIsNotNone(doc)
+        assert doc is not None
+        exact = lighteval_rwkv_skills_tasks.LongBenchExactMatch()
+        f1 = lighteval_rwkv_skills_tasks.LongBenchF1()
+        response = ModelResponse(text=['{"answer":"Ozalj"}'])
+        self.assertEqual(exact.compute(response, doc), 1.0)
+        self.assertEqual(f1.compute(response, doc), 1.0)
+
+    def test_longcodeqa_prompt_and_metric_accept_option_letter(self) -> None:
+        doc = lighteval_rwkv_skills_tasks.longcodeqa_prompt(
+            {
+                "prompt": "Repository: Repository:\nexample\nQuestion:\nA) no\nB) yes\n",
+                "question": "Question:\nA) no\nB) yes\n",
+                "correct_letter": "B",
+            },
+            "longcodeqa",
+        )
+
+        self.assertIsNotNone(doc)
+        assert doc is not None
+        self.assertIn("Repository:\nexample", doc.query)
+        self.assertNotIn("Repository: Repository:", doc.query)
+        self.assertEqual(doc.specific["correct_letter"], "B")
+        self.assertEqual(doc.specific["allowed_letters"], ["A", "B"])
+        metric = lighteval_rwkv_skills_tasks.LongCodeQAAccuracy()
+        self.assertEqual(metric.compute(ModelResponse(text=['{"arguments":{"answer":"B"}}']), doc), 1.0)
+        self.assertEqual(metric.compute(ModelResponse(text=["Answer: A"]), doc), 0.0)
 
     def test_free_answer_prompt_normalizes_numeric_answers(self) -> None:
         doc = lighteval_rwkv_skills_tasks.free_answer_prompt(
