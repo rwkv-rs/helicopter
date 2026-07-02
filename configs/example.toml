@@ -13,9 +13,6 @@ output_dir = "results/lighteval"
 save_details = true
 dataset_loading_processes = 1
 
-[lighteval_suites.rwkv_skills]
-path = "configs/lighteval/rwkv_skills.toml"
-
 [takeoff.grpo]
 project_name = "verl_rwkv_grpo"
 experiment_name = "rwkv7_grpo_vllm"
