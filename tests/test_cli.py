@@ -458,6 +458,8 @@ class CommandPlanTests(unittest.TestCase):
         self.assertIn("rwkv_skills:polymath_zh", suite["benchmarks"]["polymath"]["lighteval_tasks"])
         self.assertEqual(len(suite["benchmarks"]["mmmlu"]["lighteval_tasks"]), 14)
         self.assertIn("rwkv_skills:mmmlu_zh", suite["benchmarks"]["mmmlu"]["lighteval_tasks"])
+        self.assertEqual(len(suite["benchmarks"]["wmt24pp"]["lighteval_tasks"]), 5)
+        self.assertIn("rwkv_skills:wmt24pp_ja_JP", suite["benchmarks"]["wmt24pp"]["lighteval_tasks"])
 
     def test_lighteval_suite_requires_explicit_mapped_only_for_partial_mapping(self) -> None:
         loaded_config = load_example_config()
@@ -574,6 +576,8 @@ class CommandPlanTests(unittest.TestCase):
         self.assertIn("rwkv_skills:supergpqa", registry._task_registry)
         self.assertIn("rwkv_skills:mmmlu_ar", registry._task_registry)
         self.assertIn("rwkv_skills:mmmlu_zh", registry._task_registry)
+        self.assertIn("rwkv_skills:wmt24pp_de_DE", registry._task_registry)
+        self.assertIn("rwkv_skills:wmt24pp_ja_JP", registry._task_registry)
 
     def test_rwkv_skills_multiple_choice_metric_extracts_answer_letters(self) -> None:
         if importlib.util.find_spec("lighteval") is None:
@@ -619,6 +623,35 @@ class CommandPlanTests(unittest.TestCase):
         self.assertIn("Each pack costs 76 dollars. What is the price", doc.query)
         self.assertEqual(doc.choices, ["51"])
         self.assertEqual(doc.specific["id"], "chal-1")
+
+    def test_rwkv_skills_wmt24pp_prompt_uses_translation_target(self) -> None:
+        if importlib.util.find_spec("lighteval") is None:
+            self.skipTest("LightEval is not installed")
+
+        custom_tasks = ROOT / "src/cli/helicopter_cli/lighteval_rwkv_skills_tasks.py"
+        spec = importlib.util.spec_from_file_location("rwkv_skills_lighteval_tasks", custom_tasks)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        doc = module.wmt24pp_prompt(
+            {
+                "lp": "en-ja_JP",
+                "domain": "news",
+                "document_id": "doc-1",
+                "segment_id": 7,
+                "is_bad_source": False,
+                "source": "Good morning",
+                "target": "ohayo gozaimasu",
+            },
+            "rwkv_skills:wmt24pp_ja_JP",
+        )
+
+        self.assertEqual(doc.query, "English phrase: Good morning\nJapanese phrase:")
+        self.assertEqual(doc.choices, ["ohayo gozaimasu"])
+        self.assertIn("Translate English to Japanese", doc.instruction)
+        self.assertEqual(doc.specific["segment_id"], 7)
 
     def test_rwkv_skills_comp_math_static_data_is_packaged(self) -> None:
         data_file = ROOT / "benchmarks/lighteval_data/comp_math_24_25/test.jsonl"

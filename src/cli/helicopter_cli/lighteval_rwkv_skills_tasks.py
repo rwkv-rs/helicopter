@@ -112,6 +112,14 @@ HF_MMMLU_TASKS = {
     "mmmlu_zh": "ZH_CN",
 }
 
+WMT24PP_TARGET_LANGUAGES = {
+    "de_DE": "German",
+    "es_MX": "Spanish",
+    "fr_FR": "French",
+    "it_IT": "Italian",
+    "ja_JP": "Japanese",
+}
+
 MATH_PROMPT_TEMPLATE = """
 Solve the following math problem step by step. The last line of your
 response should be of the form "ANSWER: $ANSWER" (without quotes)
@@ -311,6 +319,25 @@ def mmmlu_prompt(line: dict, task_name: str | None = None) -> Doc:
     )
 
 
+def wmt24pp_prompt(line: dict, task_name: str | None = None) -> Doc:
+    target_language = str(line.get("lp") or "").split("-", 1)[-1]
+    target_name = WMT24PP_TARGET_LANGUAGES.get(target_language, target_language)
+    return Doc(
+        task_name=task_name,
+        query=f"English phrase: {str(line['source']).rstrip()}\n{target_name} phrase:",
+        choices=[str(line["target"]).rstrip()],
+        gold_index=0,
+        instruction=f"Translate English to {target_name}, do not explain, only output the translation.",
+        specific={
+            "lp": line.get("lp"),
+            "domain": line.get("domain"),
+            "document_id": line.get("document_id"),
+            "segment_id": line.get("segment_id"),
+            "is_bad_source": line.get("is_bad_source"),
+        },
+    )
+
+
 def answer_judge_prompt(line: dict, task_name: str | None = None) -> Doc | None:
     mean_score = _mean_annotation_score(line.get("annotations"))
     if mean_score is None:
@@ -467,6 +494,23 @@ def _hf_mmmlu_task(name: str, subset: str) -> LightevalTaskConfig:
     )
 
 
+def _hf_wmt24pp_task(target_language: str) -> LightevalTaskConfig:
+    return LightevalTaskConfig(
+        name=f"rwkv_skills:wmt24pp_{target_language}",
+        prompt_function=wmt24pp_prompt,
+        hf_repo="google/wmt24pp",
+        hf_subset=f"en-{target_language}",
+        hf_avail_splits=["train"],
+        evaluation_splits=["train"],
+        few_shots_split=None,
+        few_shots_select=None,
+        generation_size=None,
+        metrics=[Metrics.bleu, Metrics.chrf, Metrics.ter],
+        stop_sequence=["\n"],
+        version=0,
+    )
+
+
 TASKS_TABLE = [
     *[_hf_math_task(name, task) for name, task in HF_MATH_TASKS.items()],
     _hf_answer_judge_task(),
@@ -474,4 +518,5 @@ TASKS_TABLE = [
     *[_hf_polymath_task(language) for language in HF_POLYMATH_LANGUAGES],
     *[_hf_multiple_choice_task(name, task) for name, task in HF_MULTIPLE_CHOICE_TASKS.items()],
     *[_hf_mmmlu_task(name, subset) for name, subset in HF_MMMLU_TASKS.items()],
+    *[_hf_wmt24pp_task(target_language) for target_language in WMT24PP_TARGET_LANGUAGES],
 ]

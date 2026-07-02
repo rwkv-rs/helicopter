@@ -297,8 +297,14 @@ lighteval_tasks = ["ifeval"]
 
 [benchmarks.wmt24pp]
 field = "instruction_following"
-status = "needs_adapter"
-reason = "No direct WMT24++ task was found in the current LightEval registry snapshot."
+status = "direct"
+lighteval_tasks = [
+  "rwkv_skills:wmt24pp_de_DE",
+  "rwkv_skills:wmt24pp_es_MX",
+  "rwkv_skills:wmt24pp_fr_FR",
+  "rwkv_skills:wmt24pp_it_IT",
+  "rwkv_skills:wmt24pp_ja_JP",
+]
 
 [benchmarks.ceval]
 field = "knowledge"
