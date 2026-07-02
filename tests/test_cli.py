@@ -1132,7 +1132,89 @@ class CommandPlanTests(unittest.TestCase):
                 "scoreboard_dataset": "longcodeqa_test_limit3",
                 "job_name": "function_longcodebench",
                 "job_id": "helicopter-longcodeqa",
+                "prompt_max_chars": 8192,
             },
+        )
+
+    def test_run_catalog_longcodeqa_dry_run_supports_sample_size(self) -> None:
+        args = Namespace(
+            dry_run=True,
+            benchmark="longcodeqa",
+            base_url=None,
+            model=None,
+            limit=None,
+            sample_size=3,
+            sample_seed=7,
+        )
+
+        with mock.patch.object(cli_main, "print_json") as print_json:
+            rc = cli_main.handle_eval_run_catalog(args, root=ROOT)
+
+        self.assertEqual(rc, 0)
+        payload = print_json.call_args.args[0]
+        self.assertEqual(payload["scoreboard_dataset"], "longcodeqa_test_sample3_seed7")
+        self.assertEqual(payload["sample_size"], 3)
+        self.assertEqual(payload["sample_seed"], 7)
+
+    def test_longcodeqa_random_sampling_is_deterministic_and_traceable(self) -> None:
+        run_config = longcodeqa.LongCodeQARunConfig(
+            base_url="http://127.0.0.1:29082",
+            model="rwkv7-g1d-0.4b-20260210-ctx8192",
+            sample_size=3,
+            sample_seed=7,
+            source_path="/tmp/longcodeqa-test.zip",
+        )
+        rows = [
+            {
+                "task_id": f"task-{index}",
+                "prompt": "Question\nA) no\nB) yes",
+                "question": "A) no\nB) yes",
+                "answer": "B",
+                "repo": "repo",
+                "context_bucket": "8K",
+                "context_size": 8192,
+                "_source_path": "archive:8K.json",
+                "_source_index": index,
+            }
+            for index in range(10)
+        ]
+
+        with mock.patch.object(longcodeqa, "_iter_source_rows", return_value=iter(rows)):
+            samples = longcodeqa.load_samples(run_config)
+
+        self.assertEqual([sample.sample_index for sample in samples], [0, 1, 2])
+        self.assertEqual([sample.metadata["original_sample_index"] for sample in samples], [2, 5, 6])
+        self.assertEqual([sample.metadata["source_id"] for sample in samples], ["task-2", "task-5", "task-6"])
+        self.assertEqual([sample.metadata["source_index"] for sample in samples], [2, 5, 6])
+        self.assertEqual(longcodeqa.scoreboard_dataset_name(run_config), "longcodeqa_test_sample3_seed7")
+
+    def test_longcodeqa_sample_size_above_source_total_keeps_full_dataset_name(self) -> None:
+        run_config = longcodeqa.LongCodeQARunConfig(
+            base_url="http://127.0.0.1:29082",
+            model="rwkv7-g1d-0.4b-20260210-ctx8192",
+            sample_size=500,
+            sample_seed=42,
+            scoreboard_dataset="longcodeqa_test",
+            source_path="/tmp/longcodeqa-test.zip",
+        )
+        rows = [
+            {
+                "task_id": f"task-{index}",
+                "prompt": "Question\nA) no\nB) yes",
+                "question": "A) no\nB) yes",
+                "answer": "B",
+            }
+            for index in range(3)
+        ]
+
+        with mock.patch.object(longcodeqa, "_iter_source_rows", return_value=iter(rows)):
+            loaded = longcodeqa._load_samples(run_config)
+
+        self.assertFalse(loaded.sample_applied)
+        self.assertEqual(len(loaded.samples), 3)
+        self.assertEqual(
+            longcodeqa.scoreboard_dataset_name(run_config, sample_applied=loaded.sample_applied),
+            "longcodeqa_test",
         )
 
     def test_longcodeqa_normalizes_json_and_plain_answers(self) -> None:
@@ -1147,6 +1229,23 @@ class CommandPlanTests(unittest.TestCase):
             correct_letter="B",
         )
         self.assertEqual(longcodeqa.evaluate_completion(sample, "B"), ("B", True))
+
+    def test_longcodeqa_build_prompt_truncates_long_context(self) -> None:
+        sample = longcodeqa.LongCodeQASample(
+            sample_index=0,
+            task_id="toy",
+            prompt="Repository: " + ("x" * 2000) + "\nQuestion\nA) no\nB) yes",
+            repo_text="x" * 2000,
+            question="A) no\nB) yes",
+            correct_letter="B",
+        )
+
+        prompt = longcodeqa.build_prompt(sample, prompt_max_chars=512)
+
+        self.assertLessEqual(len(prompt), 512)
+        self.assertIn("Allowed letters: A, B", prompt)
+        self.assertIn("B) yes", prompt)
+        self.assertIn("middle truncated", prompt)
 
     def test_run_catalog_longbench_qa_dry_run_uses_runner(self) -> None:
         args = Namespace(
