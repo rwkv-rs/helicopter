@@ -13,7 +13,7 @@ from unittest import mock
 
 from lighteval.models.model_output import ModelResponse
 
-from helicopter_cli import commands, config, env, lighteval_rwkv_skills_tasks, lighteval_tasks
+from helicopter_cli import commands, config, env, lighteval_export, lighteval_rwkv_skills_tasks, lighteval_tasks
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -614,6 +614,11 @@ class CommandPlanTests(unittest.TestCase):
                 "omni_math",
                 "polymath",
                 "svamp",
+                "swe_bench",
+                "swe_bench_lite",
+                "swe_bench_verified",
+                "swe_bench_lite_oracle",
+                "swe_bench_lite_bm25_13k",
                 "supergpqa",
                 "wmt24pp",
             }.issubset({task.name for task in lighteval_rwkv_skills_tasks.TASKS_TABLE})
@@ -1225,6 +1230,58 @@ class CommandPlanTests(unittest.TestCase):
             ),
             1.0,
         )
+
+    def test_swebench_prompt_scores_gold_patch_and_strips_context_patch(self) -> None:
+        patch = "--- a/example.py\n+++ b/example.py\n@@ -1 +1 @@\n-old\n+new\n"
+        doc = lighteval_rwkv_skills_tasks.swebench_prompt(
+            {
+                "instance_id": "repo__project-1",
+                "repo": "repo/project",
+                "base_commit": "abc123",
+                "problem_statement": "Fix the example bug.",
+                "hints_text": "Look at example.py.",
+                "text": f"Relevant context before patch.\n<patch>\n{patch}</patch>\nDo not leak this.",
+                "patch": f"<patch>\n{patch}</patch>",
+            },
+            "swe_bench_lite_oracle",
+        )
+
+        self.assertIsNotNone(doc)
+        assert doc is not None
+        self.assertIn("SWE-bench", doc.query)
+        self.assertIn("Relevant context before patch.", doc.query)
+        self.assertNotIn("<patch>", doc.query)
+        self.assertNotIn("-old", doc.query)
+        self.assertEqual(doc.specific["sample_id"], "repo__project-1")
+        self.assertEqual(doc.specific["harness_dataset_name"], "princeton-nlp/SWE-bench_Lite")
+
+        f1 = lighteval_rwkv_skills_tasks.SweBenchPatchF1()
+        nonempty = lighteval_rwkv_skills_tasks.SweBenchPatchNonEmpty()
+        response = ModelResponse(text=[f"```diff\n{patch}```"])
+        self.assertEqual(f1.compute(response, doc), 1.0)
+        self.assertEqual(nonempty.compute(response, doc), 1.0)
+        self.assertEqual(nonempty.compute(ModelResponse(text=["I cannot produce a patch."]), doc), 0.0)
+
+    def test_lighteval_export_prefers_specific_sample_id(self) -> None:
+        row = lighteval_export.export_rows_from_frame(
+            [
+                {
+                    "doc": {
+                        "id": "doc-id",
+                        "task_name": "swe_bench_lite|0",
+                        "query": "Patch:",
+                        "choices": [""],
+                        "gold_index": 0,
+                        "specific": {"sample_id": "repo__project-1"},
+                    },
+                    "metric": {"swebench_patch_nonempty": 1.0},
+                    "model_response": {"text": ["--- a/x\n+++ b/x\n"]},
+                }
+            ]
+        )[0]
+
+        self.assertEqual(row["sample_id"], "repo__project-1")
+        self.assertTrue(row["is_correct"])
 
     def test_free_answer_prompt_normalizes_numeric_answers(self) -> None:
         doc = lighteval_rwkv_skills_tasks.free_answer_prompt(

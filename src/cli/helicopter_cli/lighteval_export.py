@@ -60,24 +60,19 @@ def is_correct(metric: dict[str, Any]) -> bool | None:
     return any(value > 0 for value in numeric_values)
 
 
-def export_rows(details_path: Path) -> list[dict[str, Any]]:
-    try:
-        import pandas as pd
-    except ImportError as exc:
-        raise SystemExit("pandas and pyarrow are required; run with `uv run --group eval`") from exc
-
-    frame = pd.read_parquet(details_path)
+def export_rows_from_frame(frame: Any) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for sample_index, row in frame.iterrows():
+    iterator = frame.iterrows() if hasattr(frame, "iterrows") else enumerate(frame)
+    for sample_index, row in iterator:
         doc = jsonable(row.get("doc") or {})
         metric = jsonable(row.get("metric") or {})
         response = jsonable(row.get("model_response") or {})
         specific = doc.get("specific") if isinstance(doc.get("specific"), dict) else {}
         rows.append(
             {
-                "details_path": str(details_path),
+                "details_path": "",
                 "sample_index": int(sample_index),
-                "sample_id": doc.get("id"),
+                "sample_id": specific.get("sample_id") or doc.get("id"),
                 "task_name": doc.get("task_name"),
                 "is_correct": is_correct(metric),
                 "metric": metric,
@@ -91,6 +86,19 @@ def export_rows(details_path: Path) -> list[dict[str, Any]]:
                 "input": response.get("input"),
             }
         )
+    return rows
+
+
+def export_rows(details_path: Path) -> list[dict[str, Any]]:
+    try:
+        import pandas as pd
+    except ImportError as exc:
+        raise SystemExit("pandas and pyarrow are required; run with `uv run --group eval`") from exc
+
+    frame = pd.read_parquet(details_path)
+    rows = export_rows_from_frame(frame)
+    for row in rows:
+        row["details_path"] = str(details_path)
     return rows
 
 
