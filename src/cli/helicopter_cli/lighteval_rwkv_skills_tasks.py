@@ -21,6 +21,7 @@ import sys
 import tempfile
 import traceback
 import unicodedata
+import urllib.request
 from collections import Counter, defaultdict
 from pathlib import Path
 from string import ascii_uppercase
@@ -263,6 +264,15 @@ TOOLALPACA_TASKS = {
 }
 TOOLALPACA_MAX_TOOL_DESCRIPTION_CHARS = 700
 TOOLALPACA_MAX_TOOL_SCHEMA_CHARS = 1_200
+COMPLEXFUNCBENCH_LIGHTEVAL_DATASET = "rwkv_skills_complexfuncbench"
+COMPLEXFUNCBENCH_HF_URL = "https://huggingface.co/datasets/zai-org/ComplexFuncBench/resolve/main/ComplexFuncBench.jsonl"
+COMPLEXFUNCBENCH_TASKS = {
+    "complexfuncbench_official": {"max_rows_env": "RWKV_LIGHTEVAL_COMPLEXFUNCBENCH_OFFICIAL_MAX_ROWS"},
+    "complexfuncbench_subset": {"max_rows_env": "RWKV_LIGHTEVAL_COMPLEXFUNCBENCH_SUBSET_MAX_ROWS"},
+}
+COMPLEXFUNCBENCH_DEFAULT_SUBSET_ROWS = 100
+COMPLEXFUNCBENCH_MAX_TOOL_DESCRIPTION_CHARS = 700
+COMPLEXFUNCBENCH_MAX_TOOL_SCHEMA_CHARS = 1_200
 _TOOLALPACA_REF_KEY = "__toolalpaca_ref__"
 _TOOLALPACA_OPTIONAL_KEY = "__toolalpaca_optional__"
 _TOOLALPACA_AUTH_PARAMS_BY_API = {
@@ -4124,6 +4134,402 @@ TOOLALPACA_ACCURACY = SampleLevelMetric(
 )
 
 
+def _complexfuncbench_source_candidates() -> tuple[Path, ...]:
+    candidates: list[Path] = []
+    for raw in (
+        os.environ.get("RWKV_LIGHTEVAL_COMPLEXFUNCBENCH_SOURCE"),
+        os.environ.get("RWKV_COMPLEXFUNCBENCH_SOURCE"),
+        os.environ.get("RWKV_COMPLEXFUNC_SOURCE"),
+        os.environ.get("COMPLEXFUNCBENCH_SOURCE"),
+    ):
+        if raw:
+            candidates.append(Path(raw).expanduser())
+    repo_root = Path(__file__).resolve().parents[3]
+    candidates.extend(
+        [
+            repo_root / "references" / "ComplexFuncBench" / "data" / "ComplexFuncBench.jsonl",
+            repo_root / "references" / "ComplexFuncBench" / "ComplexFuncBench.jsonl",
+            repo_root.parent / "ComplexFuncBench" / "data" / "ComplexFuncBench.jsonl",
+            repo_root.parent / "ComplexFuncBench" / "ComplexFuncBench.jsonl",
+            repo_root / "benchmarks" / "lighteval_data" / "complexfuncbench" / "ComplexFuncBench.jsonl",
+            Path("/tmp/helicopter-complexfuncbench/ComplexFuncBench.jsonl"),
+            Path("/home/chase/GitHub/rwkv-skills/data/cache/complexfuncbench_subset/ComplexFuncBench.jsonl"),
+            Path("/home/chase/GitHub/rwkv-skills/references/ComplexFuncBench/data/ComplexFuncBench.jsonl"),
+            Path("/home/chase/GitHub/rwkv-skills/references/ComplexFuncBench/ComplexFuncBench.jsonl"),
+        ]
+    )
+    return tuple(dict.fromkeys(path.expanduser().resolve() for path in candidates))
+
+
+def _complexfuncbench_source_path() -> Path:
+    for candidate in _complexfuncbench_source_candidates():
+        if candidate.exists():
+            return candidate.resolve()
+    return _download_complexfuncbench_source()
+
+
+def _download_complexfuncbench_source() -> Path:
+    target = Path(os.environ.get("RWKV_LIGHTEVAL_COMPLEXFUNCBENCH_CACHE", "/tmp/helicopter-complexfuncbench")).expanduser().resolve()
+    target.mkdir(parents=True, exist_ok=True)
+    destination = target / "ComplexFuncBench.jsonl"
+    if not destination.exists():
+        urllib.request.urlretrieve(COMPLEXFUNCBENCH_HF_URL, destination)
+    return destination.resolve()
+
+
+def _complexfuncbench_limit(dataset_name: str) -> int:
+    task = COMPLEXFUNCBENCH_TASKS.get(dataset_name)
+    if task is None:
+        raise ValueError(f"unknown ComplexFuncBench dataset: {dataset_name}")
+    raw = os.environ.get(str(task.get("max_rows_env") or ""))
+    if raw is None and dataset_name == "complexfuncbench_subset":
+        raw = os.environ.get("RWKV_LIGHTEVAL_COMPLEXFUNCBENCH_MAX_ROWS", str(COMPLEXFUNCBENCH_DEFAULT_SUBSET_ROWS))
+    elif raw is None:
+        raw = os.environ.get("RWKV_LIGHTEVAL_COMPLEXFUNCBENCH_MAX_ROWS", "0")
+    try:
+        return max(0, int(str(raw).strip()))
+    except ValueError:
+        return 0
+
+
+def _complexfuncbench_expected_turns(conversations: Sequence[Mapping[str, Any]]) -> list[list[dict[str, Any]]]:
+    turns: list[list[dict[str, Any]]] = []
+    for turn in conversations:
+        if "function_call" not in turn:
+            continue
+        calls = _normalize_complexfuncbench_tool_calls(turn.get("function_call"))
+        if calls:
+            turns.append(calls)
+    return turns
+
+
+def _normalize_complexfuncbench_tool_calls(raw: Any) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    for item in _coerce_list(raw):
+        if not isinstance(item, Mapping):
+            continue
+        name = str(item.get("name") or item.get("tool_name") or item.get("function_name") or "").strip()
+        arguments = item.get("arguments")
+        if isinstance(arguments, str):
+            try:
+                parsed = json.loads(arguments)
+                arguments = parsed if isinstance(parsed, Mapping) else {}
+            except json.JSONDecodeError:
+                arguments = {}
+        if not isinstance(arguments, Mapping):
+            arguments = {}
+        if name:
+            calls.append({"name": name, "arguments": dict(arguments)})
+    return calls
+
+
+def _load_complexfuncbench_rows(dataset_name: str) -> list[dict[str, Any]]:
+    if dataset_name not in COMPLEXFUNCBENCH_TASKS:
+        raise ValueError(f"unknown ComplexFuncBench dataset: {dataset_name}")
+    source_path = _complexfuncbench_source_path()
+    limit = _complexfuncbench_limit(dataset_name)
+    rows: list[dict[str, Any]] = []
+    for index, item in enumerate(_read_json_or_jsonl_items(source_path)):
+        if not isinstance(item, Mapping):
+            continue
+        conversations = [dict(turn) for turn in _coerce_list(item.get("conversations")) if isinstance(turn, Mapping)]
+        functions = [dict(tool) for tool in _coerce_list(item.get("functions")) if isinstance(tool, Mapping)]
+        expected_turns = _complexfuncbench_expected_turns(conversations)
+        if not conversations or not functions or not expected_turns:
+            continue
+        official_id = str(item.get("id") or item.get("task_id") or index)
+        instruction = str(conversations[0].get("content") or conversations[0].get("text") or "").strip()
+        if not instruction:
+            continue
+        rows.append(
+            {
+                "task_id": f"{dataset_name}__{official_id}",
+                "instruction": instruction,
+                "tools": [_normalize_tool_schema(tool) for tool in functions],
+                "expected_tool_turns": expected_turns,
+                "metadata": {
+                    "source_format": "official_complexfuncbench",
+                    "official_source": "zai-org/ComplexFuncBench",
+                    "official_id": official_id,
+                    "source_path": str(source_path),
+                    "complexfuncbench_total_turn_num": len(expected_turns),
+                    "complexfuncbench_total_call_num": sum(len(turn) for turn in expected_turns),
+                    "category": item.get("category") or item.get("type") or "",
+                    "direct_lighteval_mode": "golden_function_call_chain",
+                },
+            }
+        )
+        if limit > 0 and len(rows) >= limit:
+            break
+    if not rows:
+        raise ValueError(f"{source_path} did not yield any ComplexFuncBench rows for {dataset_name}")
+    return rows
+
+
+def _load_complexfuncbench_dataset_dict(dataset_name: str):
+    from datasets import Dataset, DatasetDict
+
+    rows: list[dict[str, Any]] = []
+    for row in _load_complexfuncbench_rows(dataset_name):
+        rendered = dict(row)
+        for key in ("tools", "expected_tool_turns", "metadata"):
+            rendered[key] = json.dumps(rendered.get(key) or ([] if key != "metadata" else {}), ensure_ascii=False, sort_keys=True)
+        rows.append(rendered)
+    return DatasetDict({"test": Dataset.from_list(rows)})
+
+
+def _render_complexfuncbench_tool_catalog(tools: Sequence[Mapping[str, Any]]) -> str:
+    rendered_tools: list[dict[str, Any]] = []
+    for tool in tools:
+        parameters = tool.get("parameters")
+        if not isinstance(parameters, Mapping):
+            parameters = {"type": "object", "properties": {}, "required": []}
+        raw_properties = parameters.get("properties")
+        rendered_arguments: Any = dict(raw_properties) if isinstance(raw_properties, Mapping) else dict(parameters)
+        rendered_schema = json.dumps(rendered_arguments, ensure_ascii=False, sort_keys=True)
+        if len(rendered_schema) > COMPLEXFUNCBENCH_MAX_TOOL_SCHEMA_CHARS:
+            rendered_arguments = {
+                "_truncated": True,
+                "preview": _truncate_text(rendered_schema, COMPLEXFUNCBENCH_MAX_TOOL_SCHEMA_CHARS),
+            }
+        rendered_tools.append(
+            {
+                "name": str(tool.get("name") or ""),
+                "description": _truncate_text(_normalize_rwkv_text(tool.get("description")), COMPLEXFUNCBENCH_MAX_TOOL_DESCRIPTION_CHARS),
+                "arguments": rendered_arguments,
+                **(
+                    {"required": list(parameters.get("required") or [])}
+                    if isinstance(parameters.get("required"), list) and parameters.get("required")
+                    else {}
+                ),
+            }
+        )
+    return json.dumps(rendered_tools, ensure_ascii=False, indent=2, sort_keys=False)
+
+
+def _render_complexfuncbench_output_schema() -> str:
+    tool_call_schema = {
+        "type": "object",
+        "required": ["name", "arguments"],
+        "additionalProperties": False,
+        "properties": {"name": {"type": "string"}, "arguments": {"type": "object"}},
+    }
+    return json.dumps(
+        {
+            "type": "object",
+            "required": ["tool_turns"],
+            "properties": {
+                "tool_turns": {
+                    "type": "array",
+                    "items": {"type": "array", "items": tool_call_schema, "minItems": 1},
+                }
+            },
+        },
+        indent=2,
+    )
+
+
+def complexfuncbench_prompt(line: dict, task_name: str | None = None) -> Doc:
+    instruction = _normalize_rwkv_text(line.get("instruction"))
+    tools = _bfcl_json_list_field(line.get("tools"))
+    expected_tool_turns = _bfcl_json_list_field(line.get("expected_tool_turns"))
+    metadata = _bfcl_json_mapping_field(line.get("metadata"))
+    expected_payload = {"tool_turns": expected_tool_turns}
+    system_prompt = "\n".join(
+        [
+            "You are solving a ComplexFuncBench function-calling task from the official dataset.",
+            "Tools:",
+            _render_complexfuncbench_tool_catalog([tool for tool in tools if isinstance(tool, Mapping)]),
+            "Output JSON schema:",
+            _render_complexfuncbench_output_schema(),
+            "Return exactly one JSON object that validates against the schema.",
+            "The value of tool_turns is the complete function-call plan.",
+            "Each inner array is one assistant turn; include every parallel call from that turn in order.",
+            "Each call must use only a listed tool name and an arguments object with final argument values.",
+            "Do not include observations, explanations, markdown, tool schemas, wrapper text, or natural-language final answers.",
+        ]
+    )
+    query = f"System: {system_prompt}\n\nUser: {instruction}\n\nJSON:"
+    return Doc(
+        task_name=task_name,
+        query=query,
+        choices=[json.dumps(expected_payload, ensure_ascii=False, sort_keys=True)],
+        gold_index=0,
+        specific={
+            "task_id": line.get("task_id"),
+            "instruction": instruction,
+            "tools": json.dumps(tools, ensure_ascii=False, sort_keys=True),
+            "expected_tool_turns": json.dumps(expected_tool_turns, ensure_ascii=False, sort_keys=True),
+            "metadata": json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+            "prompt_chars": len(query),
+        },
+    )
+
+
+def _coerce_complexfuncbench_turns(payload: Any) -> list[list[dict[str, Any]]]:
+    if isinstance(payload, Mapping):
+        if "tool_turns" in payload:
+            return _coerce_complexfuncbench_turns(payload.get("tool_turns"))
+        if "turns" in payload:
+            return _coerce_complexfuncbench_turns(payload.get("turns"))
+        if "tool_calls" in payload:
+            return _coerce_complexfuncbench_turns(payload.get("tool_calls"))
+        if "calls" in payload:
+            return _coerce_complexfuncbench_turns(payload.get("calls"))
+        if any(key in payload for key in ("name", "tool_name", "function", "function_call")):
+            return [[_coerce_bfcl_function_call_mapping(payload)]]
+        return []
+    if not isinstance(payload, list):
+        return []
+    if all(isinstance(item, Mapping) for item in payload):
+        return [[_coerce_bfcl_function_call_mapping(item) for item in payload]]
+    turns: list[list[dict[str, Any]]] = []
+    for item in payload:
+        if isinstance(item, list):
+            turn = [_coerce_bfcl_function_call_mapping(call) for call in item if isinstance(call, Mapping)]
+            if turn:
+                turns.append(turn)
+        elif isinstance(item, Mapping):
+            turn = _coerce_complexfuncbench_turns(item)
+            turns.extend(turn)
+    return turns
+
+
+def decode_complexfuncbench_response(response: str) -> list[list[dict[str, Any]]]:
+    candidate = _extract_bfcl_json_value_text(response)
+    try:
+        payload = json.loads(candidate)
+    except json.JSONDecodeError:
+        payload = _literal_from_ast(ast.parse(candidate, mode="eval").body)
+    return _coerce_complexfuncbench_turns(payload)
+
+
+def _canonical_complexfuncbench_call(item: Mapping[str, Any]) -> tuple[str, str]:
+    arguments = item.get("arguments")
+    if not isinstance(arguments, Mapping):
+        arguments = {}
+    return (
+        str(item.get("name") or "").strip(),
+        json.dumps(dict(arguments), ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str),
+    )
+
+
+def _complexfuncbench_flatten(turns: Sequence[Sequence[Mapping[str, Any]]]) -> list[Mapping[str, Any]]:
+    return [call for turn in turns for call in turn]
+
+
+def evaluate_complexfuncbench_turns(
+    record: Mapping[str, Any],
+    decoded_turns: Sequence[Sequence[Mapping[str, Any]]],
+    *,
+    parse_error: str | None = None,
+) -> dict[str, Any]:
+    expected_turns = [
+        [dict(call) for call in turn if isinstance(call, Mapping)]
+        for turn in _bfcl_json_list_field(record.get("expected_tool_turns"))
+        if isinstance(turn, list)
+    ]
+    details: dict[str, Any] = {
+        "execution_mode": "golden_function_call_chain",
+        "expected_tool_turns": expected_turns,
+        "decoded_tool_turns": [[dict(call) for call in turn if isinstance(call, Mapping)] for turn in decoded_turns],
+        "turn_matches": [],
+        "parse_error": parse_error or "",
+    }
+    if parse_error:
+        return {"success_rate": 0.0, "call_accuracy": 0.0, "passed": False, "reason": parse_error, "details": details}
+
+    total_calls = sum(len(turn) for turn in expected_turns)
+    correct_calls = 0
+    failure_bits: list[str] = []
+    for turn_index, expected_turn in enumerate(expected_turns):
+        decoded_turn = list(decoded_turns[turn_index]) if turn_index < len(decoded_turns) else []
+        expected_canonical = [_canonical_complexfuncbench_call(call) for call in expected_turn]
+        decoded_canonical = [_canonical_complexfuncbench_call(call) for call in decoded_turn]
+        turn_ok = expected_canonical == decoded_canonical
+        for call_index, expected_call in enumerate(expected_canonical):
+            if call_index < len(decoded_canonical) and decoded_canonical[call_index] == expected_call:
+                correct_calls += 1
+        if not turn_ok:
+            failure_bits.append(f"turn_{turn_index}:mismatch")
+        details["turn_matches"].append(
+            {
+                "turn_index": turn_index,
+                "ok": turn_ok,
+                "expected_calls": len(expected_turn),
+                "decoded_calls": len(decoded_turn),
+            }
+        )
+
+    if len(decoded_turns) > len(expected_turns):
+        for turn_index in range(len(expected_turns), len(decoded_turns)):
+            failure_bits.append(f"turn_{turn_index}:unexpected_extra_turn")
+            details["turn_matches"].append(
+                {
+                    "turn_index": turn_index,
+                    "ok": False,
+                    "expected_calls": 0,
+                    "decoded_calls": len(decoded_turns[turn_index]),
+                }
+            )
+
+    success = not failure_bits and len(decoded_turns) == len(expected_turns)
+    call_accuracy = correct_calls / total_calls if total_calls else (1.0 if not _complexfuncbench_flatten(decoded_turns) else 0.0)
+    return {
+        "success_rate": 1.0 if success else 0.0,
+        "call_accuracy": float(call_accuracy),
+        "passed": bool(success),
+        "reason": "; ".join(failure_bits),
+        "details": details,
+    }
+
+
+class ComplexFuncBenchSuccessRate(SampleLevelComputation):
+    def compute(self, doc: Doc, model_response, **kwargs) -> float:
+        record = dict(doc.specific or {})
+        for prediction in model_response.final_text:
+            try:
+                decoded_turns = decode_complexfuncbench_response(prediction)
+                result = evaluate_complexfuncbench_turns(record, decoded_turns)
+            except Exception:
+                continue
+            if float(result.get("success_rate") or 0.0) > 0:
+                return 1.0
+        return 0.0
+
+
+class ComplexFuncBenchCallAccuracy(SampleLevelComputation):
+    def compute(self, doc: Doc, model_response, **kwargs) -> float:
+        record = dict(doc.specific or {})
+        best = 0.0
+        for prediction in model_response.final_text:
+            try:
+                decoded_turns = decode_complexfuncbench_response(prediction)
+                result = evaluate_complexfuncbench_turns(record, decoded_turns)
+            except Exception:
+                continue
+            best = max(best, float(result.get("call_accuracy") or 0.0))
+        return best
+
+
+COMPLEXFUNCBENCH_SUCCESS_RATE = SampleLevelMetric(
+    metric_name="complexfuncbench_success_rate",
+    sample_level_fn=ComplexFuncBenchSuccessRate(),
+    category=SamplingMethod.GENERATIVE,
+    corpus_level_fn=_mean,
+    higher_is_better=True,
+)
+
+
+COMPLEXFUNCBENCH_CALL_ACCURACY = SampleLevelMetric(
+    metric_name="complexfuncbench_call_accuracy",
+    sample_level_fn=ComplexFuncBenchCallAccuracy(),
+    category=SamplingMethod.GENERATIVE,
+    corpus_level_fn=_mean,
+    higher_is_better=True,
+)
+
+
 def _install_longcodeqa_data_files_patch() -> None:
     """Scope LightEval 0.13 dataset patches to custom rwkv-skills datasets."""
 
@@ -4165,6 +4571,11 @@ def _install_longcodeqa_data_files_patch() -> None:
             if dataset_name is None and len(args) > 1:
                 dataset_name = args[1]
             return _load_toolalpaca_dataset_dict(str(dataset_name or ""))
+        if path == COMPLEXFUNCBENCH_LIGHTEVAL_DATASET:
+            dataset_name = kwargs.get("name")
+            if dataset_name is None and len(args) > 1:
+                dataset_name = args[1]
+            return _load_complexfuncbench_dataset_dict(str(dataset_name or ""))
         return original_load_dataset(*args, **kwargs)
 
     patched_load_dataset._helicopter_rwkv_skills_patch = True  # type: ignore[attr-defined]
@@ -4928,6 +5339,23 @@ def _hf_toolalpaca_task(name: str) -> LightevalTaskConfig:
     )
 
 
+def _hf_complexfuncbench_task(name: str) -> LightevalTaskConfig:
+    return LightevalTaskConfig(
+        name=f"rwkv_skills:{name}",
+        prompt_function=complexfuncbench_prompt,
+        hf_repo=COMPLEXFUNCBENCH_LIGHTEVAL_DATASET,
+        hf_subset=name,
+        hf_avail_splits=["test"],
+        evaluation_splits=["test"],
+        few_shots_split=None,
+        few_shots_select=None,
+        generation_size=2048,
+        metrics=[COMPLEXFUNCBENCH_SUCCESS_RATE, COMPLEXFUNCBENCH_CALL_ACCURACY],
+        stop_sequence=["\nUser:", "\nSystem:", "\nAssistant:"],
+        version=0,
+    )
+
+
 _install_longcodeqa_data_files_patch()
 
 
@@ -4949,6 +5377,7 @@ TASKS_TABLE = [
     *[_hf_bfcl_exec_task(name) for name in BFCL_EXEC_TASKS],
     *[_hf_apibank_task(name) for name in APIBANK_TASKS],
     *[_hf_toolalpaca_task(name) for name in TOOLALPACA_TASKS],
+    *[_hf_complexfuncbench_task(name) for name in COMPLEXFUNCBENCH_TASKS],
     *[_hf_math_task(name, task) for name, task in HF_MATH_TASKS.items()],
     _hf_answer_judge_task(),
     _hf_svamp_task(),

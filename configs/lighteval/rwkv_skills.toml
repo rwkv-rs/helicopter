@@ -156,13 +156,13 @@ reason = "No direct Chinese BrowseComp task was found in the current LightEval r
 
 [benchmarks.complexfuncbench_official]
 field = "function_calling"
-status = "needs_adapter"
-reason = "ComplexFuncBench requires a function-calling custom task adapter."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:complexfuncbench_official"]
 
 [benchmarks.complexfuncbench_subset]
 field = "function_calling"
-status = "needs_adapter"
-reason = "ComplexFuncBench requires a function-calling custom task adapter."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:complexfuncbench_subset"]
 
 [benchmarks.longbench]
 field = "function_calling"
