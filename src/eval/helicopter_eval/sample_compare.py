@@ -175,25 +175,34 @@ def result_identity(
     row: Mapping[str, Any],
     *,
     index: int,
+    manifest_by_source_sample_index: Mapping[str, str],
+    manifest_by_source_id: Mapping[str, str],
     manifest_by_sample_index: Mapping[int, str],
     manifest_by_order: Mapping[int, str],
 ) -> str:
+    for key in ("sample_sha256", "source_id"):
+        value = row.get(key)
+        if value not in (None, ""):
+            return f"{key}:{value}"
+    metadata = row.get("metadata")
+    if isinstance(metadata, Mapping):
+        for key in ("source_id", "task_id", "id", "instance_id"):
+            value = metadata.get(key)
+            if value not in (None, "") and str(value) in manifest_by_source_id:
+                return manifest_by_source_id[str(value)]
+        for key in ("original_sample_index", "dataset_sample_index", "source_index"):
+            value = metadata.get(key)
+            if value is not None and str(value) in manifest_by_source_sample_index:
+                return manifest_by_source_sample_index[str(value)]
     sample_index = row.get("sample_index")
     if _int_like(sample_index) and int(sample_index) in manifest_by_sample_index:
         return manifest_by_sample_index[int(sample_index)]
     sample_order = row.get("sample_order")
     if _int_like(sample_order) and int(sample_order) in manifest_by_order:
         return manifest_by_order[int(sample_order)]
-    for key in ("sample_sha256", "task_id", "source_id"):
-        value = row.get(key)
-        if value not in (None, ""):
-            return f"{key}:{value}"
-    metadata = row.get("metadata")
-    if isinstance(metadata, Mapping):
-        for key in ("source_id", "task_id"):
-            value = metadata.get(key)
-            if value not in (None, ""):
-                return f"{key}:{value}"
+    task_id = row.get("task_id")
+    if task_id not in (None, "") and not _int_like(task_id):
+        return f"task_id:{task_id}"
     return f"result_order:{index}"
 
 
@@ -201,6 +210,24 @@ def _results_by_manifest_key(
     results: Sequence[Mapping[str, Any]],
     manifest: Sequence[Mapping[str, Any]],
 ) -> dict[str, Mapping[str, Any]]:
+    manifest_by_source_sample_index = {
+        str(row["source_sample_index"]): manifest_identity(row, index=index)
+        for index, row in enumerate(manifest)
+        if row.get("source_sample_index") is not None
+    }
+    manifest_by_source_id: dict[str, str] = {}
+    for index, row in enumerate(manifest):
+        identity = manifest_identity(row, index=index)
+        for key in ("task_id", "source_id"):
+            value = row.get(key)
+            if value not in (None, ""):
+                manifest_by_source_id[str(value)] = identity
+        metadata = row.get("metadata")
+        if isinstance(metadata, Mapping):
+            for key in ("source_id", "task_id", "id", "instance_id"):
+                value = metadata.get(key)
+                if value not in (None, ""):
+                    manifest_by_source_id[str(value)] = identity
     manifest_by_sample_index = {
         int(row["sample_index"]): manifest_identity(row, index=index)
         for index, row in enumerate(manifest)
@@ -216,6 +243,8 @@ def _results_by_manifest_key(
         key = result_identity(
             row,
             index=index,
+            manifest_by_source_sample_index=manifest_by_source_sample_index,
+            manifest_by_source_id=manifest_by_source_id,
             manifest_by_sample_index=manifest_by_sample_index,
             manifest_by_order=manifest_by_order,
         )

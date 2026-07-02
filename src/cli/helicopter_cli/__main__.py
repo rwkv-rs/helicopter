@@ -288,6 +288,19 @@ def handle_eval_compare_samples(args: argparse.Namespace, **_: Any) -> int:
     return 0
 
 
+def handle_eval_export_results(args: argparse.Namespace, *, root: Any, **_: Any) -> int:
+    from helicopter_eval.scoreboard_export import export_scoreboard_task_results
+
+    payload = export_scoreboard_task_results(
+        task_id=int(args.task_id),
+        output_path=args.output,
+        repo_root=root,
+        include_context=not bool(args.no_context),
+    )
+    print_json(payload)
+    return 0
+
+
 def handle_eval_run_free_response(args: argparse.Namespace, *, root: Any, **_: Any) -> int:
     from helicopter_eval.free_response import FreeResponseRunConfig, dry_run_summary, run_free_response
 
@@ -417,6 +430,15 @@ def build_parser() -> argparse.ArgumentParser:
     eval_compare_samples.add_argument("--candidate-results")
     eval_compare_samples.add_argument("--max-examples", type=int, default=20)
     eval_compare_samples.set_defaults(handler=handle_eval_compare_samples)
+
+    eval_export_results = eval_subparsers.add_parser(
+        "export-results",
+        help="export a scoreboard task's eval rows to JSONL",
+    )
+    eval_export_results.add_argument("--task-id", required=True, type=int)
+    eval_export_results.add_argument("--output", required=True)
+    eval_export_results.add_argument("--no-context", action="store_true", help="omit prompt/completion context fields")
+    eval_export_results.set_defaults(handler=handle_eval_export_results)
 
     eval_run = eval_subparsers.add_parser("run", help="run a implemented benchmark and write scoreboard DB rows")
     add_common_options(eval_run)

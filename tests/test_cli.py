@@ -33,6 +33,7 @@ from helicopter_eval import (
     multiple_choice,
     openai_client,
     sample_compare,
+    scoreboard_export,
     swe_bench,
     tau_bench,
     toolalpaca,
@@ -1676,6 +1677,38 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(payload["results"]["candidate_only_passed"], 1)
         self.assertEqual(payload["results"]["pass_disagreements"], 2)
 
+    def test_compare_results_prefers_source_identity_over_sample_index(self) -> None:
+        manifest_rows = [
+            {"sample_index": 0, "source_sample_index": 308, "sample_sha256": "source-308"},
+            {"sample_index": 1, "source_sample_index": 663, "sample_sha256": "source-663"},
+        ]
+        baseline_results = [
+            {
+                "sample_index": 0,
+                "metadata": {"original_sample_index": 663},
+                "is_passed": True,
+            }
+        ]
+        candidate_results = [
+            {
+                "sample_index": 1,
+                "metadata": {"original_sample_index": 663},
+                "is_passed": True,
+            }
+        ]
+
+        payload = sample_compare.compare_results(
+            manifest_rows,
+            manifest_rows,
+            baseline_results,
+            candidate_results,
+        )
+
+        self.assertEqual(payload["matched"], 1)
+        self.assertEqual(payload["both_passed"], 1)
+        self.assertEqual(payload["missing_in_candidate_count"], 0)
+        self.assertEqual(payload["extra_in_candidate_count"], 0)
+
     def test_compare_samples_cli_outputs_manifest_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1699,6 +1732,50 @@ class CommandPlanTests(unittest.TestCase):
         payload = print_json.call_args.args[0]
         self.assertTrue(payload["manifest"]["same_order"])
         self.assertEqual(payload["manifest"]["baseline_total"], 1)
+
+    def test_export_eval_record_row_flattens_scoreboard_context(self) -> None:
+        row = {
+            "sample_index": 2,
+            "repeat_index": 0,
+            "pass_index": 0,
+            "answer": "42",
+            "ref_answer": "43",
+            "is_passed": False,
+            "fail_reason": "expected 43, got 42",
+            "context": {
+                "stages": [{"prompt": "Question?", "completion": "Answer.", "stop_reason": "stop"}],
+                "metadata": {"original_sample_index": 99, "source_id": "case-99"},
+                "sampling_config": {"answer": {"temperature": 0.0}},
+            },
+        }
+
+        payload = scoreboard_export.export_eval_record_row(row, task_id=62)
+
+        self.assertEqual(payload["task_id"], 62)
+        self.assertEqual(payload["sample_index"], 2)
+        self.assertEqual(payload["reference_answer"], "43")
+        self.assertFalse(payload["is_passed"])
+        self.assertEqual(payload["prompt"], "Question?")
+        self.assertEqual(payload["completion"], "Answer.")
+        self.assertEqual(payload["metadata"]["original_sample_index"], 99)
+        self.assertEqual(payload["sampling_config"]["answer"]["temperature"], 0.0)
+
+    def test_export_results_cli_calls_scoreboard_export(self) -> None:
+        args = Namespace(task_id=62, output="/tmp/task62.jsonl", no_context=True)
+        expected = {"task_id": 62, "output_path": "/tmp/task62.jsonl", "total": 1}
+
+        with mock.patch.object(cli_main, "print_json") as print_json:
+            with mock.patch.object(scoreboard_export, "export_scoreboard_task_results", return_value=expected) as export:
+                rc = cli_main.handle_eval_export_results(args, root=ROOT)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(print_json.call_args.args[0], expected)
+        export.assert_called_once_with(
+            task_id=62,
+            output_path="/tmp/task62.jsonl",
+            repo_root=ROOT,
+            include_context=False,
+        )
 
     def test_longbench_prompt_preserves_rwkv_skills_line_breaks(self) -> None:
         sample = longbench.LongBenchSample(
