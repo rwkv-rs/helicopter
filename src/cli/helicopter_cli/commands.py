@@ -359,12 +359,20 @@ def build_lighteval_tasks_plan(
     python = python_executable(config, root=root, env=env)
     custom_tasks = lighteval_path_arg(getattr(args, "custom_tasks", None), root=root, env=env)
 
-    if args.task_action == "export":
-        command = [python, "-m", "helicopter_cli.lighteval_tasks", "export"]
+    if args.task_action in {"export", "coverage"}:
+        command = [python, "-m", "helicopter_cli.lighteval_tasks", args.task_action]
         append_cli_flag(command, "--load-multilingual", getattr(args, "load_tasks_multilingual", None))
         append_cli_option(command, "--custom-tasks", custom_tasks)
         append_cli_option(command, "--output", getattr(args, "output", None))
         append_cli_option(command, "--format", getattr(args, "format", None))
+        if args.task_action == "coverage":
+            append_cli_option(
+                command,
+                "--source",
+                lighteval_path_arg(getattr(args, "source", None), root=root, env=env),
+            )
+            append_cli_option(command, "--source-format", getattr(args, "source_format", None))
+            append_cli_option(command, "--candidate-limit", getattr(args, "candidate_limit", None))
         for pattern in getattr(args, "contains", None) or []:
             append_cli_option(command, "--contains", pattern, optional=False)
         append_cli_option(command, "--limit", getattr(args, "limit", None))

@@ -98,6 +98,9 @@ def lighteval_tasks_args(**overrides: object) -> Namespace:
         "contains": None,
         "limit": None,
         "include_supersets": None,
+        "source": None,
+        "source_format": "auto",
+        "candidate_limit": 5,
     }
     values.update(overrides)
     return Namespace(**values)
@@ -429,6 +432,84 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(
             lighteval_tasks.format_export(rows, "jsonl"),
             '{"kind": "task", "task": "gsm8k"}\n{"kind": "task", "task": "tiny:gsm8k"}\n',
+        )
+
+    def test_lighteval_tasks_coverage_uses_local_registry_wrapper(self) -> None:
+        loaded_config = load_example_config()
+
+        plan = commands.build_lighteval_tasks_plan(
+            lighteval_tasks_args(
+                task_action="coverage",
+                source="benchmarks.txt",
+                source_format="text",
+                output="tmp/coverage.jsonl",
+                format="jsonl",
+                candidate_limit=7,
+            ),
+            root=ROOT,
+            env={},
+            config=loaded_config,
+        )
+
+        self.assertEqual(plan.command[1:4], ["-m", "helicopter_cli.lighteval_tasks", "coverage"])
+        options = command_options(plan.command)
+        self.assertEqual(options["--source"], str(ROOT / "benchmarks.txt"))
+        self.assertEqual(options["--source-format"], "text")
+        self.assertEqual(options["--output"], "tmp/coverage.jsonl")
+        self.assertEqual(options["--format"], "jsonl")
+        self.assertEqual(options["--candidate-limit"], "7")
+
+    def test_lighteval_tasks_coverage_resolves_registry_rows(self) -> None:
+        class FakeRegistry:
+            _task_registry = {"gpqa:diamond": object(), "gsm8k": object(), "tiny:gsm8k": object()}
+            _task_superset_dict = {"mmlu": ("mmlu:abstract_algebra",)}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "benchmarks.txt"
+            source.write_text("gsm8k,maths\ngpqa_diamond,knowledge\nmmlu,knowledge\nmissing_one,maths\n")
+            with mock.patch.object(lighteval_tasks, "load_registry", return_value=FakeRegistry()):
+                rows = lighteval_tasks.coverage_rows(
+                    Namespace(
+                        custom_tasks=None,
+                        load_multilingual=False,
+                        source=str(source),
+                        source_format="text",
+                        candidate_limit=3,
+                    )
+                )
+
+        self.assertEqual(rows[0].status, "exact_task")
+        self.assertEqual(rows[1].status, "normalized_task")
+        self.assertEqual(rows[1].targets, ("gpqa:diamond",))
+        self.assertEqual(rows[2].status, "exact_superset")
+        self.assertEqual(rows[3].status, "missing")
+        self.assertIn("direct\t3\n", lighteval_tasks.format_coverage(rows, "summary"))
+        self.assertIn("not_direct\t1\n", lighteval_tasks.format_coverage(rows, "summary"))
+
+    def test_lighteval_tasks_loads_rwkv_skills_registry_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "benchmark_registry.py"
+            source.write_text(
+                "\n".join(
+                    [
+                        "_EXPLICIT_METADATA: dict[str, object] = {",
+                        '    canonical_slug("gsm8k"): _math("gsm8k"),',
+                        '    canonical_slug("mmlu"): _knowledge("mmlu"),',
+                        '    canonical_slug("bfcl_v3"): _function_calling("bfcl_v3", scheduler_jobs=()),',
+                        "}",
+                    ]
+                )
+            )
+
+            rows = lighteval_tasks.load_source_benchmarks(str(source), "auto")
+
+        self.assertEqual(
+            rows,
+            [
+                lighteval_tasks.SourceBenchmark(name="gsm8k", field="maths"),
+                lighteval_tasks.SourceBenchmark(name="mmlu", field="knowledge"),
+                lighteval_tasks.SourceBenchmark(name="bfcl_v3", field="function_calling"),
+            ],
         )
 
     def test_lighteval_export_plan_exports_details(self) -> None:
