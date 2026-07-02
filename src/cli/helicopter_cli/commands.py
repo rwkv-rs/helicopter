@@ -304,7 +304,7 @@ def suite_adapter_benchmarks(
     explicit = {name for name in explicit_benchmarks if name}
     for name, entry in entries:
         adapter = str(entry.get("adapter") or "").strip()
-        if adapter in {"swebench", "tau"}:
+        if adapter in {"swebench", "tau", "mcp_bench"}:
             selected.append(name)
             continue
         if name in explicit:
@@ -551,6 +551,14 @@ def build_suite_adapter_plan(
         ("--tau-judge-model", getattr(args, "tau_judge_model", None)),
         ("--tau-judge-base-url", getattr(args, "tau_judge_base_url", None)),
         ("--tau-judge-api-key", getattr(args, "tau_judge_api_key", None)),
+        ("--mcp-bench-root", getattr(args, "mcp_bench_root", None)),
+        ("--mcp-max-rounds", getattr(args, "mcp_max_rounds", None)),
+        ("--mcp-max-errors", getattr(args, "mcp_max_errors", None)),
+        ("--mcp-history-max-chars", getattr(args, "mcp_history_max_chars", None)),
+        ("--mcp-tool-schema-max-chars", getattr(args, "mcp_tool_schema_max_chars", None)),
+        ("--mcp-judge-model", getattr(args, "mcp_judge_model", None)),
+        ("--mcp-judge-base-url", getattr(args, "mcp_judge_base_url", None)),
+        ("--mcp-judge-api-key", getattr(args, "mcp_judge_api_key", None)),
     ):
         append_cli_option(command, option, value)
     append_cli_flag(command, "--swebench-run-harness", getattr(args, "swebench_run_harness", None))

@@ -7,10 +7,12 @@ import random
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
 import uuid
+from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -71,6 +73,23 @@ TAU3_LIGHT_MOCK_TASK_IDS = frozenset(
     }
 )
 
+MCP_BENCH_TASK_FILES: dict[str, tuple[str, ...]] = {
+    "mcp_bench": (
+        "mcpbench_tasks_single_runner_format.json",
+        "mcpbench_tasks_multi_2server_runner_format.json",
+        "mcpbench_tasks_multi_3server_runner_format.json",
+    ),
+    "mcp_bench_single": ("mcpbench_tasks_single_runner_format.json",),
+    "mcp_bench_multi_2server": ("mcpbench_tasks_multi_2server_runner_format.json",),
+    "mcp_bench_multi_3server": ("mcpbench_tasks_multi_3server_runner_format.json",),
+}
+
+MCP_BENCH_PASS_THRESHOLD = 7.0
+MCP_BENCH_DEFAULT_MAX_HISTORY_CHARS = 16000
+MCP_BENCH_DEFAULT_MAX_TOOL_SCHEMA_CHARS = 2000
+MCP_BENCH_DEFAULT_MAX_RESULT_CHARS = 8000
+MCP_BENCH_DEFAULT_MAX_ERROR_CHARS = 2000
+
 
 def _repo_root() -> Path:
     for parent in Path(__file__).resolve().parents:
@@ -103,6 +122,39 @@ class TauAdapterRecord:
     benchmark_version: str
     index: int
     metadata: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class McpBenchTaskSpec:
+    task_id: str
+    task_description: str
+    fuzzy_description: str = ""
+    dependency_analysis: str = ""
+    distraction_servers: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class McpBenchRecord:
+    task_file: str
+    server_name: str
+    combination_name: str
+    combination_type: str
+    servers: tuple[str, ...]
+    task: McpBenchTaskSpec
+    runtime_root: str
+    metadata: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class McpToolCall:
+    full_name: str
+    arguments: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class McpDecision:
+    final_answer: str
+    tool_call: McpToolCall | None
 
 
 @dataclass
@@ -1877,6 +1929,587 @@ def run_tau_adapter(name: str, entry: Mapping[str, Any], args: argparse.Namespac
     return metrics
 
 
+def _resolve_mcp_bench_root(raw_root: str | None = None) -> Path:
+    repo_root = _repo_root()
+    candidates = [
+        raw_root,
+        os.environ.get("HELICOPTER_MCP_BENCH_ROOT"),
+        os.environ.get("MCP_BENCH_ROOT"),
+        str(repo_root / "references/mcp-bench"),
+        "/tmp/mcp-bench",
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        root = Path(str(candidate)).expanduser().resolve()
+        if (root / "mcp_servers" / "commands.json").is_file() and (root / "tasks").is_dir():
+            return root
+    checked = ", ".join(str(item) for item in candidates if item)
+    raise FileNotFoundError(f"MCP-Bench reference checkout not found; checked: {checked}")
+
+
+def load_mcp_bench_records(name: str, entry: Mapping[str, Any], *, mcp_bench_root: str | None = None) -> list[McpBenchRecord]:
+    root = _resolve_mcp_bench_root(mcp_bench_root)
+    task_files = tuple(entry.get("task_files") or MCP_BENCH_TASK_FILES.get(name, ()))
+    if not task_files:
+        raise ValueError(f"{name} is missing MCP-Bench task file mapping")
+    records: list[McpBenchRecord] = []
+    for file_name in task_files:
+        path = root / "tasks" / str(file_name)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        for group in payload.get("server_tasks", []) or []:
+            if not isinstance(group, Mapping):
+                continue
+            servers = tuple(str(item) for item in (group.get("servers") or []) if str(item).strip())
+            for task_payload in group.get("tasks", []) or []:
+                if not isinstance(task_payload, Mapping):
+                    continue
+                task_id = str(task_payload.get("task_id") or "").strip()
+                if not task_id:
+                    continue
+                task = McpBenchTaskSpec(
+                    task_id=task_id,
+                    task_description=str(task_payload.get("task_description") or ""),
+                    fuzzy_description=str(task_payload.get("fuzzy_description") or ""),
+                    dependency_analysis=str(task_payload.get("dependency_analysis") or ""),
+                    distraction_servers=tuple(str(item) for item in (task_payload.get("distraction_servers") or [])),
+                )
+                records.append(
+                    McpBenchRecord(
+                        task_file=str(file_name),
+                        server_name=str(group.get("server_name") or ""),
+                        combination_name=str(group.get("combination_name") or ""),
+                        combination_type=str(group.get("combination_type") or ""),
+                        servers=servers,
+                        task=task,
+                        runtime_root=str(root),
+                        metadata={
+                            "source": "mcp-bench",
+                            "task_file": str(file_name),
+                            "server_name": str(group.get("server_name") or ""),
+                            "combination_name": str(group.get("combination_name") or ""),
+                            "combination_type": str(group.get("combination_type") or ""),
+                            "servers": list(servers),
+                            "mcp_bench_root": str(root),
+                        },
+                    )
+                )
+    return records
+
+
+class McpBenchWorkerClient:
+    def __init__(self, *, runtime_root: str | Path, worker_script: str | Path) -> None:
+        self.runtime_root = Path(runtime_root).expanduser().resolve()
+        self.worker_script = Path(worker_script).expanduser().resolve()
+        python_bin = self.runtime_root / ".venv" / "bin" / "python"
+        if not python_bin.is_file():
+            raise FileNotFoundError(f"missing MCP-Bench runtime python: {python_bin}")
+        if not self.worker_script.is_file():
+            raise FileNotFoundError(f"missing MCP-Bench worker script: {self.worker_script}")
+        self._proc = subprocess.Popen(
+            [str(python_bin), str(self.worker_script), "--runtime-root", str(self.runtime_root)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        self._stderr_lines: deque[str] = deque(maxlen=200)
+        self._stderr_thread = threading.Thread(target=self._drain_stderr, name="McpBenchWorkerStderr", daemon=True)
+        self._stderr_thread.start()
+        self._closed = False
+
+    def open_task(self, record: McpBenchRecord) -> dict[str, Any]:
+        response = self._request("open_task", {"servers": list(record.servers)})
+        tools = response.get("available_tools")
+        if not isinstance(tools, dict):
+            raise RuntimeError("worker returned invalid available_tools payload")
+        return tools
+
+    def call_tool(self, full_tool_name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        response = self._request("call_tool", {"tool_name": full_tool_name, "arguments": dict(arguments)})
+        if not isinstance(response, dict):
+            raise RuntimeError("worker returned invalid tool response")
+        return response
+
+    def evaluate(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        response = self._request("evaluate", {"request": dict(request)})
+        if not isinstance(response, dict):
+            raise RuntimeError("worker returned invalid evaluation payload")
+        return response
+
+    def close_task(self) -> None:
+        if not self._closed:
+            try:
+                self._request("close_task", {})
+            except Exception:  # noqa: BLE001
+                pass
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        try:
+            if self._proc.poll() is None:
+                try:
+                    self._request("shutdown", {})
+                except Exception:  # noqa: BLE001
+                    pass
+        finally:
+            self._closed = True
+            if self._proc.poll() is None:
+                self._proc.terminate()
+                try:
+                    self._proc.wait(timeout=10.0)
+                except subprocess.TimeoutExpired:
+                    self._proc.kill()
+                    self._proc.wait(timeout=5.0)
+
+    def _request(self, action: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        if self._closed and action != "shutdown":
+            raise RuntimeError("worker client already closed")
+        if self._proc.stdin is None or self._proc.stdout is None:
+            raise RuntimeError("worker pipes are unavailable")
+        wire = json.dumps({"action": action, "payload": dict(payload)}, ensure_ascii=False)
+        try:
+            self._proc.stdin.write(wire + "\n")
+            self._proc.stdin.flush()
+        except BrokenPipeError as exc:
+            raise RuntimeError(self._worker_failure_message("worker stdin closed")) from exc
+        while True:
+            line = self._proc.stdout.readline()
+            if not line:
+                raise RuntimeError(self._worker_failure_message("worker stdout closed"))
+            raw = line.strip()
+            if not raw:
+                continue
+            try:
+                response = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(response, Mapping):
+                continue
+            if not response.get("ok", False):
+                raise RuntimeError(self._worker_failure_message(str(response.get("error") or "unknown worker error")))
+            data = response.get("data")
+            return dict(data) if isinstance(data, Mapping) else {}
+
+    def _drain_stderr(self) -> None:
+        if self._proc.stderr is None:
+            return
+        for line in self._proc.stderr:
+            self._stderr_lines.append(line.rstrip("\n"))
+
+    def _worker_failure_message(self, message: str) -> str:
+        stderr = "\n".join(self._stderr_lines)
+        return f"{message}\nworker stderr:\n{stderr}" if stderr else message
+
+
+def _truncate_text(text: Any, max_chars: int) -> str:
+    rendered = str(text or "")
+    if max_chars <= 0 or len(rendered) <= max_chars:
+        return rendered
+    return rendered[: max(0, max_chars - 32)].rstrip() + "\n[truncated]"
+
+
+def _mcp_presented_task(record: McpBenchRecord) -> str:
+    return record.task.fuzzy_description.strip() or record.task.task_description.strip()
+
+
+def _render_mcp_tool_catalog(available_tools: Mapping[str, Any], *, max_schema_chars: int) -> str:
+    rendered: list[dict[str, Any]] = []
+    for full_name, raw_tool in sorted(available_tools.items()):
+        tool = raw_tool if isinstance(raw_tool, Mapping) else {}
+        schema_text = _truncate_text(json.dumps(tool.get("input_schema") or {}, ensure_ascii=False, sort_keys=True), max_schema_chars)
+        rendered.append(
+            {
+                "name": str(full_name),
+                "description": str(tool.get("description") or ""),
+                "input_schema": schema_text,
+            }
+        )
+    return json.dumps(rendered, ensure_ascii=False, indent=2)
+
+
+def _build_mcp_planning_prompt(
+    record: McpBenchRecord,
+    available_tools: Mapping[str, Any],
+    history: str,
+    *,
+    max_history_chars: int,
+    max_tool_schema_chars: int,
+) -> str:
+    history_text = _truncate_text(history, max_history_chars).strip() or "No MCP tool calls have been made yet."
+    return "\n\n".join(
+        [
+            "System: You are an MCP-Bench agent. Use the available MCP tools to solve the task.",
+            "Return exactly one JSON object and no markdown or prose.",
+            'To call a tool, return {"name":"Server:tool_name","arguments":{...}}.',
+            'When the task is complete, return {"name":"final_answer","arguments":{"answer":"..."}}.',
+            "Use only exact tool names from the catalog. Do not invent tool outputs.",
+            "",
+            "Tool catalog:",
+            _render_mcp_tool_catalog(available_tools, max_schema_chars=max_tool_schema_chars),
+            "",
+            "Task:",
+            _mcp_presented_task(record),
+            "",
+            "Tool evidence so far:",
+            history_text,
+            "",
+            "Assistant: ```json\n{",
+        ]
+    )
+
+
+def _parse_mcp_decision(text: str) -> McpDecision:
+    payload = json.loads(_extract_json_object_text(text))
+    if not isinstance(payload, Mapping):
+        raise ValueError("MCP decision must be a JSON object")
+    name = str(
+        payload.get("name")
+        or payload.get("tool_name")
+        or payload.get("tool")
+        or payload.get("Tool name")
+        or payload.get("tool")
+        or ""
+    ).strip()
+    arguments = payload.get("arguments")
+    if not isinstance(arguments, Mapping):
+        arguments = payload.get("parameters")
+    if not isinstance(arguments, Mapping):
+        arguments = payload.get("Tool input")
+    if not isinstance(arguments, Mapping):
+        arguments = payload.get("tool_input")
+    if not isinstance(arguments, Mapping):
+        arguments = {}
+    payload_type = str(payload.get("type") or "").strip().lower()
+    if name in {"final_answer", "answer", "respond"} or payload_type in {"final_answer", "answer", "message"}:
+        answer = str(arguments.get("answer") or payload.get("answer") or payload.get("content") or "").strip()
+        return McpDecision(final_answer=answer, tool_call=None)
+    if not name:
+        raise ValueError("MCP decision missing tool name")
+    return McpDecision(final_answer="", tool_call=McpToolCall(full_name=name, arguments=dict(arguments)))
+
+
+def _normalize_mcp_tool_call(call: McpToolCall, available_tools: Mapping[str, Any]) -> McpToolCall:
+    full_name = call.full_name.strip()
+    if full_name in available_tools:
+        return call
+    if ":" not in full_name:
+        matches = sorted(name for name in available_tools if name.endswith(f":{full_name}"))
+        if len(matches) == 1:
+            return McpToolCall(full_name=matches[0], arguments=dict(call.arguments))
+    raise ValueError(f"planned MCP tool `{full_name}` was not found")
+
+
+def _append_mcp_history(history: str, round_num: int, execution: Mapping[str, Any], *, max_chars: int) -> str:
+    result = _truncate_text(execution.get("result") or "", MCP_BENCH_DEFAULT_MAX_RESULT_CHARS)
+    error = _truncate_text(execution.get("error") or "", MCP_BENCH_DEFAULT_MAX_ERROR_CHARS)
+    params = json.dumps(execution.get("parameters") or {}, ensure_ascii=False, sort_keys=True)
+    if execution.get("success"):
+        line = f"Round {round_num}: {execution.get('tool')} with {params} succeeded. Result: {result}"
+    else:
+        line = f"Round {round_num}: {execution.get('tool')} with {params} failed. Error: {error}"
+    return _truncate_text("\n".join(part for part in (history, line) if part), max_chars)
+
+
+def _mcp_rule_metrics(
+    execution_results: Sequence[Mapping[str, Any]],
+    available_tools: Mapping[str, Any],
+    *,
+    planning_json_compliance: float,
+) -> dict[str, Any]:
+    if not execution_results:
+        return {
+            "input_schema_compliance": None,
+            "valid_tool_name_rate": None,
+            "execution_success_rate": None,
+            "valid_call_failure_rate": None,
+            "planning_json_compliance": planning_json_compliance,
+        }
+    try:
+        import jsonschema
+    except ModuleNotFoundError:  # pragma: no cover
+        jsonschema = None  # type: ignore[assignment]
+    valid_tool_calls = 0
+    schema_compliant_calls = 0
+    successful_executions = 0
+    valid_call_failures = 0
+    for result in execution_results:
+        tool_name = str(result.get("tool") or "")
+        success = bool(result.get("success"))
+        parameters = result.get("parameters") if isinstance(result.get("parameters"), Mapping) else {}
+        tool_info = available_tools.get(tool_name)
+        if isinstance(tool_info, Mapping):
+            valid_tool_calls += 1
+            schema = tool_info.get("input_schema")
+            if not isinstance(schema, Mapping) or jsonschema is None:
+                schema_compliant_calls += 1
+            else:
+                try:
+                    jsonschema.validate(dict(parameters), dict(schema))
+                    schema_compliant_calls += 1
+                except Exception:  # noqa: BLE001
+                    pass
+            if not success:
+                valid_call_failures += 1
+        if success:
+            successful_executions += 1
+    total_calls = len(execution_results)
+    return {
+        "input_schema_compliance": schema_compliant_calls / valid_tool_calls if valid_tool_calls else 0.0,
+        "valid_tool_name_rate": valid_tool_calls / total_calls,
+        "execution_success_rate": successful_executions / total_calls,
+        "valid_call_failure_rate": valid_call_failures / valid_tool_calls if valid_tool_calls else 0.0,
+        "planning_json_compliance": planning_json_compliance,
+    }
+
+
+def _resolve_mcp_judge_config(args: argparse.Namespace) -> dict[str, str] | None:
+    model = _first_value(getattr(args, "mcp_judge_model", None), _first_env("MCP_JUDGE_MODEL", "JUDGE_MODEL"))
+    if not model:
+        return None
+    api_key = _first_value(
+        getattr(args, "mcp_judge_api_key", None),
+        _first_env("MCP_JUDGE_API_KEY", "JUDGE_API_KEY"),
+        getattr(args, "api_key", None),
+    )
+    base_url = _first_value(
+        getattr(args, "mcp_judge_base_url", None),
+        _first_env("MCP_JUDGE_BASE_URL", "JUDGE_BASE_URL"),
+        getattr(args, "base_url", None),
+    )
+    if not api_key or not base_url:
+        raise ValueError("MCP judge requires api key and base url")
+    return {"model": str(model), "api_key": str(api_key), "base_url": str(base_url).rstrip("/")}
+
+
+def _mcp_passed(evaluation: Mapping[str, Any]) -> bool:
+    return (
+        float(evaluation.get("task_completion_score") or 0.0) >= MCP_BENCH_PASS_THRESHOLD
+        and float(evaluation.get("tool_selection_score") or 0.0) >= MCP_BENCH_PASS_THRESHOLD
+        and float(evaluation.get("planning_effectiveness_and_efficiency_score") or 0.0) >= MCP_BENCH_PASS_THRESHOLD
+    )
+
+
+def run_mcp_bench_adapter(name: str, entry: Mapping[str, Any], args: argparse.Namespace, run_root: Path) -> dict[str, Any]:
+    env_file_loaded = load_adapter_env_file(getattr(args, "env_file", None))
+    records = load_mcp_bench_records(name, entry, mcp_bench_root=getattr(args, "mcp_bench_root", None))
+    selected = select_records(records, max_samples=args.max_samples, sample_seed=args.sample_seed)
+    runtime_root = Path(records[0].runtime_root).expanduser().resolve() if records else _resolve_mcp_bench_root(args.mcp_bench_root)
+    worker_script = _repo_root() / "src/cli/helicopter_cli/mcp_bench_worker.py"
+    judge_config = _resolve_mcp_judge_config(args)
+    max_rounds = max(1, int(getattr(args, "mcp_max_rounds", None) or 6))
+    max_errors = max(1, int(getattr(args, "mcp_max_errors", None) or 2))
+    history_max_chars = max(1, int(getattr(args, "mcp_history_max_chars", None) or MCP_BENCH_DEFAULT_MAX_HISTORY_CHARS))
+    tool_schema_max_chars = max(1, int(getattr(args, "mcp_tool_schema_max_chars", None) or MCP_BENCH_DEFAULT_MAX_TOOL_SCHEMA_CHARS))
+
+    benchmark_dir = run_root / name
+    benchmark_dir.mkdir(parents=True, exist_ok=True)
+    completions: list[dict[str, Any]] = []
+    eval_rows: list[dict[str, Any]] = []
+    worker = McpBenchWorkerClient(runtime_root=runtime_root, worker_script=worker_script)
+    try:
+        for ordinal, (dataset_index, record) in enumerate(selected):
+            started = time.monotonic()
+            available_tools: dict[str, Any] = {}
+            stages: list[dict[str, Any]] = []
+            execution_results: list[dict[str, Any]] = []
+            history = ""
+            final_answer = ""
+            runtime_error = ""
+            termination_reason = ""
+            parse_attempts = 0
+            parsed_attempts = 0
+            parse_errors: list[str] = []
+            evaluation: dict[str, Any] = {}
+            judge_error = ""
+            try:
+                available_tools = worker.open_task(record)
+                if not available_tools:
+                    raise RuntimeError("MCP-Bench worker returned no tools")
+                for round_num in range(1, max_rounds + 1):
+                    prompt = _build_mcp_planning_prompt(
+                        record,
+                        available_tools,
+                        history,
+                        max_history_chars=history_max_chars,
+                        max_tool_schema_chars=tool_schema_max_chars,
+                    )
+                    completion, finish_reason = call_chat_completion(
+                        base_url=args.base_url,
+                        api_key=args.api_key,
+                        model=args.model_name,
+                        prompt=prompt,
+                        max_tokens=args.max_tokens,
+                        temperature=args.temperature,
+                        timeout_s=args.timeout_s,
+                    )
+                    parse_attempts += 1
+                    stage: dict[str, Any] = {
+                        "round": round_num,
+                        "prompt": prompt,
+                        "completion": completion,
+                        "finish_reason": finish_reason,
+                        "parse_error": "",
+                        "tool": "",
+                    }
+                    try:
+                        decision = _parse_mcp_decision(completion)
+                        parsed_attempts += 1
+                    except Exception as exc:  # noqa: BLE001
+                        parse_error = str(exc)
+                        stage["parse_error"] = parse_error
+                        parse_errors.append(parse_error)
+                        stages.append(stage)
+                        if len(parse_errors) >= max_errors:
+                            termination_reason = "parse_errors"
+                            break
+                        continue
+                    if decision.tool_call is None:
+                        final_answer = decision.final_answer
+                        termination_reason = "final_answer"
+                        stages.append(stage)
+                        break
+                    try:
+                        tool_call = _normalize_mcp_tool_call(decision.tool_call, available_tools)
+                        tool_response = worker.call_tool(tool_call.full_name, tool_call.arguments)
+                        execution = {
+                            "tool": tool_call.full_name,
+                            "server": tool_call.full_name.split(":", 1)[0] if ":" in tool_call.full_name else "",
+                            "parameters": dict(tool_call.arguments),
+                            "round_num": round_num,
+                            "success": bool(tool_response.get("success")),
+                            "result": str(tool_response.get("result") or ""),
+                            "error": str(tool_response.get("error") or ""),
+                        }
+                    except Exception as exc:  # noqa: BLE001
+                        execution = {
+                            "tool": decision.tool_call.full_name,
+                            "server": decision.tool_call.full_name.split(":", 1)[0] if ":" in decision.tool_call.full_name else "",
+                            "parameters": dict(decision.tool_call.arguments),
+                            "round_num": round_num,
+                            "success": False,
+                            "result": "",
+                            "error": str(exc),
+                        }
+                    execution_results.append(execution)
+                    stage["tool"] = str(execution["tool"])
+                    stage["execution"] = execution
+                    stages.append(stage)
+                    history = _append_mcp_history(history, round_num, execution, max_chars=history_max_chars)
+                else:
+                    termination_reason = "max_rounds"
+
+                planning_json_compliance = (parsed_attempts / parse_attempts) if parse_attempts else 0.0
+                evaluation.update(
+                    _mcp_rule_metrics(
+                        execution_results,
+                        available_tools,
+                        planning_json_compliance=planning_json_compliance,
+                    )
+                )
+                if judge_config is not None:
+                    try:
+                        official = worker.evaluate(
+                            {
+                                "judge_config": judge_config,
+                                "task": _mcp_presented_task(record),
+                                "execution_results": execution_results,
+                                "final_solution": final_answer,
+                                "total_rounds": len(stages),
+                                "available_tools": available_tools,
+                                "planning_json_compliance": planning_json_compliance,
+                                "accumulated_information": history,
+                                "concrete_task_description": record.task.task_description,
+                                "dependency_analysis": record.task.dependency_analysis,
+                            }
+                        )
+                        evaluation.update(official)
+                    except Exception as exc:  # noqa: BLE001
+                        judge_error = str(exc)
+                if not termination_reason:
+                    termination_reason = "stopped"
+            except Exception as exc:  # noqa: BLE001
+                runtime_error = f"{type(exc).__name__}: {exc}"
+                termination_reason = "runtime_error"
+            finally:
+                worker.close_task()
+            is_passed = _mcp_passed(evaluation) if judge_config and not judge_error else False
+            row = {
+                "benchmark_name": name,
+                "sample_index": ordinal,
+                "dataset_index": dataset_index,
+                "task_id": record.task.task_id,
+                "task_file": record.task_file,
+                "server_name": record.server_name,
+                "servers": list(record.servers),
+                "combination_type": record.combination_type,
+                "task": _mcp_presented_task(record),
+                "model_name": args.model_name,
+                "latency_s": time.monotonic() - started,
+                "available_tool_count": len(available_tools),
+                "final_answer": final_answer,
+                "is_passed": is_passed,
+                "termination_reason": termination_reason,
+                "runtime_error": runtime_error,
+                "parse_errors": parse_errors,
+                "judge_ran": judge_config is not None and not judge_error,
+                "judge_error": judge_error,
+                "evaluation": evaluation,
+                "execution_results": execution_results,
+                "stages": stages,
+                "metadata": record.metadata,
+            }
+            completions.append(row)
+            eval_rows.append(
+                {
+                    "task_id": record.task.task_id,
+                    "sample_index": ordinal,
+                    "is_passed": is_passed,
+                    "termination_reason": termination_reason,
+                    "runtime_error": runtime_error,
+                    "judge_ran": row["judge_ran"],
+                    "evaluation": evaluation,
+                }
+            )
+            print(
+                f"{name}: generated {ordinal + 1}/{len(selected)} task={record.task.task_id} "
+                f"tools={len(available_tools)} passed={is_passed}"
+            )
+    finally:
+        worker.close()
+
+    completions_path = benchmark_dir / "completions.jsonl"
+    eval_path = benchmark_dir / "eval.jsonl"
+    write_jsonl(completions_path, completions)
+    write_jsonl(eval_path, eval_rows)
+    passed = sum(1 for item in eval_rows if item["is_passed"])
+    judge_ran = sum(1 for item in eval_rows if item["judge_ran"])
+    runtime_errors = sum(1 for item in eval_rows if item["runtime_error"])
+    metrics = {
+        "adapter": "mcp_bench",
+        "benchmark": name,
+        "samples": len(selected),
+        "source_rows": len(records),
+        "passed": passed,
+        "success_rate": (passed / len(eval_rows)) if eval_rows else 0.0,
+        "runtime_error_count": runtime_errors,
+        "judge_ran": judge_ran,
+        "judge_model": judge_config.get("model") if judge_config else None,
+        "split": str(getattr(args, "split", None) or ""),
+        "env_file_loaded": env_file_loaded,
+        "mcp_bench_root": str(runtime_root),
+        "completions_path": str(completions_path),
+        "eval_path": str(eval_path),
+    }
+    (benchmark_dir / "metrics.json").write_text(
+        json.dumps(metrics, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return metrics
+
+
 def write_jsonl(path: Path, rows: Iterable[Mapping[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as file:
@@ -2013,6 +2646,8 @@ def run(args: argparse.Namespace) -> int:
             all_metrics.append(run_swebench_adapter(name, entry, args, run_root))
         elif adapter == "tau":
             all_metrics.append(run_tau_adapter(name, entry, args, run_root))
+        elif adapter == "mcp_bench":
+            all_metrics.append(run_mcp_bench_adapter(name, entry, args, run_root))
         else:
             raise SystemExit(f"unsupported adapter for {name}: {adapter}")
     summary = {
@@ -2062,6 +2697,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tau-judge-model")
     parser.add_argument("--tau-judge-base-url")
     parser.add_argument("--tau-judge-api-key")
+    parser.add_argument("--mcp-bench-root")
+    parser.add_argument("--mcp-max-rounds", type=int, default=6)
+    parser.add_argument("--mcp-max-errors", type=int, default=2)
+    parser.add_argument("--mcp-history-max-chars", type=int, default=MCP_BENCH_DEFAULT_MAX_HISTORY_CHARS)
+    parser.add_argument("--mcp-tool-schema-max-chars", type=int, default=MCP_BENCH_DEFAULT_MAX_TOOL_SCHEMA_CHARS)
+    parser.add_argument("--mcp-judge-model")
+    parser.add_argument("--mcp-judge-base-url")
+    parser.add_argument("--mcp-judge-api-key")
     return parser
 
 

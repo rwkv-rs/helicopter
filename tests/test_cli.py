@@ -173,6 +173,14 @@ def suite_adapter_args(**overrides: object) -> Namespace:
         "tau_judge_model": None,
         "tau_judge_base_url": None,
         "tau_judge_api_key": None,
+        "mcp_bench_root": None,
+        "mcp_max_rounds": None,
+        "mcp_max_errors": None,
+        "mcp_history_max_chars": None,
+        "mcp_tool_schema_max_chars": None,
+        "mcp_judge_model": None,
+        "mcp_judge_base_url": None,
+        "mcp_judge_api_key": None,
     }
     values.update(overrides)
     return Namespace(**values)
@@ -527,6 +535,11 @@ class CommandPlanTests(unittest.TestCase):
             self.assertEqual(suite["benchmarks"][benchmark]["adapter"], "tau")
         self.assertEqual(suite["benchmarks"]["tau_bench_telecom"]["status"], "needs_adapter")
         self.assertIn("official tau-bench v1", suite["benchmarks"]["tau_bench_telecom"]["reason"])
+        self.assertEqual(suite["benchmarks"]["mcp_bench_single"]["status"], "adapter")
+        self.assertEqual(suite["benchmarks"]["mcp_bench_single"]["adapter"], "mcp_bench")
+        for benchmark in ("mcp_bench", "mcp_bench_multi_2server", "mcp_bench_multi_3server"):
+            self.assertEqual(suite["benchmarks"][benchmark]["status"], "needs_adapter")
+            self.assertIn("MCP-Bench", suite["benchmarks"][benchmark]["reason"])
         self.assertEqual(suite["benchmarks"]["longcodeqa"]["lighteval_tasks"], ["rwkv_skills:longcodeqa"])
         self.assertEqual(suite["benchmarks"]["apibank_l1"]["lighteval_tasks"], ["rwkv_skills:apibank_l1"])
         self.assertEqual(suite["benchmarks"]["apibank_l2"]["lighteval_tasks"], ["rwkv_skills:apibank_l2"])
@@ -755,6 +768,39 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(options["--output-dir"], str(ROOT / "results/tau_adapter_test"))
         self.assertEqual(plan.env["OPENAI_API_KEY"], "EMPTY")
 
+    def test_suite_adapter_plan_runs_mcp_bench_adapter(self) -> None:
+        loaded_config = load_example_config()
+
+        plan = commands.build_suite_adapter_plan(
+            suite_adapter_args(
+                benchmark=["mcp_bench_single"],
+                max_samples=1,
+                max_tokens=128,
+                mcp_bench_root="/tmp/mcp-bench",
+                mcp_max_rounds=2,
+                mcp_tool_schema_max_chars=1024,
+                mcp_judge_model="judge-model",
+                mcp_judge_base_url="https://judge.example/v1",
+                output_dir="results/mcp_adapter_test",
+                run_id="unit-mcp",
+            ),
+            root=ROOT,
+            env={},
+            config=loaded_config,
+        )
+
+        self.assertEqual(plan.command[1:3], ["-m", "helicopter_cli.benchmark_adapters"])
+        options = command_options(plan.command)
+        self.assertEqual(options["--benchmark"], "mcp_bench_single")
+        self.assertEqual(options["--mcp-bench-root"], "/tmp/mcp-bench")
+        self.assertEqual(options["--mcp-max-rounds"], "2")
+        self.assertEqual(options["--mcp-tool-schema-max-chars"], "1024")
+        self.assertEqual(options["--mcp-judge-model"], "judge-model")
+        self.assertEqual(options["--mcp-judge-base-url"], "https://judge.example/v1")
+        self.assertEqual(options["--run-id"], "unit-mcp")
+        self.assertEqual(options["--output-dir"], str(ROOT / "results/mcp_adapter_test"))
+        self.assertEqual(plan.env["OPENAI_API_KEY"], "EMPTY")
+
     def test_adapter_env_file_loads_tau_model_keys_without_overriding_existing_env(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             env_path = Path(directory) / ".env"
@@ -827,6 +873,36 @@ class CommandPlanTests(unittest.TestCase):
         self.assertNotIn("gold patch", prompt)
         completion = "text\n```diff\ndiff --git a/pkg.py b/pkg.py\n--- a/pkg.py\n+++ b/pkg.py\n@@\n-pass\n+ok\n```"
         self.assertTrue(benchmark_adapters.extract_swebench_patch(completion).startswith("diff --git a/pkg.py"))
+
+    def test_mcp_bench_adapter_loads_official_single_tasks_when_reference_exists(self) -> None:
+        from helicopter_cli import benchmark_adapters
+
+        reference = Path("/tmp/mcp-bench")
+        if not (reference / "tasks/mcpbench_tasks_single_runner_format.json").is_file():
+            self.skipTest("/tmp/mcp-bench reference checkout is not available")
+
+        records = benchmark_adapters.load_mcp_bench_records(
+            "mcp_bench_single",
+            {"task_files": ["mcpbench_tasks_single_runner_format.json"]},
+            mcp_bench_root=str(reference),
+        )
+
+        unit_converter = [record for record in records if record.server_name == "Unit Converter"]
+        self.assertGreaterEqual(len(unit_converter), 1)
+        self.assertIn("Unit Converter", unit_converter[0].servers)
+        self.assertEqual(unit_converter[0].metadata["source"], "mcp-bench")
+
+    def test_mcp_bench_parser_accepts_tool_name_variants_without_fixing_arguments(self) -> None:
+        from helicopter_cli import benchmark_adapters
+
+        decision = benchmark_adapters._parse_mcp_decision(
+            '{"Tool name":"convert_temperature","Tool input":{"value":350,"from_unit":"°C","to_unit":"°F"}}'
+        )
+
+        self.assertIsNotNone(decision.tool_call)
+        assert decision.tool_call is not None
+        self.assertEqual(decision.tool_call.full_name, "convert_temperature")
+        self.assertEqual(decision.tool_call.arguments["from_unit"], "°C")
 
     def test_tau_adapter_parses_prefilled_json_and_builds_light_rows(self) -> None:
         from helicopter_cli import benchmark_adapters
