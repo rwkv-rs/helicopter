@@ -181,6 +181,11 @@ def suite_adapter_args(**overrides: object) -> Namespace:
         "mcp_judge_model": None,
         "mcp_judge_base_url": None,
         "mcp_judge_api_key": None,
+        "agentbench_root": None,
+        "agentbench_worker_url": None,
+        "agentbench_max_rounds": None,
+        "agentbench_history_max_chars": None,
+        "agentbench_prompt_max_chars": None,
     }
     values.update(overrides)
     return Namespace(**values)
@@ -515,6 +520,11 @@ class CommandPlanTests(unittest.TestCase):
             suite["benchmarks"]["swe_bench_lite"]["harness_dataset"],
             "princeton-nlp/SWE-bench_Lite",
         )
+        self.assertEqual(suite["benchmarks"]["agentbench_db"]["status"], "adapter")
+        self.assertEqual(suite["benchmarks"]["agentbench_db"]["adapter"], "agentbench")
+        self.assertEqual(suite["benchmarks"]["agentbench_db"]["agentbench_task"], "dbbench-std")
+        self.assertEqual(suite["benchmarks"]["agentbench_kg"]["status"], "needs_adapter")
+        self.assertIn("Virtuoso", suite["benchmarks"]["agentbench_kg"]["reason"])
         self.assertEqual(suite["benchmarks"]["tau3_bench_mock"]["status"], "adapter")
         self.assertEqual(suite["benchmarks"]["tau3_bench_mock"]["adapter"], "tau")
         self.assertEqual(suite["benchmarks"]["tau3_bench_mock"]["tau_domain"], "mock")
@@ -799,6 +809,39 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(options["--output-dir"], str(ROOT / "results/mcp_adapter_test"))
         self.assertEqual(plan.env["OPENAI_API_KEY"], "EMPTY")
 
+    def test_suite_adapter_plan_runs_agentbench_adapter(self) -> None:
+        loaded_config = load_example_config()
+
+        plan = commands.build_suite_adapter_plan(
+            suite_adapter_args(
+                benchmark=["agentbench_db"],
+                max_samples=1,
+                max_tokens=128,
+                agentbench_root="/tmp/AgentBench",
+                agentbench_worker_url="http://127.0.0.1:5021",
+                agentbench_max_rounds=2,
+                agentbench_history_max_chars=4096,
+                agentbench_prompt_max_chars=8192,
+                output_dir="results/agentbench_adapter_test",
+                run_id="unit-agentbench",
+            ),
+            root=ROOT,
+            env={},
+            config=loaded_config,
+        )
+
+        self.assertEqual(plan.command[1:3], ["-m", "helicopter_cli.benchmark_adapters"])
+        options = command_options(plan.command)
+        self.assertEqual(options["--benchmark"], "agentbench_db")
+        self.assertEqual(options["--agentbench-root"], "/tmp/AgentBench")
+        self.assertEqual(options["--agentbench-worker-url"], "http://127.0.0.1:5021")
+        self.assertEqual(options["--agentbench-max-rounds"], "2")
+        self.assertEqual(options["--agentbench-history-max-chars"], "4096")
+        self.assertEqual(options["--agentbench-prompt-max-chars"], "8192")
+        self.assertEqual(options["--run-id"], "unit-agentbench")
+        self.assertEqual(options["--output-dir"], str(ROOT / "results/agentbench_adapter_test"))
+        self.assertEqual(plan.env["OPENAI_API_KEY"], "EMPTY")
+
     def test_adapter_env_file_loads_tau_model_keys_without_overriding_existing_env(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             env_path = Path(directory) / ".env"
@@ -871,6 +914,46 @@ class CommandPlanTests(unittest.TestCase):
         self.assertNotIn("gold patch", prompt)
         completion = "text\n```diff\ndiff --git a/pkg.py b/pkg.py\n--- a/pkg.py\n+++ b/pkg.py\n@@\n-pass\n+ok\n```"
         self.assertTrue(benchmark_adapters.extract_swebench_patch(completion).startswith("diff --git a/pkg.py"))
+
+    def test_agentbench_adapter_loads_official_rows_when_reference_exists(self) -> None:
+        from helicopter_cli import benchmark_adapters
+
+        reference = Path("/tmp/AgentBench")
+        if not (reference / "data/dbbench/standard.jsonl").is_file():
+            self.skipTest("/tmp/AgentBench reference checkout is not available")
+
+        records = benchmark_adapters.load_agentbench_records(
+            "agentbench_db",
+            {
+                "agentbench_task": "dbbench-std",
+                "agentbench_data": "data/dbbench/standard.jsonl",
+            },
+            agentbench_root=str(reference),
+        )
+
+        self.assertEqual(len(records), 300)
+        self.assertEqual(records[0].task_name, "dbbench-std")
+        self.assertEqual(records[0].index, 0)
+        self.assertEqual(records[0].metadata["source"], "AgentBench")
+
+    def test_agentbench_parser_builds_tool_and_final_answer_messages(self) -> None:
+        from helicopter_cli import benchmark_adapters
+
+        name, arguments = benchmark_adapters.parse_agentbench_decision(
+            '```json\n{"name":"execute_sql","arguments":{"query":"SHOW TABLES"}}\n```'
+        )
+        self.assertEqual(name, "execute_sql")
+        self.assertEqual(arguments["query"], "SHOW TABLES")
+
+        tool_message = benchmark_adapters._agentbench_assistant_message(name, arguments, round_index=1)
+        self.assertEqual(tool_message["tool_calls"][0]["function"]["name"], "execute_sql")
+
+        final_message = benchmark_adapters._agentbench_assistant_message(
+            "final_answer",
+            {"answer": "Final Answer: #0"},
+            round_index=2,
+        )
+        self.assertEqual(final_message, {"role": "assistant", "content": "Final Answer: #0"})
 
     def test_mcp_bench_adapter_loads_official_single_tasks_when_reference_exists(self) -> None:
         from helicopter_cli import benchmark_adapters

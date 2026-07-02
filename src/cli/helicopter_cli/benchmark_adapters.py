@@ -65,6 +65,17 @@ TAU_ADAPTER_BENCHMARKS: dict[str, dict[str, str]] = {
     "tau3_bench_telecom": {"domain": "telecom", "version": "tau_v3"},
 }
 
+AGENTBENCH_ADAPTER_BENCHMARKS: dict[str, dict[str, str]] = {
+    "agentbench_db": {
+        "task_name": "dbbench-std",
+        "data_file": "data/dbbench/standard.jsonl",
+    },
+    "agentbench_kg": {
+        "task_name": "kg-std",
+        "data_file": "data/knowledgegraph/std.json",
+    },
+}
+
 TAU3_LIGHT_MOCK_TASK_IDS = frozenset(
     {
         "create_task_1_with_env_assertions",
@@ -120,6 +131,14 @@ class TauAdapterRecord:
     instruction: str
     task: dict[str, Any]
     benchmark_version: str
+    index: int
+    metadata: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class AgentBenchRecord:
+    task_id: str
+    task_name: str
     index: int
     metadata: dict[str, Any]
 
@@ -395,6 +414,450 @@ def call_chat_completion(
     content = str(message.get("content") or choice.get("text") or "")
     finish_reason = str(choice.get("finish_reason") or "")
     return content, finish_reason
+
+
+def _agentbench_count_rows(path: Path) -> int:
+    raw = path.read_text(encoding="utf-8")
+    if path.suffix.lower() == ".jsonl":
+        return sum(1 for line in raw.splitlines() if line.strip())
+    payload = json.loads(raw)
+    if isinstance(payload, list):
+        return len(payload)
+    raise ValueError(f"unsupported AgentBench data file: {path}")
+
+
+def _resolve_agentbench_root(raw_root: str | None = None) -> Path:
+    candidates = [
+        raw_root,
+        os.environ.get("HELICOPTER_AGENTBENCH_ROOT"),
+        os.environ.get("AGENTBENCH_ROOT"),
+        "/tmp/AgentBench",
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        root = Path(str(candidate)).expanduser().resolve()
+        if (root / "data").is_dir() and (root / "src" / "server" / "tasks").is_dir():
+            return root
+    checked = ", ".join(str(item) for item in candidates if item)
+    raise FileNotFoundError(f"AgentBench reference checkout not found; checked: {checked}")
+
+
+def load_agentbench_records(
+    benchmark_name: str,
+    entry: Mapping[str, Any],
+    *,
+    agentbench_root: str | None = None,
+) -> list[AgentBenchRecord]:
+    if benchmark_name not in AGENTBENCH_ADAPTER_BENCHMARKS:
+        raise ValueError(f"unsupported AgentBench adapter benchmark: {benchmark_name}")
+    root = _resolve_agentbench_root(agentbench_root)
+    spec = AGENTBENCH_ADAPTER_BENCHMARKS[benchmark_name]
+    task_name = str(entry.get("agentbench_task") or spec["task_name"])
+    data_file = root / str(entry.get("agentbench_data") or spec["data_file"])
+    if not data_file.is_file():
+        raise FileNotFoundError(f"AgentBench data file not found: {data_file}")
+    count = _agentbench_count_rows(data_file)
+    records: list[AgentBenchRecord] = []
+    for index in range(count):
+        records.append(
+            AgentBenchRecord(
+                task_id=f"{benchmark_name}__{index:05d}",
+                task_name=task_name,
+                index=index,
+                metadata={
+                    "source": "AgentBench",
+                    "source_path": str(data_file),
+                    "task_name": task_name,
+                    "agentbench_root": str(root),
+                },
+            )
+        )
+    return records
+
+
+def _resolve_agentbench_worker_url(args: argparse.Namespace, benchmark_name: str, entry: Mapping[str, Any]) -> str:
+    env_names = [
+        f"HELICOPTER_{benchmark_name.upper()}_WORKER_URL",
+        f"{benchmark_name.upper()}_WORKER_URL",
+        "HELICOPTER_AGENTBENCH_WORKER_URL",
+        "AGENTBENCH_WORKER_URL",
+    ]
+    value = _first_value(
+        getattr(args, "agentbench_worker_url", None),
+        *(os.environ.get(name) for name in env_names),
+        str(entry.get("agentbench_worker_url") or ""),
+    )
+    if not value:
+        raise ValueError(
+            f"{benchmark_name} requires an official AgentBench worker URL; "
+            "start `python -m agentrl.worker ...` and pass --agentbench-worker-url"
+        )
+    return value.rstrip("/")
+
+
+def _agentbench_post(worker_url: str, path: str, payload: Mapping[str, Any], *, timeout_s: float) -> dict[str, Any]:
+    req = urllib.request.Request(
+        f"{worker_url.rstrip('/')}/api/{path.lstrip('/')}",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as response:
+            raw = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"AgentBench worker HTTP {exc.code}: {detail}") from exc
+    data = json.loads(raw) if raw.strip() else {}
+    if not isinstance(data, dict):
+        raise RuntimeError("AgentBench worker response must be a JSON object")
+    return data
+
+
+def _agentbench_get(worker_url: str, path: str, *, timeout_s: float) -> Any:
+    req = urllib.request.Request(f"{worker_url.rstrip('/')}/api/{path.lstrip('/')}", method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as response:
+            raw = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"AgentBench worker HTTP {exc.code}: {detail}") from exc
+    return json.loads(raw) if raw.strip() else None
+
+
+def _agentbench_env_out(response: Mapping[str, Any]) -> dict[str, Any]:
+    env_out = response.get("env_out")
+    if isinstance(env_out, Mapping):
+        return dict(env_out)
+    return dict(response)
+
+
+def _normalize_agentbench_tool(tool: Mapping[str, Any]) -> dict[str, Any]:
+    function = tool.get("function") if isinstance(tool.get("function"), Mapping) else tool
+    return {
+        "name": str(function.get("name") or ""),
+        "description": str(function.get("description") or ""),
+        "parameters": dict(function.get("parameters") or {}),
+    }
+
+
+def build_agentbench_prompt(
+    messages: Sequence[Mapping[str, Any]],
+    tools: Sequence[Mapping[str, Any]],
+    *,
+    history_max_chars: int,
+    prompt_max_chars: int,
+    allow_final_answer_text: bool,
+) -> str:
+    system_messages = [
+        str(item.get("content") or "").strip()
+        for item in messages
+        if str(item.get("role") or "").strip().lower() == "system"
+    ]
+    dialog_messages = [
+        item for item in messages
+        if str(item.get("role") or "").strip().lower() != "system"
+    ]
+    tool_schemas = [_normalize_agentbench_tool(tool) for tool in tools]
+    if allow_final_answer_text:
+        tool_schemas.append(
+            {
+                "name": "final_answer",
+                "description": "Submit the final KG answer as assistant text content.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"answer": {"type": "string"}},
+                    "required": ["answer"],
+                },
+            }
+        )
+    rendered_history = _render_agentbench_messages(dialog_messages)
+    if history_max_chars > 0 and len(rendered_history) > history_max_chars:
+        rendered_history = "[earlier history truncated]\n" + rendered_history[-history_max_chars:].lstrip()
+    lines = [
+        "You are solving an official AgentBench interactive task.",
+        "Return exactly one JSON object and no prose.",
+        "Use only the listed tool names.",
+        'For SQL calls return: {"name":"execute_sql","arguments":{"query":"SELECT ..."}}',
+        'For DB final answers return: {"name":"commit_final_answer","arguments":{"answers":["..."]}}',
+        "Tools:",
+        json.dumps(tool_schemas, ensure_ascii=False, indent=2, sort_keys=True),
+    ]
+    if allow_final_answer_text:
+        lines.append('For KG final answers return: {"name":"final_answer","arguments":{"answer":"Final Answer: #0"}}')
+    if system_messages:
+        lines.extend(["Official system instructions:", "\n\n".join(system_messages)])
+    prompt = "\n".join(lines) + "\n\nConversation:\n" + rendered_history + "\n\nAssistant JSON:\n{"
+    if prompt_max_chars > 0 and len(prompt) > prompt_max_chars:
+        overflow = len(prompt) - prompt_max_chars
+        adjusted_history = rendered_history[max(0, overflow + 512):].lstrip()
+        if adjusted_history:
+            adjusted_history = "[earlier history truncated]\n" + adjusted_history
+        prompt = "\n".join(lines) + "\n\nConversation:\n" + adjusted_history + "\n\nAssistant JSON:\n{"
+    return prompt
+
+
+def _render_agentbench_messages(messages: Sequence[Mapping[str, Any]]) -> str:
+    rendered: list[str] = []
+    for message in messages:
+        role = str(message.get("role") or "").strip().lower()
+        content = str(message.get("content") or "").strip()
+        if role == "assistant":
+            tool_calls = message.get("tool_calls")
+            if isinstance(tool_calls, Sequence) and not isinstance(tool_calls, (str, bytes)) and tool_calls:
+                calls = []
+                for call in tool_calls:
+                    if not isinstance(call, Mapping):
+                        continue
+                    function = call.get("function")
+                    if not isinstance(function, Mapping):
+                        continue
+                    raw_arguments = function.get("arguments")
+                    try:
+                        arguments = json.loads(str(raw_arguments or "{}"))
+                    except json.JSONDecodeError:
+                        arguments = {}
+                    calls.append({"name": str(function.get("name") or ""), "arguments": arguments})
+                if calls:
+                    rendered.append("Assistant: " + json.dumps(calls[-1], ensure_ascii=False, separators=(",", ":")))
+                    continue
+        if role == "tool":
+            payload = {
+                "tool_call_id": str(message.get("tool_call_id") or ""),
+                "content": content,
+            }
+            rendered.append("Tool: " + json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+        elif role:
+            rendered.append(f"{role.title()}: {content}")
+    return "\n\n".join(rendered) if rendered else "User: Start the task."
+
+
+def parse_agentbench_decision(text: str) -> tuple[str, dict[str, Any]]:
+    payload = json.loads(_extract_json_object_text(text))
+    if not isinstance(payload, Mapping):
+        raise ValueError("AgentBench decision must be a JSON object")
+    name = str(payload.get("name") or payload.get("tool_name") or payload.get("function") or "").strip()
+    arguments = payload.get("arguments")
+    if not isinstance(arguments, Mapping):
+        arguments = payload.get("parameters")
+    if not isinstance(arguments, Mapping):
+        arguments = {}
+    if name in {"answer", "final", "final_answer_text"}:
+        name = "final_answer"
+    if not name:
+        raise ValueError(f"AgentBench decision missing name: {payload}")
+    return name, dict(arguments)
+
+
+def _agentbench_assistant_message(name: str, arguments: Mapping[str, Any], *, round_index: int) -> dict[str, Any]:
+    if name == "final_answer":
+        return {"role": "assistant", "content": str(arguments.get("answer") or arguments.get("content") or "")}
+    return {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": f"call_{round_index}_0",
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": json.dumps(dict(arguments), ensure_ascii=False),
+                },
+            }
+        ],
+    }
+
+
+def run_agentbench_adapter(name: str, entry: Mapping[str, Any], args: argparse.Namespace, run_root: Path) -> dict[str, Any]:
+    env_file_loaded = load_adapter_env_file(getattr(args, "env_file", None))
+    records = load_agentbench_records(name, entry, agentbench_root=getattr(args, "agentbench_root", None))
+    selected = select_records(records, max_samples=args.max_samples, sample_seed=args.sample_seed)
+    worker_url = _resolve_agentbench_worker_url(args, name, entry)
+    try:
+        worker_indices = _agentbench_get(worker_url, "get_indices", timeout_s=args.timeout_s)
+        if isinstance(worker_indices, list):
+            available = {int(index) for index in worker_indices}
+            missing = [record.index for _dataset_index, record in selected if record.index not in available]
+            if missing:
+                raise ValueError(f"AgentBench worker does not expose selected indices: {missing[:10]}")
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"AgentBench worker preflight failed for {worker_url}: {exc}") from exc
+
+    benchmark_dir = run_root / name
+    benchmark_dir.mkdir(parents=True, exist_ok=True)
+    completions: list[dict[str, Any]] = []
+    eval_rows: list[dict[str, Any]] = []
+    for ordinal, (dataset_index, record) in enumerate(selected):
+        started = time.monotonic()
+        session_id = int(time.time() * 1000) + ordinal
+        messages: list[dict[str, Any]] = []
+        tools: list[dict[str, Any]] = []
+        stages: list[dict[str, Any]] = []
+        trace: list[dict[str, Any]] = []
+        parse_errors: list[str] = []
+        reward = 0.0
+        is_passed = False
+        runtime_error = ""
+        termination_reason = ""
+        status = ""
+        try:
+            start_response = _agentbench_post(
+                worker_url,
+                "start_sample",
+                {"index": record.index, "session_id": session_id, "custom_task": None},
+                timeout_s=args.timeout_s,
+            )
+            env_out = _agentbench_env_out(start_response)
+            messages = [dict(item) for item in env_out.get("messages") or [] if isinstance(item, Mapping)]
+            tools = [dict(item) for item in env_out.get("tools") or [] if isinstance(item, Mapping)]
+            status = str(env_out.get("status") or "")
+            if bool(env_out.get("finish")):
+                reward = float(env_out.get("reward") or 0.0)
+                is_passed = reward > 0.0
+            for round_index in range(1, max(1, int(args.agentbench_max_rounds)) + 1):
+                if is_passed or str(status).lower() not in {"", "running"}:
+                    break
+                prompt = build_agentbench_prompt(
+                    messages,
+                    tools,
+                    history_max_chars=args.agentbench_history_max_chars,
+                    prompt_max_chars=args.agentbench_prompt_max_chars,
+                    allow_final_answer_text=name == "agentbench_kg",
+                )
+                completion, finish_reason = call_chat_completion(
+                    base_url=args.base_url,
+                    api_key=args.api_key,
+                    model=args.model_name,
+                    prompt=prompt,
+                    max_tokens=args.max_tokens,
+                    temperature=args.temperature,
+                    timeout_s=args.timeout_s,
+                )
+                parsed_name = ""
+                parse_error = ""
+                try:
+                    parsed_name, arguments = parse_agentbench_decision(completion)
+                    assistant_message = _agentbench_assistant_message(parsed_name, arguments, round_index=round_index)
+                except Exception as exc:  # noqa: BLE001
+                    parse_error = str(exc)
+                    parse_errors.append(parse_error)
+                    termination_reason = "parse_error"
+                    stages.append(
+                        {
+                            "prompt": prompt,
+                            "completion": completion,
+                            "finish_reason": finish_reason,
+                            "parsed_name": parsed_name,
+                            "parse_error": parse_error,
+                            "round": round_index,
+                        }
+                    )
+                    break
+                stages.append(
+                    {
+                        "prompt": prompt,
+                        "completion": completion,
+                        "finish_reason": finish_reason,
+                        "parsed_name": parsed_name,
+                        "parse_error": parse_error,
+                        "round": round_index,
+                    }
+                )
+                messages.append(assistant_message)
+                response = _agentbench_post(
+                    worker_url,
+                    "interact",
+                    {"session_id": session_id, "messages": [assistant_message]},
+                    timeout_s=args.timeout_s,
+                )
+                env_out = _agentbench_env_out(response)
+                trace.append({"round": round_index, "assistant_message": assistant_message, "worker_response": env_out})
+                status = str(env_out.get("status") or status)
+                if bool(env_out.get("finish")):
+                    reward = float(env_out.get("reward") or 0.0)
+                    is_passed = reward > 0.0
+                    break
+                messages.extend(dict(item) for item in env_out.get("messages") or [] if isinstance(item, Mapping))
+                tools = [dict(item) for item in env_out.get("tools") or tools if isinstance(item, Mapping)]
+            else:
+                termination_reason = "max_rounds"
+        except Exception as exc:  # noqa: BLE001
+            runtime_error = f"{type(exc).__name__}: {exc}"
+            termination_reason = "runtime_error"
+            try:
+                _agentbench_post(worker_url, "cancel", {"session_id": session_id}, timeout_s=10.0)
+            except Exception:  # noqa: BLE001
+                pass
+        if (termination_reason in {"parse_error", "max_rounds"} or str(status).lower() in {"", "running"}) and not is_passed:
+            try:
+                _agentbench_post(worker_url, "cancel", {"session_id": session_id}, timeout_s=10.0)
+            except Exception:  # noqa: BLE001
+                pass
+        latency_s = time.monotonic() - started
+        row = {
+            "benchmark_name": name,
+            "sample_index": ordinal,
+            "dataset_index": dataset_index,
+            "task_id": record.task_id,
+            "task_name": record.task_name,
+            "agentbench_index": record.index,
+            "model_name": args.model_name,
+            "latency_s": latency_s,
+            "reward": reward,
+            "is_passed": is_passed,
+            "status": status,
+            "termination_reason": termination_reason,
+            "runtime_error": runtime_error,
+            "parse_errors": parse_errors,
+            "stages": stages,
+            "agent_trace": trace,
+            "metadata": record.metadata,
+        }
+        completions.append(row)
+        eval_rows.append(
+            {
+                "task_id": record.task_id,
+                "sample_index": ordinal,
+                "is_passed": is_passed,
+                "reward": reward,
+                "fail_reason": runtime_error or termination_reason or ("passed" if is_passed else status or "failed"),
+            }
+        )
+        print(
+            f"{name}: generated {ordinal + 1}/{len(selected)} index={record.index} "
+            f"reward={reward:.3f} passed={is_passed}"
+        )
+
+    completions_path = benchmark_dir / "completions.jsonl"
+    eval_path = benchmark_dir / "eval.jsonl"
+    write_jsonl(completions_path, completions)
+    write_jsonl(eval_path, eval_rows)
+    passed = sum(1 for item in eval_rows if item["is_passed"])
+    runtime_errors = sum(1 for item in completions if item["runtime_error"])
+    parse_error_count = sum(1 for item in completions if item["parse_errors"])
+    metrics = {
+        "adapter": "agentbench",
+        "benchmark": name,
+        "samples": len(selected),
+        "source_rows": len(records),
+        "passed": passed,
+        "success_rate": (passed / len(eval_rows)) if eval_rows else 0.0,
+        "avg_reward": (sum(float(item["reward"]) for item in eval_rows) / len(eval_rows)) if eval_rows else 0.0,
+        "runtime_error_count": runtime_errors,
+        "runtime_error_rate": (runtime_errors / len(eval_rows)) if eval_rows else 0.0,
+        "parse_error_count": parse_error_count,
+        "parse_error_rate": (parse_error_count / len(eval_rows)) if eval_rows else 0.0,
+        "worker_url": worker_url,
+        "env_file_loaded": env_file_loaded,
+        "completions_path": str(completions_path),
+        "eval_path": str(eval_path),
+    }
+    (benchmark_dir / "metrics.json").write_text(
+        json.dumps(metrics, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return metrics
 
 
 def _dump_model(value: Any) -> dict[str, Any]:
@@ -2710,6 +3173,8 @@ def run(args: argparse.Namespace) -> int:
             all_metrics.append(run_tau_adapter(name, entry, args, run_root))
         elif adapter == "mcp_bench":
             all_metrics.append(run_mcp_bench_adapter(name, entry, args, run_root))
+        elif adapter == "agentbench":
+            all_metrics.append(run_agentbench_adapter(name, entry, args, run_root))
         else:
             raise SystemExit(f"unsupported adapter for {name}: {adapter}")
     summary = {
@@ -2767,6 +3232,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mcp-judge-model")
     parser.add_argument("--mcp-judge-base-url")
     parser.add_argument("--mcp-judge-api-key")
+    parser.add_argument("--agentbench-root")
+    parser.add_argument("--agentbench-worker-url")
+    parser.add_argument("--agentbench-max-rounds", type=int, default=20)
+    parser.add_argument("--agentbench-history-max-chars", type=int, default=16000)
+    parser.add_argument("--agentbench-prompt-max-chars", type=int, default=24576)
     return parser
 
 

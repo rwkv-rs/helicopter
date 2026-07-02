@@ -76,13 +76,15 @@ harness_dataset = "princeton-nlp/SWE-bench_Verified"
 
 [benchmarks.agentbench_db]
 field = "function_calling"
-status = "needs_adapter"
-reason = "AgentBench DB requires an interactive tool/agent environment adapter."
+status = "adapter"
+adapter = "agentbench"
+agentbench_task = "dbbench-std"
+agentbench_data = "data/dbbench/standard.jsonl"
 
 [benchmarks.agentbench_kg]
 field = "function_calling"
 status = "needs_adapter"
-reason = "AgentBench KG requires an interactive tool/agent environment adapter."
+reason = "AgentBench KG requires an official Freebase/Virtuoso SPARQL worker; the local reference checkout has std.json but no virtuoso_db."
 
 [benchmarks.apibank_l1]
 field = "function_calling"

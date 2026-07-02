@@ -163,6 +163,11 @@ def build_parser() -> argparse.ArgumentParser:
     suite_adapter.add_argument("--mcp-judge-model")
     suite_adapter.add_argument("--mcp-judge-base-url")
     suite_adapter.add_argument("--mcp-judge-api-key")
+    suite_adapter.add_argument("--agentbench-root")
+    suite_adapter.add_argument("--agentbench-worker-url")
+    suite_adapter.add_argument("--agentbench-max-rounds", type=int)
+    suite_adapter.add_argument("--agentbench-history-max-chars", type=int)
+    suite_adapter.add_argument("--agentbench-prompt-max-chars", type=int)
     suite_adapter.set_defaults(plan_builder=build_suite_adapter_plan)
 
     lighteval_tasks = eval_subparsers.add_parser("lighteval-tasks", help="list or inspect LightEval tasks")
