@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import ast
 import faulthandler
 import io
 import json
@@ -11,13 +12,15 @@ import platform
 import re
 import signal
 import string
+import subprocess
 import sys
 import tempfile
 import traceback
 import unicodedata
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 from string import ascii_uppercase
+from types import ModuleType, SimpleNamespace
 from typing import Any, Mapping, Sequence
 
 from inspect_ai.dataset import Sample
@@ -183,6 +186,35 @@ LONG_BENCH_QA_DATASETS = (
     "dureader",
     "triviaqa",
 )
+BFCL_LIGHTEVAL_DATASET = "rwkv_skills_bfcl_v4_ast"
+BFCL_GORILLA_REPO_URL = "https://github.com/ShishirPatil/gorilla.git"
+BFCL_GORILLA_REVISION = "main"
+BFCL_GORILLA_ROOT_NAME = "gorilla"
+BFCL_DEFAULT_MODEL_NAME = "gorilla-openfunctions-v2"
+BFCL_MAX_TOOL_DESCRIPTION_CHARS = 700
+BFCL_MAX_TOOL_SCHEMA_CHARS = 1_200
+BFCL_AST_TASKS = {
+    "bfcl_simple_python": {
+        "category": "simple_python",
+        "question": ("BFCL_v4_simple_python.json",),
+        "answer": ("possible_answer", "BFCL_v4_simple_python.json"),
+    },
+    "bfcl_multiple": {
+        "category": "multiple",
+        "question": ("BFCL_v4_multiple.json",),
+        "answer": ("possible_answer", "BFCL_v4_multiple.json"),
+    },
+    "bfcl_exec_simple_ast": {
+        "category": "exec_simple",
+        "question": ("unused_datasets", "question", "BFCL_v4_exec_simple.json"),
+        "answer": ("unused_datasets", "possible_answer", "BFCL_v4_exec_simple.json"),
+    },
+    "bfcl_exec_multiple_ast": {
+        "category": "exec_multiple",
+        "question": ("unused_datasets", "question", "BFCL_v4_exec_multiple.json"),
+        "answer": ("unused_datasets", "possible_answer", "BFCL_v4_exec_multiple.json"),
+    },
+}
 _THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DOTALL)
 _FENCED_CODE_RE = re.compile(
     r"```[ \t]*(?:python|py)?[^\S\r\n]*\r?\n(?P<code>.*?)```",
@@ -201,6 +233,7 @@ _LONGCODEQA_INLINE_BOLD_CHOICE_RE = re.compile(r"\*\*\s*\(?([A-Z])\)?\s*[\).:]",
 _LONG_BENCH_ANSWER_PREFIX_RE = re.compile(r"^\s*(?:final\s+answer|answer)\s*[:\-]\s*", re.IGNORECASE)
 _LONG_BENCH_ROLE_PREFIX_RE = re.compile(r"^\s*Assistant\s*:\s*", re.IGNORECASE)
 _LONG_BENCH_WORD_OR_CJK_RE = re.compile(r"[A-Za-z0-9]+|[\u4e00-\u9fff]")
+_BFCL_JSON_PREFILL_FIELDS = frozenset({"action", "function", "function_call", "name", "tool", "tool_calls", "tool_name", "type"})
 _LONGCODEQA_STOPWORDS = {
     "about",
     "after",
@@ -917,13 +950,719 @@ LONG_BENCH_F1 = SampleLevelMetric(
 )
 
 
+def _normalize_rwkv_text(text: object) -> str:
+    return str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    body = str(text or "")
+    if max_chars <= 0 or len(body) <= max_chars:
+        return body
+    marker = "...[truncated]..."
+    if max_chars <= len(marker) + 8:
+        return body[:max_chars]
+    head = max_chars - len(marker)
+    return body[:head] + marker
+
+
+def _coerce_list(raw: object) -> list[Any]:
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, tuple):
+        return list(raw)
+    return []
+
+
+def _read_json_or_jsonl_items(path: Path) -> list[Any]:
+    raw = path.read_text(encoding="utf-8")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        if "Extra data" not in str(exc):
+            raise
+        return [json.loads(line) for line in raw.splitlines() if line.strip()]
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, Mapping):
+        return [dict(payload)]
+    raise ValueError(f"unsupported JSON payload in {path}")
+
+
+def _bfcl_source_candidates() -> tuple[Path, ...]:
+    candidates: list[Path] = []
+    for raw in (
+        os.environ.get("RWKV_BFCL_SMALL_SOURCE_ROOT"),
+        os.environ.get("RWKV_BFCL_V4_SOURCE_ROOT"),
+        os.environ.get("BFCL_V4_SOURCE_ROOT"),
+    ):
+        if raw:
+            candidates.append(Path(raw).expanduser())
+    candidates.extend(
+        [
+            Path(__file__).resolve().parents[3]
+            / "references"
+            / "gorilla"
+            / "berkeley-function-call-leaderboard"
+            / "bfcl_eval"
+            / "data",
+            Path("/tmp/rwkv-official-refs/gorilla/berkeley-function-call-leaderboard/bfcl_eval/data"),
+            Path("/tmp/gorilla-official/berkeley-function-call-leaderboard/bfcl_eval/data"),
+            Path("/home/chase/GitHub/rwkv-skills/references/gorilla/berkeley-function-call-leaderboard/bfcl_eval/data"),
+        ]
+    )
+    return tuple(dict.fromkeys(path.expanduser().resolve() for path in candidates))
+
+
+def _bfcl_data_root_from_candidate(candidate: Path) -> Path:
+    root = candidate.expanduser().resolve()
+    if root.name == "data" and root.parent.name == "bfcl_eval":
+        return root
+    if (root / "bfcl_eval" / "data").is_dir():
+        return root / "bfcl_eval" / "data"
+    if (root / "berkeley-function-call-leaderboard" / "bfcl_eval" / "data").is_dir():
+        return root / "berkeley-function-call-leaderboard" / "bfcl_eval" / "data"
+    return root
+
+
+def _bfcl_required_paths(data_root: Path, dataset_name: str) -> tuple[Path, Path]:
+    task = BFCL_AST_TASKS[dataset_name]
+    return (data_root.joinpath(*task["question"]), data_root.joinpath(*task["answer"]))
+
+
+def _bfcl_data_root(dataset_name: str) -> Path:
+    for candidate in _bfcl_source_candidates():
+        data_root = _bfcl_data_root_from_candidate(candidate)
+        question_path, answer_path = _bfcl_required_paths(data_root, dataset_name)
+        if question_path.exists() and answer_path.exists():
+            return data_root.resolve()
+    return _download_bfcl_source(dataset_name)
+
+
+def _download_bfcl_source(dataset_name: str) -> Path:
+    target = Path(os.environ.get("RWKV_LIGHTEVAL_BFCL_CACHE", "/tmp/helicopter-bfcl-official")).expanduser().resolve()
+    repo_root = target / BFCL_GORILLA_ROOT_NAME
+    if not (repo_root / ".git").exists():
+        target.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["git", "clone", "--depth", "1", "--branch", BFCL_GORILLA_REVISION, BFCL_GORILLA_REPO_URL, str(repo_root)],
+            check=True,
+        )
+    data_root = repo_root / "berkeley-function-call-leaderboard" / "bfcl_eval" / "data"
+    question_path, answer_path = _bfcl_required_paths(data_root, dataset_name)
+    if not question_path.exists() or not answer_path.exists():
+        raise FileNotFoundError(f"BFCL source is incomplete for {dataset_name}: {question_path}, {answer_path}")
+    return data_root.resolve()
+
+
+def _bfcl_official_root(data_root: Path) -> Path:
+    root = data_root.expanduser().resolve()
+    if root.name == "data" and root.parent.name == "bfcl_eval":
+        return root.parent.parent.resolve()
+    if (root / "bfcl_eval" / "eval_checker").is_dir():
+        return root.resolve()
+    for parent in root.parents:
+        if (parent / "bfcl_eval" / "eval_checker").is_dir():
+            return parent.resolve()
+    return root.parent.parent.resolve()
+
+
+def _render_bfcl_question(raw: object) -> str:
+    if isinstance(raw, str):
+        return raw.strip()
+    parts: list[str] = []
+    for turn in _coerce_list(raw):
+        for message in _coerce_list(turn):
+            if isinstance(message, Mapping):
+                role = str(message.get("role") or "user").strip().lower() or "user"
+                content = str(message.get("content") or "").strip()
+                if content:
+                    parts.append(f"{role.title()}: {content}")
+            elif str(message or "").strip():
+                parts.append(str(message).strip())
+    return "\n".join(parts).strip()
+
+
+def _normalize_tool_schema(raw: object) -> dict[str, Any]:
+    if not isinstance(raw, Mapping):
+        return {"name": "unknown_tool", "description": "", "parameters": {"type": "object", "properties": {}, "required": []}}
+    function = raw.get("function") if isinstance(raw.get("function"), Mapping) else None
+    source = function or raw
+    parameters = source.get("parameters") or {"type": "object", "properties": {}, "required": []}
+    if not isinstance(parameters, Mapping):
+        parameters = {"type": "object", "properties": {}, "required": []}
+    parameters = dict(parameters)
+    if str(parameters.get("type") or "").lower() == "dict":
+        parameters["type"] = "object"
+    parameters.setdefault("properties", {})
+    parameters.setdefault("required", [])
+    normalized = {
+        "name": str(source.get("name") or raw.get("name") or "unknown_tool"),
+        "description": str(source.get("description") or raw.get("description") or ""),
+        "parameters": parameters,
+    }
+    metadata = raw.get("metadata") or source.get("metadata")
+    if isinstance(metadata, Mapping):
+        normalized["metadata"] = dict(metadata)
+    return normalized
+
+
+def _literal_from_ast(node: ast.AST) -> Any:
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name):
+        if node.id in {"true", "True"}:
+            return True
+        if node.id in {"false", "False"}:
+            return False
+        if node.id in {"null", "None"}:
+            return None
+    if isinstance(node, ast.List):
+        return [_literal_from_ast(item) for item in node.elts]
+    if isinstance(node, ast.Tuple):
+        return [_literal_from_ast(item) for item in node.elts]
+    if isinstance(node, ast.Dict):
+        return {_literal_from_ast(key): _literal_from_ast(value) for key, value in zip(node.keys, node.values)}
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        value = _literal_from_ast(node.operand)
+        return -value if isinstance(value, (int, float)) else value
+    if isinstance(node, ast.BinOp):
+        left = _literal_from_ast(node.left)
+        right = _literal_from_ast(node.right)
+        if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+            if isinstance(node.op, ast.Add):
+                return left + right
+            if isinstance(node.op, ast.Sub):
+                return left - right
+            if isinstance(node.op, ast.Mult):
+                return left * right
+            if isinstance(node.op, ast.Div):
+                return left / right
+            if isinstance(node.op, ast.Pow):
+                return left**right
+    return ast.literal_eval(node)
+
+
+def _render_ast_call_name(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        prefix = _render_ast_call_name(node.value)
+        return f"{prefix}.{node.attr}" if prefix else node.attr
+    return ""
+
+
+def _parse_python_call(text: str) -> tuple[str, dict[str, Any]]:
+    parsed = ast.parse(str(text).strip(), mode="eval")
+    if not isinstance(parsed.body, ast.Call):
+        raise ValueError(f"BFCL ground-truth expression is not a function call: {text}")
+    name = _render_ast_call_name(parsed.body.func)
+    arguments: dict[str, Any] = {}
+    for keyword in parsed.body.keywords:
+        if keyword.arg is not None:
+            arguments[keyword.arg] = _literal_from_ast(keyword.value)
+    return name, arguments
+
+
+def _normalize_bfcl_ground_truth_calls(raw: object) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    for item in _coerce_list(raw):
+        if isinstance(item, str):
+            name, arguments = _parse_python_call(item)
+            calls.append(
+                {
+                    "name": name,
+                    "arguments": arguments,
+                    "argument_options": {key: [value] for key, value in arguments.items()},
+                }
+            )
+            continue
+        if isinstance(item, Mapping):
+            if "name" in item:
+                arguments = item.get("arguments")
+                if isinstance(arguments, str):
+                    try:
+                        arguments = json.loads(arguments)
+                    except json.JSONDecodeError:
+                        arguments = {}
+                argument_options = {
+                    str(key): [value]
+                    for key, value in dict(arguments).items()
+                } if isinstance(arguments, Mapping) else {}
+                calls.append(
+                    {
+                        "name": str(item.get("name") or ""),
+                        "arguments": dict(arguments) if isinstance(arguments, Mapping) else {},
+                        "argument_options": argument_options,
+                    }
+                )
+                continue
+            if len(item) == 1:
+                name, argument_options = next(iter(item.items()))
+                if isinstance(argument_options, Mapping):
+                    normalized_options = {str(key): _coerce_list(value) or [value] for key, value in argument_options.items()}
+                    arguments = {key: _canonical_bfcl_option_value(value) for key, value in normalized_options.items()}
+                else:
+                    normalized_options = {}
+                    arguments = {}
+                calls.append({"name": str(name), "arguments": arguments, "argument_options": normalized_options})
+    return calls
+
+
+def _canonical_bfcl_option_value(options: Sequence[Any]) -> Any:
+    for option in options:
+        if option not in (None, "", {}, []):
+            return option
+    return options[0] if options else None
+
+
+def _load_bfcl_ast_rows(dataset_name: str) -> list[dict[str, Any]]:
+    if dataset_name not in BFCL_AST_TASKS:
+        raise ValueError(f"unknown BFCL AST dataset: {dataset_name}")
+    data_root = _bfcl_data_root(dataset_name)
+    official_root = _bfcl_official_root(data_root)
+    task = BFCL_AST_TASKS[dataset_name]
+    question_path, answer_path = _bfcl_required_paths(data_root, dataset_name)
+    questions = _read_json_or_jsonl_items(question_path)
+    answer_lookup = {
+        str(item.get("id") or item.get("task_id") or ""): item
+        for item in _read_json_or_jsonl_items(answer_path)
+        if isinstance(item, Mapping)
+    }
+    rows: list[dict[str, Any]] = []
+    for index, item in enumerate(questions):
+        if not isinstance(item, Mapping):
+            continue
+        task_id = str(item.get("id") or item.get("task_id") or f"{task['category']}_{index}")
+        answer = answer_lookup.get(task_id)
+        if answer is None:
+            raise ValueError(f"missing BFCL possible-answer entry for {task_id}")
+        instruction = _render_bfcl_question(item.get("question"))
+        if not instruction:
+            raise ValueError(f"BFCL row {task_id!r} is missing question content")
+        raw_functions = _coerce_list(item.get("function"))
+        raw_ground_truth = _coerce_list(answer.get("ground_truth"))
+        rows.append(
+            {
+                "task_id": task_id,
+                "instruction": instruction,
+                "tools": [_normalize_tool_schema(tool) for tool in raw_functions],
+                "expected_tool_calls": _normalize_bfcl_ground_truth_calls(raw_ground_truth),
+                "metadata": {
+                    "source_format": "official_bfcl_v4_ast",
+                    "category": task["category"],
+                    "source_path": str(question_path),
+                    "possible_answer_path": str(answer_path),
+                    "official_root": str(official_root),
+                    "official_source": "gorilla/berkeley-function-call-leaderboard",
+                    "bfcl_official_function": raw_functions,
+                    "bfcl_official_ground_truth": raw_ground_truth,
+                    "bfcl_official_language": str(item.get("language") or item.get("programming_language") or "python").lower(),
+                },
+            }
+        )
+    return rows
+
+
+def _load_bfcl_dataset_dict(dataset_name: str):
+    from datasets import Dataset, DatasetDict
+
+    rows: list[dict[str, Any]] = []
+    for row in _load_bfcl_ast_rows(dataset_name):
+        rendered = dict(row)
+        for key in ("tools", "expected_tool_calls", "metadata"):
+            rendered[key] = json.dumps(rendered.get(key) or ([] if key != "metadata" else {}), ensure_ascii=False, sort_keys=True)
+        rows.append(rendered)
+    return DatasetDict({"test": Dataset.from_list(rows)})
+
+
+def _bfcl_json_list_field(value: object) -> list[Any]:
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return _coerce_list(value)
+
+
+def _bfcl_json_mapping_field(value: object) -> dict[str, Any]:
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return dict(parsed) if isinstance(parsed, Mapping) else {}
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _render_bfcl_tool_catalog(tools: Sequence[Mapping[str, Any]]) -> str:
+    rendered_tools: list[dict[str, Any]] = []
+    for tool in tools:
+        parameters = tool.get("parameters")
+        if not isinstance(parameters, Mapping):
+            parameters = {"type": "object", "properties": {}, "required": []}
+        raw_properties = parameters.get("properties")
+        rendered_arguments: Any = dict(raw_properties) if isinstance(raw_properties, Mapping) else dict(parameters)
+        rendered_schema = json.dumps(rendered_arguments, ensure_ascii=False, sort_keys=True)
+        if len(rendered_schema) > BFCL_MAX_TOOL_SCHEMA_CHARS:
+            rendered_arguments = {
+                "_truncated": True,
+                "preview": _truncate_text(rendered_schema, BFCL_MAX_TOOL_SCHEMA_CHARS),
+            }
+        rendered_tools.append(
+            {
+                "name": str(tool.get("name") or ""),
+                "description": _truncate_text(_normalize_rwkv_text(tool.get("description")), BFCL_MAX_TOOL_DESCRIPTION_CHARS),
+                "arguments": rendered_arguments,
+                **(
+                    {"required": list(parameters.get("required") or [])}
+                    if isinstance(parameters.get("required"), list) and parameters.get("required")
+                    else {}
+                ),
+            }
+        )
+    return json.dumps(rendered_tools, ensure_ascii=False, indent=2, sort_keys=False)
+
+
+def _render_bfcl_output_schema() -> str:
+    tool_call_schema = {
+        "type": "object",
+        "required": ["name", "arguments"],
+        "additionalProperties": False,
+        "properties": {"name": {"type": "string"}, "arguments": {"type": "object"}},
+    }
+    return json.dumps({"oneOf": [tool_call_schema, {"type": "array", "items": tool_call_schema, "minItems": 1}]}, indent=2)
+
+
+def bfcl_ast_prompt(line: dict, task_name: str | None = None) -> Doc:
+    instruction = _normalize_rwkv_text(line.get("instruction"))
+    tools = _bfcl_json_list_field(line.get("tools"))
+    expected_tool_calls = _bfcl_json_list_field(line.get("expected_tool_calls"))
+    metadata = _bfcl_json_mapping_field(line.get("metadata"))
+    system_prompt = "\n".join(
+        [
+            "Tools:",
+            _render_bfcl_tool_catalog([tool for tool in tools if isinstance(tool, Mapping)]),
+            "Output JSON schema:",
+            _render_bfcl_output_schema(),
+            "Return exactly one JSON value that validates against the schema.",
+            "For one tool call, return one JSON object.",
+            "For multiple required tool calls, return a JSON array containing every required call in execution order.",
+            "Each arguments object must contain only final argument values for that tool.",
+            "Do not copy tool schemas, descriptions, type/items/properties/required/default fields, or wrapper objects into arguments.",
+            "Use only listed tool names.",
+            "Return no prose, no markdown, and no extra text outside the JSON value.",
+        ]
+    )
+    query = f"System: {system_prompt}\n\nUser: {instruction}\n\nJSON:"
+    return Doc(
+        task_name=task_name,
+        query=query,
+        choices=[json.dumps(expected_tool_calls, ensure_ascii=False, sort_keys=True)],
+        gold_index=0,
+        specific={
+            "task_id": line.get("task_id"),
+            "instruction": instruction,
+            "tools": json.dumps(tools, ensure_ascii=False, sort_keys=True),
+            "expected_tool_calls": json.dumps(expected_tool_calls, ensure_ascii=False, sort_keys=True),
+            "metadata": json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+            "prompt_chars": len(query),
+        },
+    )
+
+
+def _strip_json_fence(text: str) -> str:
+    normalized = _normalize_rwkv_text(text)
+    if normalized.startswith("```"):
+        lines = normalized.split("\n")
+        if lines and lines[0].strip().lower() in {"```", "```json", "```javascript", "```js"}:
+            lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            normalized = _normalize_rwkv_text("\n".join(lines))
+    if normalized.endswith("```"):
+        normalized = _normalize_rwkv_text(normalized[: -len("```")])
+    return normalized
+
+
+def _find_leading_json_value_end(text: str) -> int | None:
+    if not text or text[0] not in "{[":
+        return None
+    expected_stack: list[str] = []
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            continue
+        if char == "{":
+            expected_stack.append("}")
+            continue
+        if char == "[":
+            expected_stack.append("]")
+            continue
+        if char in "}]":
+            if not expected_stack or expected_stack[-1] != char:
+                return None
+            expected_stack.pop()
+            if not expected_stack:
+                return index + 1
+    return None
+
+
+def _apply_bfcl_json_prefill(response: str) -> str:
+    normalized = _normalize_rwkv_text(response)
+    stripped = normalized.lstrip()
+    if not stripped or stripped.startswith(("{", "[", "```")):
+        return normalized
+    field_match = re.match(r'^"(?P<field>[A-Za-z_][A-Za-z0-9_]*)"\s*:', stripped)
+    if field_match and field_match.group("field") in _BFCL_JSON_PREFILL_FIELDS:
+        return "{" + stripped
+    return normalized
+
+
+def _bfcl_functional_call_to_payload(text: str) -> dict[str, Any] | None:
+    match = re.match(r"(?s)^(?P<name>[A-Za-z_][\w.:-]*)\s*\((?P<arguments>.*)\)\s*$", _normalize_rwkv_text(text))
+    if match is None:
+        return None
+    try:
+        parsed_call = ast.parse(f"_rwkv_tool_call({match.group('arguments')})", mode="eval").body
+    except SyntaxError:
+        return None
+    if not isinstance(parsed_call, ast.Call):
+        return None
+    arguments: dict[str, Any] = {}
+    for keyword in parsed_call.keywords:
+        if keyword.arg is None:
+            return None
+        arguments[str(keyword.arg)] = _literal_from_ast(keyword.value)
+    return {"name": match.group("name"), "arguments": arguments}
+
+
+def _extract_bfcl_json_value_text(response: str) -> str:
+    normalized = _normalize_rwkv_text(response)
+    if normalized.startswith("Assistant:"):
+        normalized = _normalize_rwkv_text(normalized[len("Assistant:") :])
+    normalized = _THINK_BLOCK_RE.sub("", normalized).strip()
+    normalized = _strip_json_fence(normalized)
+    tagged = re.match(r"(?is)^<tool_call>\s*(.*?)\s*</tool_call>\s*$", normalized)
+    if tagged is not None:
+        normalized = _strip_json_fence(tagged.group(1))
+    functional = _bfcl_functional_call_to_payload(normalized)
+    if functional is not None:
+        return json.dumps(functional, ensure_ascii=False, separators=(",", ":"))
+    normalized = _apply_bfcl_json_prefill(normalized)
+    if not normalized.startswith(("{", "[")):
+        raise ValueError(f"model response must be a JSON function call object or array: {normalized}")
+    end = _find_leading_json_value_end(normalized)
+    if end is None:
+        raise ValueError(f"model response must be a complete JSON function call object or array: {normalized}")
+    candidate = normalized[:end]
+    trailing = _normalize_rwkv_text(normalized[end:])
+    trailing = _strip_json_fence(trailing) if trailing.startswith("```") else trailing
+    if trailing and trailing != "```":
+        raise ValueError(f"model response has extra text after JSON function call object or array: {trailing}")
+    return candidate
+
+
+def decode_bfcl_tool_call_response(response: str) -> list[dict[str, Any]]:
+    candidate = _extract_bfcl_json_value_text(response)
+    try:
+        payload = json.loads(candidate)
+    except json.JSONDecodeError:
+        payload = _literal_from_ast(ast.parse(candidate, mode="eval").body)
+    return _coerce_bfcl_function_call_payloads(payload)
+
+
+def _coerce_bfcl_function_call_payloads(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [_coerce_bfcl_function_call_mapping(item) for item in payload if isinstance(item, Mapping)]
+    if not isinstance(payload, Mapping):
+        raise ValueError("tool-call selection payload must be a JSON object")
+    if isinstance(payload.get("tool_calls"), list):
+        return [_coerce_bfcl_function_call_mapping(item) for item in payload["tool_calls"] if isinstance(item, Mapping)]
+    return [_coerce_bfcl_function_call_mapping(payload)]
+
+
+def _coerce_bfcl_function_call_mapping(payload: Mapping[str, Any]) -> dict[str, Any]:
+    function_payload = payload.get("function")
+    if not isinstance(function_payload, Mapping):
+        function_payload = payload.get("function_call")
+    if isinstance(function_payload, Mapping):
+        name = function_payload.get("name") or payload.get("name")
+        arguments = function_payload.get("arguments", payload.get("arguments", {}))
+    else:
+        name = payload.get("name") or payload.get("tool_name") or payload.get("tool")
+        arguments = payload.get("arguments", {})
+    name_text = str(name or "").strip()
+    if not name_text:
+        raise ValueError("tool-call selection missing name")
+    if arguments is None:
+        arguments = {}
+    if isinstance(arguments, str):
+        raw_arguments = arguments.strip()
+        if raw_arguments:
+            try:
+                arguments = json.loads(raw_arguments)
+            except json.JSONDecodeError as exc:
+                raise ValueError("tool-call string arguments must be a JSON object") from exc
+        else:
+            arguments = {}
+    if not isinstance(arguments, Mapping):
+        raise ValueError("tool-call arguments must be a JSON object")
+    return {"name": name_text, "arguments": dict(arguments)}
+
+
+@contextlib.contextmanager
+def _bfcl_ast_model_config_stub():
+    module_name = "bfcl_eval.constants.model_config"
+    previous = sys.modules.get(module_name)
+    stub = ModuleType(module_name)
+    stub.MODEL_CONFIG_MAPPING = defaultdict(lambda: SimpleNamespace(underscore_to_dot=False))
+    sys.modules[module_name] = stub
+    try:
+        yield
+    finally:
+        if previous is None:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = previous
+
+
+@contextlib.contextmanager
+def _bfcl_official_import_context(root: str):
+    added = False
+    if root and root not in sys.path:
+        sys.path.insert(0, root)
+        added = True
+    try:
+        yield
+    finally:
+        if added:
+            try:
+                sys.path.remove(root)
+            except ValueError:
+                pass
+
+
+def _officialize_bfcl_tool_schema(tool: Mapping[str, Any]) -> dict[str, Any]:
+    payload = dict(tool)
+    parameters = payload.get("parameters")
+    if isinstance(parameters, Mapping):
+        parameters = dict(parameters)
+        if str(parameters.get("type") or "").lower() == "object":
+            parameters["type"] = "dict"
+        payload["parameters"] = parameters
+    return payload
+
+
+def _bfcl_record_function_description(record: Mapping[str, Any]) -> list[dict[str, Any]]:
+    metadata = _bfcl_json_mapping_field(record.get("metadata"))
+    raw = metadata.get("bfcl_official_function")
+    if isinstance(raw, list):
+        return [dict(item) for item in raw if isinstance(item, Mapping)]
+    return [_officialize_bfcl_tool_schema(tool) for tool in _bfcl_json_list_field(record.get("tools")) if isinstance(tool, Mapping)]
+
+
+def _bfcl_record_possible_answer(record: Mapping[str, Any]) -> list[dict[str, Any]]:
+    metadata = _bfcl_json_mapping_field(record.get("metadata"))
+    raw = metadata.get("bfcl_official_ground_truth")
+    if isinstance(raw, list):
+        answers = [dict(item) for item in raw if isinstance(item, Mapping)]
+        if answers:
+            return answers
+    possible: list[dict[str, Any]] = []
+    for item in _bfcl_json_list_field(record.get("expected_tool_calls")):
+        if not isinstance(item, Mapping):
+            continue
+        options = item.get("argument_options")
+        if isinstance(options, Mapping):
+            possible.append({str(item.get("name") or ""): {str(key): list(_coerce_list(value) or [value]) for key, value in options.items()}})
+        else:
+            possible.append({str(item.get("name") or ""): {key: [value] for key, value in dict(item.get("arguments") or {}).items()}})
+    return possible
+
+
+def _bfcl_record_language(record: Mapping[str, Any]):
+    metadata = _bfcl_json_mapping_field(record.get("metadata"))
+    return str(metadata.get("bfcl_official_language") or "python").strip().upper()
+
+
+def _bfcl_record_category(record: Mapping[str, Any]) -> str:
+    metadata = _bfcl_json_mapping_field(record.get("metadata"))
+    category = str(metadata.get("category") or "").strip()
+    return category or str(record.get("task_id") or "").rsplit("_", 1)[0]
+
+
+def _bfcl_model_output(decoded_calls: Sequence[Mapping[str, Any]]) -> list[dict[str, dict[str, Any]]]:
+    result: list[dict[str, dict[str, Any]]] = []
+    for call in decoded_calls:
+        name = str(call.get("name") or call.get("tool_name") or "").strip()
+        arguments = call.get("arguments")
+        result.append({name: dict(arguments) if isinstance(arguments, Mapping) else {}})
+    return result
+
+
+def run_bfcl_official_ast_checker(record: Mapping[str, Any], decoded_calls: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    metadata = _bfcl_json_mapping_field(record.get("metadata"))
+    root = str(metadata.get("official_root") or "").strip()
+    if not root:
+        source_path = str(metadata.get("source_path") or "")
+        root = str(_bfcl_official_root(Path(source_path).parent)) if source_path else ""
+    with _bfcl_official_import_context(root), _bfcl_ast_model_config_stub():
+        from bfcl_eval.constants.enums import Language
+        from bfcl_eval.eval_checker.ast_eval.ast_checker import ast_checker
+
+        language = getattr(Language, _bfcl_record_language(record), Language.PYTHON)
+        result = ast_checker(
+            _bfcl_record_function_description(record),
+            _bfcl_model_output(decoded_calls),
+            _bfcl_record_possible_answer(record),
+            language,
+            _bfcl_record_category(record),
+            BFCL_DEFAULT_MODEL_NAME,
+        )
+    return dict(result) if isinstance(result, Mapping) else {"valid": False, "error": [str(result)]}
+
+
+class BfclAstAccuracy(SampleLevelComputation):
+    def compute(self, doc: Doc, model_response, **kwargs) -> float:
+        record = dict(doc.specific or {})
+        for prediction in model_response.final_text:
+            try:
+                decoded_calls = decode_bfcl_tool_call_response(prediction)
+                checker_result = run_bfcl_official_ast_checker(record, decoded_calls)
+            except Exception:
+                continue
+            if bool(checker_result.get("valid")):
+                return 1.0
+        return 0.0
+
+
+BFCL_AST_ACCURACY = SampleLevelMetric(
+    metric_name="bfcl_ast_accuracy",
+    sample_level_fn=BfclAstAccuracy(),
+    category=SamplingMethod.GENERATIVE,
+    corpus_level_fn=_mean,
+    higher_is_better=True,
+)
+
+
 def _install_longcodeqa_data_files_patch() -> None:
-    """Scope a LightEval 0.13 compatibility patch to the LongCodeQA zip dataset."""
+    """Scope LightEval 0.13 dataset patches to custom rwkv-skills datasets."""
 
     import lighteval.tasks.lighteval_task as lighteval_task_module
 
     original_load_dataset = lighteval_task_module.load_dataset
-    if getattr(original_load_dataset, "_helicopter_longcodeqa_patch", False):
+    if getattr(original_load_dataset, "_helicopter_rwkv_skills_patch", False):
         return
 
     def patched_load_dataset(*args, **kwargs):
@@ -938,9 +1677,14 @@ def _install_longcodeqa_data_files_patch() -> None:
                 data_files={"test": LONGCODEQA_DATA_FILE},
                 revision=kwargs.get("revision"),
             )
+        if path == BFCL_LIGHTEVAL_DATASET:
+            dataset_name = kwargs.get("name")
+            if dataset_name is None and len(args) > 1:
+                dataset_name = args[1]
+            return _load_bfcl_dataset_dict(str(dataset_name or ""))
         return original_load_dataset(*args, **kwargs)
 
-    patched_load_dataset._helicopter_longcodeqa_patch = True  # type: ignore[attr-defined]
+    patched_load_dataset._helicopter_rwkv_skills_patch = True  # type: ignore[attr-defined]
     patched_load_dataset._helicopter_original_load_dataset = original_load_dataset  # type: ignore[attr-defined]
     lighteval_task_module.load_dataset = patched_load_dataset
 
@@ -1633,6 +2377,23 @@ def _hf_longbench_task(dataset: str) -> LightevalTaskConfig:
     )
 
 
+def _hf_bfcl_ast_task(name: str) -> LightevalTaskConfig:
+    return LightevalTaskConfig(
+        name=f"rwkv_skills:{name}",
+        prompt_function=bfcl_ast_prompt,
+        hf_repo=BFCL_LIGHTEVAL_DATASET,
+        hf_subset=name,
+        hf_avail_splits=["test"],
+        evaluation_splits=["test"],
+        few_shots_split=None,
+        few_shots_select=None,
+        generation_size=768,
+        metrics=[BFCL_AST_ACCURACY],
+        stop_sequence=["\nUser:", "\nSystem:", "\nAssistant:"],
+        version=1,
+    )
+
+
 _install_longcodeqa_data_files_patch()
 
 
@@ -1650,6 +2411,7 @@ TASKS_TABLE = [
     _hf_mbpp_task("mbpp_plus", MBPP_PLUS_PASS_AT_1),
     _hf_longcodeqa_task(),
     *[_hf_longbench_task(dataset) for dataset in LONG_BENCH_DATASETS],
+    *[_hf_bfcl_ast_task(name) for name in BFCL_AST_TASKS],
     *[_hf_math_task(name, task) for name, task in HF_MATH_TASKS.items()],
     _hf_answer_judge_task(),
     _hf_svamp_task(),

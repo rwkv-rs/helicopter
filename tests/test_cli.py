@@ -441,6 +441,13 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(suite["benchmarks"]["mbpp"]["lighteval_tasks"], ["rwkv_skills:mbpp"])
         self.assertEqual(suite["benchmarks"]["mbpp_plus"]["lighteval_tasks"], ["rwkv_skills:mbpp_plus"])
         self.assertEqual(suite["benchmarks"]["longcodeqa"]["lighteval_tasks"], ["rwkv_skills:longcodeqa"])
+        self.assertEqual(suite["benchmarks"]["bfcl_simple_python"]["lighteval_tasks"], ["rwkv_skills:bfcl_simple_python"])
+        self.assertEqual(suite["benchmarks"]["bfcl_multiple"]["lighteval_tasks"], ["rwkv_skills:bfcl_multiple"])
+        self.assertEqual(suite["benchmarks"]["bfcl_exec_simple_ast"]["lighteval_tasks"], ["rwkv_skills:bfcl_exec_simple_ast"])
+        self.assertEqual(
+            suite["benchmarks"]["bfcl_exec_multiple_ast"]["lighteval_tasks"],
+            ["rwkv_skills:bfcl_exec_multiple_ast"],
+        )
         self.assertEqual(len(suite["benchmarks"]["longbench"]["lighteval_tasks"]), 21)
         self.assertEqual(len(suite["benchmarks"]["longbench_qa"]["lighteval_tasks"]), 9)
         self.assertEqual(len(suite["benchmarks"]["longbench_qa_balanced"]["lighteval_tasks"]), 9)
@@ -587,6 +594,10 @@ class CommandPlanTests(unittest.TestCase):
         self.assertIn("rwkv_skills:longcodeqa", registry._task_registry)
         self.assertIn("rwkv_skills:longbench_narrativeqa", registry._task_registry)
         self.assertIn("rwkv_skills:longbench_repobench_p", registry._task_registry)
+        self.assertIn("rwkv_skills:bfcl_simple_python", registry._task_registry)
+        self.assertIn("rwkv_skills:bfcl_multiple", registry._task_registry)
+        self.assertIn("rwkv_skills:bfcl_exec_simple_ast", registry._task_registry)
+        self.assertIn("rwkv_skills:bfcl_exec_multiple_ast", registry._task_registry)
         self.assertIn("rwkv_skills:algebra222", registry._task_registry)
         self.assertIn("rwkv_skills:gaokao2023en", registry._task_registry)
         self.assertIn("rwkv_skills:amc23", registry._task_registry)
@@ -703,6 +714,35 @@ class CommandPlanTests(unittest.TestCase):
         response = type("Response", (), {"final_text": ['{"answer":"deprecated and stable"}']})()
         self.assertEqual(module.LongBenchExactMatch().compute(doc, response), 1.0)
         self.assertEqual(module.LongBenchF1().compute(doc, response), 1.0)
+
+    def test_rwkv_skills_bfcl_ast_prompt_loads_and_scores_with_official_checker(self) -> None:
+        if importlib.util.find_spec("lighteval") is None:
+            self.skipTest("LightEval is not installed")
+
+        custom_tasks = ROOT / "src/cli/helicopter_cli/lighteval_rwkv_skills_tasks.py"
+        spec = importlib.util.spec_from_file_location("rwkv_skills_lighteval_tasks", custom_tasks)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        for dataset_name in (
+            "bfcl_simple_python",
+            "bfcl_multiple",
+            "bfcl_exec_simple_ast",
+            "bfcl_exec_multiple_ast",
+        ):
+            rows = module._load_bfcl_ast_rows(dataset_name)
+            self.assertGreater(len(rows), 0)
+            doc = module.bfcl_ast_prompt(rows[0], f"rwkv_skills:{dataset_name}")
+            self.assertIn("Output JSON schema", doc.query)
+            self.assertIn("\n\nJSON:", doc.query)
+            response = type(
+                "Response",
+                (),
+                {"final_text": [module.json.dumps(rows[0]["expected_tool_calls"], ensure_ascii=False)]},
+            )()
+            self.assertEqual(module.BfclAstAccuracy().compute(doc, response), 1.0, dataset_name)
 
     def test_rwkv_skills_svamp_prompt_combines_body_question_and_normalizes_answer(self) -> None:
         if importlib.util.find_spec("lighteval") is None:

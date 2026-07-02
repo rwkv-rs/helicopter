@@ -101,8 +101,8 @@ reason = "BFCL execution tasks require function-call execution semantics."
 
 [benchmarks.bfcl_exec_multiple_ast]
 field = "function_calling"
-status = "needs_adapter"
-reason = "BFCL AST tasks require a custom parser/scorer adapter."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:bfcl_exec_multiple_ast"]
 
 [benchmarks.bfcl_exec_parallel]
 field = "function_calling"
@@ -121,18 +121,18 @@ reason = "BFCL execution tasks require function-call execution semantics."
 
 [benchmarks.bfcl_exec_simple_ast]
 field = "function_calling"
-status = "needs_adapter"
-reason = "BFCL AST tasks require a custom parser/scorer adapter."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:bfcl_exec_simple_ast"]
 
 [benchmarks.bfcl_multiple]
 field = "function_calling"
-status = "needs_adapter"
-reason = "BFCL AST tasks require a custom parser/scorer adapter."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:bfcl_multiple"]
 
 [benchmarks.bfcl_simple_python]
 field = "function_calling"
-status = "needs_adapter"
-reason = "BFCL AST tasks require a custom parser/scorer adapter."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:bfcl_simple_python"]
 
 [benchmarks.bfcl_v3]
 field = "function_calling"
