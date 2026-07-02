@@ -13,6 +13,7 @@ import sys
 from typing import Any
 
 from .openai_client import chat_completion
+from .sampling import apply_limit_or_sample, dataset_sample_suffix
 from .scoreboard import ScoreboardEvalResult, ScoreboardWriteConfig, write_scoreboard_results
 
 
@@ -98,6 +99,8 @@ class SweBenchRunConfig:
     benchmark: str
     dataset_name: str
     limit: int | None = None
+    sample_size: int | None = None
+    sample_seed: int = 42
     split: str = "test"
     source_path: str | None = None
     source_root: str | None = None
@@ -125,15 +128,18 @@ def load_samples(config: SweBenchRunConfig) -> list[SweBenchSample]:
         raise ValueError("SWE-Bench only provides test split in the rwkv-skills catalog")
     if config.dataset_name not in SWE_BENCH_DATASETS:
         raise ValueError(f"unknown SWE-Bench dataset: {config.dataset_name}")
-    if config.limit is not None and int(config.limit) < 0:
-        raise ValueError("limit must be non-negative")
     rows = _load_rows(config)
     samples = [
         _sample_from_row(index, row, dataset_name=config.dataset_name)
         for index, row in enumerate(rows)
     ]
-    if config.limit is not None:
-        samples = samples[: int(config.limit)]
+    samples = apply_limit_or_sample(
+        samples,
+        limit=config.limit,
+        sample_size=config.sample_size,
+        sample_seed=config.sample_seed,
+        sort_key=lambda sample: sample.sample_index,
+    )
     if not samples:
         raise ValueError("SWE-Bench run selected zero samples")
     return samples
@@ -313,6 +319,7 @@ def scoreboard_dataset_name(config: SweBenchRunConfig) -> str:
     dataset = config.scoreboard_dataset or f"{config.benchmark}_{config.split}"
     if config.limit is not None:
         dataset = f"{dataset}_limit{int(config.limit)}"
+    dataset += dataset_sample_suffix(sample_size=config.sample_size, sample_seed=config.sample_seed)
     return dataset
 
 
@@ -338,6 +345,8 @@ def task_sampling_config(config: SweBenchRunConfig) -> dict[str, Any]:
         "prompt_profile": "helicopter_swebench_patch",
         "harness_dataset": SWE_BENCH_DATASETS[config.dataset_name]["harness_dataset"],
         "run_harness": bool(config.run_harness),
+        "sample_size": config.sample_size,
+        "sample_seed": config.sample_seed if config.sample_size is not None else None,
         "sampling_config": completion_sampling_config(config),
     }
 
@@ -414,6 +423,8 @@ def dry_run_summary(config: SweBenchRunConfig) -> dict[str, Any]:
         "hf_dataset": SWE_BENCH_DATASETS[config.dataset_name]["hf_dataset"],
         "harness_dataset": SWE_BENCH_DATASETS[config.dataset_name]["harness_dataset"],
         "limit": config.limit,
+        "sample_size": config.sample_size,
+        "sample_seed": config.sample_seed if config.sample_size is not None else None,
         "available_samples": len(samples),
         "base_url": config.base_url,
         "model": config.model,

@@ -14,6 +14,7 @@ from typing import Any, Iterator, Mapping, Sequence
 
 from .apibank import decode_tool_calls
 from .openai_client import chat_completion
+from .sampling import apply_limit_or_sample, dataset_sample_suffix
 from .scoreboard import ScoreboardEvalResult, ScoreboardWriteConfig, write_scoreboard_results
 
 
@@ -91,6 +92,8 @@ class ToolAlpacaRunConfig:
     benchmark: str
     dataset_name: str
     limit: int | None = None
+    sample_size: int | None = None
+    sample_seed: int = 42
     split: str = "test"
     source_root: str | None = None
     temperature: float = 0.0
@@ -206,15 +209,12 @@ def load_samples(config: ToolAlpacaRunConfig) -> list[ToolAlpacaSample]:
         raise ValueError("ToolAlpaca only provides test split")
     if config.dataset_name not in TOOLALPACA_FILES:
         raise ValueError(f"unknown ToolAlpaca dataset: {config.dataset_name}")
-    if config.limit is not None and int(config.limit) < 0:
-        raise ValueError("limit must be non-negative")
-
     source_root = resolve_toolalpaca_source_root(config)
     source_path = source_root / TOOLALPACA_FILES[config.dataset_name]
     rows = load_toolalpaca_rows_from_source(source_path, dataset_name=config.dataset_name)
     samples: list[ToolAlpacaSample] = []
     for row in rows:
-        if config.limit is not None and len(samples) >= int(config.limit):
+        if config.limit is not None and config.sample_size is None and len(samples) >= int(config.limit):
             break
         samples.append(
             ToolAlpacaSample(
@@ -233,7 +233,13 @@ def load_samples(config: ToolAlpacaRunConfig) -> list[ToolAlpacaSample]:
                 metadata=dict(row.get("metadata") or {}),
             )
         )
-    return samples
+    return apply_limit_or_sample(
+        samples,
+        limit=config.limit,
+        sample_size=config.sample_size,
+        sample_seed=config.sample_seed,
+        sort_key=lambda sample: sample.sample_index,
+    )
 
 
 def load_toolalpaca_rows_from_source(path: str | Path, *, dataset_name: str) -> list[dict[str, Any]]:
@@ -436,6 +442,7 @@ def scoreboard_dataset_name(config: ToolAlpacaRunConfig) -> str:
     dataset = config.scoreboard_dataset or f"{config.benchmark}_{config.split}"
     if config.limit is not None:
         dataset = f"{dataset}_limit{int(config.limit)}"
+    dataset += dataset_sample_suffix(sample_size=config.sample_size, sample_seed=config.sample_seed)
     return dataset
 
 
@@ -459,6 +466,8 @@ def task_sampling_config(config: ToolAlpacaRunConfig) -> dict[str, Any]:
         "pass_ks": [1],
         "prompt_profile": "helicopter_toolalpaca",
         "execution_backend": "local_toolalpaca_request_sandbox",
+        "sample_size": config.sample_size,
+        "sample_seed": config.sample_seed if config.sample_size is not None else None,
         "sampling_config": completion_sampling_config(config),
     }
 
@@ -508,6 +517,8 @@ def dry_run_summary(config: ToolAlpacaRunConfig) -> dict[str, Any]:
         "split": config.split,
         "source_dataset": config.dataset_name,
         "limit": config.limit,
+        "sample_size": config.sample_size,
+        "sample_seed": config.sample_seed if config.sample_size is not None else None,
         "base_url": config.base_url,
         "model": config.model,
         "scoreboard_dataset": scoreboard_dataset_name(config),

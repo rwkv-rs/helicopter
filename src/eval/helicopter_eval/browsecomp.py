@@ -17,6 +17,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 from .openai_client import chat_completion
+from .sampling import apply_limit_or_sample, dataset_sample_suffix
 from .scoreboard import ScoreboardEvalResult, ScoreboardWriteConfig, write_scoreboard_results
 
 
@@ -69,6 +70,8 @@ class BrowseCompRunConfig:
     source_url: str | None = None
     source_path: str | None = None
     limit: int | None = None
+    sample_size: int | None = None
+    sample_seed: int = 42
     split: str = "test"
     temperature: float = 0.0
     top_p: float = 1.0
@@ -217,8 +220,6 @@ def _xml_unescape(text: str) -> str:
 def load_samples(config: BrowseCompRunConfig) -> list[BrowseCompSample]:
     if config.split != "test":
         raise ValueError("BrowseComp only provides test split")
-    if config.limit is not None and int(config.limit) < 0:
-        raise ValueError("limit must be non-negative")
     raw = _read_source_bytes(config)
     if config.source_type == "browsecomp_csv":
         samples = _load_browsecomp_csv(raw)
@@ -226,9 +227,13 @@ def load_samples(config: BrowseCompRunConfig) -> list[BrowseCompSample]:
         samples = _load_browsecomp_zh_xlsx(raw)
     else:
         raise ValueError(f"unsupported BrowseComp source_type: {config.source_type}")
-    if config.limit is not None:
-        return samples[: int(config.limit)]
-    return samples
+    return apply_limit_or_sample(
+        samples,
+        limit=config.limit,
+        sample_size=config.sample_size,
+        sample_seed=config.sample_seed,
+        sort_key=lambda sample: sample.sample_index,
+    )
 
 
 def build_browsecomp_user_prompt(question: str, *, locale: str) -> str:
@@ -473,6 +478,7 @@ def scoreboard_dataset_name(config: BrowseCompRunConfig) -> str:
     dataset = config.scoreboard_dataset or f"{config.benchmark}_{config.split}"
     if config.limit is not None:
         dataset = f"{dataset}_limit{int(config.limit)}"
+    dataset += dataset_sample_suffix(sample_size=config.sample_size, sample_seed=config.sample_seed)
     return dataset
 
 
@@ -504,6 +510,8 @@ def task_sampling_config(config: BrowseCompRunConfig) -> dict[str, Any]:
         "avg_k": 1,
         "pass_ks": [1],
         "prompt_profile": "helicopter_browsecomp_two_stage",
+        "sample_size": config.sample_size,
+        "sample_seed": config.sample_seed if config.sample_size is not None else None,
         "sampling_config": completion_sampling_config(config),
     }
 
@@ -555,6 +563,8 @@ def dry_run_summary(config: BrowseCompRunConfig) -> dict[str, Any]:
         "source_type": config.source_type,
         "split": config.split,
         "limit": config.limit,
+        "sample_size": config.sample_size,
+        "sample_seed": config.sample_seed if config.sample_size is not None else None,
         "base_url": config.base_url,
         "model": config.model,
         "judge_model": _resolved_judge_model(config),

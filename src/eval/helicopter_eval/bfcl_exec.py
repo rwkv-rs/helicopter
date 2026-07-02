@@ -11,6 +11,7 @@ from typing import Any, Mapping, Sequence
 from .apibank import decode_tool_calls
 from .bfcl_ast import _coerce_list, _normalize_tool_schema, _read_items, _render_bfcl_question
 from .openai_client import chat_completion
+from .sampling import apply_limit_or_sample, dataset_sample_suffix
 from .scoreboard import ScoreboardEvalResult, ScoreboardWriteConfig, write_scoreboard_results
 
 
@@ -83,6 +84,8 @@ class BfclExecRunConfig:
     benchmark: str
     category: str
     limit: int | None = None
+    sample_size: int | None = None
+    sample_seed: int = 42
     split: str = "test"
     source_root: str | None = None
     temperature: float = 0.0
@@ -434,9 +437,6 @@ def load_samples(config: BfclExecRunConfig) -> list[BfclExecSample]:
         raise ValueError("BFCL v4 executable datasets only provide test split")
     if config.category not in BFCL_EXEC_CATEGORY_PATHS:
         raise ValueError(f"unknown BFCL exec category: {config.category}")
-    if config.limit is not None and int(config.limit) < 0:
-        raise ValueError("limit must be non-negative")
-
     question_rel, answer_rel = BFCL_EXEC_CATEGORY_PATHS[config.category]
     questions = _read_items(config, question_rel)
     answers = {
@@ -446,7 +446,7 @@ def load_samples(config: BfclExecRunConfig) -> list[BfclExecSample]:
     }
     samples: list[BfclExecSample] = []
     for index, item in enumerate(questions):
-        if config.limit is not None and len(samples) >= int(config.limit):
+        if config.limit is not None and config.sample_size is None and len(samples) >= int(config.limit):
             break
         if not isinstance(item, Mapping):
             continue
@@ -471,7 +471,13 @@ def load_samples(config: BfclExecRunConfig) -> list[BfclExecSample]:
                 category=config.category,
             )
         )
-    return samples
+    return apply_limit_or_sample(
+        samples,
+        limit=config.limit,
+        sample_size=config.sample_size,
+        sample_seed=config.sample_seed,
+        sort_key=lambda sample: sample.sample_index,
+    )
 
 
 def build_prompt(sample: BfclExecSample) -> str:
@@ -637,6 +643,7 @@ def scoreboard_dataset_name(config: BfclExecRunConfig) -> str:
     dataset = config.scoreboard_dataset or f"{config.benchmark}_{config.split}"
     if config.limit is not None:
         dataset = f"{dataset}_limit{int(config.limit)}"
+    dataset += dataset_sample_suffix(sample_size=config.sample_size, sample_seed=config.sample_seed)
     return dataset
 
 
@@ -659,6 +666,8 @@ def task_sampling_config(config: BfclExecRunConfig) -> dict[str, Any]:
         "avg_k": 1,
         "pass_ks": [1],
         "prompt_profile": "helicopter_bfcl_exec",
+        "sample_size": config.sample_size,
+        "sample_seed": config.sample_seed if config.sample_size is not None else None,
         "sampling_config": completion_sampling_config(config),
     }
 
@@ -708,6 +717,8 @@ def dry_run_summary(config: BfclExecRunConfig) -> dict[str, Any]:
         "split": config.split,
         "category": config.category,
         "limit": config.limit,
+        "sample_size": config.sample_size,
+        "sample_seed": config.sample_seed if config.sample_size is not None else None,
         "base_url": config.base_url,
         "model": config.model,
         "scoreboard_dataset": scoreboard_dataset_name(config),

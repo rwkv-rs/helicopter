@@ -13,6 +13,7 @@ import urllib.request
 from .apibank import decode_tool_calls
 from .browsecomp import BrowseCompRunConfig, BrowseCompSample, judge_answer, parse_final_answer
 from .openai_client import chat_completion
+from .sampling import apply_limit_or_sample, dataset_sample_suffix
 from .scoreboard import ScoreboardEvalResult, ScoreboardWriteConfig, write_scoreboard_results
 
 
@@ -104,6 +105,8 @@ class BrowseCompPlusRunConfig:
     source_path: str | None = None
     source_root: str | None = None
     limit: int | None = None
+    sample_size: int | None = None
+    sample_seed: int = 42
     split: str = "test"
     temperature: float = 0.0
     top_p: float = 1.0
@@ -204,14 +207,12 @@ class BrowseCompPlusEnv:
 def load_samples(config: BrowseCompPlusRunConfig) -> list[BrowseCompPlusSample]:
     if config.split != "test":
         raise ValueError("BrowseComp-Plus only provides test split")
-    if config.limit is not None and int(config.limit) < 0:
-        raise ValueError("limit must be non-negative")
     path = _resolve_source_path(config)
     rows = _load_rows(path)
     official_source = _resolve_official_source(config, manifest_path=path)
     samples: list[BrowseCompPlusSample] = []
     for index, item in enumerate(rows):
-        if config.limit is not None and len(samples) >= int(config.limit):
+        if config.limit is not None and config.sample_size is None and len(samples) >= int(config.limit):
             break
         if not isinstance(item, Mapping):
             continue
@@ -243,7 +244,13 @@ def load_samples(config: BrowseCompPlusRunConfig) -> list[BrowseCompPlusSample]:
                 metadata=metadata,
             )
         )
-    return samples
+    return apply_limit_or_sample(
+        samples,
+        limit=config.limit,
+        sample_size=config.sample_size,
+        sample_seed=config.sample_seed,
+        sort_key=lambda sample: sample.sample_index,
+    )
 
 
 def build_prompt(
@@ -377,6 +384,7 @@ def scoreboard_dataset_name(config: BrowseCompPlusRunConfig) -> str:
     dataset = config.scoreboard_dataset or f"{config.benchmark}_{config.split}"
     if config.limit is not None:
         dataset = f"{dataset}_limit{int(config.limit)}"
+    dataset += dataset_sample_suffix(sample_size=config.sample_size, sample_seed=config.sample_seed)
     return dataset
 
 
@@ -404,6 +412,8 @@ def task_sampling_config(config: BrowseCompPlusRunConfig) -> dict[str, Any]:
         "avg_k": 1,
         "pass_ks": [1],
         "prompt_profile": "helicopter_browsecomp_plus_tool_loop",
+        "sample_size": config.sample_size,
+        "sample_seed": config.sample_seed if config.sample_size is not None else None,
         "sampling_config": completion_sampling_config(config),
     }
 
@@ -455,7 +465,8 @@ def run_browsecomp_plus(config: BrowseCompPlusRunConfig, *, repo_root: Path) -> 
 
 def dry_run_summary(config: BrowseCompPlusRunConfig) -> dict[str, Any]:
     path = _resolve_source_path(config)
-    samples = load_samples(replace(config, limit=config.limit or 5))
+    probe_config = config if config.sample_size is not None else replace(config, limit=config.limit or 5)
+    samples = load_samples(probe_config)
     document_counts = [len(sample.documents) for sample in samples]
     return {
         "benchmark": config.benchmark,
@@ -463,6 +474,8 @@ def dry_run_summary(config: BrowseCompPlusRunConfig) -> dict[str, Any]:
         "official_source": OFFICIAL_BROWSECOMP_PLUS_SOURCE,
         "split": config.split,
         "limit": config.limit,
+        "sample_size": config.sample_size,
+        "sample_seed": config.sample_seed if config.sample_size is not None else None,
         "base_url": config.base_url,
         "model": config.model,
         "scoreboard_dataset": scoreboard_dataset_name(config),

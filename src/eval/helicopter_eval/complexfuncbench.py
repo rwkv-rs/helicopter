@@ -11,6 +11,7 @@ from typing import Any
 
 from .apibank import decode_tool_calls
 from .openai_client import chat_completion
+from .sampling import apply_limit_or_sample, dataset_sample_suffix
 from .scoreboard import ScoreboardEvalResult, ScoreboardWriteConfig, write_scoreboard_results
 
 
@@ -70,6 +71,8 @@ class ComplexFuncBenchRunConfig:
     benchmark: str
     dataset_name: str
     limit: int | None = None
+    sample_size: int | None = None
+    sample_seed: int = 42
     split: str = "test"
     source_path: str | None = None
     source_url: str = COMPLEXFUNCBENCH_SOURCE_URL
@@ -95,9 +98,15 @@ def load_samples(config: ComplexFuncBenchRunConfig) -> list[ComplexFuncBenchSamp
         if sample is None:
             continue
         samples.append(sample)
-        if config.limit is not None and len(samples) >= config.limit:
+        if config.limit is not None and config.sample_size is None and len(samples) >= config.limit:
             break
-    return samples
+    return apply_limit_or_sample(
+        samples,
+        limit=config.limit,
+        sample_size=config.sample_size,
+        sample_seed=config.sample_seed,
+        sort_key=lambda sample: sample.sample_index,
+    )
 
 
 def sample_from_row(
@@ -296,7 +305,9 @@ def evaluate_sample(sample: ComplexFuncBenchSample, config: ComplexFuncBenchRunC
 
 def scoreboard_dataset_name(config: ComplexFuncBenchRunConfig) -> str:
     base = config.scoreboard_dataset or f"{config.benchmark}_{config.split}"
-    return f"{base}_limit{config.limit}" if config.limit else base
+    if config.limit:
+        base = f"{base}_limit{config.limit}"
+    return base + dataset_sample_suffix(sample_size=config.sample_size, sample_seed=config.sample_seed)
 
 
 def job_id(config: ComplexFuncBenchRunConfig) -> str:
@@ -317,6 +328,8 @@ def task_sampling_config(config: ComplexFuncBenchRunConfig) -> dict[str, Any]:
         "pass_ks": [1],
         "prompt_profile": "helicopter_complexfuncbench_local",
         "execution_backend": "local_golden_conversation",
+        "sample_size": config.sample_size,
+        "sample_seed": config.sample_seed if config.sample_size is not None else None,
         "sampling_config": {"tool": completion_sampling_config(config)},
     }
 
@@ -385,6 +398,8 @@ def dry_run_summary(config: ComplexFuncBenchRunConfig) -> dict[str, Any]:
         "source_url": config.source_url,
         "split": config.split,
         "limit": config.limit,
+        "sample_size": config.sample_size,
+        "sample_seed": config.sample_seed if config.sample_size is not None else None,
         "base_url": config.base_url,
         "model": config.model,
         "scoreboard_dataset": scoreboard_dataset_name(config),

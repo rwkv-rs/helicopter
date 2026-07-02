@@ -14,6 +14,7 @@ from typing import Any
 
 from .apibank import decode_tool_calls
 from .openai_client import chat_completion
+from .sampling import apply_limit_or_sample, dataset_sample_suffix
 from .scoreboard import ScoreboardEvalResult, ScoreboardWriteConfig, write_scoreboard_results
 
 
@@ -158,6 +159,8 @@ class McpBenchRunConfig:
     benchmark: str
     dataset_name: str
     limit: int | None = None
+    sample_size: int | None = None
+    sample_seed: int = 42
     split: str = "test"
     source_path: str | None = None
     source_root: str | None = None
@@ -403,11 +406,13 @@ def load_samples(config: McpBenchRunConfig) -> list[McpBenchItem]:
         raise ValueError("MCP-Bench only provides test split")
     if config.dataset_name not in MCP_BENCH_DATASET_FILES:
         raise ValueError(f"unknown MCP-Bench dataset: {config.dataset_name}")
-    if config.limit is not None and int(config.limit) < 0:
-        raise ValueError("limit must be non-negative")
     items = _load_items(config)
-    if config.limit is not None:
-        items = items[: int(config.limit)]
+    items = apply_limit_or_sample(
+        items,
+        limit=config.limit,
+        sample_size=config.sample_size,
+        sample_seed=config.sample_seed,
+    )
     if not items:
         raise ValueError("MCP-Bench run selected zero samples")
     return items
@@ -892,6 +897,7 @@ def scoreboard_dataset_name(config: McpBenchRunConfig) -> str:
     dataset = config.scoreboard_dataset or f"{config.benchmark}_{config.split}"
     if config.limit is not None:
         dataset = f"{dataset}_limit{int(config.limit)}"
+    dataset += dataset_sample_suffix(sample_size=config.sample_size, sample_seed=config.sample_seed)
     return dataset
 
 
@@ -921,6 +927,8 @@ def task_sampling_config(config: McpBenchRunConfig) -> dict[str, Any]:
         "pass_ks": [1],
         "max_rounds": config.max_rounds,
         "prompt_profile": "helicopter_mcp_bench_json_tool_call",
+        "sample_size": config.sample_size,
+        "sample_seed": config.sample_seed if config.sample_size is not None else None,
         "sampling_config": completion_sampling_config(config),
     }
 
@@ -1004,6 +1012,8 @@ def dry_run_summary(config: McpBenchRunConfig) -> dict[str, Any]:
         "split": config.split,
         "source_dataset": config.dataset_name,
         "limit": config.limit,
+        "sample_size": config.sample_size,
+        "sample_seed": config.sample_seed if config.sample_size is not None else None,
         "available_samples": len(samples),
         "base_url": config.base_url,
         "model": config.model,

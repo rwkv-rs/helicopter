@@ -499,6 +499,23 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(config_obj.judge_model, "judge-model")
         self.assertEqual(config_obj.judge_api_key, "secret")
 
+    def test_catalog_arena_hard_config_supports_random_sample(self) -> None:
+        catalog = eval_catalog.load_rwkv_skills_catalog()
+        spec = catalog_runner.resolve_catalog_run_spec(catalog.benchmarks_by_name["arena_hard_v2"])
+
+        config_obj = catalog_runner._run_config(
+            spec,
+            base_url="http://127.0.0.1:29082",
+            model="rwkv7-g1d-0.4b-20260210-ctx8192",
+            limit=None,
+            sample_size=3,
+            sample_seed=7,
+        )
+
+        self.assertEqual(config_obj.sample_size, 3)
+        self.assertEqual(config_obj.sample_seed, 7)
+        self.assertEqual(arena_hard.scoreboard_dataset_name(config_obj), "arena_hard_test_sample3_seed7")
+
     def test_eval_infer_plan_uses_local_04_vllm_rwkv_defaults(self) -> None:
         loaded_config = load_example_config()
 
@@ -1013,7 +1030,21 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(print_json.call_args.args[0]["sample_size"], 3)
         self.assertEqual(print_json.call_args.args[0]["sample_seed"], 7)
 
-    def test_run_catalog_rejects_sample_size_for_unsupported_kind(self) -> None:
+    def test_run_catalog_rejects_sample_size_for_unimplemented_catalog_entry(self) -> None:
+        args = Namespace(
+            dry_run=True,
+            benchmark="hle",
+            base_url=None,
+            model=None,
+            limit=None,
+            sample_size=3,
+            sample_seed=7,
+        )
+
+        with self.assertRaisesRegex(SystemExit, "not runnable yet"):
+            cli_main.handle_eval_run_catalog(args, root=ROOT)
+
+    def test_run_catalog_browsecomp_dry_run_supports_sample_size(self) -> None:
         args = Namespace(
             dry_run=True,
             benchmark="browsecomp",
@@ -1022,10 +1053,19 @@ class CommandPlanTests(unittest.TestCase):
             limit=None,
             sample_size=3,
             sample_seed=7,
+            judge_base_url="http://judge.local/v1",
+            judge_model="judge-model",
+            judge_api_key="secret",
         )
 
-        with self.assertRaisesRegex(SystemExit, "--sample-size is not supported"):
-            cli_main.handle_eval_run_catalog(args, root=ROOT)
+        with mock.patch.object(cli_main, "print_json") as print_json:
+            rc = cli_main.handle_eval_run_catalog(args, root=ROOT)
+
+        self.assertEqual(rc, 0)
+        payload = print_json.call_args.args[0]
+        self.assertEqual(payload["scoreboard_dataset"], "browsecomp_test_sample3_seed7")
+        self.assertEqual(payload["sample_size"], 3)
+        self.assertEqual(payload["sample_seed"], 7)
 
     def test_code_generation_random_sampling_is_deterministic_and_traceable(self) -> None:
         run_config = code_generation.CodeGenerationRunConfig(
@@ -1643,6 +1683,30 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(payload["scoreboard_dataset"], "bfcl_simple_python_test_limit2")
         self.assertEqual(payload["job_name"], "function_bfcl_ast")
 
+    def test_bfcl_ast_random_sampling_is_deterministic_and_traceable(self) -> None:
+        questions = [
+            {"id": f"case-{index}", "question": f"Call tool {index}", "function": [{"name": "tool"}]}
+            for index in range(6)
+        ]
+        answers = [{"id": f"case-{index}", "ground_truth": [{"tool": {}}]} for index in range(6)]
+        config_obj = bfcl_ast.BfclAstRunConfig(
+            base_url="http://127.0.0.1:29082",
+            model="rwkv7-g1d-0.4b-20260210-ctx8192",
+            benchmark="bfcl_simple_python",
+            category="simple_python",
+            sample_size=3,
+            sample_seed=7,
+        )
+
+        def fake_read_items(_config: object, rel_path: str) -> list[dict[str, object]]:
+            return answers if "possible_answer" in rel_path else questions
+
+        with mock.patch.object(bfcl_ast, "_read_items", side_effect=fake_read_items):
+            samples = bfcl_ast.load_samples(config_obj)
+
+        self.assertEqual([sample.task_id for sample in samples], ["case-1", "case-2", "case-3"])
+        self.assertEqual(bfcl_ast.scoreboard_dataset_name(config_obj), "bfcl_simple_python_test_sample3_seed7")
+
     def test_bfcl_ast_scores_ground_truth_call_options(self) -> None:
         sample = bfcl_ast.BfclAstSample(
             sample_index=0,
@@ -1958,6 +2022,49 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(payload["scoreboard_dataset"], "mcp_bench_single_test")
         self.assertFalse(payload["runtime_ready"])
         self.assertIn("Demo Server", payload["checked_servers"])
+
+    def test_mcp_bench_random_sampling_is_deterministic_and_traceable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "test.jsonl"
+            rows = []
+            for index in range(6):
+                rows.append(
+                    {
+                        "task_id": f"task-{index}",
+                        "instruction": "Use a tool.",
+                        "task_file": "mcpbench_tasks_single_runner_format.json",
+                        "server_name": "Demo Server",
+                        "combination_name": "Single Server: Demo",
+                        "combination_type": "single_server",
+                        "servers": ["Demo Server"],
+                        "runtime_root": str(root),
+                        "tasks_root": str(root / "tasks"),
+                        "task": {
+                            "task_id": f"task-{index}",
+                            "task_description": "Use a tool.",
+                            "fuzzy_description": "Please use a tool.",
+                            "dependency_analysis": "",
+                            "distraction_servers": [],
+                        },
+                    }
+                )
+            manifest.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+            config_obj = mcp_bench.McpBenchRunConfig(
+                base_url="http://127.0.0.1:29082",
+                model="rwkv7-g1d-0.4b-20260210-ctx8192",
+                benchmark="mcp_bench_single",
+                dataset_name="mcp_bench_single",
+                source_path=str(manifest),
+                runtime_root=str(root),
+                sample_size=3,
+                sample_seed=7,
+            )
+
+            samples = mcp_bench.load_samples(config_obj)
+
+        self.assertEqual([sample.task.task_id for sample in samples], ["task-1", "task-2", "task-3"])
+        self.assertEqual(mcp_bench.scoreboard_dataset_name(config_obj), "mcp_bench_single_test_sample3_seed7")
 
     def test_catalog_mcp_bench_defaults_to_rwkv_long_context_router(self) -> None:
         catalog = eval_catalog.load_rwkv_skills_catalog()

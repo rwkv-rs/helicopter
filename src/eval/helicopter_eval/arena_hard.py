@@ -9,6 +9,7 @@ from typing import Any, Iterable, Mapping, Sequence
 import urllib.request
 
 from .openai_client import chat_completion
+from .sampling import apply_limit_or_sample, dataset_sample_suffix
 from .scoreboard import ScoreboardEvalResult, ScoreboardWriteConfig, write_scoreboard_results
 
 
@@ -62,6 +63,8 @@ class ArenaHardRunConfig:
     source_path: str | None = None
     baseline_path: str | None = None
     limit: int | None = None
+    sample_size: int | None = None
+    sample_seed: int = 42
     split: str = "test"
     temperature: float = 0.0
     top_p: float = 1.0
@@ -81,12 +84,10 @@ class ArenaHardRunConfig:
 def load_samples(config: ArenaHardRunConfig) -> list[ArenaHardSample]:
     if config.split != "test":
         raise ValueError("Arena-Hard only provides test split")
-    if config.limit is not None and int(config.limit) < 0:
-        raise ValueError("limit must be non-negative")
     baseline = _load_baseline_answers(config)
     samples: list[ArenaHardSample] = []
     for item in _iter_question_rows(config):
-        if config.limit is not None and len(samples) >= int(config.limit):
+        if config.limit is not None and config.sample_size is None and len(samples) >= int(config.limit):
             break
         uid = str(item.get("uid") or item.get("question_id") or len(samples))
         prompt = str(item.get("prompt") or item.get("question") or "").strip()
@@ -102,7 +103,13 @@ def load_samples(config: ArenaHardRunConfig) -> list[ArenaHardSample]:
                 baseline_answer=baseline.get(uid, ""),
             )
         )
-    return samples
+    return apply_limit_or_sample(
+        samples,
+        limit=config.limit,
+        sample_size=config.sample_size,
+        sample_seed=config.sample_seed,
+        sort_key=lambda sample: sample.sample_index,
+    )
 
 
 def build_generation_prompt(sample: ArenaHardSample) -> str:
@@ -182,6 +189,7 @@ def scoreboard_dataset_name(config: ArenaHardRunConfig) -> str:
     dataset = config.scoreboard_dataset or f"{config.benchmark}_{config.split}"
     if config.limit is not None:
         dataset = f"{dataset}_limit{int(config.limit)}"
+    dataset += dataset_sample_suffix(sample_size=config.sample_size, sample_seed=config.sample_seed)
     return dataset
 
 
@@ -209,6 +217,8 @@ def task_sampling_config(config: ArenaHardRunConfig) -> dict[str, Any]:
         "avg_k": 1,
         "pass_ks": [1],
         "prompt_profile": "helicopter_arena_hard_pairwise",
+        "sample_size": config.sample_size,
+        "sample_seed": config.sample_seed if config.sample_size is not None else None,
         "sampling_config": completion_sampling_config(config),
     }
 
@@ -267,6 +277,8 @@ def dry_run_summary(config: ArenaHardRunConfig) -> dict[str, Any]:
         "baseline_source": config.baseline_path or config.baseline_url,
         "split": config.split,
         "limit": config.limit,
+        "sample_size": config.sample_size,
+        "sample_seed": config.sample_seed if config.sample_size is not None else None,
         "base_url": config.base_url,
         "model": config.model,
         "judge_model": _resolved_judge_model(config),

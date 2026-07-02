@@ -11,6 +11,7 @@ from typing import Any, Mapping, Sequence
 
 from .apibank import decode_tool_calls
 from .openai_client import chat_completion
+from .sampling import apply_limit_or_sample, dataset_sample_suffix
 from .scoreboard import ScoreboardEvalResult, ScoreboardWriteConfig, write_scoreboard_results
 
 
@@ -68,6 +69,8 @@ class AgentBenchRunConfig:
     benchmark: str
     dataset_name: str
     limit: int | None = None
+    sample_size: int | None = None
+    sample_seed: int = 42
     split: str = "test"
     source_path: str | None = None
     source_root: str | None = None
@@ -188,12 +191,14 @@ def load_samples(config: AgentBenchRunConfig) -> list[AgentBenchRecord]:
         raise ValueError("AgentBench only provides test split")
     if config.dataset_name not in AGENTBENCH_TASK_NAMES:
         raise ValueError(f"unknown AgentBench dataset: {config.dataset_name}")
-    if config.limit is not None and int(config.limit) < 0:
-        raise ValueError("limit must be non-negative")
-
     records = _load_records(config)
-    if config.limit is not None:
-        records = records[: int(config.limit)]
+    records = apply_limit_or_sample(
+        records,
+        limit=config.limit,
+        sample_size=config.sample_size,
+        sample_seed=config.sample_seed,
+        sort_key=lambda record: record.index,
+    )
     if not records:
         raise ValueError("AgentBench run selected zero samples")
     return records
@@ -339,6 +344,7 @@ def scoreboard_dataset_name(config: AgentBenchRunConfig) -> str:
     dataset = config.scoreboard_dataset or f"{config.benchmark}_{config.split}"
     if config.limit is not None:
         dataset = f"{dataset}_limit{int(config.limit)}"
+    dataset += dataset_sample_suffix(sample_size=config.sample_size, sample_seed=config.sample_seed)
     return dataset
 
 
@@ -363,6 +369,8 @@ def task_sampling_config(config: AgentBenchRunConfig) -> dict[str, Any]:
         "pass_ks": [1],
         "prompt_profile": "helicopter_agentbench_json_tool_call",
         "controller_url": _controller_url(config),
+        "sample_size": config.sample_size,
+        "sample_seed": config.sample_seed if config.sample_size is not None else None,
         "sampling_config": completion_sampling_config(config),
     }
 
@@ -424,6 +432,8 @@ def dry_run_summary(config: AgentBenchRunConfig) -> dict[str, Any]:
         "split": config.split,
         "source_dataset": config.dataset_name,
         "limit": config.limit,
+        "sample_size": config.sample_size,
+        "sample_seed": config.sample_seed if config.sample_size is not None else None,
         "available_samples": len(samples),
         "base_url": config.base_url,
         "model": config.model,

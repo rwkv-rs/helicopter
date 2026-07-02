@@ -13,6 +13,7 @@ import uuid
 from typing import Any, Mapping, Sequence
 
 from .openai_client import chat_completion
+from .sampling import apply_limit_or_sample, dataset_sample_suffix
 from .scoreboard import ScoreboardEvalResult, ScoreboardWriteConfig, write_scoreboard_results
 
 
@@ -98,6 +99,8 @@ class TauBenchRunConfig:
     benchmark: str
     dataset_name: str
     limit: int | None = None
+    sample_size: int | None = None
+    sample_seed: int = 42
     split: str = "base"
     source_path: str | None = None
     source_root: str | None = None
@@ -362,14 +365,17 @@ def load_samples(config: TauBenchRunConfig) -> list[TauManifestRecord]:
     expected_split = TAU_BENCH_DATASETS[config.dataset_name]["split"]
     if config.split != expected_split:
         raise ValueError(f"{config.dataset_name} only provides {expected_split} split")
-    if config.limit is not None and int(config.limit) < 0:
-        raise ValueError("limit must be non-negative")
     path = _resolve_manifest_path(config)
     if path is None:
         raise FileNotFoundError(f"no prepared TAU manifest found for {config.dataset_name}")
     rows = load_tau_manifest_records(path)
-    if config.limit is not None:
-        rows = rows[: int(config.limit)]
+    rows = apply_limit_or_sample(
+        rows,
+        limit=config.limit,
+        sample_size=config.sample_size,
+        sample_seed=config.sample_seed,
+        sort_key=lambda row: row.sample_index,
+    )
     if not rows:
         raise ValueError("TAU run selected zero samples")
     return rows
@@ -584,6 +590,8 @@ def dry_run_summary(config: TauBenchRunConfig) -> dict[str, Any]:
         "split": config.split,
         "source_dataset": config.dataset_name,
         "limit": config.limit,
+        "sample_size": config.sample_size,
+        "sample_seed": config.sample_seed if config.sample_size is not None else None,
         "available_samples": len(samples),
         "domains": domains,
         "benchmark_versions": sorted({sample.benchmark_version for sample in samples}),
@@ -624,6 +632,7 @@ def scoreboard_dataset_name(config: TauBenchRunConfig) -> str:
     dataset = config.scoreboard_dataset or f"{config.benchmark}_{config.split}"
     if config.limit is not None:
         dataset = f"{dataset}_limit{int(config.limit)}"
+    dataset += dataset_sample_suffix(sample_size=config.sample_size, sample_seed=config.sample_seed)
     return dataset
 
 
@@ -647,6 +656,8 @@ def task_sampling_config(config: TauBenchRunConfig) -> dict[str, Any]:
         "avg_k": 1,
         "pass_ks": [1],
         "prompt_profile": "helicopter_tau_official",
+        "sample_size": config.sample_size,
+        "sample_seed": config.sample_seed if config.sample_size is not None else None,
         "sampling_config": completion_sampling_config(config),
         "user_model": _model_metadata(_user_model_config(config)),
         "judge_model": _model_metadata(_judge_model_config(config)),
