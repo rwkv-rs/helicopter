@@ -354,8 +354,8 @@ reason = "LightEval has several multilingual MMLU families; the rwkv-skills MMML
 
 [benchmarks.supergpqa]
 field = "knowledge"
-status = "needs_adapter"
-reason = "No direct SuperGPQA task was found in the current LightEval registry snapshot."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:supergpqa"]
 
 [benchmarks.aime24]
 field = "maths"
@@ -389,13 +389,13 @@ lighteval_tasks = ["asdiv"]
 
 [benchmarks.beyond_aime]
 field = "maths"
-status = "needs_adapter"
-reason = "No direct BeyondAIME task was found in the current LightEval registry snapshot."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:beyond_aime"]
 
 [benchmarks.brumo25]
 field = "maths"
-status = "needs_adapter"
-reason = "No direct BRUMO25 task was found in the current LightEval registry snapshot."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:brumo25"]
 
 [benchmarks.college_math]
 field = "maths"
@@ -434,8 +434,8 @@ lighteval_tasks = ["hle"]
 
 [benchmarks.hmmt_feb25]
 field = "maths"
-status = "needs_adapter"
-reason = "No direct HMMT Feb 2025 task was found in the current LightEval registry snapshot."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:hmmt_feb25"]
 
 [benchmarks.math_500]
 field = "maths"
