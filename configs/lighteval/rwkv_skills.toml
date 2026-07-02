@@ -335,8 +335,8 @@ lighteval_tasks = ["gpqa:main"]
 
 [benchmarks.include]
 field = "knowledge"
-status = "needs_adapter"
-reason = "No equivalent LightEval task was found for the rwkv-skills INCLUDE aggregate."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:include"]
 
 [benchmarks.mmlu]
 field = "knowledge"

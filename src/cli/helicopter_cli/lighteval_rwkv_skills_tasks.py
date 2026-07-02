@@ -101,6 +101,10 @@ HF_POLYMATH_LANGUAGES = (
 )
 
 HF_MULTIPLE_CHOICE_TASKS = {
+    "include": {
+        "repo": str(LOCAL_DATA_ROOT / "include"),
+        "split": "test",
+    },
     "supergpqa": {
         "repo": "m-a-p/SuperGPQA",
         "split": "train",

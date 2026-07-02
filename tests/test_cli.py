@@ -428,6 +428,7 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(len(suite["benchmarks"]), 95)
         self.assertIn("gsm8k", suite["benchmarks"])
         self.assertEqual(suite["benchmarks"]["human_eval"]["lighteval_tasks"], ["rwkv_skills:human_eval"])
+        self.assertEqual(suite["benchmarks"]["include"]["lighteval_tasks"], ["rwkv_skills:include"])
         self.assertEqual(suite["benchmarks"]["human_eval_cn"]["lighteval_tasks"], ["rwkv_skills:human_eval_cn"])
         self.assertEqual(
             suite["benchmarks"]["human_eval_fix"]["lighteval_tasks"],
@@ -571,6 +572,7 @@ class CommandPlanTests(unittest.TestCase):
         registry = Registry(custom_tasks=str(custom_tasks))
 
         self.assertIn("rwkv_skills:human_eval", registry._task_registry)
+        self.assertIn("rwkv_skills:include", registry._task_registry)
         self.assertIn("rwkv_skills:human_eval_cn", registry._task_registry)
         self.assertIn("rwkv_skills:human_eval_fix", registry._task_registry)
         self.assertIn("rwkv_skills:human_eval_plus", registry._task_registry)
@@ -821,6 +823,21 @@ class CommandPlanTests(unittest.TestCase):
 
         self.assertEqual(len(dataset["test"]), 2065)
         self.assertEqual(set(dataset["test"].features), {"input", "target"})
+
+    def test_rwkv_skills_include_static_data_loads_as_test_split(self) -> None:
+        if importlib.util.find_spec("datasets") is None:
+            self.skipTest("datasets is not installed")
+
+        from datasets import load_dataset
+
+        data_dir = ROOT / "benchmarks/lighteval_data/include"
+        dataset = load_dataset(str(data_dir))
+
+        self.assertEqual(len(dataset["test"]), 22639)
+        self.assertEqual(
+            {"question", "answer", "A", "B", "C", "D", "subset", "source"} - set(dataset["test"].features),
+            set(),
+        )
 
     def test_takeoff_plan_uses_verl_module_entrypoint_and_default_overrides(self) -> None:
         loaded_config = load_example_config()
