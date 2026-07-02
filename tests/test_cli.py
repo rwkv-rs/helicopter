@@ -626,6 +626,18 @@ class CommandPlanTests(unittest.TestCase):
                 "swe_bench_lite_oracle",
                 "swe_bench_lite_bm25_13k",
                 "supergpqa",
+                "tau_bench_retail",
+                "tau_bench_airline",
+                "tau_bench_telecom",
+                "tau2_bench_retail",
+                "tau2_bench_airline",
+                "tau2_bench_telecom",
+                "tau3_bench_retail",
+                "tau3_bench_airline",
+                "tau3_bench_telecom",
+                "tau3_bench_banking_knowledge",
+                "tau3_bench_mock",
+                "tau3_bench_mock_long_context",
                 "wmt24pp",
             }.issubset({task.name for task in lighteval_rwkv_skills_tasks.TASKS_TABLE})
         )
@@ -659,6 +671,36 @@ class CommandPlanTests(unittest.TestCase):
             self.assertTrue(path.is_file(), name)
             with path.open(encoding="utf-8") as fh:
                 self.assertEqual(sum(1 for _line in fh), expected_count, name)
+
+    def test_taubench_static_data_files_are_packaged(self) -> None:
+        expected_counts = {
+            "tau_bench_retail": 40,
+            "tau_bench_airline": 20,
+            "tau_bench_telecom": 40,
+            "tau2_bench_retail": 114,
+            "tau2_bench_airline": 50,
+            "tau2_bench_telecom": 114,
+            "tau3_bench_retail": 114,
+            "tau3_bench_airline": 50,
+            "tau3_bench_telecom": 114,
+            "tau3_bench_banking_knowledge": 97,
+            "tau3_bench_mock": 3,
+            "tau3_bench_mock_long_context": 2,
+        }
+        self.assertEqual(set(lighteval_rwkv_skills_tasks.TAU_BENCH_PATHS), set(expected_counts))
+        for name, expected_count in expected_counts.items():
+            path = Path(lighteval_rwkv_skills_tasks.TAU_BENCH_PATHS[name])
+            self.assertTrue(path.is_file(), name)
+            with path.open(encoding="utf-8") as fh:
+                self.assertEqual(sum(1 for _line in fh), expected_count, name)
+
+    def test_taubench_mock_update_row_exposes_update_tool(self) -> None:
+        path = Path(lighteval_rwkv_skills_tasks.TAU_BENCH_PATHS["tau3_bench_mock"])
+        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        update_row = next(row for row in rows if row["task_id"] == "update_task_with_history_and_env_assertions")
+        self.assertIn("update_task_status", update_row["available_action_names"])
+        self.assertEqual(update_row["reference_action_names"], ["update_task_status"])
+        self.assertIn("update_task_status", update_row["reference_plan"])
 
     def test_wmt24pp_task_uses_default_target_languages(self) -> None:
         self.assertEqual(lighteval_rwkv_skills_tasks.WMT24PP_TARGET_LANGUAGES, ("de_DE", "es_MX", "fr_FR", "it_IT", "ja_JP"))
@@ -1386,6 +1428,55 @@ class CommandPlanTests(unittest.TestCase):
         f1 = lighteval_rwkv_skills_tasks.AgentBenchKgPlanF1()
         response = ModelResponse(text=[doc.specific["reference_plans"][0]])
         self.assertEqual(f1.compute(response, doc), 1.0)
+
+    def test_taubench_prompt_scores_static_plan_without_leaking_criteria(self) -> None:
+        reference_plan = json.dumps(
+            {
+                "actions": [{"name": "create_task", "arguments": {"user_id": "user_1", "title": "Important Meeting"}}],
+                "env_assertions": [{"func_name": "assert_task_status"}],
+                "nl_assertions": [],
+                "reward_basis": ["DB", "ENV_ASSERTION"],
+            },
+            sort_keys=True,
+        )
+        doc = lighteval_rwkv_skills_tasks.taubench_prompt(
+            {
+                "sample_id": "tau3_bench_mock__create_task_1",
+                "task_id": "create_task_1",
+                "domain": "mock",
+                "split": "base",
+                "benchmark_version": "tau_v3_light",
+                "instruction": "Create a task named Important Meeting for user_1.",
+                "available_action_names": ["create_task", "update_task_status"],
+                "reference_action_names": ["create_task"],
+                "reference_actions": [{"name": "create_task", "arguments": {"user_id": "user_1", "title": "Important Meeting"}}],
+                "reference_plan": reference_plan,
+                "task": {
+                    "id": "create_task_1",
+                    "ticket": "Create a task named Important Meeting for user_1.",
+                    "evaluation_criteria": {"actions": [{"name": "create_task"}]},
+                },
+                "official_source": "https://github.com/sierra-research/tau2-bench",
+                "official_source_revision": "revision",
+                "official_source_path": "data/tau2/domains/mock",
+            },
+            "tau3_bench_mock",
+        )
+
+        self.assertIsNotNone(doc)
+        assert doc is not None
+        self.assertIn("TAU benchmark", doc.query)
+        self.assertIn("create_task", doc.query)
+        self.assertNotIn("evaluation_criteria", doc.query)
+        self.assertEqual(doc.specific["sample_id"], "tau3_bench_mock__create_task_1")
+        self.assertEqual(doc.specific["reference_action_names"], ["create_task"])
+
+        f1 = lighteval_rwkv_skills_tasks.TauBenchStaticPlanF1()
+        nonempty = lighteval_rwkv_skills_tasks.TauBenchResponseNonEmpty()
+        response = ModelResponse(text=[doc.specific["reference_plans"][0]])
+        self.assertEqual(f1.compute(response, doc), 1.0)
+        self.assertEqual(nonempty.compute(response, doc), 1.0)
+        self.assertEqual(nonempty.compute(ModelResponse(text=[""]), doc), 0.0)
 
     def test_lighteval_export_prefers_specific_sample_id(self) -> None:
         row = lighteval_export.export_rows_from_frame(
