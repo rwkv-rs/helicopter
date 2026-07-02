@@ -570,6 +570,7 @@ class CommandPlanTests(unittest.TestCase):
                 "algebra222",
                 "amc23",
                 "answer_judge",
+                "arena_hard_v2",
                 "apibank_l1",
                 "apibank_l2",
                 "apibank_level1",
@@ -1200,6 +1201,29 @@ class CommandPlanTests(unittest.TestCase):
                 doc,
             ),
             0.0,
+        )
+
+    def test_arena_hard_prompt_scores_against_baseline_answer(self) -> None:
+        doc = lighteval_rwkv_skills_tasks.arena_hard_prompt(
+            {
+                "uid": "arena-1",
+                "prompt": "Explain why the sky appears blue.",
+                "baseline_answer": "The sky appears blue because air molecules scatter shorter blue wavelengths.",
+            },
+            "arena_hard_v2",
+        )
+
+        self.assertIsNotNone(doc)
+        assert doc is not None
+        self.assertIn("Arena-Hard", doc.query)
+        self.assertEqual(doc.specific["sample_id"], "arena-1")
+        metric = lighteval_rwkv_skills_tasks.ArenaHardBaselineF1()
+        self.assertEqual(
+            metric.compute(
+                ModelResponse(text=["The sky appears blue because air molecules scatter shorter blue wavelengths."]),
+                doc,
+            ),
+            1.0,
         )
 
     def test_free_answer_prompt_normalizes_numeric_answers(self) -> None:
