@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import math
+import random
 import re
 from pathlib import Path
 from typing import Any, Sequence
@@ -46,6 +47,7 @@ class TranslationSample:
     target_language: str
     source_language_name: str
     target_language_name: str
+    metadata: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +61,7 @@ class TranslationResult:
     score: float
     is_passed: bool
     fail_reason: str
+    metadata: dict[str, Any] | None = None
 
     def to_scoreboard(self) -> ScoreboardEvalResult:
         return ScoreboardEvalResult(
@@ -69,6 +72,7 @@ class TranslationResult:
             reference_answer=self.reference_answer,
             is_passed=self.is_passed,
             fail_reason=self.fail_reason,
+            metadata=self.metadata,
         )
 
 
@@ -80,6 +84,8 @@ class TranslationRunConfig:
     source_type: str
     dataset_name: str
     limit: int | None = None
+    sample_size: int | None = None
+    sample_seed: int = 42
     split: str = "test"
     source_languages: tuple[str, ...] = DEFAULT_FLORES_SOURCE_LANGUAGES
     target_languages: tuple[str, ...] = DEFAULT_FLORES_TARGET_LANGUAGES
@@ -98,11 +104,43 @@ class TranslationRunConfig:
 def load_samples(config: TranslationRunConfig) -> list[TranslationSample]:
     if config.limit is not None and int(config.limit) < 0:
         raise ValueError("limit must be non-negative")
+    if config.sample_size is not None and int(config.sample_size) < 0:
+        raise ValueError("sample_size must be non-negative")
+    if config.limit is not None and config.sample_size is not None:
+        raise ValueError("limit and sample_size are mutually exclusive")
     if config.source_type == "hf_flores200":
-        return _load_flores_samples(config)
-    if config.source_type == "hf_wmt24pp":
-        return _load_wmt24pp_samples(config)
-    raise ValueError(f"unsupported translation source_type: {config.source_type}")
+        samples = _load_flores_samples(config)
+    elif config.source_type == "hf_wmt24pp":
+        samples = _load_wmt24pp_samples(config)
+    else:
+        raise ValueError(f"unsupported translation source_type: {config.source_type}")
+    if config.sample_size is not None and int(config.sample_size) < len(samples):
+        rng = random.Random(int(config.sample_seed))
+        samples = sorted(rng.sample(samples, int(config.sample_size)), key=lambda item: item.sample_index)
+        samples = [replace(sample, sample_index=index) for index, sample in enumerate(samples)]
+    return samples
+
+
+def _sample_metadata(
+    *,
+    config: TranslationRunConfig,
+    original_sample_index: int,
+    task_id: str,
+    row_index: int,
+    source_language: str,
+    target_language: str,
+) -> dict[str, Any]:
+    return {
+        "benchmark": config.benchmark,
+        "dataset_name": config.dataset_name,
+        "source_type": config.source_type,
+        "split": config.split,
+        "original_sample_index": original_sample_index,
+        "source_id": task_id,
+        "row_index": row_index,
+        "source_language": source_language,
+        "target_language": target_language,
+    }
 
 
 def _load_flores_samples(config: TranslationRunConfig) -> list[TranslationSample]:
@@ -121,16 +159,26 @@ def _load_flores_samples(config: TranslationRunConfig) -> list[TranslationSample
             src_texts = cache.setdefault(src_lang, _load_flores_language(src_lang, config.split))
             tgt_texts = cache.setdefault(tgt_lang, _load_flores_language(tgt_lang, config.split))
             for row_index, (source_text, target_text) in enumerate(zip(src_texts, tgt_texts, strict=True)):
+                task_id = f"flores200__{src_lang}_{tgt_lang}_{row_index:05d}"
+                original_sample_index = len(rows)
                 rows.append(
                     TranslationSample(
-                        sample_index=len(rows),
-                        task_id=f"flores200__{src_lang}_{tgt_lang}_{row_index:05d}",
+                        sample_index=original_sample_index,
+                        task_id=task_id,
                         source_text=source_text,
                         reference_translation=target_text,
                         source_language=src_lang,
                         target_language=tgt_lang,
                         source_language_name=_lang_display(src_lang),
                         target_language_name=_lang_display(tgt_lang),
+                        metadata=_sample_metadata(
+                            config=config,
+                            original_sample_index=original_sample_index,
+                            task_id=task_id,
+                            row_index=row_index,
+                            source_language=src_lang,
+                            target_language=tgt_lang,
+                        ),
                     )
                 )
                 if config.limit is not None and len(rows) >= int(config.limit):
@@ -144,16 +192,26 @@ def _load_wmt24pp_samples(config: TranslationRunConfig) -> list[TranslationSampl
     rows: list[TranslationSample] = []
     for target_language in config.target_languages:
         for row_index, (source_text, target_text) in enumerate(_load_wmt24pp_pair(target_language)):
+            task_id = f"wmt24pp__en_{target_language}_{row_index:05d}"
+            original_sample_index = len(rows)
             rows.append(
                 TranslationSample(
-                    sample_index=len(rows),
-                    task_id=f"wmt24pp__en_{target_language}_{row_index:05d}",
+                    sample_index=original_sample_index,
+                    task_id=task_id,
                     source_text=source_text,
                     reference_translation=target_text,
                     source_language="en",
                     target_language=target_language,
                     source_language_name=_lang_display("en"),
                     target_language_name=_lang_display(target_language),
+                    metadata=_sample_metadata(
+                        config=config,
+                        original_sample_index=original_sample_index,
+                        task_id=task_id,
+                        row_index=row_index,
+                        source_language="en",
+                        target_language=target_language,
+                    ),
                 )
             )
             if config.limit is not None and len(rows) >= int(config.limit):
@@ -219,6 +277,7 @@ def generate_completion(sample: TranslationSample, config: TranslationRunConfig)
         score=score,
         is_passed=passed,
         fail_reason=fail_reason,
+        metadata=sample.metadata,
     )
 
 
@@ -230,6 +289,8 @@ def scoreboard_dataset_name(config: TranslationRunConfig) -> str:
     dataset = config.scoreboard_dataset or f"{config.benchmark}_{config.split}"
     if config.limit is not None:
         dataset = f"{dataset}_limit{int(config.limit)}"
+    if config.sample_size is not None:
+        dataset = f"{dataset}_sample{int(config.sample_size)}_seed{int(config.sample_seed)}"
     return dataset
 
 
@@ -300,7 +361,7 @@ def run_translation(config: TranslationRunConfig, *, repo_root: Path) -> dict[st
 
 
 def dry_run_summary(config: TranslationRunConfig) -> dict[str, Any]:
-    return {
+    payload = {
         "benchmark": config.benchmark,
         "hf_dataset": config.dataset_name,
         "source_type": config.source_type,
@@ -316,6 +377,10 @@ def dry_run_summary(config: TranslationRunConfig) -> dict[str, Any]:
         "metric": "chrf",
         "pass_threshold": config.pass_threshold,
     }
+    if config.sample_size is not None:
+        payload["sample_size"] = config.sample_size
+        payload["sample_seed"] = config.sample_seed
+    return payload
 
 
 def normalize_translation(text: str) -> str:

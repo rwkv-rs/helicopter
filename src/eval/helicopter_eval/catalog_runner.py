@@ -31,7 +31,7 @@ RunKind = Literal[
 
 
 _SAMPLE_SIZE_SUPPORTED_KINDS = frozenset(
-    {"free_response", "multiple_choice", "code_generation", "instruction_following"}
+    {"free_response", "multiple_choice", "code_generation", "instruction_following", "translation"}
 )
 
 
@@ -1706,6 +1706,8 @@ def _run_config(
             source_type=spec.source_type,
             dataset_name=str(spec.dataset_name),
             limit=limit,
+            sample_size=sample_size,
+            sample_seed=sample_seed,
             split=str(spec.source_split),
             target_languages=target_languages,
             max_tokens=int(spec.max_tokens or 512),

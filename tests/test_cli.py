@@ -1553,6 +1553,56 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(payload["job_name"], "translation_chrf")
         self.assertEqual(payload["metric"], "chrf")
 
+    def test_run_catalog_wmt24pp_dry_run_supports_sample_size(self) -> None:
+        args = Namespace(
+            dry_run=True,
+            benchmark="wmt24pp",
+            base_url=None,
+            model=None,
+            limit=None,
+            sample_size=3,
+            sample_seed=7,
+        )
+
+        with mock.patch.object(cli_main, "print_json") as print_json:
+            rc = cli_main.handle_eval_run_catalog(args, root=ROOT)
+
+        self.assertEqual(rc, 0)
+        payload = print_json.call_args.args[0]
+        self.assertEqual(payload["scoreboard_dataset"], "wmt24pp_test_sample3_seed7")
+        self.assertEqual(payload["sample_size"], 3)
+        self.assertEqual(payload["sample_seed"], 7)
+
+    def test_translation_random_sampling_is_deterministic_and_traceable(self) -> None:
+        run_config = translation.TranslationRunConfig(
+            base_url="http://127.0.0.1:29082",
+            model="rwkv7-g1d-0.4b-20260210-ctx8192",
+            benchmark="wmt24pp",
+            source_type="hf_wmt24pp",
+            dataset_name="google/wmt24pp",
+            target_languages=("de_DE", "fr_FR"),
+            sample_size=3,
+            sample_seed=7,
+        )
+
+        def fake_pair(target_language: str) -> list[tuple[str, str]]:
+            return [
+                (f"source {target_language} {index}", f"target {target_language} {index}")
+                for index in range(5)
+            ]
+
+        with mock.patch.object(translation, "_load_wmt24pp_pair", side_effect=fake_pair):
+            samples = translation.load_samples(run_config)
+
+        self.assertEqual([sample.sample_index for sample in samples], [0, 1, 2])
+        self.assertEqual([sample.metadata["original_sample_index"] for sample in samples], [2, 5, 6])
+        self.assertEqual(
+            [sample.metadata["source_id"] for sample in samples],
+            ["wmt24pp__en_de_DE_00002", "wmt24pp__en_fr_FR_00000", "wmt24pp__en_fr_FR_00001"],
+        )
+        self.assertEqual([sample.metadata["target_language"] for sample in samples], ["de_DE", "fr_FR", "fr_FR"])
+        self.assertEqual(translation.scoreboard_dataset_name(run_config), "wmt24pp_test_sample3_seed7")
+
     def test_translation_chrf_scores_exact_match_higher(self) -> None:
         exact = translation.chrf_score("Bonjour le monde", "Bonjour le monde")
         partial = translation.chrf_score("Salut", "Bonjour le monde")
