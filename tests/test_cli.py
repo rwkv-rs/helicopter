@@ -574,6 +574,8 @@ class CommandPlanTests(unittest.TestCase):
                 "apibank_l2",
                 "apibank_level1",
                 "apibank_level2",
+                "toolalpaca_eval_real",
+                "toolalpaca_eval_simulated",
                 "beyond_aime",
                 "bfcl_multiple",
                 "bfcl_exec_multiple",
@@ -1072,6 +1074,61 @@ class CommandPlanTests(unittest.TestCase):
         wrong = copy.deepcopy(actual)
         wrong["input"]["location"] = "Other Room"
         self.assertFalse(FakeSandbox().check_api_call_correctness("DeleteMeeting", actual, wrong))
+
+    def test_toolalpaca_prompt_scores_matching_request(self) -> None:
+        doc = lighteval_rwkv_skills_tasks.toolalpaca_prompt(
+            {
+                "task_id": "toolalpaca_eval_simulated__weather_000",
+                "instruction": "Find the current weather in Paris.",
+                "tools": [
+                    {
+                        "name": "getWeather",
+                        "description": "Get weather.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"],
+                        },
+                        "metadata": {
+                            "path": "/weather/{city}",
+                            "method": "get",
+                            "operation": {
+                                "parameters": [
+                                    {
+                                        "name": "city",
+                                        "in": "path",
+                                        "required": True,
+                                        "schema": {"type": "string"},
+                                    }
+                                ]
+                            },
+                        },
+                    }
+                ],
+                "expected_tool_calls": [
+                    {
+                        "name": "getWeather",
+                        "arguments": {"city": "Paris"},
+                        "argument_options": {"city": ["Paris"]},
+                    }
+                ],
+            },
+            "toolalpaca_eval_simulated",
+        )
+
+        self.assertIsNotNone(doc)
+        assert doc is not None
+        self.assertIn("ToolAlpaca", doc.query)
+        self.assertNotIn('"metadata"', doc.query)
+        self.assertEqual(doc.specific["sample_id"], "toolalpaca_eval_simulated__weather_000")
+        metric = lighteval_rwkv_skills_tasks.ToolAlpacaAccuracy()
+        self.assertEqual(
+            metric.compute(
+                ModelResponse(text=['{"name":"getWeather","arguments":{"city":"Paris"}}']),
+                doc,
+            ),
+            1.0,
+        )
 
     def test_free_answer_prompt_normalizes_numeric_answers(self) -> None:
         doc = lighteval_rwkv_skills_tasks.free_answer_prompt(
