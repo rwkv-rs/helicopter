@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import threading
 from typing import Any
@@ -171,6 +172,18 @@ class McpBenchRunConfig:
     final_max_tokens: int = 1024
     max_rounds: int = 8
     timeout_s: float = 600.0
+    tool_router_mode: str = "off"
+    tool_router_max_tools: int = 16
+    tool_router_trigger_tool_count: int = 20
+    tool_router_trigger_catalog_chars: int = 6000
+    tool_router_context_chars: int = 6000
+    tool_router_description_chars: int = 240
+    long_context_router_mode: str = "off"
+    long_context_min_chars: int = 4000
+    long_context_chunk_chars: int = 1200
+    long_context_overlap_lines: int = 2
+    long_context_max_evidence_chunks: int = 4
+    long_context_max_evidence_chars: int = 6000
     skip_runtime_preflight: bool = False
     scoreboard_dataset: str | None = None
     job_name: str = "function_mcp_bench"
@@ -474,10 +487,112 @@ def build_mcp_task_user_message(item: McpBenchItem) -> str:
     return f"Task:\n{presented_task(item)}"
 
 
+def route_mcp_tools(
+    item: McpBenchItem,
+    available_tools: Mapping[str, Mapping[str, Any]],
+    prompt_messages: Sequence[Mapping[str, Any]],
+    config: McpBenchRunConfig,
+) -> tuple[dict[str, Mapping[str, Any]], dict[str, Any]]:
+    mode = str(config.tool_router_mode or "off").strip().lower()
+    catalog_chars = len(render_tool_catalog(available_tools))
+    trace: dict[str, Any] = {
+        "mode": mode,
+        "enabled": mode != "off",
+        "input_tool_count": len(available_tools),
+        "input_catalog_chars": catalog_chars,
+        "selected_tool_count": len(available_tools),
+        "selected_tools": sorted(_mcp_tool_full_name(tool) for tool in available_tools.values()),
+        "triggered": False,
+    }
+    if mode == "off":
+        return dict(available_tools), trace
+    if mode != "lexical":
+        raise ValueError(f"unsupported MCP tool_router_mode={config.tool_router_mode!r}; expected off or lexical")
+    triggered = (
+        len(available_tools) > max(1, int(config.tool_router_trigger_tool_count))
+        or catalog_chars > max(1, int(config.tool_router_trigger_catalog_chars))
+    )
+    trace["triggered"] = triggered
+    if not triggered:
+        return dict(available_tools), trace
+    query = _mcp_router_query(item, prompt_messages, max_chars=max(1, int(config.tool_router_context_chars)))
+    query_terms = _lexical_terms(query)
+    scored: list[tuple[float, str, Mapping[str, Any]]] = []
+    for key, tool in available_tools.items():
+        scored.append((_tool_score(tool, query_terms), str(key), tool))
+    scored.sort(key=lambda row: (-row[0], _mcp_tool_full_name(row[2])))
+    selected_rows = scored[: max(1, int(config.tool_router_max_tools))]
+    selected: dict[str, Mapping[str, Any]] = {key: tool for _score, key, tool in selected_rows}
+    trace.update(
+        {
+            "selected_tool_count": len(selected),
+            "selected_tools": [_mcp_tool_full_name(tool) for _score, _key, tool in selected_rows],
+            "scores": [
+                {"tool": _mcp_tool_full_name(tool), "score": score}
+                for score, _key, tool in selected_rows[: max(1, int(config.tool_router_max_tools))]
+            ],
+        }
+    )
+    return selected, trace
+
+
+def compact_mcp_messages_for_long_context(
+    item: McpBenchItem,
+    messages: Sequence[Mapping[str, str]],
+    config: McpBenchRunConfig,
+) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    mode = str(config.long_context_router_mode or "off").strip().lower()
+    trace: dict[str, Any] = {
+        "mode": mode,
+        "enabled": mode != "off",
+        "compacted_messages": 0,
+        "selected_chunks": 0,
+    }
+    if mode == "off":
+        return [dict(message) for message in messages], trace
+    if mode != "lexical":
+        raise ValueError(
+            f"unsupported MCP long_context_router_mode={config.long_context_router_mode!r}; expected off or lexical"
+        )
+    query_terms = _lexical_terms(presented_task(item) + "\n" + _format_messages(messages[-4:]))
+    compacted: list[dict[str, str]] = []
+    chunk_count = 0
+    for message in messages:
+        role = str(message.get("role") or "message")
+        content = str(message.get("content") or "")
+        if len(content) < max(1, int(config.long_context_min_chars)):
+            compacted.append({"role": role, "content": content})
+            continue
+        evidence, selected = _select_long_context_evidence(
+            content,
+            query_terms=query_terms,
+            chunk_chars=max(1, int(config.long_context_chunk_chars)),
+            overlap_lines=max(0, int(config.long_context_overlap_lines)),
+            max_chunks=max(1, int(config.long_context_max_evidence_chunks)),
+            max_chars=max(1, int(config.long_context_max_evidence_chars)),
+        )
+        compacted.append(
+            {
+                "role": role,
+                "content": (
+                    "[long context compacted]\n"
+                    f"original_chars={len(content)} selected_chunks={len(selected)}\n"
+                    f"{evidence}"
+                ),
+            }
+        )
+        trace["compacted_messages"] = int(trace["compacted_messages"]) + 1
+        chunk_count += len(selected)
+    trace["selected_chunks"] = chunk_count
+    return compacted, trace
+
+
 def build_planning_prompt(
     item: McpBenchItem,
     available_tools: Mapping[str, Mapping[str, Any]],
     prompt_messages: Sequence[Mapping[str, Any]],
+    *,
+    tool_description_chars: int = 400,
 ) -> str:
     schema = {
         "type": "object",
@@ -491,7 +606,7 @@ def build_planning_prompt(
     return (
         "You are solving an MCP-Bench interactive task.\n\n"
         "Available MCP tools:\n"
-        f"{render_tool_catalog(available_tools)}\n\n"
+        f"{render_tool_catalog(available_tools, description_chars=tool_description_chars)}\n\n"
         "Output JSON schema:\n"
         f"{json.dumps(schema, ensure_ascii=False, indent=2, sort_keys=True)}\n\n"
         "Return exactly one JSON object. Use a listed tool name in the form `server:tool`, "
@@ -583,7 +698,14 @@ def generate_sample(
     executed_rounds = 0
     try:
         for round_num in range(1, max(1, int(config.max_rounds)) + 1):
-            decision_prompt = build_planning_prompt(item, available_tools, prompt_messages)
+            planning_messages, long_context_trace = compact_mcp_messages_for_long_context(item, prompt_messages, config)
+            routed_tools, tool_router_trace = route_mcp_tools(item, available_tools, planning_messages, config)
+            decision_prompt = build_planning_prompt(
+                item,
+                routed_tools,
+                planning_messages,
+                tool_description_chars=max(40, int(config.tool_router_description_chars)),
+            )
             decision_output = chat_completion(
                 base_url=config.base_url,
                 model=config.model,
@@ -605,6 +727,8 @@ def generate_sample(
                         "round_num": round_num,
                         "decision": {"raw": decision_output, "parse_error": str(exc)},
                         "executions": [],
+                        "tool_router": tool_router_trace,
+                        "long_context": long_context_trace,
                     }
                 )
                 break
@@ -636,7 +760,7 @@ def generate_sample(
                 for planned_layer, raw_call in enumerate(decision.tool_calls):
                     total_planned_tools += 1
                     try:
-                        normalized = normalize_planned_tool_call(raw_call, available_tools)
+                        normalized = normalize_planned_tool_call(raw_call, routed_tools)
                         valid_planned_tools += 1
                         tool_response = worker.call_tool(normalized.full_name, normalized.arguments)
                         success = bool(tool_response.get("success", False))
@@ -679,6 +803,8 @@ def generate_sample(
                         ],
                     },
                     "executions": [_execution_to_dict(entry) for entry in round_executions],
+                    "tool_router": tool_router_trace,
+                    "long_context": long_context_trace,
                 }
             )
             if round_executions:
@@ -738,7 +864,7 @@ def generate_sample(
         sample_index=sample_index,
         task_id=item.task.task_id,
         prompt=_join_round_artifacts(prompts),
-        completion=_join_round_artifacts(completions),
+        completion=json.dumps({"completions": list(completions), "trace": steps}, ensure_ascii=False),
         final_answer=final_answer,
         reference_answer=build_mcp_bench_ref_answer(item),
         is_passed=is_passed,
@@ -785,6 +911,7 @@ def completion_sampling_config(config: McpBenchRunConfig) -> dict[str, Any]:
             "top_p": config.top_p,
             "max_new_tokens": config.final_max_tokens,
         },
+        "router": mcp_router_config_payload(config),
     }
 
 
@@ -886,6 +1013,7 @@ def dry_run_summary(config: McpBenchRunConfig) -> dict[str, Any]:
         "runtime_errors": list(preflight.errors),
         "checked_servers": list(preflight.checked_servers),
         "judge_required": True,
+        "router": mcp_router_config_payload(config),
         "scoreboard_dataset": scoreboard_dataset_name(config),
         "job_name": config.job_name,
         "job_id": job_id(config),
@@ -1091,7 +1219,7 @@ def render_function_output_user_block(execution: McpBenchExecutionResult) -> str
     )
 
 
-def render_tool_catalog(available_tools: Mapping[str, Mapping[str, Any]]) -> str:
+def render_tool_catalog(available_tools: Mapping[str, Mapping[str, Any]], *, description_chars: int = 400) -> str:
     rendered: list[dict[str, Any]] = []
     for tool in available_tools.values():
         server = str(tool.get("server") or "")
@@ -1106,7 +1234,7 @@ def render_tool_catalog(available_tools: Mapping[str, Mapping[str, Any]]) -> str
                 "name": f"{server}:{name}" if server else name,
                 "description": _truncate_text(
                     str(tool.get("description") or "").strip() or "No description available",
-                    400,
+                    max(40, int(description_chars)),
                 ),
                 "arguments": arguments,
             }
@@ -1151,6 +1279,146 @@ def build_mcp_bench_ref_answer(item: McpBenchItem) -> str:
         "runtime_origin=official_mcp_bench_runtime\n"
         "evaluator=official_mcp_bench_evaluator_phase2"
     )
+
+
+def mcp_router_config_payload(config: McpBenchRunConfig) -> dict[str, Any]:
+    return {
+        "tool_router": {
+            "mode": str(config.tool_router_mode or "off"),
+            "max_tools": int(config.tool_router_max_tools),
+            "trigger_tool_count": int(config.tool_router_trigger_tool_count),
+            "trigger_catalog_chars": int(config.tool_router_trigger_catalog_chars),
+            "context_chars": int(config.tool_router_context_chars),
+            "description_chars": int(config.tool_router_description_chars),
+        },
+        "long_context": {
+            "mode": str(config.long_context_router_mode or "off"),
+            "min_chars": int(config.long_context_min_chars),
+            "chunk_chars": int(config.long_context_chunk_chars),
+            "overlap_lines": int(config.long_context_overlap_lines),
+            "max_evidence_chunks": int(config.long_context_max_evidence_chunks),
+            "max_evidence_chars": int(config.long_context_max_evidence_chars),
+        },
+    }
+
+
+def _mcp_router_query(item: McpBenchItem, messages: Sequence[Mapping[str, Any]], *, max_chars: int) -> str:
+    context = _trim_text(_format_messages(messages), max(0, int(max_chars)))
+    return f"{presented_task(item)}\n{item.task.dependency_analysis}\n{context}"
+
+
+def _mcp_tool_full_name(tool: Mapping[str, Any]) -> str:
+    server = str(tool.get("server") or "").strip()
+    name = str(tool.get("name") or "").strip()
+    return f"{server}:{name}" if server else name
+
+
+def _tool_score(tool: Mapping[str, Any], query_terms: set[str]) -> float:
+    full_name = _mcp_tool_full_name(tool)
+    schema = tool.get("input_schema") if isinstance(tool.get("input_schema"), Mapping) else {}
+    text = "\n".join(
+        [
+            full_name,
+            str(tool.get("description") or ""),
+            json.dumps(schema, ensure_ascii=False, sort_keys=True),
+        ]
+    )
+    terms = _lexical_terms(text)
+    if not query_terms:
+        return 0.0
+    overlap = query_terms & terms
+    name_terms = _lexical_terms(full_name)
+    return float(len(overlap)) + (2.0 * len(query_terms & name_terms))
+
+
+def _lexical_terms(text: str) -> set[str]:
+    terms = {
+        token
+        for token in re.findall(r"[A-Za-z0-9_]{2,}", str(text or "").lower())
+        if token not in _LEXICAL_STOPWORDS
+    }
+    return terms
+
+
+_LEXICAL_STOPWORDS = {
+    "the",
+    "and",
+    "for",
+    "with",
+    "that",
+    "this",
+    "from",
+    "into",
+    "when",
+    "then",
+    "task",
+    "tool",
+    "tools",
+    "user",
+    "assistant",
+    "function",
+    "output",
+    "arguments",
+    "name",
+    "type",
+    "string",
+    "object",
+    "true",
+    "false",
+    "none",
+    "null",
+}
+
+
+def _select_long_context_evidence(
+    text: str,
+    *,
+    query_terms: set[str],
+    chunk_chars: int,
+    overlap_lines: int,
+    max_chunks: int,
+    max_chars: int,
+) -> tuple[str, list[dict[str, Any]]]:
+    chunks = _split_text_chunks(text, chunk_chars=chunk_chars, overlap_lines=overlap_lines)
+    scored: list[tuple[float, int, str]] = []
+    for index, chunk in enumerate(chunks):
+        score = float(len(_lexical_terms(chunk) & query_terms))
+        scored.append((score, index, chunk))
+    scored.sort(key=lambda row: (-row[0], row[1]))
+    selected_rows = sorted(scored[: max(1, int(max_chunks))], key=lambda row: row[1])
+    parts: list[str] = []
+    metadata: list[dict[str, Any]] = []
+    used = 0
+    for score, index, chunk in selected_rows:
+        header = f"[evidence chunk {index} score={score:.1f}]"
+        body_budget = max(0, int(max_chars) - used - len(header) - 2)
+        if body_budget <= 0:
+            break
+        body = _truncate_text(chunk, body_budget)
+        parts.append(f"{header}\n{body}")
+        used += len(parts[-1]) + 2
+        metadata.append({"index": index, "score": score, "chars": len(chunk)})
+    return "\n\n".join(parts), metadata
+
+
+def _split_text_chunks(text: str, *, chunk_chars: int, overlap_lines: int) -> list[str]:
+    lines = str(text or "").splitlines()
+    if not lines:
+        return [str(text or "")]
+    chunks: list[str] = []
+    current: list[str] = []
+    current_chars = 0
+    for line in lines:
+        line_chars = len(line) + 1
+        if current and current_chars + line_chars > max(1, int(chunk_chars)):
+            chunks.append("\n".join(current))
+            current = current[-max(0, int(overlap_lines)) :] if overlap_lines else []
+            current_chars = sum(len(item) + 1 for item in current)
+        current.append(line)
+        current_chars += line_chars
+    if current:
+        chunks.append("\n".join(current))
+    return chunks or [str(text or "")]
 
 
 def _execution_to_dict(entry: McpBenchExecutionResult) -> dict[str, Any]:

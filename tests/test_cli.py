@@ -1959,6 +1959,111 @@ class CommandPlanTests(unittest.TestCase):
         self.assertFalse(payload["runtime_ready"])
         self.assertIn("Demo Server", payload["checked_servers"])
 
+    def test_catalog_mcp_bench_defaults_to_rwkv_long_context_router(self) -> None:
+        catalog = eval_catalog.load_rwkv_skills_catalog()
+        spec = catalog_runner.resolve_catalog_run_spec(catalog.benchmarks_by_name["mcp_bench_single"])
+
+        config_obj = catalog_runner._run_config(
+            spec,
+            base_url="http://127.0.0.1:29082",
+            model="rwkv7-g1d-0.4b-20260210-ctx8192",
+            limit=1,
+        )
+
+        self.assertEqual(config_obj.tool_router_mode, "lexical")
+        self.assertEqual(config_obj.tool_router_max_tools, 16)
+        self.assertEqual(config_obj.tool_router_trigger_tool_count, 20)
+        self.assertEqual(config_obj.tool_router_trigger_catalog_chars, 6000)
+        self.assertEqual(config_obj.tool_router_context_chars, 6000)
+        self.assertEqual(config_obj.tool_router_description_chars, 240)
+        self.assertEqual(config_obj.long_context_router_mode, "lexical")
+        self.assertEqual(config_obj.long_context_min_chars, 4000)
+        self.assertEqual(config_obj.long_context_chunk_chars, 1200)
+        self.assertEqual(config_obj.long_context_overlap_lines, 2)
+        self.assertEqual(config_obj.long_context_max_evidence_chunks, 4)
+        self.assertEqual(config_obj.long_context_max_evidence_chars, 6000)
+
+    def test_mcp_bench_lexical_tool_router_selects_relevant_tools(self) -> None:
+        item = mcp_bench.McpBenchItem(
+            task_file="task.json",
+            server_name="Docs",
+            combination_name="Single",
+            combination_type="single_server",
+            servers=("Docs",),
+            task=mcp_bench.McpBenchTaskSpec(
+                task_id="task-1",
+                task_description="Find the OpenAPI operation for invoice refunds.",
+            ),
+        )
+        tools = {
+            f"Docs:tool_{index}": {"server": "Docs", "name": f"tool_{index}", "description": "unrelated calendar lookup"}
+            for index in range(25)
+        }
+        tools["Docs:refund_search"] = {
+            "server": "Docs",
+            "name": "refund_search",
+            "description": "Search OpenAPI operations for invoice refund routes",
+        }
+        config = mcp_bench.McpBenchRunConfig(
+            base_url="http://127.0.0.1:29082",
+            model="rwkv7-g1d-0.4b-20260210-ctx8192",
+            benchmark="mcp_bench_single",
+            dataset_name="mcp_bench_single",
+            tool_router_mode="lexical",
+            tool_router_max_tools=3,
+            tool_router_trigger_tool_count=3,
+        )
+
+        selected, trace = mcp_bench.route_mcp_tools(
+            item,
+            tools,
+            [{"role": "user", "content": "Need invoice refund operation."}],
+            config,
+        )
+
+        self.assertTrue(trace["triggered"])
+        self.assertIn("Docs:refund_search", selected)
+        self.assertLessEqual(len(selected), 3)
+
+    def test_mcp_bench_long_context_compacts_large_function_outputs(self) -> None:
+        item = mcp_bench.McpBenchItem(
+            task_file="task.json",
+            server_name="Docs",
+            combination_name="Single",
+            combination_type="single_server",
+            servers=("Docs",),
+            task=mcp_bench.McpBenchTaskSpec(
+                task_id="task-1",
+                task_description="Find invoice refund evidence.",
+            ),
+        )
+        long_output = "\n".join(
+            [f"noise line {index}" for index in range(80)]
+            + ["invoice refund endpoint POST /refunds evidence"]
+            + [f"other line {index}" for index in range(80)]
+        )
+        config = mcp_bench.McpBenchRunConfig(
+            base_url="http://127.0.0.1:29082",
+            model="rwkv7-g1d-0.4b-20260210-ctx8192",
+            benchmark="mcp_bench_single",
+            dataset_name="mcp_bench_single",
+            long_context_router_mode="lexical",
+            long_context_min_chars=200,
+            long_context_chunk_chars=120,
+            long_context_max_evidence_chunks=2,
+            long_context_max_evidence_chars=300,
+        )
+
+        compacted, trace = mcp_bench.compact_mcp_messages_for_long_context(
+            item,
+            [{"role": "user", "content": long_output}],
+            config,
+        )
+
+        self.assertEqual(trace["compacted_messages"], 1)
+        self.assertIn("[long context compacted]", compacted[0]["content"])
+        self.assertIn("invoice refund", compacted[0]["content"])
+
     def test_mcp_bench_parses_tool_and_final_answer_decisions(self) -> None:
         tool_decision = mcp_bench.parse_planning_decision('{"name":"Demo Server:lookup","arguments":{"q":"x"}}')
         final_decision = mcp_bench.parse_planning_decision('{"name":"final_answer","arguments":{"answer":"done"}}')

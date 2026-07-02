@@ -212,6 +212,18 @@ def handle_eval_run_catalog(args: argparse.Namespace, *, root: Any, **_: Any) ->
         "mcp_runtime_root": getattr(args, "mcp_runtime_root", None),
         "mcp_worker_script": getattr(args, "mcp_worker_script", None),
         "mcp_max_rounds": getattr(args, "mcp_max_rounds", None),
+        "mcp_tool_router_mode": getattr(args, "mcp_tool_router_mode", None),
+        "mcp_tool_router_max_tools": getattr(args, "mcp_tool_router_max_tools", None),
+        "mcp_tool_router_trigger_tool_count": getattr(args, "mcp_tool_router_trigger_tool_count", None),
+        "mcp_tool_router_trigger_catalog_chars": getattr(args, "mcp_tool_router_trigger_catalog_chars", None),
+        "mcp_tool_router_context_chars": getattr(args, "mcp_tool_router_context_chars", None),
+        "mcp_tool_router_description_chars": getattr(args, "mcp_tool_router_description_chars", None),
+        "mcp_long_context_router_mode": getattr(args, "mcp_long_context_router_mode", None),
+        "mcp_long_context_min_chars": getattr(args, "mcp_long_context_min_chars", None),
+        "mcp_long_context_chunk_chars": getattr(args, "mcp_long_context_chunk_chars", None),
+        "mcp_long_context_overlap_lines": getattr(args, "mcp_long_context_overlap_lines", None),
+        "mcp_long_context_max_evidence_chunks": getattr(args, "mcp_long_context_max_evidence_chunks", None),
+        "mcp_long_context_max_evidence_chars": getattr(args, "mcp_long_context_max_evidence_chars", None),
         "judge_base_url": getattr(args, "judge_base_url", None),
         "judge_model": getattr(args, "judge_model", None),
         "judge_api_key": getattr(args, "judge_api_key", None),
@@ -443,6 +455,22 @@ def build_parser() -> argparse.ArgumentParser:
     eval_run_catalog.add_argument("--mcp-runtime-root", help="MCP-Bench official runtime root")
     eval_run_catalog.add_argument("--mcp-worker-script", help="MCP-Bench worker script path")
     eval_run_catalog.add_argument("--mcp-max-rounds", type=int, help="maximum MCP planning rounds")
+    eval_run_catalog.add_argument("--mcp-tool-router-mode", choices=("off", "lexical"), help="MCP-Bench tool router mode")
+    eval_run_catalog.add_argument("--mcp-tool-router-max-tools", type=int, help="MCP-Bench max routed tools")
+    eval_run_catalog.add_argument("--mcp-tool-router-trigger-tool-count", type=int, help="MCP-Bench tool-count trigger")
+    eval_run_catalog.add_argument("--mcp-tool-router-trigger-catalog-chars", type=int, help="MCP-Bench catalog-char trigger")
+    eval_run_catalog.add_argument("--mcp-tool-router-context-chars", type=int, help="MCP-Bench router context budget")
+    eval_run_catalog.add_argument("--mcp-tool-router-description-chars", type=int, help="MCP-Bench routed description budget")
+    eval_run_catalog.add_argument(
+        "--mcp-long-context-router-mode",
+        choices=("off", "lexical"),
+        help="MCP-Bench long function-output router mode",
+    )
+    eval_run_catalog.add_argument("--mcp-long-context-min-chars", type=int, help="MCP-Bench long-output trigger")
+    eval_run_catalog.add_argument("--mcp-long-context-chunk-chars", type=int, help="MCP-Bench long-output chunk size")
+    eval_run_catalog.add_argument("--mcp-long-context-overlap-lines", type=int, help="MCP-Bench long-output chunk overlap")
+    eval_run_catalog.add_argument("--mcp-long-context-max-evidence-chunks", type=int, help="MCP-Bench max evidence chunks")
+    eval_run_catalog.add_argument("--mcp-long-context-max-evidence-chars", type=int, help="MCP-Bench evidence char budget")
     eval_run_catalog.add_argument("--judge-base-url", help="OpenAI-compatible judge base URL")
     eval_run_catalog.add_argument("--judge-model", help="judge model name")
     eval_run_catalog.add_argument("--judge-api-key", help="judge API key")
