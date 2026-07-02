@@ -4,6 +4,7 @@ import contextlib
 import ast
 import copy
 import faulthandler
+import hashlib
 import importlib
 import io
 import json
@@ -252,6 +253,24 @@ APIBANK_TASKS = {
     "apibank_level2": {"level": 2},
 }
 _APIBANK_SCHEMA_SANDBOX_CACHE: dict[str, "ApiBankSandbox"] = {}
+TOOLALPACA_LIGHTEVAL_DATASET = "rwkv_skills_toolalpaca"
+TOOLALPACA_REPO_URL = "https://github.com/tangqiaoyu/ToolAlpaca.git"
+TOOLALPACA_REPO_REVISION = "main"
+TOOLALPACA_REPO_ROOT_NAME = "ToolAlpaca"
+TOOLALPACA_TASKS = {
+    "toolalpaca_eval_real": {"file": "eval_real.json"},
+    "toolalpaca_eval_simulated": {"file": "eval_simulated.json"},
+}
+TOOLALPACA_MAX_TOOL_DESCRIPTION_CHARS = 700
+TOOLALPACA_MAX_TOOL_SCHEMA_CHARS = 1_200
+_TOOLALPACA_REF_KEY = "__toolalpaca_ref__"
+_TOOLALPACA_OPTIONAL_KEY = "__toolalpaca_optional__"
+_TOOLALPACA_AUTH_PARAMS_BY_API = {
+    "apilayer weatherstack": frozenset({"access_key"}),
+    "wolframalpha": frozenset({"appid"}),
+    "currencybeacon": frozenset({"api_key"}),
+}
+_TOOLALPACA_HTTP_BODY_METHODS = {"post", "put", "patch"}
 _THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.IGNORECASE | re.DOTALL)
 _FENCED_CODE_RE = re.compile(
     r"```[ \t]*(?:python|py)?[^\S\r\n]*\r?\n(?P<code>.*?)```",
@@ -2957,6 +2976,1154 @@ APIBANK_ACCURACY = SampleLevelMetric(
 )
 
 
+class ToolAlpacaActionResult:
+    __slots__ = ("action", "action_input", "success", "optional", "request", "response", "error")
+
+    def __init__(
+        self,
+        *,
+        action: str,
+        action_input: Mapping[str, Any] | None = None,
+        success: bool,
+        optional: bool = False,
+        request: Mapping[str, Any] | None = None,
+        response: Any = None,
+        error: str | None = None,
+    ) -> None:
+        self.action = action
+        self.action_input = dict(action_input or {})
+        self.success = bool(success)
+        self.optional = bool(optional)
+        self.request = dict(request or {})
+        self.response = response
+        self.error = error
+
+
+class ToolAlpacaSandbox:
+    execution_mode = "local_toolalpaca_sandbox"
+
+    def execute_sequence(
+        self,
+        record: Mapping[str, Any],
+        calls: Sequence[Mapping[str, Any]],
+    ) -> list[ToolAlpacaActionResult]:
+        results: list[ToolAlpacaActionResult] = []
+        for call in calls:
+            results.append(self.execute_call(record, call, history=results))
+        return results
+
+    def execute_call(
+        self,
+        record: Mapping[str, Any],
+        call: Mapping[str, Any],
+        *,
+        history: Sequence[ToolAlpacaActionResult],
+    ) -> ToolAlpacaActionResult:
+        normalized = _normalize_toolalpaca_call(call, history)
+        if normalized is None:
+            return ToolAlpacaActionResult(action=str(call.get("name") or ""), success=False, error="arguments_not_object")
+        action, resolved_arguments, optional = normalized
+        tools_by_name = {
+            str(tool.get("name") or ""): dict(tool)
+            for tool in _bfcl_json_list_field(record.get("tools"))
+            if isinstance(tool, Mapping)
+        }
+        tool = tools_by_name.get(action)
+        if tool is None and action == "getDetails":
+            tool = _toolalpaca_get_details_tool_schema()
+        if tool is None:
+            request = {
+                "action": action,
+                "method": "",
+                "path": "",
+                "path_params": {},
+                "query": {},
+                "body": dict(_json_safe(resolved_arguments)),
+                "headers": {},
+                "cookies": {},
+                "builtin": False,
+            }
+            return ToolAlpacaActionResult(
+                action=action,
+                action_input=dict(_json_safe(resolved_arguments)),
+                success=True,
+                optional=optional,
+                request=request,
+                response=_synthetic_toolalpaca_response(action, request, history),
+            )
+        try:
+            request = _build_toolalpaca_request(record, tool, dict(resolved_arguments))
+        except ValueError as exc:
+            return ToolAlpacaActionResult(
+                action=action,
+                action_input=dict(_json_safe(resolved_arguments)),
+                success=False,
+                optional=optional,
+                error=str(exc),
+            )
+        return ToolAlpacaActionResult(
+            action=action,
+            action_input=dict(_json_safe(resolved_arguments)),
+            success=True,
+            optional=optional,
+            request=request,
+            response=_synthetic_toolalpaca_response(action, request, history),
+        )
+
+
+def _toolalpaca_source_candidates() -> tuple[Path, ...]:
+    candidates: list[Path] = []
+    for raw in (os.environ.get("TOOLALPACA_SOURCE_ROOT"), os.environ.get("RWKV_TOOLALPACA_SOURCE_ROOT")):
+        if raw:
+            candidates.append(Path(raw).expanduser())
+    repo_root = Path(__file__).resolve().parents[3]
+    candidates.extend(
+        [
+            repo_root / "references" / "ToolAlpaca",
+            repo_root.parent / "ToolAlpaca",
+            Path("/home/chase/GitHub/rwkv-skills/references/ToolAlpaca"),
+            Path("/tmp/helicopter-toolalpaca-official/ToolAlpaca"),
+        ]
+    )
+    return tuple(dict.fromkeys(path.expanduser().resolve() for path in candidates))
+
+
+def _toolalpaca_source_root() -> Path:
+    for candidate in _toolalpaca_source_candidates():
+        if (candidate / "data" / "eval_simulated.json").exists() and (candidate / "data" / "eval_real.json").exists():
+            return candidate.resolve()
+    return _download_toolalpaca_source()
+
+
+def _download_toolalpaca_source() -> Path:
+    target = Path(os.environ.get("RWKV_LIGHTEVAL_TOOLALPACA_CACHE", "/tmp/helicopter-toolalpaca-official")).expanduser().resolve()
+    repo_root = target / TOOLALPACA_REPO_ROOT_NAME
+    if not (repo_root / ".git").exists():
+        target.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [
+                "git",
+                "clone",
+                "--depth",
+                "1",
+                "--filter=blob:none",
+                "--branch",
+                TOOLALPACA_REPO_REVISION,
+                TOOLALPACA_REPO_URL,
+                str(repo_root),
+            ],
+            check=True,
+        )
+    for file_name in ("eval_simulated.json", "eval_real.json"):
+        if not (repo_root / "data" / file_name).exists():
+            raise FileNotFoundError(f"ToolAlpaca source is incomplete: {repo_root / 'data' / file_name}")
+    return repo_root.resolve()
+
+
+def _toolalpaca_source_path(dataset_name: str) -> Path:
+    task = TOOLALPACA_TASKS.get(dataset_name)
+    if task is None:
+        raise ValueError(f"unknown ToolAlpaca dataset: {dataset_name}")
+    return (_toolalpaca_source_root() / "data" / str(task["file"])).resolve()
+
+
+def _load_toolalpaca_rows(dataset_name: str) -> list[dict[str, Any]]:
+    source_path = _toolalpaca_source_path(dataset_name)
+    payload = json.loads(source_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, list):
+        raise ValueError(f"ToolAlpaca source must be a JSON array: {source_path}")
+
+    rows: list[dict[str, Any]] = []
+    for api_index, api_info in enumerate(payload):
+        if not isinstance(api_info, Mapping):
+            continue
+        api_name = str(api_info.get("Name") or api_info.get("API") or f"api_{api_index}")
+        if _toolalpaca_should_skip_api(dataset_name, api_name):
+            continue
+        instructions = _coerce_list(api_info.get("Instructions"))
+        golden_answers = _coerce_list(api_info.get("Golden_Answers"))
+        tools = _toolalpaca_tools(api_info)
+        metadata_base: dict[str, Any] = {
+            "source_format": "official_toolalpaca",
+            "api_name": api_name,
+            "api_index": api_index,
+            "source_path": str(source_path),
+            "execution_backend": _toolalpaca_execution_backend(dataset_name),
+        }
+        server_url = _toolalpaca_api_server_url(api_info)
+        if server_url:
+            metadata_base["api_server_url"] = server_url
+        for question_index, instruction in enumerate(instructions):
+            if question_index >= len(golden_answers):
+                continue
+            instruction_text = str(instruction or "").strip()
+            if not instruction_text:
+                continue
+            rows.append(
+                {
+                    "task_id": f"{dataset_name}__{_toolalpaca_slug(api_name)}_{question_index:03d}",
+                    "instruction": instruction_text,
+                    "tools": tools,
+                    "expected_tool_calls": _normalize_toolalpaca_golden_answer(golden_answers[question_index]),
+                    "metadata": {**metadata_base, "question_index": question_index},
+                }
+            )
+    return rows
+
+
+def _load_toolalpaca_dataset_dict(dataset_name: str):
+    from datasets import Dataset, DatasetDict
+
+    rows: list[dict[str, Any]] = []
+    for row in _load_toolalpaca_rows(dataset_name):
+        rendered = dict(row)
+        for key in ("tools", "expected_tool_calls", "metadata"):
+            rendered[key] = json.dumps(rendered.get(key) or ([] if key != "metadata" else {}), ensure_ascii=False, sort_keys=True)
+        rows.append(rendered)
+    return DatasetDict({"test": Dataset.from_list(rows)})
+
+
+def _toolalpaca_execution_backend(dataset_name: str) -> str:
+    if dataset_name == "toolalpaca_eval_simulated":
+        return "toolalpaca_simulator"
+    if dataset_name == "toolalpaca_eval_real":
+        return "toolalpaca_real_http"
+    return "toolalpaca_synthetic"
+
+
+def _toolalpaca_should_skip_api(dataset_name: str, api_name: str) -> bool:
+    return dataset_name == "toolalpaca_eval_real" and api_name.strip().lower() in _TOOLALPACA_AUTH_PARAMS_BY_API
+
+
+def _toolalpaca_tools(api_info: Mapping[str, Any]) -> list[dict[str, Any]]:
+    api_name = str(api_info.get("Name") or api_info.get("API") or "")
+    openapi_spec = _toolalpaca_openapi_spec(api_info)
+    server_url = _openapi_server_url(openapi_spec)
+    descriptions = api_info.get("Function_Description")
+    projection = api_info.get("Function_Projection")
+    tools: list[dict[str, Any]] = []
+    if isinstance(descriptions, Mapping):
+        for name, description in descriptions.items():
+            name_text = str(name).strip()
+            if not name_text or name_text == "components":
+                continue
+            method = ""
+            path = ""
+            if isinstance(projection, Mapping):
+                projected = projection.get(name)
+                if isinstance(projected, Sequence) and not isinstance(projected, (str, bytes, bytearray)):
+                    path = str(projected[0]) if len(projected) > 0 else ""
+                    method = str(projected[1]) if len(projected) > 1 else ""
+            metadata: dict[str, Any] = {"path": path, "method": method, "api_name": api_name}
+            if server_url:
+                metadata["server_url"] = server_url
+            operation = _toolalpaca_openapi_operation(openapi_spec, path, method)
+            if operation:
+                metadata["operation"] = dict(operation)
+            tools.append(
+                {
+                    "name": name_text,
+                    "description": _normalize_rwkv_text(str(description or "")),
+                    "parameters": _strip_toolalpaca_auth_parameters(
+                        api_name,
+                        _toolalpaca_parameters_from_description(str(description or "")),
+                    ),
+                    "metadata": metadata,
+                }
+            )
+    if _toolalpaca_api_uses_action(api_info, "getDetails"):
+        tools.append(_toolalpaca_get_details_tool_schema(api_name=api_name))
+    return tools
+
+
+def _normalize_toolalpaca_golden_answer(raw: Any) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    for item in _coerce_list(raw):
+        if not isinstance(item, Mapping):
+            continue
+        action = str(item.get("Action") or item.get("action") or "").strip()
+        optional = False
+        if action.lower().startswith("[optional]"):
+            optional = True
+            action = action.split("]", 1)[-1].strip()
+        arguments = _parse_toolalpaca_action_input(item.get("Action_Input", item.get("action_input", {})))
+        if optional:
+            arguments[_TOOLALPACA_OPTIONAL_KEY] = True
+        calls.append(
+            {
+                "name": action,
+                "arguments": dict(arguments),
+                "argument_options": {str(key): [value] for key, value in dict(arguments).items()},
+            }
+        )
+    return calls
+
+
+def _parse_toolalpaca_action_input(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, Mapping):
+        normalized = _normalize_toolalpaca_placeholders(dict(raw))
+        return dict(normalized) if isinstance(normalized, Mapping) else {}
+    if not isinstance(raw, str):
+        return {}
+    text = raw.strip()
+    if not text:
+        return {}
+    repaired = _repair_toolalpaca_action_input_text(text)
+    for candidate in (text, repaired, _quote_unquoted_toolalpaca_refs(repaired)):
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, Mapping):
+            normalized = _normalize_toolalpaca_placeholders(parsed)
+            return dict(normalized) if isinstance(normalized, Mapping) else {}
+        return {}
+    return _parse_loose_toolalpaca_object(text)
+
+
+def _repair_toolalpaca_action_input_text(text: str) -> str:
+    return re.sub(
+        r"\$\{([^,{}]+?\s+from\s+[^,{}]+?),\s*\"",
+        lambda match: f"${{{match.group(1).strip()}}}, \"",
+        text,
+    )
+
+
+def _quote_unquoted_toolalpaca_refs(text: str) -> str:
+    output: list[str] = []
+    index = 0
+    in_string = False
+    escaped = False
+    while index < len(text):
+        char = text[index]
+        if in_string:
+            output.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            output.append(char)
+            index += 1
+            continue
+        if text.startswith("${", index):
+            end = text.find("}", index + 2)
+            if end != -1:
+                output.append(json.dumps(text[index : end + 1], ensure_ascii=False))
+                index = end + 1
+                continue
+        output.append(char)
+        index += 1
+    return "".join(output)
+
+
+def _normalize_toolalpaca_placeholders(value: Any) -> Any:
+    if isinstance(value, str):
+        match = re.fullmatch(r"\$\{([^{}]+)\}", value.strip())
+        if match:
+            return {_TOOLALPACA_REF_KEY: match.group(1).strip()}
+        return value
+    if isinstance(value, list):
+        return [_normalize_toolalpaca_placeholders(item) for item in value]
+    if isinstance(value, Mapping):
+        return {str(key): _normalize_toolalpaca_placeholders(item) for key, item in value.items()}
+    return value
+
+
+def _parse_loose_toolalpaca_object(text: str) -> dict[str, Any]:
+    body = text.strip()
+    if body.startswith("{") and body.endswith("}"):
+        body = body[1:-1]
+    parsed: dict[str, Any] = {}
+    for pair in _split_toolalpaca_top_level(body, delimiter=","):
+        if ":" not in pair:
+            continue
+        key_text, value_text = pair.split(":", 1)
+        key = key_text.strip().strip('"').strip("'").strip()
+        if key:
+            parsed[key] = _parse_loose_toolalpaca_value(value_text)
+    return parsed
+
+
+def _parse_loose_toolalpaca_value(text: str) -> Any:
+    value = text.strip().rstrip(",").strip()
+    if value.startswith("${"):
+        end = value.find("}")
+        if end != -1:
+            return {_TOOLALPACA_REF_KEY: value[2:end].strip()}
+    if value.startswith("[") and value.endswith("]"):
+        return [_parse_loose_toolalpaca_value(item) for item in _split_toolalpaca_top_level(value[1:-1], delimiter=",")]
+    if value.startswith("{") and value.endswith("}"):
+        return _parse_loose_toolalpaca_object(value)
+    try:
+        return _normalize_toolalpaca_placeholders(json.loads(value))
+    except json.JSONDecodeError:
+        pass
+    lowered = value.lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    if lowered in {"null", "none"}:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        try:
+            return float(value)
+        except ValueError:
+            return value.strip('"').strip("'")
+
+
+def _split_toolalpaca_top_level(text: str, *, delimiter: str) -> list[str]:
+    parts: list[str] = []
+    start = 0
+    depth = 0
+    in_string = False
+    escaped = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            index += 1
+            continue
+        if text.startswith("${", index):
+            end = text.find("}", index + 2)
+            if end != -1:
+                index = end + 1
+                continue
+        if char in "[{(":
+            depth += 1
+        elif char in "]})" and depth > 0:
+            depth -= 1
+        elif char == delimiter and depth == 0:
+            parts.append(text[start:index].strip())
+            start = index + 1
+        index += 1
+    tail = text[start:].strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _toolalpaca_api_uses_action(api_info: Mapping[str, Any], action_name: str) -> bool:
+    for answer in _coerce_list(api_info.get("Golden_Answers")):
+        for item in _coerce_list(answer):
+            if isinstance(item, Mapping) and str(item.get("Action") or item.get("action") or "").strip() == action_name:
+                return True
+    return False
+
+
+def _toolalpaca_parameters_from_description(description: str) -> dict[str, Any]:
+    marker = "Parameters:"
+    if marker not in description:
+        return {"type": "object", "properties": {}, "required": []}
+    before_output = description.split(marker, 1)[1].split("\nOutput:", 1)[0].strip()
+    try:
+        raw_params = json.loads(before_output)
+    except json.JSONDecodeError:
+        raw_params = {}
+    if not isinstance(raw_params, Mapping):
+        raw_params = {}
+    properties: dict[str, Any] = {}
+    required: list[str] = []
+    for key, value in raw_params.items():
+        description_text = str(value or "")
+        value_lower = description_text.lower()
+        param_type = "string"
+        if value_lower.startswith("integer") or ". integer" in value_lower:
+            param_type = "integer"
+        elif value_lower.startswith("number") or value_lower.startswith("float") or ". float" in value_lower:
+            param_type = "number"
+        elif value_lower.startswith("boolean") or ". boolean" in value_lower:
+            param_type = "boolean"
+        properties[str(key)] = {"type": param_type, "description": description_text}
+        if "required." in value_lower:
+            required.append(str(key))
+    return {"type": "object", "properties": properties, "required": required}
+
+
+def _toolalpaca_openapi_spec(api_info: Mapping[str, Any]) -> Mapping[str, Any]:
+    documentation = api_info.get("Documentation")
+    if not isinstance(documentation, str) or not documentation.strip():
+        return {}
+    try:
+        payload = json.loads(documentation)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, Mapping) else {}
+
+
+def _openapi_server_url(openapi_spec: Mapping[str, Any]) -> str:
+    servers = openapi_spec.get("servers")
+    if isinstance(servers, Sequence) and not isinstance(servers, (str, bytes, bytearray)):
+        for server in servers:
+            if isinstance(server, Mapping) and server.get("url"):
+                return str(server.get("url") or "").strip()
+    return ""
+
+
+def _toolalpaca_api_server_url(api_info: Mapping[str, Any]) -> str:
+    return _openapi_server_url(_toolalpaca_openapi_spec(api_info))
+
+
+def _toolalpaca_openapi_operation(openapi_spec: Mapping[str, Any], path: str, method: str) -> Mapping[str, Any]:
+    paths = openapi_spec.get("paths") if isinstance(openapi_spec.get("paths"), Mapping) else {}
+    path_doc = paths.get(path) if isinstance(paths, Mapping) else {}
+    operation = path_doc.get(str(method or "").lower()) if isinstance(path_doc, Mapping) else {}
+    return operation if isinstance(operation, Mapping) else {}
+
+
+def _strip_toolalpaca_auth_parameters(api_name: str, parameters: Mapping[str, Any]) -> dict[str, Any]:
+    auth_params = _TOOLALPACA_AUTH_PARAMS_BY_API.get(api_name.strip().lower())
+    if not auth_params:
+        return dict(parameters)
+    normalized = dict(parameters)
+    properties = normalized.get("properties") if isinstance(normalized.get("properties"), Mapping) else {}
+    normalized["properties"] = {str(key): value for key, value in dict(properties).items() if str(key) not in auth_params}
+    normalized["required"] = [str(item) for item in _coerce_list(normalized.get("required")) if str(item) not in auth_params]
+    return normalized
+
+
+def _toolalpaca_get_details_tool_schema(*, api_name: str = "") -> dict[str, Any]:
+    return {
+        "name": "getDetails",
+        "description": "Ask the user for critical missing information required to complete the request.",
+        "parameters": {
+            "type": "object",
+            "properties": {"Question": {"type": "string", "description": "Required. String."}},
+            "required": ["Question"],
+        },
+        "metadata": {"tool_type": "toolalpaca_builtin", "api_name": api_name},
+    }
+
+
+def _build_toolalpaca_request(
+    record: Mapping[str, Any],
+    tool: Mapping[str, Any],
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    name = str(tool.get("name") or "").strip()
+    metadata = tool.get("metadata") if isinstance(tool.get("metadata"), Mapping) else {}
+    metadata = dict(metadata or {})
+    parameters = tool.get("parameters") if isinstance(tool.get("parameters"), Mapping) else {}
+    parameters = dict(parameters or {})
+    properties = parameters.get("properties") if isinstance(parameters.get("properties"), Mapping) else {}
+    required = {str(item) for item in _coerce_list(parameters.get("required"))}
+    if metadata.get("tool_type") == "toolalpaca_builtin" or name == "getDetails":
+        return _build_toolalpaca_builtin_request(name, arguments, properties, required)
+
+    operation = metadata.get("operation") if isinstance(metadata.get("operation"), Mapping) else {}
+    if operation:
+        op_required, op_properties = _operation_parameter_schema(operation)
+        required.update(op_required)
+        properties = {**op_properties, **dict(properties)}
+
+    canonical_arguments: dict[str, Any] = {}
+    for key, value in arguments.items():
+        if key == _TOOLALPACA_OPTIONAL_KEY:
+            continue
+        property_name = _resolve_property_name(str(key), properties)
+        schema = properties.get(property_name) if property_name else None
+        if schema is None:
+            continue
+        if _is_absent_value(value) and property_name not in required:
+            continue
+        canonical_arguments[str(property_name)] = _coerce_toolalpaca_argument_value(str(property_name), value, schema)
+
+    missing = sorted(key for key in required if key not in canonical_arguments or _is_absent_value(canonical_arguments[key]))
+    path = str(metadata.get("path") or "")
+    required_path_arguments = [key for key in missing if f"{{{key}}}" in path]
+    if required_path_arguments:
+        raise ValueError(f"missing_required_arguments({', '.join(required_path_arguments)})")
+    if missing and not canonical_arguments:
+        raise ValueError(f"missing_required_arguments({', '.join(missing)})")
+
+    method = str(metadata.get("method") or "get").lower()
+    param_locations = _operation_param_locations(operation)
+    path_params: dict[str, Any] = {}
+    query: dict[str, Any] = {}
+    headers: dict[str, Any] = {}
+    cookies: dict[str, Any] = {}
+    body: dict[str, Any] = {}
+    for key, value in canonical_arguments.items():
+        location = param_locations.get(key)
+        if location == "path" or f"{{{key}}}" in path:
+            path_params[key] = value
+        elif location == "header":
+            headers[key] = value
+        elif location == "cookie":
+            cookies[key] = value
+        elif location == "query" or method not in _TOOLALPACA_HTTP_BODY_METHODS:
+            query[key] = value
+        else:
+            body[key] = value
+
+    rendered_path = path
+    for key, value in path_params.items():
+        rendered_path = rendered_path.replace(f"{{{key}}}", str(value))
+    unresolved = re.findall(r"\{([^{}]+)\}", rendered_path)
+    if unresolved:
+        raise ValueError(f"missing_path_arguments({', '.join(sorted(unresolved))})")
+
+    metadata_record = _bfcl_json_mapping_field(record.get("metadata"))
+    return _json_safe(
+        {
+            "action": name,
+            "method": method,
+            "path": rendered_path,
+            "path_params": path_params,
+            "query": _drop_absent_values(query),
+            "body": _drop_absent_values(body),
+            "headers": _drop_absent_values(headers),
+            "cookies": _drop_absent_values(cookies),
+            "builtin": False,
+            "api_name": str(metadata.get("api_name") or metadata_record.get("api_name") or ""),
+        }
+    )
+
+
+def _build_toolalpaca_builtin_request(
+    name: str,
+    arguments: Mapping[str, Any],
+    properties: Mapping[str, Any],
+    required: set[str],
+) -> dict[str, Any]:
+    canonical_arguments: dict[str, Any] = {}
+    for key, value in arguments.items():
+        if key not in properties:
+            continue
+        if _is_absent_value(value) and key not in required:
+            continue
+        canonical_arguments[str(key)] = _coerce_toolalpaca_argument_value(str(key), value, properties[key])
+    missing = sorted(key for key in required if key not in canonical_arguments or _is_absent_value(canonical_arguments[key]))
+    if missing:
+        raise ValueError(f"missing_required_arguments({', '.join(missing)})")
+    return _json_safe(
+        {
+            "action": name,
+            "method": "",
+            "path": "",
+            "path_params": {},
+            "query": {},
+            "body": canonical_arguments,
+            "headers": {},
+            "cookies": {},
+            "builtin": True,
+        }
+    )
+
+
+def _operation_parameter_schema(operation: Mapping[str, Any]) -> tuple[set[str], dict[str, Any]]:
+    required: set[str] = set()
+    properties: dict[str, Any] = {}
+    for param_doc in _coerce_list(operation.get("parameters")):
+        if not isinstance(param_doc, Mapping):
+            continue
+        name = str(param_doc.get("name") or "")
+        if not name:
+            continue
+        schema = param_doc.get("schema") if isinstance(param_doc.get("schema"), Mapping) else {}
+        properties[name] = {**dict(schema or {}), "description": str(param_doc.get("description") or "")}
+        if param_doc.get("required"):
+            required.add(name)
+    body_schema = _request_body_schema(operation)
+    body_props = body_schema.get("properties") if isinstance(body_schema.get("properties"), Mapping) else {}
+    for key, schema in body_props.items():
+        properties[str(key)] = dict(schema) if isinstance(schema, Mapping) else {}
+    required.update(str(item) for item in _coerce_list(body_schema.get("required")))
+    return required, properties
+
+
+def _operation_param_locations(operation: Mapping[str, Any]) -> dict[str, str]:
+    locations: dict[str, str] = {}
+    for param_doc in _coerce_list(operation.get("parameters")):
+        if isinstance(param_doc, Mapping) and param_doc.get("name"):
+            locations[str(param_doc.get("name"))] = str(param_doc.get("in") or "query")
+    return locations
+
+
+def _request_body_schema(operation: Mapping[str, Any]) -> Mapping[str, Any]:
+    request_body = operation.get("requestBody") if isinstance(operation.get("requestBody"), Mapping) else {}
+    content = request_body.get("content") if isinstance(request_body.get("content"), Mapping) else {}
+    json_content = content.get("application/json") if isinstance(content.get("application/json"), Mapping) else {}
+    schema = json_content.get("schema") if isinstance(json_content.get("schema"), Mapping) else {}
+    return schema if isinstance(schema, Mapping) else {}
+
+
+def _resolve_property_name(key: str, properties: Mapping[str, Any]) -> str | None:
+    if key in properties:
+        return key
+    lowered = key.lower()
+    for candidate in properties.keys():
+        candidate_text = str(candidate)
+        if candidate_text.lower() == lowered:
+            return candidate_text
+        if candidate_text.lower() == f"{lowered}s":
+            return candidate_text
+    if lowered.endswith("s"):
+        for candidate in properties.keys():
+            if str(candidate).lower() == lowered[:-1]:
+                return str(candidate)
+    return None
+
+
+def _coerce_toolalpaca_argument_value(key: str, value: Any, schema: Any) -> Any:
+    if not isinstance(schema, Mapping):
+        return _json_safe(value)
+    expected_type = str(schema.get("type") or "").lower()
+    if expected_type == "integer":
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"argument_type_error({key}:integer)") from None
+    elif expected_type == "number":
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"argument_type_error({key}:number)") from None
+    elif expected_type == "boolean":
+        value = _coerce_toolalpaca_bool(key, value)
+    elif expected_type == "array":
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                pass
+        if not isinstance(value, list):
+            raise ValueError(f"argument_type_error({key}:array)")
+    elif expected_type == "object":
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                pass
+        if not isinstance(value, Mapping):
+            raise ValueError(f"argument_type_error({key}:object)")
+        value = dict(value)
+    elif expected_type == "string" and not isinstance(value, str):
+        value = str(value)
+    enum = _schema_enum(schema)
+    if enum and value not in enum and not _is_absent_value(value):
+        raise ValueError(f"argument_enum_error({key})")
+    return _json_safe(value)
+
+
+def _coerce_toolalpaca_bool(key: str, value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes"}:
+            return True
+        if lowered in {"false", "0", "no"}:
+            return False
+    raise ValueError(f"argument_type_error({key}:boolean)")
+
+
+def _schema_enum(schema: Mapping[str, Any]) -> list[Any]:
+    raw_enum = schema.get("enum")
+    if isinstance(raw_enum, list):
+        return list(raw_enum)
+    description = str(schema.get("description") or "")
+    match = re.search(r"One of:\s*\[([^\]]+)\]", description, re.IGNORECASE)
+    if not match:
+        return []
+    return [item.strip().strip("\"'") for item in match.group(1).split(",")]
+
+
+def _normalize_toolalpaca_call(
+    call: Mapping[str, Any],
+    history: Sequence[ToolAlpacaActionResult],
+) -> tuple[str, dict[str, Any], bool] | None:
+    action = str(call.get("name") or call.get("Action") or "").strip()
+    raw_arguments = call.get("arguments", call.get("Action_Input", {}))
+    if isinstance(raw_arguments, str):
+        try:
+            raw_arguments = json.loads(raw_arguments)
+        except json.JSONDecodeError:
+            raw_arguments = {}
+    if not isinstance(raw_arguments, Mapping):
+        return None
+    arguments = dict(raw_arguments)
+    optional = _truthy_toolalpaca(arguments.pop(_TOOLALPACA_OPTIONAL_KEY, False))
+    if action.lower().startswith("[optional]"):
+        optional = True
+        action = action.split("]", 1)[-1].strip()
+    resolved_arguments = _resolve_toolalpaca_value(arguments, history)
+    if not isinstance(resolved_arguments, Mapping):
+        resolved_arguments = {}
+    return action, dict(resolved_arguments), optional
+
+
+def _resolve_toolalpaca_value(value: Any, history: Sequence[ToolAlpacaActionResult]) -> Any:
+    if isinstance(value, Mapping):
+        if _TOOLALPACA_REF_KEY in value:
+            return _resolve_toolalpaca_ref(str(value.get(_TOOLALPACA_REF_KEY) or ""), history)
+        return {str(key): _resolve_toolalpaca_value(item, history) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_resolve_toolalpaca_value(item, history) for item in value]
+    if isinstance(value, str):
+        match = re.fullmatch(r"\$\{([^{}]+)\}", value.strip())
+        if match:
+            return _resolve_toolalpaca_ref(match.group(1).strip(), history)
+    return value
+
+
+def _resolve_toolalpaca_ref(ref: str, history: Sequence[ToolAlpacaActionResult]) -> Any:
+    text = " ".join(str(ref).strip().split())
+    if not text:
+        return ""
+    lowered = text.lower()
+    if " from " in lowered:
+        prefix, source = re.split(r"\s+from\s+", text, maxsplit=1, flags=re.IGNORECASE)
+        field_name = prefix.strip()
+        source_name = source.strip()
+        for result in reversed(history):
+            if result.action == source_name and result.success:
+                extracted = _extract_toolalpaca_response_field(result.response, field_name)
+                if extracted is not None:
+                    return extracted
+                return _synthetic_toolalpaca_ref_value(field_name, source_name, result.request)
+        return _synthetic_toolalpaca_ref_value(field_name, source_name, {})
+    if "end date" in lowered:
+        return "2023-01-31"
+    if "start date" in lowered:
+        return "2023-01-01"
+    if "year" in lowered:
+        return 2023
+    if "permission" in lowered:
+        return "read"
+    if lowered == "string":
+        return "string"
+    return _synthetic_toolalpaca_ref_value(text, "context", {})
+
+
+def _extract_toolalpaca_response_field(response: Any, field_name: str) -> Any:
+    if isinstance(response, Mapping):
+        if field_name in response:
+            return response[field_name]
+        normalized_target = _toolalpaca_slug(field_name)
+        for key, value in response.items():
+            if _toolalpaca_slug(str(key)) == normalized_target:
+                return value
+            nested = _extract_toolalpaca_response_field(value, field_name)
+            if nested is not None:
+                return nested
+    if isinstance(response, list):
+        for item in response:
+            nested = _extract_toolalpaca_response_field(item, field_name)
+            if nested is not None:
+                return nested
+    return None
+
+
+def _synthetic_toolalpaca_response(
+    action: str,
+    request: Mapping[str, Any],
+    history: Sequence[ToolAlpacaActionResult],
+) -> dict[str, Any]:
+    seed = _toolalpaca_stable_seed({"action": action, "request": _comparable_toolalpaca_request(request)})
+    response: dict[str, Any] = {"ok": True, "action": action, "id": _toolalpaca_stable_int(seed, "id"), "resultId": _toolalpaca_stable_id(seed, "result")}
+    for field_name in _likely_toolalpaca_response_fields(action, request, history):
+        response[field_name] = _synthetic_toolalpaca_ref_value(field_name, action, request)
+    return _json_safe(response)
+
+
+def _likely_toolalpaca_response_fields(
+    action: str,
+    request: Mapping[str, Any],
+    history: Sequence[ToolAlpacaActionResult],
+) -> list[str]:
+    fields = {
+        "id",
+        "resultId",
+        "userId",
+        "accessToken",
+        "animeId",
+        "ip",
+        "style",
+        "format",
+        "category",
+        "username",
+        "holidayId",
+        "symbol",
+        "dashboardId",
+        "sourceId",
+        "targetId",
+    }
+    for container_name in ("query", "body", "path_params"):
+        container = request.get(container_name)
+        if isinstance(container, Mapping):
+            fields.update(str(key) for key in container)
+    for result in history:
+        if isinstance(result.response, Mapping):
+            fields.update(str(key) for key in result.response.keys())
+    if action.startswith("search"):
+        fields.add(f"{_toolalpaca_slug(action.removeprefix('search'))}Id")
+    if action.startswith("create"):
+        fields.add(f"{_toolalpaca_slug(action.removeprefix('create'))}Id")
+    return sorted(fields)
+
+
+def _synthetic_toolalpaca_ref_value(field_name: str, source_name: str, request: Mapping[str, Any] | None) -> Any:
+    field_slug = _toolalpaca_slug(field_name)
+    seed = _toolalpaca_stable_seed({"field": field_name, "source": source_name, "request": _comparable_toolalpaca_request(request or {})})
+    if "date" in field_slug:
+        return "2023-01-31" if field_slug.startswith("end") else "2023-01-01"
+    if field_slug.endswith("year") or field_slug == "year":
+        return 2023
+    if field_slug.endswith("id") or field_slug == "id":
+        return _toolalpaca_stable_int(seed, field_slug)
+    if field_slug == "ip":
+        return f"192.0.2.{_toolalpaca_stable_int(seed, field_slug) % 250 + 1}"
+    if field_slug == "symbol":
+        return "BTC/USD"
+    if field_slug == "format":
+        return "png"
+    if field_slug == "style":
+        return "minimal"
+    if field_slug == "category":
+        return "general"
+    if field_slug in {"permission", "permissions", "somepermission"}:
+        return "read"
+    return _toolalpaca_stable_id(seed, field_slug)
+
+
+def _toolalpaca_result_payload(result: ToolAlpacaActionResult) -> dict[str, Any]:
+    return {
+        "Action": result.action,
+        "Action_Input": {str(key): _json_safe(value) for key, value in result.action_input.items() if key != _TOOLALPACA_OPTIONAL_KEY},
+        "success": bool(result.success),
+        "optional": bool(result.optional),
+        "request": result.request,
+        "response": result.response,
+        "error": result.error or "",
+    }
+
+
+def _execution_matches_toolalpaca(actual: ToolAlpacaActionResult, expected: ToolAlpacaActionResult) -> tuple[bool, str]:
+    if actual.action != expected.action:
+        return False, f"name_mismatch(expected={expected.action}, actual={actual.action})"
+    if actual.success != expected.success:
+        return False, f"execution_status_mismatch(expected={expected.success}, actual={actual.success})"
+    if not expected.success:
+        return (actual.error == expected.error, "ok" if actual.error == expected.error else "execution_error_mismatch")
+    if _comparable_toolalpaca_request(actual.request) != _comparable_toolalpaca_request(expected.request):
+        return False, "request_mismatch"
+    return True, "ok"
+
+
+def _comparable_toolalpaca_request(request: Mapping[str, Any]) -> dict[str, Any]:
+    return _json_safe(
+        {
+            "action": request.get("action", ""),
+            "method": request.get("method", ""),
+            "path": request.get("path", ""),
+            "path_params": _drop_absent_values(request.get("path_params", {})),
+            "query": _drop_absent_values(request.get("query", {})),
+            "body": _drop_absent_values(request.get("body", {})),
+            "headers": _drop_absent_values(request.get("headers", {})),
+            "cookies": _drop_absent_values(request.get("cookies", {})),
+            "builtin": bool(request.get("builtin", False)),
+        }
+    )
+
+
+def _drop_absent_values(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(key): _drop_absent_values(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            if not _is_absent_value(item)
+        }
+    if isinstance(value, list):
+        return [_drop_absent_values(item) for item in value if not _is_absent_value(item)]
+    return value
+
+
+def _is_absent_value(value: Any) -> bool:
+    return value is None or value == "" or value == {} or value == []
+
+
+def _truthy_toolalpaca(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y"}
+    return bool(value)
+
+
+def _toolalpaca_stable_seed(payload: Any) -> str:
+    return hashlib.sha256(json.dumps(_json_safe(payload), ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _toolalpaca_stable_int(seed: str, salt: str) -> int:
+    digest = hashlib.sha256(f"{seed}:{salt}".encode("utf-8")).hexdigest()
+    return int(digest[:8], 16) % 900000 + 1000
+
+
+def _toolalpaca_stable_id(seed: str, salt: str) -> str:
+    digest = hashlib.sha256(f"{seed}:{salt}".encode("utf-8")).hexdigest()
+    return f"{_toolalpaca_slug(salt)}_{digest[:10]}"
+
+
+def _toolalpaca_slug(value: str) -> str:
+    rendered = []
+    for char in str(value).lower():
+        rendered.append(char if char.isalnum() else "_")
+    return "_".join(part for part in "".join(rendered).split("_") if part) or "item"
+
+
+def toolalpaca_prompt(line: dict, task_name: str | None = None) -> Doc:
+    instruction = _normalize_rwkv_text(line.get("instruction"))
+    tools = _bfcl_json_list_field(line.get("tools"))
+    expected_tool_calls = _bfcl_json_list_field(line.get("expected_tool_calls"))
+    metadata = _bfcl_json_mapping_field(line.get("metadata"))
+    system_prompt = "\n".join(
+        [
+            "Tools:",
+            _render_bfcl_tool_catalog([tool for tool in tools if isinstance(tool, Mapping)]),
+            "Output JSON schema:",
+            _render_bfcl_output_schema(),
+            "Return exactly one JSON value that validates against the schema.",
+            "For one tool call, return one JSON object.",
+            "For multiple required tool calls, return a JSON array containing every required call in execution order; do not stop after the first call.",
+            "Each arguments object must contain only final argument values for that tool.",
+            "For a later tool that depends on an earlier result, use the literal placeholder shown by the task, for example ${field from previousTool}.",
+            "Do not copy tool schemas, descriptions, type/items/properties/required/default fields, or wrapper objects into arguments.",
+            "Use only listed tool names.",
+            "Return no prose, no markdown, and no extra text outside the JSON value.",
+        ]
+    )
+    query = f"System: {system_prompt}\n\nUser: {instruction}\n\nJSON:"
+    return Doc(
+        task_name=task_name,
+        query=query,
+        choices=[json.dumps(expected_tool_calls, ensure_ascii=False, sort_keys=True)],
+        gold_index=0,
+        specific={
+            "task_id": line.get("task_id"),
+            "instruction": instruction,
+            "tools": json.dumps(tools, ensure_ascii=False, sort_keys=True),
+            "expected_tool_calls": json.dumps(expected_tool_calls, ensure_ascii=False, sort_keys=True),
+            "metadata": json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+            "prompt_chars": len(query),
+        },
+    )
+
+
+def evaluate_toolalpaca_calls(
+    record: Mapping[str, Any],
+    decoded_calls: Sequence[Mapping[str, Any]],
+    *,
+    parse_error: str | None = None,
+    sandbox: ToolAlpacaSandbox | None = None,
+) -> dict[str, Any]:
+    expected_calls = _bfcl_json_list_field(record.get("expected_tool_calls"))
+    actual_calls = [
+        {"name": str(item.get("name") or ""), "arguments": dict(item.get("arguments") or {})}
+        for item in decoded_calls
+        if isinstance(item, Mapping)
+    ]
+    sandbox = sandbox or ToolAlpacaSandbox()
+    details: dict[str, Any] = {
+        "execution_mode": sandbox.execution_mode,
+        "expected_tool_calls": expected_calls,
+        "decoded_tool_calls": actual_calls,
+        "call_matches": [],
+        "parse_error": parse_error or "",
+    }
+    if parse_error:
+        return {"score": 0.0, "passed": False, "reason": parse_error, "details": details}
+
+    expected_results = sandbox.execute_sequence(record, [call for call in expected_calls if isinstance(call, Mapping)])
+    actual_results = sandbox.execute_sequence(record, actual_calls)
+    details["expected_execution_results"] = [_toolalpaca_result_payload(item) for item in expected_results]
+    details["decoded_execution_results"] = [_toolalpaca_result_payload(item) for item in actual_results]
+    required_expected = [item for item in expected_results if not item.optional]
+    denominator = max(1, len(required_expected))
+    passed_count = 0
+    failure_bits: list[str] = []
+    actual_index = 0
+    for expected_index, expected in enumerate(expected_results):
+        if actual_index >= len(actual_results):
+            if expected.optional:
+                details["call_matches"].append({"expected_index": expected_index, "decoded_index": None, "ok": True, "reason": "optional_skipped"})
+                continue
+            details["call_matches"].append({"expected_index": expected_index, "decoded_index": None, "ok": False, "reason": "missing_call"})
+            failure_bits.append(f"call_{expected_index}:missing_call")
+            continue
+
+        actual = actual_results[actual_index]
+        ok, reason = _execution_matches_toolalpaca(actual, expected)
+        if ok:
+            if not expected.optional:
+                passed_count += 1
+            details["call_matches"].append({"expected_index": expected_index, "decoded_index": actual_index, "ok": True, "reason": reason})
+            actual_index += 1
+            continue
+        if expected.optional:
+            details["call_matches"].append(
+                {"expected_index": expected_index, "decoded_index": actual_index, "ok": True, "reason": "optional_skipped", "candidate_reason": reason}
+            )
+            continue
+        details["call_matches"].append({"expected_index": expected_index, "decoded_index": actual_index, "ok": False, "reason": reason})
+        failure_bits.append(f"call_{expected_index}:{reason}")
+        actual_index += 1
+
+    while actual_index < len(actual_results):
+        details["call_matches"].append({"expected_index": None, "decoded_index": actual_index, "ok": False, "reason": "unexpected_extra_call"})
+        failure_bits.append(f"call_{actual_index}:unexpected_extra_call")
+        actual_index += 1
+
+    reward = passed_count / denominator
+    passed = passed_count == len(required_expected) and not failure_bits
+    if not expected_results:
+        passed = len(actual_results) == 0
+        reward = 1.0 if passed else 0.0
+    return {"score": float(reward), "passed": bool(passed), "reason": "; ".join(failure_bits), "details": details}
+
+
+class ToolAlpacaAccuracy(SampleLevelComputation):
+    def compute(self, doc: Doc, model_response, **kwargs) -> float:
+        record = dict(doc.specific or {})
+        for prediction in model_response.final_text:
+            try:
+                decoded_calls = decode_bfcl_tool_call_response(prediction)
+                result = evaluate_toolalpaca_calls(record, decoded_calls)
+            except Exception:
+                continue
+            score = float(result.get("score") or 0.0)
+            if score > 0:
+                return score
+        return 0.0
+
+
+TOOLALPACA_ACCURACY = SampleLevelMetric(
+    metric_name="toolalpaca_accuracy",
+    sample_level_fn=ToolAlpacaAccuracy(),
+    category=SamplingMethod.GENERATIVE,
+    corpus_level_fn=_mean,
+    higher_is_better=True,
+)
+
+
 def _install_longcodeqa_data_files_patch() -> None:
     """Scope LightEval 0.13 dataset patches to custom rwkv-skills datasets."""
 
@@ -2993,6 +4160,11 @@ def _install_longcodeqa_data_files_patch() -> None:
             if dataset_name is None and len(args) > 1:
                 dataset_name = args[1]
             return _load_apibank_dataset_dict(str(dataset_name or ""))
+        if path == TOOLALPACA_LIGHTEVAL_DATASET:
+            dataset_name = kwargs.get("name")
+            if dataset_name is None and len(args) > 1:
+                dataset_name = args[1]
+            return _load_toolalpaca_dataset_dict(str(dataset_name or ""))
         return original_load_dataset(*args, **kwargs)
 
     patched_load_dataset._helicopter_rwkv_skills_patch = True  # type: ignore[attr-defined]
@@ -3739,6 +4911,23 @@ def _hf_apibank_task(name: str) -> LightevalTaskConfig:
     )
 
 
+def _hf_toolalpaca_task(name: str) -> LightevalTaskConfig:
+    return LightevalTaskConfig(
+        name=f"rwkv_skills:{name}",
+        prompt_function=toolalpaca_prompt,
+        hf_repo=TOOLALPACA_LIGHTEVAL_DATASET,
+        hf_subset=name,
+        hf_avail_splits=["test"],
+        evaluation_splits=["test"],
+        few_shots_split=None,
+        few_shots_select=None,
+        generation_size=1024,
+        metrics=[TOOLALPACA_ACCURACY],
+        stop_sequence=["\nUser:", "\nSystem:", "\nAssistant:"],
+        version=0,
+    )
+
+
 _install_longcodeqa_data_files_patch()
 
 
@@ -3759,6 +4948,7 @@ TASKS_TABLE = [
     *[_hf_bfcl_ast_task(name) for name in BFCL_AST_TASKS],
     *[_hf_bfcl_exec_task(name) for name in BFCL_EXEC_TASKS],
     *[_hf_apibank_task(name) for name in APIBANK_TASKS],
+    *[_hf_toolalpaca_task(name) for name in TOOLALPACA_TASKS],
     *[_hf_math_task(name, task) for name, task in HF_MATH_TASKS.items()],
     _hf_answer_judge_task(),
     _hf_svamp_task(),

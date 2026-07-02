@@ -308,13 +308,13 @@ reason = "TAU Bench requires an interactive environment adapter."
 
 [benchmarks.toolalpaca_eval_real]
 field = "function_calling"
-status = "needs_adapter"
-reason = "ToolAlpaca requires tool-call parsing/scoring adapters."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:toolalpaca_eval_real"]
 
 [benchmarks.toolalpaca_eval_simulated]
 field = "function_calling"
-status = "needs_adapter"
-reason = "ToolAlpaca requires tool-call parsing/scoring adapters."
+status = "direct"
+lighteval_tasks = ["rwkv_skills:toolalpaca_eval_simulated"]
 
 [benchmarks.arena_hard_v2]
 field = "instruction_following"
