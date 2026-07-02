@@ -596,6 +596,12 @@ class CommandPlanTests(unittest.TestCase):
             },
         )
 
+    def test_polymath_uses_fixed_language_and_split_inventory(self) -> None:
+        self.assertEqual(len(free_response._POLYMATH_CONFIG_NAMES), 18)
+        self.assertEqual(free_response._POLYMATH_CONFIG_NAMES[0], "ar")
+        self.assertEqual(free_response._POLYMATH_CONFIG_NAMES[-1], "zh")
+        self.assertEqual(free_response._polymath_source_splits("all"), ("top", "high", "medium", "low"))
+
     def test_instruction_following_scores_ifeval_rule(self) -> None:
         sample = instruction_following.InstructionFollowingSample(
             sample_index=0,

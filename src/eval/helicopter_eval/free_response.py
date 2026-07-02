@@ -19,6 +19,26 @@ from .scoreboard import ScoreboardEvalResult, ScoreboardWriteConfig, write_score
 
 _NUMBER_RE = re.compile(r"[-+]?\d[\d,]*(?:\.\d+)?")
 _BOXED_RE = re.compile(r"\\boxed\{([^{}]+)\}")
+_POLYMATH_CONFIG_NAMES = (
+    "ar",
+    "bn",
+    "de",
+    "en",
+    "es",
+    "fr",
+    "id",
+    "it",
+    "ja",
+    "ko",
+    "ms",
+    "pt",
+    "ru",
+    "sw",
+    "te",
+    "th",
+    "vi",
+    "zh",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,15 +282,22 @@ def _polymath_source_splits(split: str) -> tuple[str, ...]:
 
 def _iter_polymath_rows(config: FreeResponseRunConfig):
     try:
-        from datasets import get_dataset_config_names, load_dataset
+        from huggingface_hub import hf_hub_download
+        import pyarrow.parquet as pq
     except ImportError as exc:  # pragma: no cover - exercised in integration environments
-        raise SystemExit("polymath eval requires the `datasets` package; install the rwkv dependency group.") from exc
+        raise SystemExit(
+            "polymath eval requires the `huggingface_hub` and `pyarrow` packages; "
+            "install the rwkv dependency group."
+        ) from exc
 
-    for config_name in sorted(
-        name for name in get_dataset_config_names(config.dataset_name) if name and name != "default"
-    ):
+    for config_name in _POLYMATH_CONFIG_NAMES:
         for source_split in _polymath_source_splits(config.split):
-            for index, row in enumerate(load_dataset(config.dataset_name, config_name, split=source_split)):
+            path = hf_hub_download(
+                repo_id=config.dataset_name,
+                filename=f"{config_name}/{source_split}.parquet",
+                repo_type="dataset",
+            )
+            for index, row in enumerate(pq.read_table(path).to_pylist()):
                 payload = dict(row)
                 payload["_polymath_language"] = config_name
                 payload["_polymath_difficulty"] = source_split
