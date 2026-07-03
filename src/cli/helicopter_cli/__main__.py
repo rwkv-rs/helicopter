@@ -90,7 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     lighteval_tasks = eval_subparsers.add_parser("lighteval-tasks", help="list or inspect LightEval tasks")
     add_common_options(lighteval_tasks)
-    lighteval_tasks.add_argument("task_action", choices=("list", "dump", "inspect", "export", "coverage"))
+    lighteval_tasks.add_argument("task_action", choices=("list", "dump", "inspect", "export", "coverage", "judges"))
     lighteval_tasks.add_argument("tasks", nargs="?", help="task id for inspect")
     lighteval_tasks.add_argument("--custom-tasks", help="custom LightEval task Python file")
     lighteval_tasks.add_argument("--load-tasks-multilingual", action="store_true", default=None)

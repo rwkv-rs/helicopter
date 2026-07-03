@@ -368,7 +368,7 @@ def build_lighteval_tasks_plan(
         lighteval.get("load_tasks_multilingual"),
     )
 
-    if args.task_action in {"export", "coverage"}:
+    if args.task_action in {"export", "coverage", "judges"}:
         command = [python, "-m", "helicopter_cli.lighteval_tasks", args.task_action]
         append_cli_flag(command, "--load-multilingual", load_tasks_multilingual)
         append_cli_option(command, "--custom-tasks", custom_tasks)
@@ -382,6 +382,8 @@ def build_lighteval_tasks_plan(
             )
             append_cli_option(command, "--source-format", getattr(args, "source_format", None))
             append_cli_option(command, "--candidate-limit", getattr(args, "candidate_limit", None))
+        if args.task_action == "judges" and getattr(args, "tasks", None):
+            command.append(args.tasks)
         for pattern in getattr(args, "contains", None) or []:
             append_cli_option(command, "--contains", pattern, optional=False)
         append_cli_option(command, "--limit", getattr(args, "limit", None))

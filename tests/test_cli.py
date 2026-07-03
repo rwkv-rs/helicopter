@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from argparse import Namespace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from lighteval.models.model_output import ModelResponse
@@ -481,6 +482,34 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(options["--format"], "jsonl")
         self.assertEqual(options["--candidate-limit"], "7")
 
+    def test_lighteval_tasks_judges_uses_local_registry_wrapper(self) -> None:
+        loaded_config = load_example_config()
+
+        plan = commands.build_lighteval_tasks_plan(
+            lighteval_tasks_args(
+                task_action="judges",
+                tasks="aime24",
+                load_tasks_multilingual=True,
+                output="tmp/judges.jsonl",
+                format="jsonl",
+                contains=["aime"],
+                limit=1,
+            ),
+            root=ROOT,
+            env={},
+            config=loaded_config,
+        )
+
+        self.assertEqual(plan.command[1:4], ["-m", "helicopter_cli.lighteval_tasks", "judges"])
+        self.assertIn("--load-multilingual", plan.command)
+        options = command_options(plan.command)
+        self.assertEqual(options["--custom-tasks"], str(ROOT / "src/cli/helicopter_cli/lighteval_rwkv_skills_tasks.py"))
+        self.assertEqual(options["--output"], "tmp/judges.jsonl")
+        self.assertEqual(options["--format"], "jsonl")
+        self.assertEqual(options["--contains"], "aime")
+        self.assertEqual(options["--limit"], "1")
+        self.assertIn("aime24", plan.command)
+
     def test_lighteval_tasks_coverage_resolves_registry_rows(self) -> None:
         mmmlu_targets = lighteval_tasks.OFFICIAL_LIGHTEVAL_ALIASES["mmmlu"]
 
@@ -547,6 +576,53 @@ class CommandPlanTests(unittest.TestCase):
             "ifbench_multiturn\n"
             "lcb\n",
         )
+
+    def test_lighteval_tasks_judges_classifies_builtin_and_custom_metrics(self) -> None:
+        class UpstreamAvgAtN:
+            pass
+
+        UpstreamAvgAtN.__module__ = "lighteval.metrics.metrics_sample"
+
+        class FakeRegistry:
+            _task_registry = {
+                "aime24": SimpleNamespace(
+                    metrics=(
+                        SimpleNamespace(metric_name="pass@k:k=1", sample_level_fn=UpstreamAvgAtN()),
+                        SimpleNamespace(metric_name="avg@n:n=1", sample_level_fn=UpstreamAvgAtN()),
+                    )
+                ),
+                "tau3_bench_mock": SimpleNamespace(
+                    metrics=(
+                        lighteval_rwkv_skills_tasks.rwkv_tau_bench_static_plan_f1,
+                        lighteval_rwkv_skills_tasks.rwkv_tau_bench_response_nonempty,
+                    )
+                ),
+            }
+            _task_superset_dict = {"demo_family": ("aime24", "tau3_bench_mock")}
+
+        with mock.patch.object(lighteval_tasks, "load_registry", return_value=FakeRegistry()):
+            rows = lighteval_tasks.judge_rows(
+                Namespace(
+                    custom_tasks=None,
+                    load_multilingual=False,
+                    tasks="demo_family",
+                    contains=None,
+                    limit=None,
+                )
+            )
+
+        by_metric = {row.metric: row for row in rows}
+        self.assertEqual(by_metric["avg@n:n=1"].source, "lighteval_builtin")
+        self.assertEqual(by_metric["avg@n:n=1"].status, "ready")
+        self.assertEqual(by_metric["avg@n:n=1"].judge_type, "avg_at_n")
+        self.assertEqual(by_metric["tau_bench_static_plan_f1"].source, "helicopter_custom")
+        self.assertEqual(by_metric["tau_bench_static_plan_f1"].status, "proxy")
+        self.assertEqual(by_metric["tau_bench_response_nonempty"].status, "sanity")
+        summary = lighteval_tasks.format_judges(rows, "summary")
+        self.assertIn("tasks\t2\n", summary)
+        self.assertIn("status\tready\t2\n", summary)
+        self.assertIn("status\tproxy\t1\n", summary)
+        self.assertIn("status\tsanity\t1\n", summary)
 
     def test_supergpqa_custom_task_prompt_keeps_all_options(self) -> None:
         doc = lighteval_rwkv_skills_tasks.supergpqa_prompt(
