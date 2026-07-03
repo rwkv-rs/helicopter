@@ -5,6 +5,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .config import dataset_root, resolve_model_entry, resolve_model_path, table
 from .env import env_value, pick
@@ -176,6 +177,22 @@ def append_cli_flag(command: list[str], option: str, value: Any) -> None:
         command.append(option)
 
 
+def normalize_openai_base_url(base_url: str) -> str:
+    """Ensure an OpenAI-compatible base URL carries a path (defaulting to /v1).
+
+    Mirrors the behavior of the removed openai_client.normalize_api_base(): a
+    bare host such as ``http://host:8000`` becomes ``http://host:8000/v1`` so
+    LiteLLM posts to ``.../v1/chat/completions``. URLs that already have a path
+    (``.../v1``, ``.../custom``) are left untouched apart from trailing-slash
+    trimming.
+    """
+    trimmed = base_url.rstrip("/")
+    parsed = urlsplit(trimmed)
+    if parsed.scheme and parsed.netloc and parsed.path == "":
+        return f"{trimmed}/v1"
+    return trimmed
+
+
 def local_openai_base_url(config: dict[str, Any], env: dict[str, str], args: Any) -> str:
     lighteval = table(config, "lighteval")
     runtime = table(config, "runtime")
@@ -185,7 +202,7 @@ def local_openai_base_url(config: dict[str, Any], env: dict[str, str], args: Any
         lighteval.get("base_url"),
     )
     if configured:
-        return str(configured).rstrip("/")
+        return normalize_openai_base_url(str(configured))
 
     host = str(pick(runtime.get("client_host"), default="127.0.0.1"))
     port = str(pick(runtime.get("port"), default="8000"))
@@ -232,6 +249,8 @@ def build_lighteval_model_args(
         table(config, "lighteval").get("api_key"),
     )
     if raw_model_args:
+        if not api_key and is_local_base_url(local_openai_base_url(config, env, args)):
+            api_key = "EMPTY"
         return raw_model_args, str(api_key) if api_key else None
 
     model = resolve_model_entry(config, args.model)
@@ -264,10 +283,17 @@ def build_lighteval_model_args(
         lighteval.get("max_model_length"),
         model.get("max_model_len"),
     )
+    max_new_tokens = pick(
+        getattr(args, "max_new_tokens", None),
+        env_value(env, "HELICOPTER_EVAL_MAX_NEW_TOKENS"),
+        lighteval.get("max_new_tokens"),
+    )
     if concurrent_requests is not None:
         parts.append(f"concurrent_requests={concurrent_requests}")
     if max_model_length is not None:
         parts.append(f"max_model_length={max_model_length}")
+    if max_new_tokens is not None:
+        parts.append(f"generation_parameters={{max_new_tokens:{max_new_tokens}}}")
 
     if not api_key and is_local_base_url(base_url):
         api_key = "EMPTY"
@@ -349,6 +375,65 @@ def build_lighteval_plan(
     return CommandPlan(command=command, cwd=root, shown_env=shown_env, env=plan_env)
 
 
+# Output formats each lighteval-tasks action's delegate parser actually accepts.
+# The shared front-end parser allows the union of these, so we validate the
+# (action, format) pair here rather than letting the spawned subprocess exit 2.
+_LIGHTEVAL_TASKS_FORMATS: dict[str, frozenset[str]] = {
+    "export": frozenset({"text", "jsonl"}),
+    "judges": frozenset({"text", "jsonl", "summary"}),
+    "coverage": frozenset({"text", "jsonl", "summary", "tasks"}),
+}
+
+
+def validate_lighteval_tasks_args(args: Any) -> None:
+    """Reject flag combinations the front-end accepts but the delegate rejects.
+
+    The shared ``lighteval-tasks`` parser exposes --format/--contains/--limit/
+    --include-supersets for every action, but the underlying subcommands support
+    different subsets. Fail fast with a clear message instead of forwarding an
+    argument that makes the spawned process exit 2 (or silently drop it).
+    """
+    action = args.task_action
+    fmt = getattr(args, "format", None)
+    allowed = _LIGHTEVAL_TASKS_FORMATS.get(action)
+    if allowed is not None and fmt is not None and fmt not in allowed:
+        raise SystemExit(
+            f"helicopter eval lighteval-tasks {action} does not support --format {fmt}; "
+            f"choose one of: {', '.join(sorted(allowed))}"
+        )
+
+    if action == "coverage":
+        for flag, value in (
+            ("--contains", getattr(args, "contains", None)),
+            ("--limit", getattr(args, "limit", None)),
+            ("--include-supersets", getattr(args, "include_supersets", None)),
+        ):
+            if value:
+                raise SystemExit(f"helicopter eval lighteval-tasks coverage does not support {flag}")
+    elif action == "judges":
+        if getattr(args, "include_supersets", None):
+            raise SystemExit(
+                "helicopter eval lighteval-tasks judges does not support --include-supersets; "
+                "supersets are always expanded to their member tasks"
+            )
+    elif action in {"list", "dump"}:
+        unsupported = [
+            flag
+            for flag, value in (
+                ("--output", getattr(args, "output", None)),
+                ("--contains", getattr(args, "contains", None)),
+                ("--limit", getattr(args, "limit", None)),
+                ("--include-supersets", getattr(args, "include_supersets", None)),
+            )
+            if value
+        ]
+        if unsupported:
+            raise SystemExit(
+                f"helicopter eval lighteval-tasks {action} does not support "
+                f"{', '.join(unsupported)}; use `export` for filtering and file output"
+            )
+
+
 def build_lighteval_tasks_plan(
     args: Any,
     *,
@@ -356,6 +441,7 @@ def build_lighteval_tasks_plan(
     env: dict[str, str],
     config: dict[str, Any],
 ) -> CommandPlan:
+    validate_lighteval_tasks_args(args)
     python = python_executable(config, root=root, env=env)
     lighteval = table(config, "lighteval")
     custom_tasks = lighteval_path_arg(
@@ -384,10 +470,15 @@ def build_lighteval_tasks_plan(
             append_cli_option(command, "--candidate-limit", getattr(args, "candidate_limit", None))
         if args.task_action == "judges" and getattr(args, "tasks", None):
             command.append(args.tasks)
-        for pattern in getattr(args, "contains", None) or []:
-            append_cli_option(command, "--contains", pattern, optional=False)
-        append_cli_option(command, "--limit", getattr(args, "limit", None))
-        append_cli_flag(command, "--include-supersets", getattr(args, "include_supersets", None))
+        # --contains/--limit are only defined by the export and judges delegates;
+        # --include-supersets only by export. coverage rejects all three (guarded
+        # in validate_lighteval_tasks_args above).
+        if args.task_action in {"export", "judges"}:
+            for pattern in getattr(args, "contains", None) or []:
+                append_cli_option(command, "--contains", pattern, optional=False)
+            append_cli_option(command, "--limit", getattr(args, "limit", None))
+        if args.task_action == "export":
+            append_cli_flag(command, "--include-supersets", getattr(args, "include_supersets", None))
         return CommandPlan(command=command, cwd=root, shown_env={"PYTHON": python}, env=strip_vllm_env(env))
 
     if args.task_action == "inspect":

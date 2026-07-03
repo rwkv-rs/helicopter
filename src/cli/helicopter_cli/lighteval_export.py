@@ -48,9 +48,66 @@ def first_text(value: Any) -> str | None:
     return str(value)
 
 
-def is_correct(metric: dict[str, Any]) -> bool | None:
+def as_dict(value: Any) -> dict[str, Any]:
+    """Return value if it is a dict, else an empty dict.
+
+    Guards against parquet cells that materialize as numpy arrays (where
+    ``value or {}`` would raise ``ValueError: truth value of an array ...``)
+    or as JSON strings/scalars (where ``.get(...)`` would raise AttributeError).
+    """
+    return value if isinstance(value, dict) else {}
+
+
+# Metric base-names (the part before ``:``) that are graded/continuous scores
+# rather than a binary pass/fail signal. A nonzero value for one of these does
+# NOT mean the sample is correct, so they are excluded when deriving
+# ``is_correct``. Custom proxy metrics are all named ``*_f1``; upstream LightEval
+# emits bare ``f1``/``bleu``/``rouge``/... names.
+GRADED_METRIC_KEYS = frozenset(
+    {
+        "f1",
+        "bleu",
+        "bleu_1",
+        "bleu_4",
+        "chrf",
+        "chrf_plus",
+        "ter",
+        "rouge",
+        "rouge1",
+        "rouge2",
+        "rougel",
+        "rougelsum",
+        "bertscore",
+        "bleurt",
+        "extractiveness",
+        "string_distance",
+        "edit_distance",
+        "edit_similarity",
+        "perplexity",
+        "mrr",
+    }
+)
+
+
+def is_graded_metric(base_name: str) -> bool:
+    return base_name in GRADED_METRIC_KEYS or base_name.endswith("_f1")
+
+
+def is_correct(metric: Any) -> bool | None:
+    """Derive a binary correctness signal from a per-sample metric dict.
+
+    Continuous/graded metrics (F1, BLEU, ROUGE, extractiveness, ...) are ignored
+    because a small nonzero score is not a correct answer. Only binary/pass-fail
+    metrics contribute. Returns None when no binary metric is present (e.g. a
+    task scored solely by a graded metric) rather than guessing.
+    """
+    if not isinstance(metric, dict):
+        return None
     numeric_values: list[float] = []
-    for value in metric.values():
+    for key, value in metric.items():
+        base = str(key).split(":", 1)[0].lower()
+        if is_graded_metric(base):
+            continue
         if isinstance(value, bool):
             numeric_values.append(1.0 if value else 0.0)
         elif isinstance(value, (int, float)):
@@ -64,9 +121,9 @@ def export_rows_from_frame(frame: Any) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     iterator = frame.iterrows() if hasattr(frame, "iterrows") else enumerate(frame)
     for sample_index, row in iterator:
-        doc = jsonable(row.get("doc") or {})
-        metric = jsonable(row.get("metric") or {})
-        response = jsonable(row.get("model_response") or {})
+        doc = as_dict(jsonable(row.get("doc")))
+        metric = as_dict(jsonable(row.get("metric")))
+        response = as_dict(jsonable(row.get("model_response")))
         specific = doc.get("specific") if isinstance(doc.get("specific"), dict) else {}
         rows.append(
             {

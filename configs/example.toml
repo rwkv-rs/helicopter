@@ -14,6 +14,7 @@ save_details = true
 dataset_loading_processes = 1
 load_tasks_multilingual = true
 custom_tasks = "src/cli/helicopter_cli/lighteval_rwkv_skills_tasks.py"
+max_new_tokens = 512
 
 [takeoff.grpo]
 project_name = "verl_rwkv_grpo"

@@ -487,7 +487,12 @@ def load_rwkv_skills_registry(path: Path) -> list[SourceBenchmark]:
 def load_json_source(path: Path) -> list[SourceBenchmark]:
     raw = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(raw, dict):
-        raw = raw.get("benchmarks", raw.get("tasks", []))
+        if "benchmarks" in raw:
+            raw = raw["benchmarks"]
+        elif "tasks" in raw:
+            raw = raw["tasks"]
+        else:
+            raise SystemExit(f"{path} object must contain a 'benchmarks' or 'tasks' key")
     if not isinstance(raw, list):
         raise SystemExit(f"{path} must contain a JSON list or an object with benchmarks/tasks")
     return [source_benchmark_from_value(item) for item in raw]
@@ -750,7 +755,6 @@ def build_parser() -> argparse.ArgumentParser:
     judges_parser.add_argument("--format", choices=("text", "jsonl", "summary"), default="text")
     judges_parser.add_argument("--contains", action="append")
     judges_parser.add_argument("--limit", type=int)
-    judges_parser.add_argument("--include-supersets", action="store_true")
     judges_parser.set_defaults(handler=judges_tasks)
 
     coverage_parser = subparsers.add_parser("coverage")

@@ -3942,6 +3942,18 @@ wmt24pp = LightevalTaskConfig(
     version=0,
 )
 
+# Recorded duplicate aliases for the next benchmark registry cleanup pass.
+# Keep these names runnable until the cleanup removes or migrates downstream references.
+KNOWN_DUPLICATE_TASK_CONFIGS = {
+    "apibank_l1": "apibank_level1",
+    "apibank_l2": "apibank_level2",
+    "bfcl_exec_simple_ast": "bfcl_exec_simple",
+    "bfcl_exec_multiple_ast": "bfcl_exec_multiple",
+    "complexfuncbench_subset": "complexfuncbench_official",
+    "longbench_qa_balanced": "longbench_qa",
+    "mbpp": "mbpp_plus",
+}
+
 
 TASKS_TABLE = [
     algebra222,

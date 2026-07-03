@@ -14,7 +14,7 @@ from unittest import mock
 
 from lighteval.models.model_output import ModelResponse
 
-from helicopter_cli import commands, config, env, lighteval_export, lighteval_rwkv_skills_tasks, lighteval_tasks
+from helicopter_cli import commands, config, env, lighteval_export, lighteval_rwkv_skills_tasks, lighteval_tasks, performance
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -75,6 +75,7 @@ def lighteval_args(**overrides: object) -> Namespace:
         "api_key": None,
         "concurrent_requests": None,
         "max_model_length": None,
+        "max_new_tokens": None,
         "max_samples": None,
         "output_dir": None,
         "dataset_loading_processes": None,
@@ -87,6 +88,9 @@ def lighteval_args(**overrides: object) -> Namespace:
         "results_org": None,
         "job_id": None,
         "extra": None,
+        "performance_output": None,
+        "metrics_url": None,
+        "scoreboard_task_id": None,
     }
     values.update(overrides)
     return Namespace(**values)
@@ -354,6 +358,7 @@ class CommandPlanTests(unittest.TestCase):
         self.assertIn("provider=openai", plan.command[5])
         self.assertIn("base_url=http://127.0.0.1:8000/v1", plan.command[5])
         self.assertIn("max_model_length=8192", plan.command[5])
+        self.assertIn("generation_parameters={max_new_tokens:512}", plan.command[5])
         options = command_options(plan.command)
         self.assertEqual(options["--output-dir"], str(ROOT / "results/lighteval"))
         self.assertEqual(options["--max-samples"], "3")
@@ -365,6 +370,18 @@ class CommandPlanTests(unittest.TestCase):
         self.assertTrue(options["--load-tasks-multilingual"])
         self.assertTrue(options["--save-details"])
         self.assertEqual(plan.env["OPENAI_API_KEY"], "EMPTY")
+
+    def test_lighteval_plan_cli_max_new_tokens_overrides_config(self) -> None:
+        loaded_config = load_example_config()
+
+        plan = commands.build_lighteval_plan(
+            lighteval_args(max_new_tokens=128),
+            root=ROOT,
+            env={"HELICOPTER_EVAL_MAX_NEW_TOKENS": "256"},
+            config=loaded_config,
+        )
+
+        self.assertIn("generation_parameters={max_new_tokens:128}", plan.command[5])
 
     def test_lighteval_plan_keeps_api_key_out_of_command(self) -> None:
         loaded_config = load_example_config()
@@ -378,6 +395,98 @@ class CommandPlanTests(unittest.TestCase):
 
         self.assertNotIn("secret-token", " ".join(plan.command))
         self.assertEqual(plan.env["OPENAI_API_KEY"], "secret-token")
+
+    def test_lighteval_performance_metrics_url_uses_endpoint_root(self) -> None:
+        self.assertEqual(
+            performance.derive_metrics_url("http://127.0.0.1:8000/v1"),
+            "http://127.0.0.1:8000/metrics",
+        )
+        self.assertEqual(
+            performance.derive_metrics_url("http://127.0.0.1:8000/custom/v1"),
+            "http://127.0.0.1:8000/custom/metrics",
+        )
+
+    def test_lighteval_performance_reads_equals_output_dir_option(self) -> None:
+        self.assertEqual(
+            performance.output_dir_from_command(["lighteval", "--output-dir=results/run"]),
+            Path("results/run"),
+        )
+
+    def test_lighteval_performance_report_derives_run_rates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            result_dir = output_dir / "results/openai/model"
+            result_dir.mkdir(parents=True)
+            result_file = result_dir / "results_2026-07-03T00-00-00.json"
+            result_file.write_text(
+                json.dumps(
+                    {
+                        "config_general": {
+                            "model_name": "openai/g1g-7.2b",
+                            "max_samples": 2,
+                            "total_evaluation_time_secondes": "10.0",
+                        },
+                        "results": {
+                            "gsm8k|0": {"acc": 0.5},
+                            "all": {"acc": 0.5},
+                        },
+                    }
+                )
+            )
+
+            report = performance.build_performance_report(
+                command=["python", "-m", "lighteval"],
+                exit_code=0,
+                output_dir=output_dir,
+                started_at_epoch=1.0,
+                ended_at_epoch=11.0,
+                metrics_url="http://127.0.0.1:8000/metrics",
+                metrics_before={
+                    "vllm:prompt_tokens_total": 100,
+                    "vllm:generation_tokens_total": 10,
+                },
+                metrics_after={
+                    "vllm:prompt_tokens_total": 130,
+                    "vllm:generation_tokens_total": 30,
+                },
+            )
+            self.assertEqual(performance.extract_lighteval_score_metrics(report["source_files"]["results"]), {"acc": 0.5})
+
+        self.assertEqual(report["samples_completed"], 2)
+        self.assertEqual(report["jobs_completed"], 1)
+        self.assertEqual(report["models_completed"], 1)
+        self.assertEqual(report["benchmarks_completed"], 1)
+        self.assertEqual(report["prompt_tokens"], 30)
+        self.assertEqual(report["generation_tokens"], 20)
+        self.assertEqual(report["total_tokens"], 50)
+        self.assertEqual(report["samples_per_hour"], 720.0)
+        self.assertEqual(report["jobs_per_hour"], 360.0)
+        self.assertEqual(report["models_per_day"], 8640.0)
+        self.assertEqual(report["benchmarks_per_day"], 8640.0)
+        self.assertEqual(report["tokens_per_second"], 5.0)
+        self.assertEqual(report["completed_runs/day"], 8640.0)
+
+    def test_lighteval_performance_metrics_embeds_scoreboard_subset(self) -> None:
+        report = {
+            "elapsed_seconds": 5.0,
+            "samples_completed": 1,
+            "jobs_completed": 1,
+            "models_completed": 1,
+            "benchmarks_completed": 1,
+            "completed_runs": 1,
+            "tokens_per_second": None,
+            "samples_per_hour": 720.0,
+            "jobs_per_hour": 720.0,
+            "models_per_day": 17280.0,
+            "benchmarks_per_day": 17280.0,
+            "completed_runs/day": 17280.0,
+        }
+
+        embedded = performance.performance_metrics_from_report(report)
+
+        self.assertEqual(embedded["samples_per_hour"], 720.0)
+        self.assertEqual(embedded["tokens_per_second"], None)
+        self.assertNotIn("command", embedded)
 
     def test_lighteval_tasks_plan_lists_registry(self) -> None:
         loaded_config = load_example_config()
@@ -509,6 +618,78 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(options["--contains"], "aime")
         self.assertEqual(options["--limit"], "1")
         self.assertIn("aime24", plan.command)
+
+    def test_lighteval_tasks_coverage_rejects_filter_flags(self) -> None:
+        loaded_config = load_example_config()
+        for overrides in (
+            {"contains": ["gsm"]},
+            {"limit": 5},
+            {"include_supersets": True},
+        ):
+            with self.assertRaises(SystemExit):
+                commands.build_lighteval_tasks_plan(
+                    lighteval_tasks_args(task_action="coverage", source="benchmarks.txt", **overrides),
+                    root=ROOT,
+                    env={},
+                    config=loaded_config,
+                )
+
+    def test_lighteval_tasks_export_rejects_unsupported_format(self) -> None:
+        loaded_config = load_example_config()
+        for fmt in ("summary", "tasks"):
+            with self.assertRaises(SystemExit):
+                commands.build_lighteval_tasks_plan(
+                    lighteval_tasks_args(task_action="export", format=fmt),
+                    root=ROOT,
+                    env={},
+                    config=loaded_config,
+                )
+
+    def test_lighteval_tasks_judges_rejects_tasks_format(self) -> None:
+        loaded_config = load_example_config()
+        with self.assertRaises(SystemExit):
+            commands.build_lighteval_tasks_plan(
+                lighteval_tasks_args(task_action="judges", tasks="aime24", format="tasks"),
+                root=ROOT,
+                env={},
+                config=loaded_config,
+            )
+
+    def test_lighteval_tasks_judges_rejects_include_supersets(self) -> None:
+        loaded_config = load_example_config()
+        with self.assertRaises(SystemExit):
+            commands.build_lighteval_tasks_plan(
+                lighteval_tasks_args(task_action="judges", tasks="aime24", include_supersets=True),
+                root=ROOT,
+                env={},
+                config=loaded_config,
+            )
+
+    def test_lighteval_tasks_list_rejects_filter_and_output_flags(self) -> None:
+        loaded_config = load_example_config()
+        for overrides in ({"output": "tmp/tasks.txt"}, {"contains": ["gsm"]}, {"limit": 3}):
+            with self.assertRaises(SystemExit):
+                commands.build_lighteval_tasks_plan(
+                    lighteval_tasks_args(task_action="list", **overrides),
+                    root=ROOT,
+                    env={},
+                    config=loaded_config,
+                )
+
+    def test_normalize_openai_base_url_appends_v1_to_bare_host(self) -> None:
+        self.assertEqual(
+            commands.normalize_openai_base_url("http://host:8000"),
+            "http://host:8000/v1",
+        )
+        # Existing path (or /v1) is preserved, only trailing slashes trimmed.
+        self.assertEqual(
+            commands.normalize_openai_base_url("http://host:8000/v1/"),
+            "http://host:8000/v1",
+        )
+        self.assertEqual(
+            commands.normalize_openai_base_url("http://host:8000/custom"),
+            "http://host:8000/custom",
+        )
 
     def test_lighteval_tasks_coverage_resolves_registry_rows(self) -> None:
         mmmlu_targets = lighteval_tasks.OFFICIAL_LIGHTEVAL_ALIASES["mmmlu"]
@@ -1574,6 +1755,40 @@ class CommandPlanTests(unittest.TestCase):
 
         self.assertEqual(row["sample_id"], "repo__project-1")
         self.assertTrue(row["is_correct"])
+
+    def test_is_correct_ignores_graded_f1_metrics(self) -> None:
+        # A small nonzero proxy token-F1 is not a correct answer.
+        self.assertIsNone(lighteval_export.is_correct({"swebench_patch_f1": 0.05}))
+        self.assertIsNone(lighteval_export.is_correct({"longbench_f1": 0.4}))
+        self.assertIsNone(lighteval_export.is_correct({"f1": 0.9}))
+
+    def test_is_correct_uses_binary_signal_over_graded(self) -> None:
+        # extractiveness (graded) must not override the binary extractive_match=0.0.
+        self.assertFalse(
+            lighteval_export.is_correct({"extractive_match": 0.0, "extractiveness": 0.83})
+        )
+        self.assertTrue(
+            lighteval_export.is_correct({"extractive_match": 1.0, "extractiveness": 0.1})
+        )
+
+    def test_is_correct_handles_non_dict_metric(self) -> None:
+        self.assertIsNone(lighteval_export.is_correct(None))
+        self.assertIsNone(lighteval_export.is_correct([1.0]))
+
+    def test_export_rows_tolerate_non_dict_columns(self) -> None:
+        # doc/metric/model_response arriving as non-dict cells must not crash.
+        rows = lighteval_export.export_rows_from_frame(
+            [
+                {
+                    "doc": ["not", "a", "dict"],
+                    "metric": None,
+                    "model_response": "plain string",
+                }
+            ]
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertIsNone(rows[0]["is_correct"])
+        self.assertIsNone(rows[0]["task_name"])
 
     def test_free_answer_prompt_normalizes_numeric_answers(self) -> None:
         doc = lighteval_rwkv_skills_tasks.free_answer_prompt(

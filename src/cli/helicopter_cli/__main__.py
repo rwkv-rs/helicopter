@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+from datetime import UTC, datetime
+from pathlib import Path
 
 from .commands import (
     EMB_DEVICES,
@@ -16,6 +18,12 @@ from .commands import (
 from .config import load_config
 from .env import DEFAULT_ENV_FILE, load_env
 from .paths import find_root
+from .performance import (
+    base_url_from_lighteval_command,
+    derive_metrics_url,
+    output_dir_from_command,
+    run_lighteval_with_performance,
+)
 from .runner import run_command
 
 
@@ -73,6 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
     lighteval.add_argument("--api-key", help="API key passed through OPENAI_API_KEY")
     lighteval.add_argument("--concurrent-requests", type=int)
     lighteval.add_argument("--max-model-length", type=int)
+    lighteval.add_argument("--max-new-tokens", type=int, help="cap generated tokens through LightEval generation_parameters")
     lighteval.add_argument("--max-samples", type=int)
     lighteval.add_argument("--output-dir")
     lighteval.add_argument("--dataset-loading-processes", type=int)
@@ -86,6 +95,9 @@ def build_parser() -> argparse.ArgumentParser:
     lighteval.add_argument("--results-org")
     lighteval.add_argument("--job-id", type=int)
     lighteval.add_argument("--extra", action="append", help="extra argument passed to LightEval")
+    lighteval.add_argument("--performance-output", help="write run performance metrics JSON here")
+    lighteval.add_argument("--metrics-url", help="Prometheus metrics URL for token throughput; defaults to <base-url without /v1>/metrics")
+    lighteval.add_argument("--scoreboard-task-id", help="merge performance metrics into this scoreboard task score")
     lighteval.set_defaults(plan_builder=build_lighteval_plan)
 
     lighteval_tasks = eval_subparsers.add_parser("lighteval-tasks", help="list or inspect LightEval tasks")
@@ -129,6 +141,30 @@ def main(argv: list[str] | None = None) -> int:
     prepend_venv_path(env, root, config)
 
     plan = args.plan_builder(args, root=root, env=env, config=config)
+    if getattr(args, "eval_command", None) == "lighteval" and not args.dry_run:
+        output_dir = output_dir_from_command(plan.command) or (root / "results/lighteval")
+        if not output_dir.is_absolute():
+            output_dir = root / output_dir
+        performance_output = (
+            root / args.performance_output
+            if getattr(args, "performance_output", None) and not str(args.performance_output).startswith("/")
+            else args.performance_output
+        )
+        if performance_output is None:
+            stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+            performance_output = output_dir / "performance" / f"performance_{stamp}.json"
+        metrics_url = getattr(args, "metrics_url", None) or derive_metrics_url(
+            base_url_from_lighteval_command(plan.command)
+        )
+        return run_lighteval_with_performance(
+            plan.command,
+            cwd=plan.cwd,
+            env=plan.env,
+            root=root,
+            performance_output=Path(performance_output),
+            metrics_url=metrics_url,
+            scoreboard_task_id=getattr(args, "scoreboard_task_id", None),
+        )
     return run_command(
         plan.command,
         cwd=plan.cwd,
