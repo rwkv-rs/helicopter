@@ -11,6 +11,8 @@ UPDATE_UV="${UPDATE_UV:-1}"
 UV_UPGRADE="${UV_UPGRADE:-1}"
 RUN_PIP_CHECK="${RUN_PIP_CHECK:-1}"
 UV_SYNC_INEXACT="${UV_SYNC_INEXACT:-1}"
+CLEAN_SUBMODULE_VENVS="${CLEAN_SUBMODULE_VENVS:-1}"
+CLEAN_VLLM_CMAKE_CACHE="${CLEAN_VLLM_CMAKE_CACHE:-1}"
 VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE:-cuda}"
 VLLM_VERSION_OVERRIDE="${VLLM_VERSION_OVERRIDE:-}"
 VLLM_REBUILD="${VLLM_REBUILD:-auto}"
@@ -80,6 +82,30 @@ configure_build_dirs() {
     mkdir -p "$BUILD_TMPDIR"
     export TMPDIR="$BUILD_TMPDIR"
   fi
+}
+
+clean_submodule_venvs() {
+  [[ "$CLEAN_SUBMODULE_VENVS" == "1" ]] || return 0
+
+  local env_dir
+  for env_dir in "$VLLM/.venv" "$VERL/.venv" "$RWKV_LM/.venv"; do
+    [[ -e "$env_dir" ]] || continue
+    [[ "$env_dir" == "$ROOT"/src/*/.venv ]] || die "refusing to remove unexpected venv path: $env_dir"
+    run rm -rf "$env_dir"
+  done
+}
+
+clean_vllm_cmake_cache() {
+  [[ "$CLEAN_VLLM_CMAKE_CACHE" == "1" ]] || return 0
+  [[ -d "$VLLM/.deps" ]] || return 0
+
+  local subbuild_dir
+  while IFS= read -r subbuild_dir; do
+    [[ -n "$subbuild_dir" ]] || continue
+    [[ "$subbuild_dir" == "$VLLM/.deps/"*-subbuild ]] ||
+      die "refusing to remove unexpected CMake cache path: $subbuild_dir"
+    run rm -rf "$subbuild_dir"
+  done < <(find "$VLLM/.deps" -maxdepth 1 -type d -name '*-subbuild' -print | LC_ALL=C sort)
 }
 
 ensure_uv() {
@@ -158,6 +184,35 @@ check_cuda_env() {
   have nvidia-smi || warn "nvidia-smi is not on PATH; nvcc exists, so build can continue"
 }
 
+configure_cuda_arch_list() {
+  [[ "$VLLM_TARGET_DEVICE" == "cuda" ]] || return 0
+  [[ -z "${TORCH_CUDA_ARCH_LIST:-}" ]] || return 0
+  [[ -x "$VENV/bin/python" ]] || return 0
+
+  local arch_list
+  arch_list="$("$VENV/bin/python" - <<'PY'
+import torch
+
+if not torch.cuda.is_available() or torch.cuda.device_count() == 0:
+    raise SystemExit(0)
+
+capabilities = {
+    torch.cuda.get_device_capability(index)
+    for index in range(torch.cuda.device_count())
+}
+supported_arches = set(torch.cuda.get_arch_list())
+
+if capabilities == {(12, 1)} and "sm_121" not in supported_arches and "sm_120" in supported_arches:
+    print("12.0+PTX")
+PY
+)"
+
+  if [[ -n "$arch_list" ]]; then
+    export TORCH_CUDA_ARCH_LIST="$arch_list"
+    echo "Using TORCH_CUDA_ARCH_LIST=$TORCH_CUDA_ARCH_LIST for CUDA 12.1 devices supported by sm_120"
+  fi
+}
+
 sync_uv_env() {
   local sync_args=(sync)
   [[ -n "$UV_INDEX_URL" ]] && sync_args+=(--index-url "$UV_INDEX_URL")
@@ -179,6 +234,7 @@ vllm_native_fingerprint() {
     printf 'VLLM_TARGET_DEVICE=%s\n' "$VLLM_TARGET_DEVICE"
     printf 'VLLM_VERSION_OVERRIDE=%s\n' "$VLLM_VERSION_OVERRIDE"
     printf 'CMAKE_BUILD_TYPE=%s\n' "$CMAKE_BUILD_TYPE"
+    printf 'TORCH_CUDA_ARCH_LIST=%s\n' "${TORCH_CUDA_ARCH_LIST:-}"
     "$VENV/bin/python" - <<'PY'
 import platform
 import sys
@@ -235,6 +291,7 @@ install_vllm_package() {
     "${pip[@]}" --no-deps --no-build-isolation -e "$VLLM" --torch-backend=auto
 
   vllm_native_ready
+  fingerprint="$(vllm_native_fingerprint)"
   printf '%s\n' "$fingerprint" >"$VLLM_STAMP"
 }
 
@@ -262,19 +319,47 @@ install_verl_package() {
   run "${pip[@]}" --no-deps -e "$VERL"
 }
 
+check_python_packages() {
+  [[ "$RUN_PIP_CHECK" == "1" ]] || return 0
+
+  print_cmd "$UV" pip check --project "$ROOT" --python "$VENV/bin/python"
+  [[ "${DRY_RUN:-0}" == "1" ]] && return 0
+
+  local check_output filtered_output
+  if check_output="$("$UV" pip check --project "$ROOT" --python "$VENV/bin/python" 2>&1)"; then
+    printf '%s\n' "$check_output"
+    return 0
+  fi
+
+  filtered_output="$(printf '%s\n' "$check_output" |
+    grep -v -F 'The package `nvidia-cusparselt-cu13` was built for a different platform' |
+    grep -v -E '^(Checked [0-9]+ packages in .+|Found 1 incompatibility)$' || true)"
+  if [[ -z "$filtered_output" ]] &&
+     [[ "$check_output" == *'The package `nvidia-cusparselt-cu13` was built for a different platform'* ]]; then
+    printf '%s\n' "$check_output" >&2
+    warn "ignoring uv platform-tag check for nvidia-cusparselt-cu13; NVIDIA publishes the aarch64 wheel with a manylinux2014_sbsa tag"
+    return 0
+  fi
+
+  printf '%s\n' "$check_output" >&2
+  return 1
+}
+
 configure_network
 configure_build_dirs
+clean_submodule_venvs
 ensure_uv
 check_compiler_env
 sync_uv_env
 check_native_env
 check_cuda_env
+configure_cuda_arch_list
+clean_vllm_cmake_cache
 install_vllm_package
 install_rwkv_lm_package
 install_verl_package
+check_python_packages
 
-if [[ "$RUN_PIP_CHECK" == "1" ]]; then
-  run "$UV" pip check --project "$ROOT" --python "$VENV/bin/python"
-fi
+clean_submodule_venvs
 
 echo "Environment ready: $VENV"
