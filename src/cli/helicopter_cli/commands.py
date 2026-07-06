@@ -114,6 +114,43 @@ def append_hydra_override(overrides: list[str], key: str, value: Any, *, optiona
     overrides.append(f"{key}={format_hydra_value(value)}")
 
 
+def append_rwkv_lm_engine_override(
+    overrides: list[str],
+    key: str,
+    value: Any,
+    *,
+    optional: bool = False,
+) -> None:
+    for prefix in ("actor_rollout_ref.actor.engine", "actor_rollout_ref.ref.engine"):
+        append_hydra_override(overrides, f"{prefix}.{key}", value, optional=optional)
+
+
+def hydra_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def reward_function_path(takeoff: dict[str, Any], env: dict[str, str], verl_path: Path) -> Path:
+    configured_path = takeoff_value(takeoff, env, "reward_function_path", "REWARD_FUNCTION_PATH")
+    if configured_path:
+        return Path(str(configured_path))
+
+    reward_function = str(
+        takeoff_value(takeoff, env, "reward_function", "REWARD_FUNCTION", "math_verify")
+    ).strip()
+    if reward_function in {"math_verify", "math_verify_reward"}:
+        return verl_path / "examples/rwkv_trainer/math_verify_reward.py"
+    if reward_function in {"math_dapo", "math_dapo_reward", "dapo"}:
+        return verl_path / "examples/rwkv_trainer/math_dapo_reward.py"
+    if reward_function.endswith(".py") or "/" in reward_function:
+        return Path(reward_function)
+    raise SystemExit(
+        "Unknown reward_function "
+        f"{reward_function!r}; use math_verify, math_dapo, or reward_function_path"
+    )
+
+
 def build_grpo_hydra_overrides(
     *,
     model_path: Path,
@@ -164,6 +201,7 @@ def build_grpo_hydra_overrides(
         "ROLLOUT_GPU_MEM_UTIL",
     )
     rollout_n = takeoff_value(takeoff, env, "rollout_n", "ROLLOUT_N", 8)
+    rollout_top_p = takeoff_value(takeoff, env, "rollout_top_p", "ROLLOUT_TOP_P", 0.8)
     rollout_max_num_seqs = takeoff_value(takeoff, env, "rollout_max_num_seqs", "ROLLOUT_MAX_NUM_SEQS")
     rollout_max_num_batched_tokens = takeoff_value(
         takeoff,
@@ -196,8 +234,44 @@ def build_grpo_hydra_overrides(
         "TRAIN_NGPUS_PER_NODE",
         num_devices,
     )
+    rwkv_ctx_len = takeoff_value(takeoff, env, "ctx_len", "RWKV_CTX_LEN")
+    rwkv_infctx = hydra_bool(takeoff_value(takeoff, env, "infctx", "RWKV_INFCTX", False))
+    rwkv_chunk_ctx = takeoff_value(takeoff, env, "chunk_ctx", "RWKV_CHUNK_CTX")
+    val_do_sample = takeoff_value(takeoff, env, "val_do_sample", "VAL_DO_SAMPLE", True)
+    val_temperature = takeoff_value(takeoff, env, "val_temperature", "VAL_TEMPERATURE", 1)
+    val_top_k = takeoff_value(takeoff, env, "val_top_k", "VAL_TOP_K", 32)
+    val_top_p = takeoff_value(takeoff, env, "val_top_p", "VAL_TOP_P", 0.28)
+    val_n = takeoff_value(takeoff, env, "val_n", "VAL_N", 4)
+    rwkv_generation_prompt = takeoff_value(
+        takeoff,
+        env,
+        "rwkv_generation_prompt",
+        "RWKV_GENERATION_PROMPT",
+    )
+    val_rwkv_generation_prompt = takeoff_value(
+        takeoff,
+        env,
+        "val_rwkv_generation_prompt",
+        "VAL_RWKV_GENERATION_PROMPT",
+    )
+    if rwkv_infctx:
+        try:
+            rwkv_chunk_ctx = int(rwkv_chunk_ctx)
+        except (TypeError, ValueError) as exc:
+            raise SystemExit("infctx requires chunk_ctx > 0") from exc
+        if rwkv_chunk_ctx <= 0:
+            raise SystemExit("infctx requires chunk_ctx > 0")
+        if rwkv_chunk_ctx % 16 != 0:
+            raise SystemExit("infctx chunk_ctx must be divisible by RWKV CUDA chunk length 16")
+        if rwkv_ctx_len is not None and str(rwkv_ctx_len).strip():
+            try:
+                rwkv_ctx_len = int(rwkv_ctx_len)
+            except (TypeError, ValueError) as exc:
+                raise SystemExit("infctx requires integer ctx_len") from exc
+            if rwkv_chunk_ctx >= rwkv_ctx_len:
+                raise SystemExit("infctx requires chunk_ctx < ctx_len")
 
-    reward_path = verl_path / "examples/rwkv_trainer/math_dapo_reward.py"
+    reward_path = reward_function_path(takeoff, env, verl_path)
     overrides = [
         f"algorithm.adv_estimator={format_hydra_value(takeoff_value(takeoff, env, 'adv_estimator', 'ADV_ESTIMATOR', 'grpo'))}",
         "algorithm.use_kl_in_reward=False",
@@ -205,7 +279,7 @@ def build_grpo_hydra_overrides(
         f"data.val_files={val_files}",
         f"data.train_batch_size={format_hydra_value(takeoff_value(takeoff, env, 'train_batch_size', 'TRAIN_BATCH_SIZE', 56))}",
         f"data.max_prompt_length={format_hydra_value(takeoff_value(takeoff, env, 'max_prompt_length', 'MAX_PROMPT_LENGTH', 512))}",
-        f"data.max_response_length={format_hydra_value(takeoff_value(takeoff, env, 'max_response_length', 'MAX_RESPONSE_LENGTH', 512))}",
+        f"data.max_response_length={format_hydra_value(takeoff_value(takeoff, env, 'max_response_length', 'MAX_RESPONSE_LENGTH', 7168))}",
         "data.filter_overlong_prompts=True",
         "data.truncation=error",
         f"reward.custom_reward_function.path={reward_path}",
@@ -279,6 +353,7 @@ def build_grpo_hydra_overrides(
             "actor_rollout_ref.rollout.load_format=auto",
             f"actor_rollout_ref.rollout.tensor_model_parallel_size={format_hydra_value(rollout_tensor_parallel_size)}",
             f"actor_rollout_ref.rollout.n={format_hydra_value(rollout_n)}",
+            f"actor_rollout_ref.rollout.top_p={format_hydra_value(rollout_top_p)}",
             "actor_rollout_ref.rollout.enable_prefix_caching=False",
             f"actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu={format_hydra_value(ppo_micro_batch_size)}",
             f"actor_rollout_ref.rollout.log_prob_use_dynamic_bsz={format_hydra_value(dynamic_bsz)}",
@@ -286,8 +361,29 @@ def build_grpo_hydra_overrides(
             "+actor_rollout_ref.rollout.engine_kwargs.vllm.tokenizer_mode=rwkv",
             "actor_rollout_ref.hybrid_engine=False",
             f"rollout.nnodes={format_hydra_value(num_nodes)}",
+            f"actor_rollout_ref.rollout.val_kwargs.do_sample={format_hydra_value(val_do_sample)}",
+            f"actor_rollout_ref.rollout.val_kwargs.temperature={format_hydra_value(val_temperature)}",
+            f"actor_rollout_ref.rollout.val_kwargs.top_k={format_hydra_value(val_top_k)}",
+            f"actor_rollout_ref.rollout.val_kwargs.top_p={format_hydra_value(val_top_p)}",
+            f"actor_rollout_ref.rollout.val_kwargs.n={format_hydra_value(val_n)}",
         ]
     )
+    append_hydra_override(
+        overrides,
+        "+data.apply_chat_template_kwargs.rwkv_generation_prompt",
+        rwkv_generation_prompt,
+        optional=True,
+    )
+    append_hydra_override(
+        overrides,
+        "+data.val_apply_chat_template_kwargs.rwkv_generation_prompt",
+        val_rwkv_generation_prompt,
+        optional=True,
+    )
+    append_rwkv_lm_engine_override(overrides, "ctx_len", rwkv_ctx_len, optional=True)
+    append_rwkv_lm_engine_override(overrides, "infctx", rwkv_infctx)
+    if rwkv_infctx:
+        append_rwkv_lm_engine_override(overrides, "chunk_ctx", rwkv_chunk_ctx)
     append_hydra_override(
         overrides,
         "actor_rollout_ref.rollout.gpu_memory_utilization",
@@ -341,16 +437,22 @@ def build_grpo_hydra_overrides(
     overrides.extend(
         [
             "critic.enable=False",
-            'trainer.logger=["console"]',
+            'trainer.logger=["console","wandb"]',
             f"trainer.project_name={format_hydra_value(takeoff_value(takeoff, env, 'project_name', 'PROJECT_NAME', 'verl_rwkv_grpo'))}",
             f"trainer.experiment_name={format_hydra_value(takeoff_value(takeoff, env, 'experiment_name', 'EXPERIMENT_NAME', 'rwkv7_grpo_vllm'))}",
             f"trainer.nnodes={format_hydra_value(num_nodes)}",
             f"trainer.n_gpus_per_node={format_hydra_value(trainer_n_gpus_per_node)}",
             f"trainer.save_freq={format_hydra_value(takeoff_value(takeoff, env, 'save_freq', 'SAVE_FREQ', 20))}",
             f"trainer.test_freq={format_hydra_value(takeoff_value(takeoff, env, 'test_freq', 'TEST_FREQ', -1))}",
-            f"trainer.val_before_train={format_hydra_value(takeoff_value(takeoff, env, 'val_before_train', 'VAL_BEFORE_TRAIN', False))}",
+            f"trainer.val_before_train={format_hydra_value(takeoff_value(takeoff, env, 'val_before_train', 'VAL_BEFORE_TRAIN', True))}",
             f"trainer.total_epochs={format_hydra_value(takeoff_value(takeoff, env, 'total_epochs', 'TOTAL_EPOCHS', 2))}",
         ]
+    )
+    append_hydra_override(
+        overrides,
+        "trainer.validation_data_dir",
+        takeoff_value(takeoff, env, "validation_data_dir", "VALIDATION_DATA_DIR"),
+        optional=True,
     )
     append_hydra_override(
         overrides,
