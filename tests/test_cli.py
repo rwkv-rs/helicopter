@@ -237,19 +237,33 @@ class CommandPlanTests(unittest.TestCase):
             {
                 key: overrides[key]
                 for key in (
+                    "data.max_prompt_length",
+                    "data.max_response_length",
+                    "reward.custom_reward_function.path",
                     "actor_rollout_ref.actor.use_dynamic_bsz",
                     "actor_rollout_ref.model.path",
                     "actor_rollout_ref.rollout.name",
+                    "actor_rollout_ref.rollout.top_p",
                     "actor_rollout_ref.hybrid_engine",
+                    "trainer.logger",
                     "trainer.total_epochs",
+                    "trainer.val_before_train",
                 )
             },
             {
+                "data.max_prompt_length": "1024",
+                "data.max_response_length": "7168",
+                "reward.custom_reward_function.path": str(
+                    ROOT / "src/train/verl-rwkv/examples/rwkv_trainer/math_verify_reward.py"
+                ),
                 "actor_rollout_ref.actor.use_dynamic_bsz": "False",
                 "actor_rollout_ref.model.path": "/weights/RWKV/rwkv7-g1g-1.5b-20260526-ctx8192.pth",
                 "actor_rollout_ref.rollout.name": "vllm",
+                "actor_rollout_ref.rollout.top_p": "0.8",
                 "actor_rollout_ref.hybrid_engine": "False",
+                "trainer.logger": '["console","wandb"]',
                 "trainer.total_epochs": "2",
+                "trainer.val_before_train": "True",
             },
         )
         self.assertEqual(optional_rollout_keys & overrides.keys(), set())
@@ -329,6 +343,111 @@ class CommandPlanTests(unittest.TestCase):
                 "reward.reward_manager.name": "dapo",
             },
         )
+
+    def test_takeoff_config_infctx_becomes_rwkv_lm_engine_overrides(self) -> None:
+        loaded_config = load_example_config()
+        takeoff = loaded_config["takeoff"]
+        takeoff["grpo"] = {
+            **takeoff["grpo"],
+            "ctx_len": 8192,
+            "infctx": True,
+            "chunk_ctx": 2048,
+        }
+
+        overrides = hydra_map(build_takeoff_plan(loaded_config))
+
+        self.assertEqual(
+            {
+                key: overrides[key]
+                for key in (
+                    "actor_rollout_ref.actor.engine.ctx_len",
+                    "actor_rollout_ref.actor.engine.infctx",
+                    "actor_rollout_ref.actor.engine.chunk_ctx",
+                    "actor_rollout_ref.ref.engine.ctx_len",
+                    "actor_rollout_ref.ref.engine.infctx",
+                    "actor_rollout_ref.ref.engine.chunk_ctx",
+                )
+            },
+            {
+                "actor_rollout_ref.actor.engine.ctx_len": "8192",
+                "actor_rollout_ref.actor.engine.infctx": "True",
+                "actor_rollout_ref.actor.engine.chunk_ctx": "2048",
+                "actor_rollout_ref.ref.engine.ctx_len": "8192",
+                "actor_rollout_ref.ref.engine.infctx": "True",
+                "actor_rollout_ref.ref.engine.chunk_ctx": "2048",
+            },
+        )
+
+    def test_takeoff_config_sets_validation_sampling_for_non_greedy_eval(self) -> None:
+        loaded_config = load_example_config()
+
+        overrides = hydra_map(build_takeoff_plan(loaded_config))
+
+        self.assertEqual(
+            {
+                key: overrides[key]
+                for key in (
+                    "actor_rollout_ref.rollout.val_kwargs.do_sample",
+                    "actor_rollout_ref.rollout.val_kwargs.temperature",
+                    "actor_rollout_ref.rollout.val_kwargs.top_k",
+                    "actor_rollout_ref.rollout.val_kwargs.top_p",
+                    "actor_rollout_ref.rollout.val_kwargs.n",
+                    "+data.apply_chat_template_kwargs.rwkv_generation_prompt",
+                    "+data.val_apply_chat_template_kwargs.rwkv_generation_prompt",
+                )
+            },
+            {
+                "actor_rollout_ref.rollout.val_kwargs.do_sample": "True",
+                "actor_rollout_ref.rollout.val_kwargs.temperature": "1",
+                "actor_rollout_ref.rollout.val_kwargs.top_k": "32",
+                "actor_rollout_ref.rollout.val_kwargs.top_p": "0.28",
+                "actor_rollout_ref.rollout.val_kwargs.n": "4",
+                "+data.apply_chat_template_kwargs.rwkv_generation_prompt": "open_think",
+                "+data.val_apply_chat_template_kwargs.rwkv_generation_prompt": "open_think",
+            },
+        )
+
+    def test_takeoff_config_can_override_validation_generation_prompt(self) -> None:
+        loaded_config = load_example_config()
+        takeoff = loaded_config["takeoff"]
+        takeoff["grpo"] = {
+            **takeoff["grpo"],
+            "val_rwkv_generation_prompt": "fake_think",
+        }
+
+        overrides = hydra_map(build_takeoff_plan(loaded_config))
+
+        self.assertEqual(
+            overrides["+data.val_apply_chat_template_kwargs.rwkv_generation_prompt"],
+            "fake_think",
+        )
+
+    def test_takeoff_config_can_override_validation_rollout_n(self) -> None:
+        loaded_config = load_example_config()
+        takeoff = loaded_config["takeoff"]
+        takeoff["grpo"] = {**takeoff["grpo"], "val_n": 2}
+
+        overrides = hydra_map(build_takeoff_plan(loaded_config))
+
+        self.assertEqual(overrides["actor_rollout_ref.rollout.val_kwargs.n"], "2")
+
+    def test_takeoff_config_can_enable_validation_dump_dir(self) -> None:
+        loaded_config = load_example_config()
+        takeoff = loaded_config["takeoff"]
+        takeoff["grpo"] = {**takeoff["grpo"], "validation_data_dir": "logs/validation/run"}
+
+        overrides = hydra_map(build_takeoff_plan(loaded_config))
+
+        self.assertEqual(overrides["trainer.validation_data_dir"], "logs/validation/run")
+
+    def test_takeoff_config_can_override_training_rollout_top_p(self) -> None:
+        loaded_config = load_example_config()
+        takeoff = loaded_config["takeoff"]
+        takeoff["grpo"] = {**takeoff["grpo"], "rollout_top_p": 0.65}
+
+        overrides = hydra_map(build_takeoff_plan(loaded_config))
+
+        self.assertEqual(overrides["actor_rollout_ref.rollout.top_p"], "0.65")
 
     def test_takeoff_rollout_gpu_count_becomes_top_level_and_actor_rollout_overrides(self) -> None:
         loaded_config = load_example_config()
