@@ -19,7 +19,7 @@ def build_leaderboard_payload(entries: list[dict[str, Any]], *, selected_model: 
     visible = _select_entries(entries, selected_model)
     param_columns = _param_columns(visible, is_delta=is_delta)
     domains = []
-    for group in ("knowledge", "math", "coding", "instruction_following", "function_call"):
+    for group in ("knowledge", "math", "coding", "agent", "instruction_following", "function_call"):
         rows = _rows_for_domain(visible, group, param_columns, is_delta=is_delta)
         label = next(item["label"] for item in _domain_groups_with_naive() if item["key"] == group)
         title = next(item["title"] for item in _domain_groups_with_naive() if item["key"] == group)
@@ -81,6 +81,7 @@ def _domain_groups_with_naive() -> list[dict[str, str]]:
         {"key": "knowledge", "label": "Knowledge", "title": "知识类（MMLU / Multi-choice）"},
         {"key": "math", "label": "Math", "title": "数学推理（AIME / Math-500 等）"},
         {"key": "coding", "label": "Coding", "title": "代码"},
+        {"key": "agent", "label": "Agent", "title": "Agent 工作流"},
         {"key": "instruction_following", "label": "Instruction Following", "title": "指令遵循（IFEval 等）"},
         {"key": "function_call", "label": "Function Call", "title": "函数调用"},
         {"key": "naive", "label": "朴素榜", "title": "朴素榜"},

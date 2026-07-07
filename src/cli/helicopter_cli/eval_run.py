@@ -123,7 +123,7 @@ def infer_args_namespace(args: Any, *, port: str | None) -> argparse.Namespace:
         max_model_len=None,
         max_num_seqs=getattr(args, "max_num_seqs", None),
         max_num_batched_tokens=getattr(args, "max_num_batched_tokens", None),
-        enable_auto_tool_choice=None,
+        enable_auto_tool_choice=getattr(args, "enable_auto_tool_choice", None),
         vllm_env=getattr(args, "vllm_env", None),
     )
 
@@ -170,6 +170,7 @@ async def _ingest_scoreboard_results(
     result_files: list[str],
     model_name: str,
     root: Path,
+    job_name: str = "lighteval",
 ) -> list[str]:
     scoreboard_path = root / "src/scoreboard-server"
     if str(scoreboard_path) not in sys.path:
@@ -198,7 +199,7 @@ async def _ingest_scoreboard_results(
                     continue
                 dataset = scoreboard_dataset_name(task_name)
                 task_id = await store.get_or_create_task(
-                    job_name="lighteval",
+                    job_name=job_name,
                     job_id=None,
                     dataset=dataset,
                     model=model_name,
@@ -237,15 +238,25 @@ def _scoreboard_env(env: dict[str, str]):
 
 
 def ingest_scoreboard_results(
-    *, result_files: list[str], model_name: str, root: Path, env: dict[str, str]
+    *,
+    result_files: list[str],
+    model_name: str,
+    root: Path,
+    env: dict[str, str],
+    job_name: str = "lighteval",
 ) -> None:
     if not result_files:
-        print("eval run: no LightEval result files found; nothing to ingest into the scoreboard")
+        print("eval run: no result files found; nothing to ingest into the scoreboard")
         return
     try:
         with _scoreboard_env(env):
             recorded = asyncio.run(
-                _ingest_scoreboard_results(result_files=result_files, model_name=model_name, root=root)
+                _ingest_scoreboard_results(
+                    result_files=result_files,
+                    model_name=model_name,
+                    root=root,
+                    job_name=job_name,
+                )
             )
     except Exception as error:  # noqa: BLE001 - scoreboard ingestion must not fail the eval run
         print(f"eval run: scoreboard ingestion failed (results are still on disk): {error}")

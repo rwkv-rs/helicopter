@@ -4,6 +4,7 @@ import argparse
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .agent_harness import DEFAULT_AGENT_BENCHMARK_SOURCE, run_agent_harness
 from .commands import (
     EMB_DEVICES,
     LIGHTEVAL_BACKENDS,
@@ -18,6 +19,7 @@ from .commands import (
 from .config import load_config
 from .env import DEFAULT_ENV_FILE, load_env
 from .eval_run import DEFAULT_SERVER_TIMEOUT_S, run_eval
+from .function_calling import FC_TASKS, run_function_calling_eval
 from .paths import find_root
 from .performance import (
     base_url_from_lighteval_command,
@@ -116,6 +118,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_run.add_argument("--gpu-memory-utilization", type=float)
     eval_run.add_argument("--max-num-seqs", type=int)
     eval_run.add_argument("--max-num-batched-tokens", type=int)
+    eval_run.add_argument("--enable-auto-tool-choice", action="store_true", default=None)
     eval_run.add_argument(
         "--vllm-env",
         action="append",
@@ -143,6 +146,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="record per-task scores into the scoreboard database after the run",
     )
     eval_run.set_defaults(plan_builder=None)
+
+    fc = eval_subparsers.add_parser(
+        "function-calling",
+        aliases=("fc",),
+        help="run native OpenAI tool_calls function-calling benchmarks",
+    )
+    add_common_options(fc)
+    fc.add_argument("model", help="model alias from configs")
+    fc.add_argument(
+        "tasks",
+        nargs="?",
+        default="all",
+        help=f"comma-separated FC task ids or all; known: {', '.join(FC_TASKS)}",
+    )
+    fc.add_argument("--base-url", help="OpenAI-compatible endpoint base URL")
+    fc.add_argument("--max-samples", type=int)
+    fc.add_argument("--output-dir")
+    fc.add_argument(
+        "--no-server",
+        action="store_true",
+        help="never start vLLM; assume the endpoint is already serving",
+    )
+    fc.add_argument(
+        "--keep-server",
+        action="store_true",
+        help="leave the managed vLLM server running after the evaluation",
+    )
+    fc.add_argument(
+        "--scoreboard",
+        action="store_true",
+        help="record native tool_calls scores into the scoreboard database after the run",
+    )
+    fc.set_defaults(plan_builder=None)
 
     lighteval = eval_subparsers.add_parser("lighteval", help="run Hugging Face LightEval")
     add_common_options(lighteval)
@@ -180,6 +216,35 @@ def build_parser() -> argparse.ArgumentParser:
     lighteval_export.add_argument("--format", choices=("jsonl", "csv"), default="jsonl")
     lighteval_export.set_defaults(plan_builder=build_lighteval_export_plan)
 
+    agent_harness = eval_subparsers.add_parser(
+        "agent-harness",
+        aliases=("agent",),
+        help="inspect and prepare external agent benchmark harnesses",
+    )
+    add_common_options(agent_harness)
+    agent_harness.add_argument("agent_action", choices=("list", "preflight", "plan", "convert"))
+    agent_harness.add_argument("benchmark", nargs="?", help="benchmark id for list/preflight filtering or plan")
+    agent_harness.add_argument("--source", default=DEFAULT_AGENT_BENCHMARK_SOURCE)
+    agent_harness.add_argument("--pipeline")
+    agent_harness.add_argument("--format", choices=("text", "jsonl", "summary"), default="text")
+    agent_harness.add_argument("--model", help="model alias used when generating a harness plan")
+    agent_harness.add_argument("--base-url", help="OpenAI-compatible endpoint base URL for adapter planning")
+    agent_harness.add_argument("--output-dir", help="output directory for generated prediction or trace artifacts")
+    agent_harness.add_argument("--n-concurrent", type=int, help="official harness worker count where supported")
+    agent_harness.add_argument("--run-id", help="official harness run id")
+    agent_harness.add_argument("--input", help="RWKV/Helicopter agent output JSON or JSONL for convert")
+    agent_harness.add_argument("--output", help="converted official sandbox artifact path")
+    agent_harness.add_argument(
+        "--target",
+        choices=("auto", "intermediate", "swebench-predictions"),
+        default="auto",
+        help="conversion target for agent-harness convert",
+    )
+    agent_harness.add_argument("--allow-empty-patch", action="store_true", help="write empty SWE-bench model_patch rows")
+    agent_harness.add_argument("--allow-invalid", action="store_true", help="write valid converted rows even if some rows fail")
+    agent_harness.add_argument("--strict", action="store_true", help="preflight exits nonzero if required tools are missing")
+    agent_harness.set_defaults(plan_builder=None)
+
     return parser
 
 
@@ -193,6 +258,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if getattr(args, "eval_command", None) == "run":
         return run_eval(args, root=root, env=env, config=config)
+    if getattr(args, "eval_command", None) in {"function-calling", "fc"}:
+        return run_function_calling_eval(args, root=root, env=env, config=config)
+    if getattr(args, "eval_command", None) in {"agent-harness", "agent"}:
+        return run_agent_harness(args, root=root, env=env, config=config)
 
     plan = args.plan_builder(args, root=root, env=env, config=config)
     if getattr(args, "eval_command", None) == "lighteval" and not args.dry_run:

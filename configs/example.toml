@@ -16,6 +16,17 @@ load_tasks_multilingual = true
 custom_tasks = "src/cli/helicopter_cli/lighteval_rwkv_skills_tasks.py"
 max_new_tokens = 512
 
+[function_calling]
+output_dir = "results/function_calling"
+max_new_tokens = 768
+concurrent_requests = 1
+request_timeout = 120
+server_timeout = 600
+
+[agent_harness]
+output_dir = "results/agent_harness"
+n_concurrent = 1
+
 [takeoff.grpo]
 project_name = "verl_rwkv_grpo"
 experiment_name = "rwkv7_grpo_vllm"

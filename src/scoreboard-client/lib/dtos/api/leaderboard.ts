@@ -90,11 +90,19 @@ export interface CodingChart {
   data: { dataset: string; model: string; score: number; metric: string }[];
 }
 
+export interface AgentChart {
+  type: "agent_bar";
+  datasets: string[];
+  models: string[];
+  data: { dataset: string; model: string; score: number; metric: string }[];
+}
+
 export interface ChartPayload {
   knowledge: KnowledgeChart | null;
   math: AimeChart | null;
   instruction_following: InstructionChart | null;
   coding: CodingChart | null;
+  agent: AgentChart | null;
 }
 
 export interface LeaderboardResponse {

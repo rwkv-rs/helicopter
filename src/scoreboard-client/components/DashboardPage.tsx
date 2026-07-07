@@ -4,7 +4,7 @@ import { useState } from "react";
 
 import { api } from "../lib/api";
 import type { CapturePageResponse } from "../lib/dtos/api/capture_page";
-import type { CellMeta, LeaderboardResponse } from "../lib/dtos/api/leaderboard";
+import type { CellMeta, ChartPayload, LeaderboardResponse } from "../lib/dtos/api/leaderboard";
 import type { MetaResponse } from "../lib/dtos/api/meta";
 import { DomainCharts } from "./DomainCharts";
 import { EvalRecordsPanel } from "./EvalRecordsPanel";
@@ -33,6 +33,9 @@ export function DashboardPage({ meta, leaderboard, model, view, tab }: Props) {
     ? null
     : leaderboard.domains.find((item) => item.key === activeTab);
   const naive = leaderboard.naive_board;
+  const activeChart = activeTab in leaderboard.charts
+    ? leaderboard.charts[activeTab as keyof ChartPayload]
+    : null;
 
   const refresh = async () => {
     setRefreshError(null);
@@ -139,10 +142,10 @@ export function DashboardPage({ meta, leaderboard, model, view, tab }: Props) {
               onCellClick={setSelectedMeta}
             />
           </section>
-          {activeTab === "coding" && leaderboard.charts.coding ? (
+          {activeChart ? (
             <section className="card chart-panel">
               <div className="card-title">图表</div>
-              <DomainCharts chart={leaderboard.charts.coding} />
+              <DomainCharts chart={activeChart} />
             </section>
           ) : null}
         </>

@@ -74,7 +74,7 @@ export function DomainCharts({ chart }: { chart: ChartPayload[keyof ChartPayload
   if (chart.type === "knowledge_bar") {
     return <GroupedBar data={chart.data} dimKey="subject" models={chart.models} height={Math.max(360, chart.subjects.length * 28)} />;
   }
-  if (chart.type === "coding_bar") {
+  if (chart.type === "coding_bar" || chart.type === "agent_bar") {
     return <GroupedBar data={chart.data} dimKey="dataset" models={chart.models} height={380} />;
   }
   if (chart.type === "instruction_bar") {

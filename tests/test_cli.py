@@ -16,11 +16,15 @@ from unittest import mock
 
 from lighteval.models.model_output import ModelResponse
 
+from helicopter_cli import __main__ as helicopter_main
 from helicopter_cli import (
+    agent_format,
+    agent_harness,
     commands,
     config,
     env,
     eval_run,
+    function_calling,
     lighteval_export,
     lighteval_rwkv_skills_tasks,
     lighteval_tasks,
@@ -189,6 +193,178 @@ def build_takeoff_plan(
     with mock.patch.object(Path, "exists", autospec=True) as exists:
         exists.side_effect = lambda path: True if path == venv_python else original_exists(path)
         return commands.build_takeoff_plan(args, root=ROOT, env=loaded_env, config=loaded_config)
+
+
+class ParserTests(unittest.TestCase):
+    def test_agent_harness_parser_accepts_plan_surface(self) -> None:
+        parser = helicopter_main.build_parser()
+        args = parser.parse_args(
+            [
+                "eval",
+                "agent-harness",
+                "plan",
+                "swe_bench_verified",
+                "--model",
+                "g1d-0.4b",
+                "--output-dir",
+                "tmp/agent",
+            ]
+        )
+
+        self.assertEqual(args.eval_command, "agent-harness")
+        self.assertEqual(args.agent_action, "plan")
+        self.assertEqual(args.benchmark, "swe_bench_verified")
+        self.assertEqual(args.model, "g1d-0.4b")
+        self.assertEqual(args.output_dir, "tmp/agent")
+
+    def test_agent_harness_parser_accepts_convert_surface(self) -> None:
+        parser = helicopter_main.build_parser()
+        args = parser.parse_args(
+            [
+                "eval",
+                "agent-harness",
+                "convert",
+                "swe_bench_verified",
+                "--input",
+                "tmp/raw.jsonl",
+                "--output",
+                "tmp/predictions.jsonl",
+                "--model",
+                "g1d-0.4b",
+            ]
+        )
+
+        self.assertEqual(args.agent_action, "convert")
+        self.assertEqual(args.benchmark, "swe_bench_verified")
+        self.assertEqual(args.input, "tmp/raw.jsonl")
+        self.assertEqual(args.output, "tmp/predictions.jsonl")
+        self.assertEqual(args.target, "auto")
+
+    def test_function_calling_parser_keeps_small_lighteval_like_surface(self) -> None:
+        parser = helicopter_main.build_parser()
+        args = parser.parse_args(
+            [
+                "eval",
+                "function-calling",
+                "g1d-0.4b",
+                "bfcl_v3",
+                "--max-samples",
+                "2",
+                "--output-dir",
+                "tmp/fc",
+                "--scoreboard",
+            ]
+        )
+
+        self.assertEqual(args.eval_command, "function-calling")
+        self.assertEqual(args.model, "g1d-0.4b")
+        self.assertEqual(args.tasks, "bfcl_v3")
+        self.assertEqual(args.max_samples, 2)
+        self.assertEqual(args.output_dir, "tmp/fc")
+        self.assertTrue(args.scoreboard)
+        self.assertFalse(hasattr(args, "wkv_mode"))
+        self.assertFalse(hasattr(args, "tensor_parallel_size"))
+
+    def test_function_calling_parser_rejects_vllm_detail_flags(self) -> None:
+        parser = helicopter_main.build_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["eval", "function-calling", "g1d-0.4b", "bfcl_v3", "--wkv-mode", "fp16"])
+
+
+class FunctionCallingTests(unittest.TestCase):
+    def test_openai_tool_calls_are_normalized_and_scored(self) -> None:
+        sample = function_calling.FunctionCallingSample(
+            task_name="bfcl_exec_parallel",
+            sample_id="unit",
+            kind="bfcl",
+            messages=[],
+            tools=[],
+            specific={
+                "expected_calls_json": json.dumps(
+                    [
+                        {"name": "calc", "arguments": {"x": 1}},
+                        {"name": "lookup", "arguments": {"key": "a"}},
+                    ]
+                )
+            },
+        )
+        response = {
+            "choices": [
+                {
+                    "message": {
+                        "tool_calls": [
+                            {
+                                "type": "function",
+                                "function": {"name": "lookup", "arguments": "{\"key\":\"a\"}"},
+                            },
+                            {
+                                "type": "function",
+                                "function": {"name": "calc", "arguments": "{\"x\":1}"},
+                            },
+                        ]
+                    }
+                }
+            ]
+        }
+
+        calls = function_calling.tool_calls_from_response(response)
+
+        self.assertEqual(
+            calls,
+            [
+                {"name": "lookup", "arguments": {"key": "a"}},
+                {"name": "calc", "arguments": {"x": 1}},
+            ],
+        )
+        self.assertEqual(function_calling.score_calls(sample, calls), 1.0)
+
+    def test_function_calling_dry_run_does_not_load_samples(self) -> None:
+        args = Namespace(
+            model="g1d-0.4b",
+            tasks="bfcl_v3",
+            dry_run=True,
+            base_url=None,
+            output_dir=None,
+            max_samples=2,
+            no_server=False,
+            keep_server=False,
+            scoreboard=False,
+        )
+        with mock.patch.object(function_calling, "load_samples") as load_samples:
+            with mock.patch("sys.stdout", new=io.StringIO()):
+                exit_code = function_calling.run_function_calling_eval(
+                    args,
+                    root=ROOT,
+                    env={},
+                    config=load_example_config(),
+                )
+
+        self.assertEqual(exit_code, 0)
+        load_samples.assert_not_called()
+
+    def test_compact_response_message_keeps_content_and_finish_reason(self) -> None:
+        response = {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {
+                        "role": "assistant",
+                        "content": "plain fallback",
+                        "tool_calls": [],
+                    },
+                }
+            ]
+        }
+
+        self.assertEqual(
+            function_calling._compact_response_message(response),
+            {
+                "role": "assistant",
+                "content": "plain fallback",
+                "tool_calls": [],
+                "finish_reason": "stop",
+            },
+        )
 
 
 class DotenvTests(unittest.TestCase):
@@ -769,6 +945,326 @@ class CommandPlanTests(unittest.TestCase):
             "lcb\n",
         )
 
+    def test_lighteval_tasks_json_source_preserves_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "agent_benchmarks.json"
+            source.write_text(
+                json.dumps(
+                    {
+                        "benchmarks": [
+                            {
+                                "name": "swe_bench_verified",
+                                "field": "agent",
+                                "display_name": "SWE-bench Verified",
+                                "run_status": "local_lighteval_proxy_available",
+                                "priority": "primary",
+                            }
+                        ],
+                        "excluded": [
+                            {"name": "gpqa_diamond", "field": "knowledge"},
+                        ],
+                    }
+                )
+            )
+
+            rows = lighteval_tasks.load_source_benchmarks(str(source), "auto")
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].name, "swe_bench_verified")
+        self.assertEqual(rows[0].field, "agent")
+        self.assertEqual(rows[0].metadata["run_status"], "local_lighteval_proxy_available")
+        self.assertEqual(rows[0].metadata["priority"], "primary")
+
+        coverage = [
+            lighteval_tasks.CoverageRow(
+                source=rows[0].name,
+                field=rows[0].field,
+                status="missing",
+                target_kind=None,
+                targets=(),
+                candidates=(),
+                metadata=rows[0].metadata,
+            )
+        ]
+        json_row = json.loads(lighteval_tasks.format_coverage(coverage, "jsonl"))
+        self.assertEqual(json_row["metadata"]["display_name"], "SWE-bench Verified")
+        self.assertIn("local_lighteval_proxy_available", lighteval_tasks.format_coverage(coverage, "text"))
+
+    def test_agent_benchmark_source_excludes_non_agent_benchmarks(self) -> None:
+        raw_source = json.loads((ROOT / "benchmarks/agent_benchmarks.json").read_text())
+        rows = lighteval_tasks.load_source_benchmarks(
+            str(ROOT / "benchmarks/agent_benchmarks.json"),
+            "auto",
+        )
+        names = {row.name for row in rows}
+        pipelines = {
+            pipeline["name"]: set(pipeline["benchmarks"])
+            for pipeline in raw_source["pipelines"]
+        }
+        row_pipeline_names = {row.metadata["pipeline"] for row in rows}
+        benchmark_names = {benchmark["name"] for benchmark in raw_source["benchmarks"]}
+        excluded_names = {benchmark["name"] for benchmark in raw_source["excluded"]}
+
+        self.assertIn("swe_bench_verified", names)
+        self.assertIn("terminal_bench_2_1", names)
+        self.assertIn("mcp_atlas", names)
+        self.assertIn("hle_with_tools", names)
+        self.assertIn("hy_euler_pro", names)
+        self.assertNotIn("gpqa_diamond", names)
+        self.assertNotIn("hle_no_tools", names)
+        self.assertNotIn("cl_bench", names)
+        self.assertNotIn("hy_math", names)
+        self.assertTrue(all(row.field == "agent" for row in rows))
+        self.assertEqual(
+            set(pipelines),
+            {
+                "coding_agent",
+                "search_agent",
+                "tool_mcp_agent",
+                "office_enterprise_workflow_agent",
+                "stem_tool_agent",
+            },
+        )
+        self.assertTrue(all(row.metadata["pipeline"] in pipelines for row in rows))
+        self.assertEqual(row_pipeline_names, set(pipelines))
+        self.assertEqual(set().union(*pipelines.values()), benchmark_names)
+        self.assertTrue(benchmark_names.isdisjoint(excluded_names))
+        self.assertEqual(
+            pipelines["coding_agent"],
+            {
+                "swe_bench_verified",
+                "swe_bench_multilingual",
+                "swe_bench_pro",
+                "terminal_bench_2_1",
+                "nl2repo",
+                "deepswe",
+                "hy_backend_2_0",
+                "hy_swe_max",
+            },
+        )
+        self.assertEqual(pipelines["search_agent"], {"browsecomp", "wide_search", "deepsearchqa"})
+        self.assertEqual(
+            pipelines["tool_mcp_agent"],
+            {"mcp_atlas", "toolathlon", "skillsbench", "hy_skillsworld"},
+        )
+        self.assertEqual(
+            pipelines["office_enterprise_workflow_agent"],
+            {
+                "apex_agents",
+                "claweval",
+                "wildclawbench",
+                "hy_companybench",
+                "prodbench",
+                "hy_finmodelbench",
+                "e_bench",
+            },
+        )
+        self.assertEqual(pipelines["stem_tool_agent"], {"hle_with_tools", "hy_euler_pro"})
+
+    def test_agent_harness_source_binds_every_benchmark_to_profile(self) -> None:
+        source = agent_harness.load_agent_harness_source(ROOT, None)
+        names = {row.name for row in source.benchmarks}
+
+        self.assertIn("swe_bench_verified", names)
+        self.assertIn("terminal_bench_2_1", names)
+        self.assertIn("mcp_atlas", names)
+        self.assertIn("hle_with_tools", names)
+        self.assertIn("swebench_official_docker", source.profiles)
+        self.assertIn("terminal_bench_official_docker", source.profiles)
+        self.assertTrue(all(row.harness_profile in source.profiles for row in source.benchmarks))
+        self.assertEqual(
+            source.profiles["swebench_official_docker"].entrypoint,
+            "python -m swebench.harness.run_evaluation",
+        )
+        self.assertEqual(source.profiles["terminal_bench_official_docker"].sandbox, "docker")
+
+    def test_agent_harness_preflight_reports_missing_required_tool(self) -> None:
+        source = agent_harness.load_agent_harness_source(ROOT, None)
+
+        with mock.patch.object(agent_harness.shutil, "which", return_value=None):
+            rows = agent_harness.preflight_rows(
+                source,
+                pipeline=None,
+                benchmark="swe_bench_verified",
+            )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].status, "blocked")
+        self.assertEqual(rows[0].missing_tools, ("docker",))
+
+    def test_agent_harness_preflight_distinguishes_local_proxy_from_official_harness(self) -> None:
+        source = agent_harness.load_agent_harness_source(ROOT, None)
+
+        with mock.patch.object(agent_harness.shutil, "which", return_value="/usr/bin/docker"):
+            rows = agent_harness.preflight_rows(
+                source,
+                pipeline=None,
+                benchmark="swe_bench_verified",
+            )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].status, "local_proxy_available_official_harness_required")
+
+    def test_agent_harness_swebench_plan_uses_official_docker_harness(self) -> None:
+        source = agent_harness.load_agent_harness_source(ROOT, None)
+        args = Namespace(
+            benchmark="swe_bench_verified",
+            model="g1d-0.4b",
+            base_url="http://127.0.0.1:8000/v1",
+            output_dir="tmp/agent",
+            n_concurrent=2,
+            run_id="unit",
+        )
+
+        plan = agent_harness.plan_for_benchmark(
+            source,
+            root=ROOT,
+            env={},
+            config=load_example_config(),
+            args=args,
+        )
+
+        self.assertEqual(plan["benchmark"]["name"], "swe_bench_verified")
+        self.assertEqual(plan["harness_profile"]["kind"], "swebench")
+        self.assertEqual(plan["steps"][0]["schema"]["model_patch"], "unified diff patch generated by the coding agent")
+        self.assertEqual(
+            plan["steps"][1]["command"][:3],
+            ["python", "-m", "swebench.harness.run_evaluation"],
+        )
+        self.assertIn("SWE-bench/SWE-bench_Verified", plan["steps"][1]["command"])
+        self.assertIn("--predictions_path", plan["steps"][1]["command"])
+        self.assertIn("--max_workers", plan["steps"][1]["command"])
+        self.assertIn("2", plan["steps"][1]["command"])
+
+    def test_agent_format_extracts_swebench_predictions_from_rwkv_response(self) -> None:
+        patch = "--- a/example.py\n+++ b/example.py\n@@ -1 +1 @@\n-old\n+new\n"
+        records = [
+            {
+                "sample_id": "repo__project-1",
+                "response_message": {
+                    "role": "assistant",
+                    "content": f"Here is the fix:\n```diff\n{patch}```",
+                    "finish_reason": "stop",
+                },
+            }
+        ]
+
+        rows, errors = agent_format.swebench_prediction_rows(
+            records,
+            model="g1d-0.4b",
+        )
+
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            rows,
+            [
+                {
+                    "instance_id": "repo__project-1",
+                    "model_name_or_path": "g1d-0.4b",
+                    "model_patch": patch,
+                }
+            ],
+        )
+
+    def test_agent_format_reports_missing_swebench_patch(self) -> None:
+        rows, errors = agent_format.swebench_prediction_rows(
+            [{"instance_id": "repo__project-1", "output": "I cannot fix this."}],
+            model="g1d-0.4b",
+        )
+
+        self.assertEqual(rows, [])
+        self.assertEqual(errors[0].reason, "missing unified diff patch")
+        self.assertIn("repo__project-1", agent_format.conversion_errors_text(errors))
+
+    def test_agent_harness_convert_writes_swebench_predictions_jsonl(self) -> None:
+        source = agent_harness.load_agent_harness_source(ROOT, None)
+        patch = "--- a/example.py\n+++ b/example.py\n@@ -1 +1 @@\n-old\n+new\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            input_path = Path(tmp) / "rwkv.jsonl"
+            output_path = Path(tmp) / "predictions.jsonl"
+            input_path.write_text(
+                json.dumps(
+                    {
+                        "instance_id": "repo__project-1",
+                        "output": f"<patch>\n{patch}</patch>",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            args = Namespace(
+                benchmark="swe_bench_verified",
+                input=str(input_path),
+                output=str(output_path),
+                model="g1d-0.4b",
+                target="auto",
+                allow_empty_patch=False,
+                allow_invalid=False,
+            )
+
+            result = agent_harness.convert_agent_outputs(source, root=ROOT, args=args)
+
+            rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(result["target"], "swebench-predictions")
+        self.assertEqual(result["written"], 1)
+        self.assertEqual(rows[0]["instance_id"], "repo__project-1")
+        self.assertEqual(rows[0]["model_patch"], patch)
+
+    def test_agent_format_reads_multirow_jsonl(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "records.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"instance_id": "repo__project-1", "output": "first"}),
+                        json.dumps({"instance_id": "repo__project-2", "output": "second"}),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            records = agent_format.read_json_records(path)
+
+        self.assertEqual([record["instance_id"] for record in records], ["repo__project-1", "repo__project-2"])
+
+    def test_agent_format_intermediate_rows_keep_patch_artifact_and_metadata(self) -> None:
+        patch = "diff --git a/example.py b/example.py\n--- a/example.py\n+++ b/example.py\n@@ -1 +1 @@\n-old\n+new\n"
+
+        rows, errors = agent_format.canonical_intermediate_rows(
+            [
+                {
+                    "task_id": "repo__project-1",
+                    "model": "rwkv",
+                    "output": patch,
+                    "score": 0.0,
+                }
+            ],
+            benchmark="swe_bench_verified",
+            model="g1d-0.4b",
+        )
+
+        self.assertEqual(errors, [])
+        self.assertEqual(rows[0]["format"], agent_format.INTERMEDIATE_FORMAT)
+        self.assertEqual(rows[0]["sample_id"], "repo__project-1")
+        self.assertEqual(rows[0]["artifacts"]["patch"], patch)
+        self.assertEqual(rows[0]["metadata"]["score"], 0.0)
+
+    def test_scoreboard_domain_classifies_agent_scope_narrowly(self) -> None:
+        scoreboard_path = ROOT / "src/scoreboard-server"
+        if str(scoreboard_path) not in sys.path:
+            sys.path.insert(0, str(scoreboard_path))
+        from scoreboard_server.cores.normalize import domain_for
+
+        self.assertEqual(domain_for("swe_bench_verified"), "agent")
+        self.assertEqual(domain_for("browsecomp"), "agent")
+        self.assertEqual(domain_for("mcp_bench_multi_2server"), "agent")
+        self.assertEqual(domain_for("tau3_bench_mock"), "agent")
+        self.assertEqual(domain_for("bfcl_v3"), "function_call")
+        self.assertEqual(domain_for("toolalpaca_eval_real"), "function_call")
+        self.assertEqual(domain_for("gpqa_diamond"), "knowledge")
+        self.assertEqual(domain_for("cl_bench"), "knowledge")
+        self.assertEqual(domain_for("matharena_apex"), "math")
+
     def test_lighteval_tasks_judges_classifies_builtin_and_custom_metrics(self) -> None:
         class UpstreamAvgAtN:
             pass
@@ -833,6 +1329,7 @@ class CommandPlanTests(unittest.TestCase):
         self.assertIn("E. four", doc.query)
 
     def test_rwkv_skills_custom_tasks_include_direct_math_and_code_ids(self) -> None:
+        registered_tasks = {task.name for task in lighteval_rwkv_skills_tasks.TASKS_TABLE}
         self.assertTrue(
             {
                 "algebra222",
@@ -841,28 +1338,11 @@ class CommandPlanTests(unittest.TestCase):
                 "arena_hard_v2",
                 "agentbench_db",
                 "agentbench_kg",
-                "apibank_l1",
-                "apibank_l2",
-                "apibank_level1",
-                "apibank_level2",
-                "toolalpaca_eval_real",
-                "toolalpaca_eval_simulated",
                 "beyond_aime",
-                "bfcl_multiple",
-                "bfcl_exec_multiple",
-                "bfcl_exec_multiple_ast",
-                "bfcl_exec_parallel",
-                "bfcl_exec_parallel_multiple",
-                "bfcl_simple_python",
-                "bfcl_exec_simple",
-                "bfcl_exec_simple_ast",
-                "bfcl_v3",
                 "brumo25",
                 "browsecomp",
                 "browsecomp_plus",
                 "browsecomp_zh",
-                "complexfuncbench_official",
-                "complexfuncbench_subset",
                 "college_math",
                 "comp_math_24_25",
                 "gaokao2023en",
@@ -874,7 +1354,6 @@ class CommandPlanTests(unittest.TestCase):
                 "human_eval_plus",
                 "longbench",
                 "longbench_qa",
-                "longbench_qa_balanced",
                 "longcodeqa",
                 "mcp_bench",
                 "mcp_bench_multi_2server",
@@ -882,7 +1361,6 @@ class CommandPlanTests(unittest.TestCase):
                 "mcp_bench_single",
                 "math_odyssey",
                 "mawps",
-                "mbpp",
                 "mbpp_plus",
                 "minerva_math",
                 "omni_math",
@@ -907,7 +1385,31 @@ class CommandPlanTests(unittest.TestCase):
                 "tau3_bench_mock",
                 "tau3_bench_mock_long_context",
                 "wmt24pp",
-            }.issubset({task.name for task in lighteval_rwkv_skills_tasks.TASKS_TABLE})
+            }.issubset(registered_tasks)
+        )
+        self.assertFalse(
+            {
+                "apibank_l1",
+                "apibank_l2",
+                "apibank_level1",
+                "apibank_level2",
+                "bfcl_multiple",
+                "bfcl_exec_multiple",
+                "bfcl_exec_multiple_ast",
+                "bfcl_exec_parallel",
+                "bfcl_exec_parallel_multiple",
+                "bfcl_simple_python",
+                "bfcl_exec_simple",
+                "bfcl_exec_simple_ast",
+                "bfcl_v3",
+                "complexfuncbench_official",
+                "complexfuncbench_subset",
+                "longbench_qa_balanced",
+                "mbpp",
+                "toolalpaca_eval_real",
+                "toolalpaca_eval_simulated",
+            }
+            & registered_tasks
         )
 
     def test_polymath_task_aggregates_all_languages_and_levels(self) -> None:
@@ -2463,7 +2965,7 @@ class EvalRunTests(unittest.TestCase):
     def test_scoreboard_dataset_name_strips_fewshot_and_suite(self) -> None:
         self.assertEqual(eval_run.scoreboard_dataset_name("gsm8k|0"), "gsm8k")
         self.assertEqual(eval_run.scoreboard_dataset_name("extended|mmlu|5"), "mmlu")
-        self.assertEqual(eval_run.scoreboard_dataset_name("apibank_l1"), "apibank_l1")
+        self.assertEqual(eval_run.scoreboard_dataset_name("apibank_level1"), "apibank_level1")
 
     def test_scoreboard_model_name_prefers_served_model_name(self) -> None:
         loaded = load_example_config()

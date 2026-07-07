@@ -18,6 +18,7 @@ def serialize_charts(entries: list[dict[str, Any]]) -> dict[str, Any]:
         "math": _math_chart(entries),
         "instruction_following": _instruction_chart(entries),
         "coding": _coding_chart(entries),
+        "agent": _agent_chart(entries),
     }
 
 
@@ -111,11 +112,19 @@ def _instruction_chart(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
 
 
 def _coding_chart(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    return _benchmark_score_chart(entries, domain="coding", chart_type="coding_bar")
+
+
+def _agent_chart(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    return _benchmark_score_chart(entries, domain="agent", chart_type="agent_bar")
+
+
+def _benchmark_score_chart(entries: list[dict[str, Any]], *, domain: str, chart_type: str) -> dict[str, Any] | None:
     data: list[dict[str, Any]] = []
     datasets: set[str] = set()
     for entry in entries:
         dataset = str(entry.get("dataset") or "")
-        if domain_for(dataset, entry.get("task")) != "coding":
+        if domain_for(dataset, entry.get("task")) != domain:
             continue
         metric, value = metric_from_context(entry.get("metrics") or {}, entry.get("sampling_config"))
         if value is None:
@@ -132,7 +141,7 @@ def _coding_chart(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
         )
     if not data:
         return None
-    return {"type": "coding_bar", "datasets": sorted(datasets), "models": _chart_models(data), "data": data}
+    return {"type": chart_type, "datasets": sorted(datasets), "models": _chart_models(data), "data": data}
 
 
 def _dataset_base(dataset: str) -> str:

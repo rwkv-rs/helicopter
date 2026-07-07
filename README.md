@@ -73,6 +73,8 @@ Important config sections:
 - `[datasets.<name>]`: maps a dataset alias to a dataset root.
 - `[infer]`: vLLM serving defaults.
 - `[lighteval]`: LightEval endpoint, output, and custom-task defaults.
+- `[function_calling]`: native OpenAI `tool_calls` benchmark defaults.
+- `[agent_harness]`: external agent harness planning defaults.
 - `[takeoff.grpo]`: verl GRPO training defaults.
 
 Scoreboard database settings are read from `SCOREBOARD_DB_*` first and then
@@ -211,6 +213,27 @@ overrides such as `--wkv-mode`, `--emb-device`,
 `--max-num-batched-tokens`. The task argument can be omitted when
 `[lighteval].tasks` is set in the selected config.
 
+### Run Function Calling
+
+Function-calling benchmarks use the native OpenAI-compatible `tools` request and
+`message.tool_calls` response path. They are not registered as LightEval custom
+tasks, so there is only one FC score path:
+
+```bash
+helicopter eval function-calling \
+  --config configs/example.toml \
+  g1d-0.4b bfcl_v3 \
+  --max-samples 2 \
+  --scoreboard
+```
+
+Use `all` or omit the task argument to run every native FC task. Supported task
+ids are BFCL, APIBank, ComplexFuncBench, and ToolAlpaca variants. Runtime knobs
+such as token cap, request timeout, concurrency, and managed-server timeout live
+under `[function_calling]` or `HELICOPTER_FC_*` environment variables; the CLI
+surface intentionally stays small. Managed local runs automatically start vLLM
+with `--enable-auto-tool-choice`.
+
 Inspect the available custom tasks and metric status before treating results as
 formal scores:
 
@@ -224,9 +247,50 @@ official benchmark harness. Examples include Arena-Hard baseline token F1,
 SWE-Bench patch token F1 or nonempty checks, and TAU static-plan token F1.
 `lighteval-tasks judges` marks these cases explicitly.
 
-The custom task registry still carries a small set of duplicate aliases in
-`KNOWN_DUPLICATE_TASK_CONFIGS` so existing downstream task names remain
-runnable. Those aliases should be cleaned up only with a registry migration.
+The agent benchmark scope is tracked separately from the runnable LightEval task
+registry:
+
+```bash
+helicopter eval lighteval-tasks coverage \
+  --source benchmarks/agent_benchmarks.json \
+  --format summary
+helicopter eval lighteval-tasks coverage \
+  --source benchmarks/agent_benchmarks.json \
+  --format jsonl
+```
+
+Only rows with direct LightEval coverage can be run through `eval run`. Rows
+marked in the source metadata as `external_harness_required` need their official
+agent harness before they should be treated as reproducible agent scores.
+The source file groups agent benchmarks into five run-planning pipelines:
+`coding_agent`, `search_agent`, `tool_mcp_agent`,
+`office_enterprise_workflow_agent`, and `stem_tool_agent`. Reasoning, math,
+context-learning, and long-context benchmarks are kept under `excluded` unless
+they require tool-using agent behavior.
+
+Prepare external agent harnesses separately from LightEval:
+
+```bash
+helicopter eval agent-harness list --format text
+helicopter eval agent-harness preflight --pipeline coding_agent --strict
+helicopter eval agent-harness plan swe_bench_verified \
+  --model g1d-0.4b \
+  --output-dir results/agent_harness
+helicopter eval agent-harness convert swe_bench_verified \
+  --input results/agent_harness/swe_bench_verified/rwkv_outputs.jsonl \
+  --output results/agent_harness/swe_bench_verified/predictions.jsonl \
+  --model g1d-0.4b
+```
+
+This command does not rewrite official sandboxes. It records which official
+harness should own execution and verification. For example, SWE-bench planning
+emits the patch-prediction artifact expected by the official Docker harness,
+while Terminal-Bench planning marks the OpenAI-compatible terminal agent adapter
+as the next required layer before `tb run` or `harbor run` should be used.
+The `convert` step is the middle-format boundary: RWKV or Helicopter raw output
+is normalized to `helicopter_agent_v1` internally, then exported to the official
+artifact shape. For SWE-bench that artifact is `predictions.jsonl` with
+`instance_id`, `model_name_or_path`, and `model_patch`.
 
 ### Start GRPO takeoff training
 

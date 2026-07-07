@@ -14,6 +14,7 @@ from typing import Any
 class SourceBenchmark:
     name: str
     field: str | None = None
+    metadata: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,7 @@ class CoverageRow:
     target_kind: str | None
     targets: tuple[str, ...]
     candidates: tuple[str, ...]
+    metadata: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -129,26 +131,6 @@ CUSTOM_JUDGE_META: dict[str, tuple[str, str, str]] = {
         "sanity",
         "nonempty",
         "Only checks that the model emitted a response.",
-    ),
-    "bfcl_accuracy": (
-        "ready",
-        "tool_call_exact_match",
-        "Parses JSON/tool-call output and matches normalized expected calls.",
-    ),
-    "apibank_accuracy": (
-        "ready",
-        "sandbox_execution",
-        "Replays API-Bank sandbox when available, with normalized argument fallback.",
-    ),
-    "complexfuncbench_call_accuracy": (
-        "ready",
-        "tool_call_exact_match",
-        "Parses tool calls and compares against expected call turns.",
-    ),
-    "toolalpaca_accuracy": (
-        "ready",
-        "tool_sequence_execution",
-        "Executes expected and predicted tool sequences in the local sandbox.",
     ),
     "code_pass@1": (
         "ready",
@@ -530,7 +512,12 @@ def source_benchmark_from_value(value: Any) -> SourceBenchmark:
         if not name:
             raise SystemExit(f"source benchmark row is missing name/benchmark/task: {value!r}")
         field = value.get("field", value.get("category"))
-        return SourceBenchmark(name=str(name), field=str(field) if field else None)
+        metadata = {
+            str(key): item
+            for key, item in value.items()
+            if key not in {"name", "benchmark", "task", "field", "category"}
+        }
+        return SourceBenchmark(name=str(name), field=str(field) if field else None, metadata=metadata or None)
     raise SystemExit(f"unsupported source benchmark row: {value!r}")
 
 
@@ -665,6 +652,7 @@ def coverage_rows(args: argparse.Namespace) -> list[CoverageRow]:
                 target_kind=target_kind,
                 targets=targets,
                 candidates=candidates,
+                metadata=source.metadata,
             )
         )
     return rows
@@ -697,7 +685,7 @@ def format_coverage(rows: list[CoverageRow], output_format: str) -> str:
         ]
         lines.extend(f"status\t{status}\t{count}" for status, count in status_counts)
         return "\n".join(lines) + "\n"
-    lines = ["source\tfield\tstatus\ttarget_kind\ttargets\tcandidates"]
+    lines = ["source\tfield\tstatus\ttarget_kind\ttargets\tcandidates\tmetadata"]
     for row in rows:
         lines.append(
             "\t".join(
@@ -708,6 +696,7 @@ def format_coverage(rows: list[CoverageRow], output_format: str) -> str:
                     row.target_kind or "",
                     ",".join(row.targets),
                     ",".join(row.candidates),
+                    json.dumps(row.metadata or {}, ensure_ascii=False, sort_keys=True),
                 ]
             )
         )

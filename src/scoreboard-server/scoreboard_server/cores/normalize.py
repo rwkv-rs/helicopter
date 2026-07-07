@@ -22,10 +22,46 @@ DOMAIN_GROUPS: tuple[dict[str, Any], ...] = (
     {"key": "knowledge", "label": "Knowledge", "title": "知识类（MMLU / Multi-choice）"},
     {"key": "math", "label": "Math", "title": "数学推理（AIME / Math-500 等）"},
     {"key": "coding", "label": "Coding", "title": "代码"},
+    {"key": "agent", "label": "Agent", "title": "Agent 工作流"},
     {"key": "instruction_following", "label": "Instruction Following", "title": "指令遵循（IFEval 等）"},
     {"key": "function_call", "label": "Function Call", "title": "函数调用"},
 )
 EVAL_PAGE_SIZE = 15
+
+AGENT_BENCHMARK_TOKENS = (
+    "agentbench",
+    "apex_agent",
+    "apex_agents",
+    "browsecomp",
+    "claweval",
+    "deepsearchqa",
+    "deepswe",
+    "e_bench",
+    "hle_with_tools",
+    "hy_backend",
+    "hy_companybench",
+    "hy_euler",
+    "hy_finmodelbench",
+    "hy_math",
+    "hy_skillsworld",
+    "hy_swe",
+    "mcp_atlas",
+    "mcp_bench",
+    "nl2repo",
+    "prodbench",
+    "skillsbench",
+    "swe_bench",
+    "swebench",
+    "tau_bench",
+    "tau2_bench",
+    "tau3_bench",
+    "terminal_bench",
+    "terminalbench",
+    "toolathlon",
+    "wide_search",
+    "widesearch",
+    "wildclawbench",
+)
 
 
 def now_utc_naive() -> datetime:
@@ -245,6 +281,10 @@ def _metric_k(key: str) -> float:
 
 def domain_for(dataset: str, evaluator: Any = None) -> str:
     token = f"{dataset} {evaluator or ''}".lower()
+    normalized_token = re.sub(r"[^a-z0-9]+", "_", token).strip("_")
+    compact_token = re.sub(r"[^a-z0-9]+", "", token)
+    if any(part in normalized_token or part in compact_token for part in AGENT_BENCHMARK_TOKENS):
+        return "agent"
     if any(part in token for part in ("human_eval", "humaneval", "mbpp", "livecodebench", "code")):
         return "coding"
     if any(part in token for part in ("ifeval", "instruction")):
