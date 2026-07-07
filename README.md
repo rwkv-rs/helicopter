@@ -7,6 +7,8 @@ in one repository, with a small CLI for launching common workflows.
 The current focus is RWKV7:
 
 - `infer`: start a vLLM server for an RWKV checkpoint.
+- `eval`: run LightEval tasks against an OpenAI-compatible endpoint, or run a
+  managed one-shot evaluation that starts and stops vLLM automatically.
 - `takeoff`: start verl training for an RWKV checkpoint. The supported takeoff
   path is GRPO.
 - `scripts/install_remote.sh`: prepare the BBT DevPod GPU workspace, sync this
@@ -25,6 +27,8 @@ scripts/
   install_local.sh          # prepare the current machine/workspace
   install_remote.sh         # sync and prepare the remote DevPod workspace
 src/cli/helicopter_cli/     # Python CLI package
+src/scoreboard-server/      # FastAPI scoreboard API and PostgreSQL store
+src/scoreboard-client/      # Next.js scoreboard UI
 src/infer/vllm-rwkv/        # vLLM RWKV implementation
 src/train/rwkv-lm/          # RWKV training code
 src/train/verl-rwkv/        # verl RWKV integration
@@ -68,7 +72,20 @@ Important config sections:
 - `[models.<name>]`: maps a CLI model alias to a checkpoint file or path.
 - `[datasets.<name>]`: maps a dataset alias to a dataset root.
 - `[infer]`: vLLM serving defaults.
+- `[lighteval]`: LightEval endpoint, output, and custom-task defaults.
 - `[takeoff.grpo]`: verl GRPO training defaults.
+
+Scoreboard database settings are read from `SCOREBOARD_DB_*` first and then
+from standard `PG*` variables. This matters for `helicopter eval run
+--scoreboard`, because the CLI loads dotenv files before writing results into
+the scoreboard database:
+
+```text
+SCOREBOARD_DB_HOST=/var/run/postgresql
+SCOREBOARD_DB_PORT=5432
+SCOREBOARD_DB_USER=postgres
+SCOREBOARD_DB_NAME=helicopter
+```
 
 ## Prepare the environment
 
@@ -154,6 +171,62 @@ preprocessing on GPU with `HELICOPTER_TAKEOFF_EMB_DEVICE=gpu`:
 ```bash
 VLLM_RWKV7_WKV_MODE=fp32io16 helicopter infer g1g-1.5b
 ```
+
+### Run LightEval
+
+Use `eval lighteval` when a compatible endpoint is already running:
+
+```bash
+helicopter eval lighteval \
+  --config configs/example.toml \
+  g1g-1.5b "gsm8k|0" \
+  --max-samples 2
+```
+
+Use `eval run` for a managed one-shot evaluation. For a local endpoint URL, the
+command starts vLLM in the background, waits for `/v1/models`, runs LightEval,
+writes a performance report, optionally records scores into the scoreboard
+database, and stops the managed server:
+
+```bash
+helicopter eval run \
+  --config configs/example.toml \
+  g1d-0.4b "gsm8k|0" \
+  --max-samples 2 \
+  --scoreboard
+```
+
+Useful run-control options:
+
+```bash
+helicopter eval run g1d-0.4b "gsm8k|0" --dry-run
+helicopter eval run g1d-0.4b "gsm8k|0" --no-server
+helicopter eval run g1d-0.4b "gsm8k|0" --keep-server
+helicopter eval run g1d-0.4b "gsm8k|0" --server-timeout 900
+```
+
+`eval run` forwards the same LightEval options as `eval lighteval`, plus serving
+overrides such as `--wkv-mode`, `--emb-device`,
+`--gpu-memory-utilization`, `--max-num-seqs`, and
+`--max-num-batched-tokens`. The task argument can be omitted when
+`[lighteval].tasks` is set in the selected config.
+
+Inspect the available custom tasks and metric status before treating results as
+formal scores:
+
+```bash
+helicopter eval lighteval-tasks export --contains gsm8k --format text
+helicopter eval lighteval-tasks judges --format summary
+```
+
+Some custom tasks intentionally use proxy or sanity metrics rather than the
+official benchmark harness. Examples include Arena-Hard baseline token F1,
+SWE-Bench patch token F1 or nonempty checks, and TAU static-plan token F1.
+`lighteval-tasks judges` marks these cases explicitly.
+
+The custom task registry still carries a small set of duplicate aliases in
+`KNOWN_DUPLICATE_TASK_CONFIGS` so existing downstream task names remain
+runnable. Those aliases should be cleaned up only with a registry migration.
 
 ### Start GRPO takeoff training
 
