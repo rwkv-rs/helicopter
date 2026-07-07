@@ -6,6 +6,11 @@ import { api } from "../lib/api";
 export const dynamic = "force-dynamic";
 
 type SearchParams = Promise<Record<string, string | string[] | undefined>>;
+const PAGE_BASE = (process.env.NEXT_PUBLIC_BASE_PATH || "/new-eval").replace(/\/$/, "");
+
+function pageHref(path: string): string {
+  return PAGE_BASE ? `${PAGE_BASE}${path}` : path;
+}
 
 function value(params: Record<string, string | string[] | undefined>, key: string, fallback: string): string {
   const raw = params[key];
@@ -35,13 +40,13 @@ export default async function Home({ searchParams }: { searchParams: SearchParam
           </div>
         </div>
         <nav className="page-nav">
-          <a className={page === "dashboard" ? "active" : ""} href={`/?page=dashboard&view=${view}&model=${encodeURIComponent(selectedModel)}&tab=${tab}`}>
+          <a className={page === "dashboard" ? "active" : ""} href={pageHref(`/?page=dashboard&view=${view}&model=${encodeURIComponent(selectedModel)}&tab=${tab}`)}>
             评测看板
           </a>
-          <a className={page === "history" ? "active" : ""} href="/?page=history">
+          <a className={page === "history" ? "active" : ""} href={pageHref("/?page=history")}>
             分数历史
           </a>
-          <a className={page === "admin" ? "active" : ""} href="/?page=admin">
+          <a className={page === "admin" ? "active" : ""} href={pageHref("/?page=admin")}>
             管理面板
           </a>
         </nav>

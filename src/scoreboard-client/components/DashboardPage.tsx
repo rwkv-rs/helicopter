@@ -18,6 +18,11 @@ interface Props {
   view: string;
   tab: string;
 }
+const PAGE_BASE = (process.env.NEXT_PUBLIC_BASE_PATH || "/new-eval").replace(/\/$/, "");
+
+function pageHref(path: string): string {
+  return PAGE_BASE ? `${PAGE_BASE}${path}` : path;
+}
 
 export function DashboardPage({ meta, leaderboard, model, view, tab }: Props) {
   const [selectedMeta, setSelectedMeta] = useState<CellMeta | null>(null);
@@ -72,7 +77,7 @@ export function DashboardPage({ meta, leaderboard, model, view, tab }: Props) {
       {leaderboard.errors.length > 0 ? <div className="error-bar">{leaderboard.errors.join("; ")}</div> : null}
       {refreshError ? <div className="error-bar">刷新失败：{refreshError}</div> : null}
       <section className="card">
-        <form className="controls" action="/" method="get">
+        <form className="controls" action={pageHref("/")} method="get">
           <input type="hidden" name="page" value="dashboard" />
           <div className="control-group">
             <label>模型选择</label>
@@ -110,7 +115,7 @@ export function DashboardPage({ meta, leaderboard, model, view, tab }: Props) {
           <a
             key={group.key}
             className={`tab${activeTab === group.key ? " active" : ""}`}
-            href={`/?page=dashboard&model=${encodeURIComponent(model)}&view=${view}&tab=${group.key}`}
+            href={pageHref(`/?page=dashboard&model=${encodeURIComponent(model)}&view=${view}&tab=${group.key}`)}
           >
             {group.label}
           </a>
