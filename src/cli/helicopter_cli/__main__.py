@@ -17,6 +17,7 @@ from .commands import (
 )
 from .config import load_config
 from .env import DEFAULT_ENV_FILE, load_env
+from .eval_run import DEFAULT_SERVER_TIMEOUT_S, run_eval
 from .paths import find_root
 from .performance import (
     base_url_from_lighteval_command,
@@ -31,6 +32,34 @@ def add_common_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", help="TOML config path; defaults to the newest configs/local/*.toml")
     parser.add_argument("--env-file", default=DEFAULT_ENV_FILE, help="dotenv file to load first")
     parser.add_argument("--dry-run", action="store_true", help="print the command without executing it")
+
+
+def add_lighteval_run_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--backend", choices=LIGHTEVAL_BACKENDS, default="endpoint-litellm")
+    parser.add_argument("--model-args", help="raw LightEval model args string or YAML config path")
+    parser.add_argument("--lighteval-model-name", help="model name passed to LightEval/LiteLLM")
+    parser.add_argument("--base-url", help="OpenAI-compatible endpoint base URL")
+    parser.add_argument("--provider", help="LiteLLM provider prefix; defaults to openai")
+    parser.add_argument("--api-key", help="API key passed through OPENAI_API_KEY")
+    parser.add_argument("--concurrent-requests", type=int)
+    parser.add_argument("--max-model-length", type=int)
+    parser.add_argument("--max-new-tokens", type=int, help="cap generated tokens through LightEval generation_parameters")
+    parser.add_argument("--max-samples", type=int)
+    parser.add_argument("--output-dir")
+    parser.add_argument("--dataset-loading-processes", type=int)
+    parser.add_argument("--num-fewshot-seeds", type=int)
+    parser.add_argument("--custom-tasks", help="custom LightEval task Python file")
+    parser.add_argument("--load-tasks-multilingual", action="store_true", default=None)
+    parser.add_argument("--save-details", dest="save_details", action="store_true", default=None)
+    parser.add_argument("--no-save-details", dest="save_details", action="store_false")
+    parser.add_argument("--push-to-hub", action="store_true", default=None)
+    parser.add_argument("--public-run", action="store_true", default=None)
+    parser.add_argument("--results-org")
+    parser.add_argument("--job-id", type=int)
+    parser.add_argument("--extra", action="append", help="extra argument passed to LightEval")
+    parser.add_argument("--performance-output", help="write run performance metrics JSON here")
+    parser.add_argument("--metrics-url", help="Prometheus metrics URL for token throughput; defaults to <base-url without /v1>/metrics")
+    parser.add_argument("--scoreboard-task-id", help="merge performance metrics into this scoreboard task score")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -69,35 +98,57 @@ def build_parser() -> argparse.ArgumentParser:
     eval_parser = subparsers.add_parser("eval", help="run model evaluations")
     eval_subparsers = eval_parser.add_subparsers(dest="eval_command", required=True)
 
+    eval_run = eval_subparsers.add_parser(
+        "run",
+        help="one-shot evaluation: start vLLM, run LightEval, stop vLLM",
+    )
+    add_common_options(eval_run)
+    eval_run.add_argument("model", help="model alias from configs")
+    eval_run.add_argument(
+        "tasks",
+        nargs="?",
+        help="LightEval task string; defaults to [lighteval].tasks from the config",
+    )
+    add_lighteval_run_options(eval_run)
+    eval_run.add_argument("--wkv-mode", choices=WKV_MODES)
+    eval_run.add_argument("--emb-device", choices=EMB_DEVICES)
+    eval_run.add_argument("--tensor-parallel-size", type=int)
+    eval_run.add_argument("--gpu-memory-utilization", type=float)
+    eval_run.add_argument("--max-num-seqs", type=int)
+    eval_run.add_argument("--max-num-batched-tokens", type=int)
+    eval_run.add_argument(
+        "--vllm-env",
+        action="append",
+        help="explicit VLLM_* environment override for the managed server",
+    )
+    eval_run.add_argument(
+        "--no-server",
+        action="store_true",
+        help="never start vLLM; assume the endpoint is already serving",
+    )
+    eval_run.add_argument(
+        "--keep-server",
+        action="store_true",
+        help="leave the managed vLLM server running after the evaluation",
+    )
+    eval_run.add_argument(
+        "--server-timeout",
+        type=float,
+        default=DEFAULT_SERVER_TIMEOUT_S,
+        help="seconds to wait for the managed vLLM server to become healthy",
+    )
+    eval_run.add_argument(
+        "--scoreboard",
+        action="store_true",
+        help="record per-task scores into the scoreboard database after the run",
+    )
+    eval_run.set_defaults(plan_builder=None)
+
     lighteval = eval_subparsers.add_parser("lighteval", help="run Hugging Face LightEval")
     add_common_options(lighteval)
     lighteval.add_argument("model", help="model alias from configs")
     lighteval.add_argument("tasks", help="LightEval task string, e.g. 'gsm8k' or 'gsm8k|0'")
-    lighteval.add_argument("--backend", choices=LIGHTEVAL_BACKENDS, default="endpoint-litellm")
-    lighteval.add_argument("--model-args", help="raw LightEval model args string or YAML config path")
-    lighteval.add_argument("--lighteval-model-name", help="model name passed to LightEval/LiteLLM")
-    lighteval.add_argument("--base-url", help="OpenAI-compatible endpoint base URL")
-    lighteval.add_argument("--provider", help="LiteLLM provider prefix; defaults to openai")
-    lighteval.add_argument("--api-key", help="API key passed through OPENAI_API_KEY")
-    lighteval.add_argument("--concurrent-requests", type=int)
-    lighteval.add_argument("--max-model-length", type=int)
-    lighteval.add_argument("--max-new-tokens", type=int, help="cap generated tokens through LightEval generation_parameters")
-    lighteval.add_argument("--max-samples", type=int)
-    lighteval.add_argument("--output-dir")
-    lighteval.add_argument("--dataset-loading-processes", type=int)
-    lighteval.add_argument("--num-fewshot-seeds", type=int)
-    lighteval.add_argument("--custom-tasks", help="custom LightEval task Python file")
-    lighteval.add_argument("--load-tasks-multilingual", action="store_true", default=None)
-    lighteval.add_argument("--save-details", dest="save_details", action="store_true", default=None)
-    lighteval.add_argument("--no-save-details", dest="save_details", action="store_false")
-    lighteval.add_argument("--push-to-hub", action="store_true", default=None)
-    lighteval.add_argument("--public-run", action="store_true", default=None)
-    lighteval.add_argument("--results-org")
-    lighteval.add_argument("--job-id", type=int)
-    lighteval.add_argument("--extra", action="append", help="extra argument passed to LightEval")
-    lighteval.add_argument("--performance-output", help="write run performance metrics JSON here")
-    lighteval.add_argument("--metrics-url", help="Prometheus metrics URL for token throughput; defaults to <base-url without /v1>/metrics")
-    lighteval.add_argument("--scoreboard-task-id", help="merge performance metrics into this scoreboard task score")
+    add_lighteval_run_options(lighteval)
     lighteval.set_defaults(plan_builder=build_lighteval_plan)
 
     lighteval_tasks = eval_subparsers.add_parser("lighteval-tasks", help="list or inspect LightEval tasks")
@@ -139,6 +190,9 @@ def main(argv: list[str] | None = None) -> int:
     env, _ = load_env(root, args.env_file)
     config, _ = load_config(root, args.config)
     prepend_venv_path(env, root, config)
+
+    if getattr(args, "eval_command", None) == "run":
+        return run_eval(args, root=root, env=env, config=config)
 
     plan = args.plan_builder(args, root=root, env=env, config=config)
     if getattr(args, "eval_command", None) == "lighteval" and not args.dry_run:

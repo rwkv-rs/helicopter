@@ -3,8 +3,10 @@ from __future__ import annotations
 import base64
 import copy
 import hashlib
+import io
 import json
 import os
+import sys
 import tempfile
 import unittest
 from argparse import Namespace
@@ -14,7 +16,16 @@ from unittest import mock
 
 from lighteval.models.model_output import ModelResponse
 
-from helicopter_cli import commands, config, env, lighteval_export, lighteval_rwkv_skills_tasks, lighteval_tasks, performance
+from helicopter_cli import (
+    commands,
+    config,
+    env,
+    eval_run,
+    lighteval_export,
+    lighteval_rwkv_skills_tasks,
+    lighteval_tasks,
+    performance,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -2335,6 +2346,264 @@ class CommandPlanTests(unittest.TestCase):
             f"Python executable not found: {venv_python}; run scripts/install_local.sh "
             "or set HELICOPTER_PYTHON / paths.python",
         )
+
+
+def eval_run_args(**overrides: object) -> Namespace:
+    values = {
+        **vars(lighteval_args()),
+        "tasks": None,
+        "dry_run": True,
+        "wkv_mode": None,
+        "emb_device": None,
+        "tensor_parallel_size": None,
+        "gpu_memory_utilization": None,
+        "max_num_seqs": None,
+        "max_num_batched_tokens": None,
+        "vllm_env": None,
+        "no_server": False,
+        "keep_server": False,
+        "server_timeout": eval_run.DEFAULT_SERVER_TIMEOUT_S,
+        "scoreboard": False,
+    }
+    values.update(overrides)
+    return Namespace(**values)
+
+
+class EvalRunTests(unittest.TestCase):
+    def test_resolve_run_tasks_prefers_cli_then_config(self) -> None:
+        loaded = load_example_config()
+        loaded["lighteval"] = {**loaded.get("lighteval", {}), "tasks": ["gsm8k|0", "mmlu|0"]}
+        self.assertEqual(
+            eval_run.resolve_run_tasks(eval_run_args(tasks="aime24|0"), loaded),
+            "aime24|0",
+        )
+        self.assertEqual(
+            eval_run.resolve_run_tasks(eval_run_args(), loaded),
+            "gsm8k|0,mmlu|0",
+        )
+
+    def test_resolve_run_tasks_requires_tasks(self) -> None:
+        loaded = load_example_config()
+        loaded["lighteval"] = {key: value for key, value in loaded.get("lighteval", {}).items() if key != "tasks"}
+        with self.assertRaises(SystemExit):
+            eval_run.resolve_run_tasks(eval_run_args(), loaded)
+
+    def test_port_and_health_url_helpers(self) -> None:
+        self.assertEqual(eval_run.port_from_base_url("http://127.0.0.1:8000/v1"), "8000")
+        self.assertIsNone(eval_run.port_from_base_url("http://example.com/v1"))
+        self.assertEqual(
+            eval_run.health_url_for("http://127.0.0.1:8000/v1"),
+            "http://127.0.0.1:8000/v1/models",
+        )
+
+    def test_dry_run_prints_infer_and_lighteval_plans(self) -> None:
+        loaded = load_example_config()
+        loaded["lighteval"] = {**loaded.get("lighteval", {}), "tasks": "gsm8k|0"}
+        args = eval_run_args()
+        env = {"WEIGHT_PATH": "/weights/RWKV"}
+        stdout = io.StringIO()
+        with mock.patch("sys.stdout", stdout):
+            exit_code = eval_run.run_eval(args, root=ROOT, env=env, config=loaded)
+        self.assertEqual(exit_code, 0)
+        lines = [line for line in stdout.getvalue().splitlines() if line.strip()]
+        self.assertEqual(len(lines), 2)
+        self.assertIn("vllm serve", lines[0])
+        self.assertIn("--port 8000", lines[0])
+        self.assertIn("-m lighteval endpoint litellm", lines[1])
+        self.assertIn("gsm8k|0", lines[1])
+
+    def test_dry_run_with_remote_base_url_skips_server_plan(self) -> None:
+        loaded = load_example_config()
+        loaded["lighteval"] = {
+            **loaded.get("lighteval", {}),
+            "tasks": "gsm8k|0",
+            "base_url": "http://eval-farm.internal:9000/v1",
+        }
+        stdout = io.StringIO()
+        with mock.patch("sys.stdout", stdout):
+            exit_code = eval_run.run_eval(
+                eval_run_args(), root=ROOT, env={"WEIGHT_PATH": "/weights/RWKV"}, config=loaded
+            )
+        self.assertEqual(exit_code, 0)
+        lines = [line for line in stdout.getvalue().splitlines() if line.strip()]
+        self.assertEqual(len(lines), 1)
+        self.assertIn("-m lighteval endpoint litellm", lines[0])
+        self.assertNotIn("vllm serve", lines[0])
+
+    def test_no_server_flag_skips_server_plan(self) -> None:
+        loaded = load_example_config()
+        loaded["lighteval"] = {**loaded.get("lighteval", {}), "tasks": "gsm8k|0"}
+        stdout = io.StringIO()
+        with mock.patch("sys.stdout", stdout):
+            exit_code = eval_run.run_eval(
+                eval_run_args(no_server=True),
+                root=ROOT,
+                env={"WEIGHT_PATH": "/weights/RWKV"},
+                config=loaded,
+            )
+        self.assertEqual(exit_code, 0)
+        lines = [line for line in stdout.getvalue().splitlines() if line.strip()]
+        self.assertEqual(len(lines), 1)
+        self.assertNotIn("vllm serve", lines[0])
+
+    def test_infer_args_namespace_forwards_server_overrides(self) -> None:
+        args = eval_run_args(
+            wkv_mode="fp16",
+            gpu_memory_utilization=0.5,
+            vllm_env=["VLLM_WSL2_ENABLE_PIN_MEMORY=1"],
+        )
+        namespace = eval_run.infer_args_namespace(args, port="8123")
+        self.assertEqual(namespace.model, "g1g-1.5b")
+        self.assertEqual(namespace.port, "8123")
+        self.assertEqual(namespace.wkv_mode, "fp16")
+        self.assertEqual(namespace.gpu_memory_utilization, 0.5)
+        self.assertEqual(namespace.vllm_env, ["VLLM_WSL2_ENABLE_PIN_MEMORY=1"])
+        self.assertIsNone(namespace.host)
+
+    def test_scoreboard_dataset_name_strips_fewshot_and_suite(self) -> None:
+        self.assertEqual(eval_run.scoreboard_dataset_name("gsm8k|0"), "gsm8k")
+        self.assertEqual(eval_run.scoreboard_dataset_name("extended|mmlu|5"), "mmlu")
+        self.assertEqual(eval_run.scoreboard_dataset_name("apibank_l1"), "apibank_l1")
+
+    def test_scoreboard_model_name_prefers_served_model_name(self) -> None:
+        loaded = load_example_config()
+        self.assertEqual(eval_run.scoreboard_model_name(eval_run_args(), loaded), "g1g-1.5b")
+        self.assertEqual(
+            eval_run.scoreboard_model_name(
+                eval_run_args(lighteval_model_name="custom-name"), loaded
+            ),
+            "custom-name",
+        )
+
+
+def _postgres_connection() -> dict[str, object] | None:
+    try:
+        import asyncpg  # noqa: F401
+    except ImportError:
+        return None
+    import asyncio
+    import getpass
+
+    async def probe() -> dict[str, object] | None:
+        for port in (int(os.environ.get("PGPORT") or 0) or None, 5432, 5433):
+            if port is None:
+                continue
+            kwargs = {
+                "user": os.environ.get("PGUSER") or getpass.getuser(),
+                "host": os.environ.get("PGHOST") or "/var/run/postgresql",
+                "database": os.environ.get("PGDATABASE") or "postgres",
+                "port": port,
+            }
+            try:
+                conn = await asyncpg.connect(**kwargs)
+            except Exception:
+                continue
+            await conn.close()
+            return kwargs
+        return None
+
+    return asyncio.run(probe())
+
+
+_POSTGRES_KWARGS = _postgres_connection()
+
+
+@unittest.skipUnless(_POSTGRES_KWARGS, "PostgreSQL is not reachable")
+class ScoreboardIngestionTests(unittest.TestCase):
+    def test_ingest_records_scores_for_each_task(self) -> None:
+        import asyncio
+        import uuid
+
+        import asyncpg
+
+        kwargs = dict(_POSTGRES_KWARGS)
+        db_name = f"helicopter_scoreboard_test_{uuid.uuid4().hex[:12]}"
+
+        async def create_db() -> None:
+            conn = await asyncpg.connect(**kwargs)
+            try:
+                await conn.execute(f'CREATE DATABASE "{db_name}"')
+            finally:
+                await conn.close()
+
+        async def drop_db() -> None:
+            conn = await asyncpg.connect(**kwargs)
+            try:
+                await conn.execute(
+                    """
+                    SELECT pg_terminate_backend(pid)
+                    FROM pg_stat_activity
+                    WHERE datname = $1 AND pid <> pg_backend_pid()
+                    """,
+                    db_name,
+                )
+                await conn.execute(f'DROP DATABASE IF EXISTS "{db_name}"')
+            finally:
+                await conn.close()
+
+        asyncio.run(create_db())
+        scoreboard_path = ROOT / "src/scoreboard-server"
+        if str(scoreboard_path) not in sys.path:
+            sys.path.insert(0, str(scoreboard_path))
+        db_env = {
+            "SCOREBOARD_DB_HOST": str(kwargs["host"]),
+            "SCOREBOARD_DB_PORT": str(kwargs["port"]),
+            "SCOREBOARD_DB_USER": str(kwargs["user"]),
+            "SCOREBOARD_DB_NAME": db_name,
+        }
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                results_path = Path(tmp) / "results_2026-07-06T00-00-00.000000.json"
+                results_path.write_text(
+                    json.dumps(
+                        {
+                            "config_general": {"model_name": "openai/unit-test-model"},
+                            "results": {
+                                "gsm8k|0": {"extractive_match": 0.5},
+                                "mmlu|0": {"acc": 0.25},
+                                "all": {"extractive_match": 0.5, "acc": 0.25},
+                            },
+                        }
+                    )
+                )
+                with mock.patch.dict(os.environ, db_env):
+                    from scoreboard_server.db.connection import close_db, init_db
+                    from scoreboard_server.db.settings import DatabaseSettings
+
+                    async def prepare_schema() -> None:
+                        await init_db(DatabaseSettings.from_env(), generate_schemas=True)
+                        await close_db()
+
+                    asyncio.run(prepare_schema())
+                    recorded = asyncio.run(
+                        eval_run._ingest_scoreboard_results(
+                            result_files=[str(results_path)],
+                            model_name="unit-test-model",
+                            root=ROOT,
+                        )
+                    )
+
+                    self.assertEqual(len(recorded), 2)
+
+                    async def read_back() -> list[dict[str, object]]:
+                        await init_db(DatabaseSettings.from_env())
+                        try:
+                            from scoreboard_server.db.repository import ScoreboardStore
+
+                            store = ScoreboardStore(settings=DatabaseSettings.from_env())
+                            return await store.list_latest_scores_for_space()
+                        finally:
+                            await close_db()
+
+                    rows = asyncio.run(read_back())
+        finally:
+            asyncio.run(drop_db())
+
+        datasets = {str(row.get("dataset") or row.get("benchmark_name")): row for row in rows}
+        self.assertIn("gsm8k", datasets)
+        self.assertIn("mmlu", datasets)
+        gsm8k_metrics = datasets["gsm8k"].get("metrics")
+        self.assertEqual(gsm8k_metrics, {"extractive_match": 0.5})
 
 
 if __name__ == "__main__":

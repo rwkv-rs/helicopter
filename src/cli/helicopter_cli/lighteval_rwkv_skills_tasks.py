@@ -2771,12 +2771,9 @@ class ToolAlpacaAccuracy(SampleLevelComputation):
         required_expected = [item for item in expected_results if not item.optional]
         denominator = max(1, len(required_expected))
         passed = 0
-        failures = 0
         actual_index = 0
         for expected in expected_results:
             if actual_index >= len(actual_results):
-                if not expected.optional:
-                    failures += 1
                 continue
             actual = actual_results[actual_index]
             if _toolalpaca_execution_matches(actual, expected):
@@ -2786,14 +2783,11 @@ class ToolAlpacaAccuracy(SampleLevelComputation):
             elif expected.optional:
                 continue
             else:
-                failures += 1
                 actual_index += 1
-        if actual_index < len(actual_results):
-            failures += len(actual_results) - actual_index
         if not expected_results:
             return 1.0 if not actual_results else 0.0
-        if failures:
-            return 0.0
+        # Partial credit: each required expected call matched in order earns an
+        # equal share; mismatched, missing, and extra calls earn nothing.
         return float(passed / denominator)
 
 
