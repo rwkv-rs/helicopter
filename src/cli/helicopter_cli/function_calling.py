@@ -123,7 +123,40 @@ def _load_json_records(source: str) -> list[dict[str, Any]]:
     return rows
 
 
-def _task_sources(task_name: str) -> list[str]:
+def _local_task_sources(task_name: str, *, root: Path | None) -> list[str]:
+    if root is None:
+        return []
+    candidates = [
+        root / "data" / task_name / "test.jsonl",
+        root.parent / "rwkv-skills" / "data" / task_name / "test.jsonl",
+    ]
+    aliases = {
+        "apibank_level1": ("apibank_l1",),
+        "apibank_level2": ("apibank_l2",),
+        "complexfuncbench_official": ("complexfuncbench_subset",),
+    }
+    for alias in aliases.get(task_name, ()):
+        candidates.extend(
+            [
+                root / "data" / alias / "test.jsonl",
+                root.parent / "rwkv-skills" / "data" / alias / "test.jsonl",
+            ]
+        )
+    seen: set[str] = set()
+    sources: list[str] = []
+    for path in candidates:
+        resolved = str(path)
+        if resolved in seen or not path.is_file():
+            continue
+        seen.add(resolved)
+        sources.append(resolved)
+    return sources
+
+
+def _task_sources(task_name: str, *, root: Path | None = None) -> list[str]:
+    local_sources = _local_task_sources(task_name, root=root)
+    if local_sources:
+        return local_sources
     if task_name in BFCL_TASK_FILES:
         files = BFCL_TASK_FILES[task_name]
         values = [files] if isinstance(files, str) else files
@@ -301,6 +334,36 @@ def _build_toolalpaca_sample(line: dict[str, Any], task_name: str) -> FunctionCa
     )
 
 
+def _build_intermediate_sample(line: dict[str, Any], task_name: str, kind: str) -> FunctionCallingSample | None:
+    instruction = str(line.get("instruction") or "").strip()
+    tools = line.get("tools")
+    expected_calls = line.get("expected_tool_calls")
+    if not instruction or not isinstance(tools, list) or not isinstance(expected_calls, list) or not expected_calls:
+        return None
+    sample_kind = "toolalpaca" if kind == "toolalpaca" else kind
+    if sample_kind == "apibank":
+        sample_kind = "bfcl"
+    return FunctionCallingSample(
+        task_name=task_name,
+        sample_id=str(line.get("task_id") or line.get("id") or ""),
+        kind=sample_kind,
+        messages=_plain_messages(
+            (
+                "You are solving a function-calling benchmark. Choose the tool call or calls "
+                "needed to satisfy the user request. Return calls through the tool calling interface."
+            ),
+            instruction,
+        ),
+        tools=_openai_tools(tools),
+        specific={
+            "expected_calls_json": json.dumps(expected_calls, ensure_ascii=False, sort_keys=True),
+            "expected_tool_calls_json": json.dumps(expected_calls, ensure_ascii=False, sort_keys=True),
+            "sample_id": str(line.get("task_id") or line.get("id") or ""),
+            "tools_json": json.dumps(tools, ensure_ascii=False, sort_keys=True),
+        },
+    )
+
+
 BUILDERS: dict[str, Callable[[dict[str, Any], str], FunctionCallingSample | None]] = {
     "bfcl": _build_bfcl_sample,
     "apibank": _build_apibank_sample,
@@ -321,13 +384,13 @@ def task_kind(task_name: str) -> str:
     raise SystemExit(f"unknown function-calling task: {task_name}")
 
 
-def load_samples(task_name: str, *, max_samples: int | None = None) -> list[FunctionCallingSample]:
+def load_samples(task_name: str, *, max_samples: int | None = None, root: Path | None = None) -> list[FunctionCallingSample]:
     kind = task_kind(task_name)
     builder = BUILDERS[kind]
     samples: list[FunctionCallingSample] = []
-    for source in _task_sources(task_name):
+    for source in _task_sources(task_name, root=root):
         for line in _load_json_records(source):
-            sample = builder(line, task_name)
+            sample = _build_intermediate_sample(line, task_name, kind) or builder(line, task_name)
             if sample is not None:
                 samples.append(sample)
                 if max_samples is not None and len(samples) >= max_samples:
@@ -736,7 +799,7 @@ def run_function_calling_eval(args: Any, *, root: Path, env: dict[str, str], con
 
     samples: list[FunctionCallingSample] = []
     for task_name in task_names:
-        samples.extend(load_samples(task_name, max_samples=max_samples))
+        samples.extend(load_samples(task_name, max_samples=max_samples, root=root))
     if not samples:
         raise SystemExit("no function-calling samples loaded")
 

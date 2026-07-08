@@ -342,6 +342,43 @@ class FunctionCallingTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         load_samples.assert_not_called()
 
+    def test_function_calling_loads_local_intermediate_dataset_before_url(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "helicopter"
+            data_path = Path(tmp) / "rwkv-skills" / "data" / "bfcl_simple_python" / "test.jsonl"
+            data_path.parent.mkdir(parents=True)
+            data_path.write_text(
+                json.dumps(
+                    {
+                        "task_id": "local-1",
+                        "instruction": "Call calc with x=1.",
+                        "tools": [
+                            {
+                                "name": "calc",
+                                "description": "Calculate.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {"x": {"type": "integer"}},
+                                    "required": ["x"],
+                                },
+                            }
+                        ],
+                        "expected_tool_calls": [{"name": "calc", "arguments": {"x": 1}}],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(function_calling.urllib.request, "urlopen", side_effect=AssertionError("network")):
+                samples = function_calling.load_samples("bfcl_simple_python", max_samples=1, root=root)
+
+        self.assertEqual(len(samples), 1)
+        self.assertEqual(samples[0].sample_id, "local-1")
+        self.assertEqual(samples[0].kind, "bfcl")
+        self.assertEqual(samples[0].tools[0]["type"], "function")
+        self.assertEqual(function_calling.score_calls(samples[0], [{"name": "calc", "arguments": {"x": 1}}]), 1.0)
+
     def test_compact_response_message_keeps_content_and_finish_reason(self) -> None:
         response = {
             "choices": [
