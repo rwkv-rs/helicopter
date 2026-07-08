@@ -222,7 +222,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="inspect and prepare external agent benchmark harnesses",
     )
     add_common_options(agent_harness)
-    agent_harness.add_argument("agent_action", choices=("list", "preflight", "plan", "convert"))
+    agent_harness.add_argument("agent_action", choices=("list", "preflight", "plan", "convert", "run"))
     agent_harness.add_argument("benchmark", nargs="?", help="benchmark id for list/preflight filtering or plan")
     agent_harness.add_argument("--source", default=DEFAULT_AGENT_BENCHMARK_SOURCE)
     agent_harness.add_argument("--pipeline")
@@ -231,6 +231,20 @@ def build_parser() -> argparse.ArgumentParser:
     agent_harness.add_argument("--base-url", help="OpenAI-compatible endpoint base URL for adapter planning")
     agent_harness.add_argument("--output-dir", help="output directory for generated prediction or trace artifacts")
     agent_harness.add_argument("--n-concurrent", type=int, help="official harness worker count where supported")
+    agent_harness.add_argument("--max-samples", type=int, help="sample cap for implemented local proxy runs")
+    agent_harness.add_argument("--no-server", action="store_true", help="reuse an existing OpenAI-compatible endpoint")
+    agent_harness.add_argument("--keep-server", action="store_true", help="leave a managed local proxy server running")
+    agent_harness.add_argument(
+        "--server-timeout",
+        type=float,
+        default=DEFAULT_SERVER_TIMEOUT_S,
+        help="seconds to wait for a managed local proxy server to become healthy",
+    )
+    agent_harness.add_argument(
+        "--allow-proxy",
+        action="store_true",
+        help="allow non-official local proxy runs such as BrowseComp answer-only scoring",
+    )
     agent_harness.add_argument("--run-id", help="official harness run id")
     agent_harness.add_argument("--input", help="RWKV/Helicopter agent output JSON or JSONL for convert")
     agent_harness.add_argument("--output", help="converted official sandbox artifact path")

@@ -282,11 +282,34 @@ helicopter eval agent-harness convert swe_bench_verified \
   --model g1d-0.4b
 ```
 
-This command does not rewrite official sandboxes. It records which official
-harness should own execution and verification. For example, SWE-bench planning
-emits the patch-prediction artifact expected by the official Docker harness,
-while Terminal-Bench planning marks the OpenAI-compatible terminal agent adapter
-as the next required layer before `tb run` or `harbor run` should be used.
+`agent-harness run` is intentionally conservative. It only executes benchmark
+profiles with an implemented Helicopter runner. External official harnesses write
+a plan artifact and exit nonzero instead of producing fake scores:
+
+```bash
+helicopter eval agent-harness run deepswe \
+  --model g1d-0.4b \
+  --output-dir results/agent_harness
+```
+
+BrowseComp currently has an answer-only local proxy through LightEval. Because
+that is not a browser-runtime agent score, it requires an explicit opt-in:
+
+```bash
+helicopter eval agent-harness run browsecomp \
+  --model g1d-0.4b \
+  --base-url http://127.0.0.1:8000/v1 \
+  --no-server \
+  --allow-proxy \
+  --max-samples 2
+```
+
+The agent harness commands do not rewrite official sandboxes. They record which
+official harness should own execution and verification. For example, SWE-bench
+planning emits the patch-prediction artifact expected by the official Docker
+harness, while Terminal-Bench planning marks the OpenAI-compatible terminal
+agent adapter as the next required layer before `tb run` or `harbor run` should
+be used.
 The `convert` step is the middle-format boundary: RWKV or Helicopter raw output
 is normalized to `helicopter_agent_v1` internally, then exported to the official
 artifact shape. For SWE-bench that artifact is `predictions.jsonl` with

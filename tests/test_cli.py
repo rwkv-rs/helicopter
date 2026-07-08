@@ -217,6 +217,32 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(args.model, "g1d-0.4b")
         self.assertEqual(args.output_dir, "tmp/agent")
 
+    def test_agent_harness_parser_accepts_run_surface(self) -> None:
+        parser = helicopter_main.build_parser()
+        args = parser.parse_args(
+            [
+                "eval",
+                "agent-harness",
+                "run",
+                "browsecomp",
+                "--model",
+                "g1d-0.4b",
+                "--base-url",
+                "http://127.0.0.1:8000/v1",
+                "--max-samples",
+                "1",
+                "--no-server",
+                "--allow-proxy",
+            ]
+        )
+
+        self.assertEqual(args.agent_action, "run")
+        self.assertEqual(args.benchmark, "browsecomp")
+        self.assertEqual(args.model, "g1d-0.4b")
+        self.assertEqual(args.max_samples, 1)
+        self.assertTrue(args.no_server)
+        self.assertTrue(args.allow_proxy)
+
     def test_agent_harness_parser_accepts_convert_surface(self) -> None:
         parser = helicopter_main.build_parser()
         args = parser.parse_args(
@@ -1172,6 +1198,104 @@ class CommandPlanTests(unittest.TestCase):
         self.assertIn("--predictions_path", plan["steps"][1]["command"])
         self.assertIn("--max_workers", plan["steps"][1]["command"])
         self.assertIn("2", plan["steps"][1]["command"])
+
+    def test_agent_harness_run_writes_plan_for_external_harness_without_fake_score(self) -> None:
+        source = agent_harness.load_agent_harness_source(ROOT, None)
+        with tempfile.TemporaryDirectory() as tmp:
+            args = Namespace(
+                benchmark="deepswe",
+                pipeline=None,
+                format="jsonl",
+                model="g1d-0.4b",
+                base_url="http://127.0.0.1:8000/v1",
+                output_dir=tmp,
+                n_concurrent=1,
+                run_id=None,
+                max_samples=None,
+                no_server=True,
+                keep_server=False,
+                server_timeout=600,
+                allow_proxy=False,
+                dry_run=False,
+            )
+
+            rows, exit_code = agent_harness.run_agent_benchmarks(
+                source,
+                root=ROOT,
+                env={},
+                config=load_example_config(),
+                args=args,
+            )
+            plan_path = Path(rows[0]["plan_path"])
+
+            self.assertEqual(exit_code, 1)
+            self.assertEqual(rows[0]["status"], "external_harness_not_implemented")
+            self.assertTrue(plan_path.exists())
+            self.assertEqual(json.loads(plan_path.read_text(encoding="utf-8"))["benchmark"]["name"], "deepswe")
+
+    def test_agent_harness_run_blocks_browsecomp_proxy_unless_allowed(self) -> None:
+        source = agent_harness.load_agent_harness_source(ROOT, None)
+        with tempfile.TemporaryDirectory() as tmp:
+            args = Namespace(
+                benchmark="browsecomp",
+                pipeline=None,
+                format="jsonl",
+                model="g1d-0.4b",
+                base_url="http://127.0.0.1:8000/v1",
+                output_dir=tmp,
+                n_concurrent=1,
+                run_id=None,
+                max_samples=1,
+                no_server=True,
+                keep_server=False,
+                server_timeout=600,
+                allow_proxy=False,
+                dry_run=False,
+            )
+
+            rows, exit_code = agent_harness.run_agent_benchmarks(
+                source,
+                root=ROOT,
+                env={},
+                config=load_example_config(),
+                args=args,
+            )
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(rows[0]["status"], "blocked_proxy")
+        self.assertIn("not a browser-runtime score", rows[0]["message"])
+
+    def test_agent_harness_run_browsecomp_proxy_dry_run_emits_lighteval_command(self) -> None:
+        source = agent_harness.load_agent_harness_source(ROOT, None)
+        args = Namespace(
+            benchmark="browsecomp",
+            pipeline=None,
+            format="jsonl",
+            model="g1d-0.4b",
+            base_url="http://127.0.0.1:8000/v1",
+            output_dir="tmp/agent",
+            n_concurrent=1,
+            run_id=None,
+            max_samples=1,
+            no_server=True,
+            keep_server=False,
+            server_timeout=600,
+            allow_proxy=True,
+            dry_run=True,
+        )
+
+        rows, exit_code = agent_harness.run_agent_benchmarks(
+            source,
+            root=ROOT,
+            env={},
+            config=load_example_config(),
+            args=args,
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(rows[0]["status"], "dry_run")
+        self.assertEqual(rows[0]["command"][:5], ["helicopter", "eval", "run", "g1d-0.4b", "browsecomp"])
+        self.assertIn("--no-server", rows[0]["command"])
 
     def test_agent_format_extracts_swebench_predictions_from_rwkv_response(self) -> None:
         patch = "--- a/example.py\n+++ b/example.py\n@@ -1 +1 @@\n-old\n+new\n"

@@ -4,6 +4,7 @@ import json
 import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from .agent_format import (
@@ -15,6 +16,7 @@ from .agent_format import (
 )
 from .commands import local_openai_base_url
 from .config import resolve_model_entry, table
+from .eval_run import DEFAULT_SERVER_TIMEOUT_S
 from .env import env_value, pick
 from .paths import resolve_path
 
@@ -242,6 +244,12 @@ def _served_model_name(config: dict[str, Any], model_name: str) -> str:
     return str(model.get("served_model_name") or model.get("name") or model_name)
 
 
+def _args_with_benchmark(args: Any, benchmark: str) -> Any:
+    values = dict(vars(args))
+    values["benchmark"] = benchmark
+    return SimpleNamespace(**values)
+
+
 def plan_for_benchmark(
     source: AgentHarnessSource,
     *,
@@ -361,6 +369,189 @@ def plan_for_benchmark(
     }
 
 
+def _plan_path_for(output_dir: Path, benchmark: str) -> Path:
+    return output_dir / benchmark / "plan.json"
+
+
+def _write_plan(path: Path, plan: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(plan, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _local_proxy_command(
+    *,
+    benchmark: AgentBenchmark,
+    output_dir: Path,
+    args: Any,
+    config: dict[str, Any],
+    env: dict[str, str],
+) -> list[str]:
+    model = str(getattr(args, "model", "") or "")
+    command = [
+        "helicopter",
+        "eval",
+        "run",
+        model or "MODEL",
+        benchmark.name,
+        "--output-dir",
+        str(output_dir / benchmark.name),
+    ]
+    base_url = getattr(args, "base_url", None) or local_openai_base_url(config, env, args)
+    if base_url:
+        command.extend(["--base-url", str(base_url)])
+    if getattr(args, "max_samples", None) is not None:
+        command.extend(["--max-samples", str(getattr(args, "max_samples"))])
+    if getattr(args, "no_server", False):
+        command.append("--no-server")
+    if getattr(args, "keep_server", False):
+        command.append("--keep-server")
+    return command
+
+
+def _run_local_answer_proxy(
+    *,
+    benchmark: AgentBenchmark,
+    output_dir: Path,
+    args: Any,
+    root: Path,
+    env: dict[str, str],
+    config: dict[str, Any],
+) -> int:
+    model = str(getattr(args, "model", "") or "")
+    if not model:
+        raise SystemExit(f"agent run {benchmark.name} requires --model")
+    from .eval_run import run_eval
+
+    run_args = SimpleNamespace(
+        model=model,
+        tasks=benchmark.name,
+        backend="endpoint-litellm",
+        model_args=None,
+        lighteval_model_name=None,
+        base_url=getattr(args, "base_url", None),
+        provider=None,
+        api_key=None,
+        concurrent_requests=None,
+        max_model_length=None,
+        max_new_tokens=None,
+        max_samples=getattr(args, "max_samples", None),
+        output_dir=str(output_dir / benchmark.name),
+        dataset_loading_processes=None,
+        num_fewshot_seeds=None,
+        custom_tasks=None,
+        load_tasks_multilingual=None,
+        save_details=None,
+        push_to_hub=None,
+        public_run=None,
+        results_org=None,
+        job_id=None,
+        extra=None,
+        performance_output=None,
+        metrics_url=None,
+        scoreboard_task_id=None,
+        wkv_mode=None,
+        emb_device=None,
+        tensor_parallel_size=None,
+        gpu_memory_utilization=None,
+        max_num_seqs=None,
+        max_num_batched_tokens=None,
+        enable_auto_tool_choice=None,
+        vllm_env=None,
+        no_server=bool(getattr(args, "no_server", False)),
+        keep_server=bool(getattr(args, "keep_server", False)),
+        server_timeout=float(getattr(args, "server_timeout", None) or DEFAULT_SERVER_TIMEOUT_S),
+        scoreboard=False,
+        dry_run=False,
+    )
+    return run_eval(run_args, root=root, env=env, config=config)
+
+
+def run_agent_benchmarks(
+    source: AgentHarnessSource,
+    *,
+    root: Path,
+    env: dict[str, str],
+    config: dict[str, Any],
+    args: Any,
+) -> tuple[list[dict[str, Any]], int]:
+    selected = _select_benchmarks(
+        source,
+        pipeline=getattr(args, "pipeline", None),
+        benchmark=getattr(args, "benchmark", None),
+    )
+    if not selected:
+        raise SystemExit("no agent benchmarks selected")
+
+    output_dir = _output_dir(config, root=root, env=env, args=args)
+    rows: list[dict[str, Any]] = []
+    exit_code = 0
+    for benchmark in selected:
+        profile = source.profiles[benchmark.harness_profile]
+        one_args = _args_with_benchmark(args, benchmark.name)
+        preflight = preflight_rows(source, pipeline=None, benchmark=benchmark.name)[0]
+        plan = plan_for_benchmark(source, root=root, env=env, config=config, args=one_args)
+        plan_path = _plan_path_for(output_dir, benchmark.name)
+        row: dict[str, Any] = {
+            "benchmark": benchmark.name,
+            "pipeline": benchmark.pipeline,
+            "harness_profile": benchmark.harness_profile,
+            "sandbox": profile.sandbox,
+            "status": "unknown",
+            "message": "",
+            "missing_tools": ",".join(preflight.missing_tools),
+            "plan_path": str(plan_path),
+        }
+
+        if benchmark.reproducibility == "internal_only":
+            row["status"] = "internal_only"
+            row["message"] = "internal-name placeholder; no external reproducible harness is configured"
+            exit_code = 1
+        elif preflight.missing_tools:
+            row["status"] = "blocked"
+            row["message"] = f"missing required tools: {', '.join(preflight.missing_tools)}"
+            exit_code = 1
+        elif profile.kind == "browser_search_answer":
+            if not getattr(args, "allow_proxy", False):
+                row["status"] = "blocked_proxy"
+                row["message"] = "local BrowseComp answer proxy requires --allow-proxy; it is not a browser-runtime score"
+                exit_code = 1
+            elif not getattr(args, "model", None):
+                row["status"] = "blocked"
+                row["message"] = "local proxy run requires --model"
+                exit_code = 1
+            elif getattr(args, "dry_run", False):
+                row["status"] = "dry_run"
+                row["message"] = "would run local answer proxy"
+                row["command"] = _local_proxy_command(
+                    benchmark=benchmark,
+                    output_dir=output_dir,
+                    args=args,
+                    config=config,
+                    env=env,
+                )
+            else:
+                rc = _run_local_answer_proxy(
+                    benchmark=benchmark,
+                    output_dir=output_dir,
+                    args=args,
+                    root=root,
+                    env=env,
+                    config=config,
+                )
+                row["status"] = "completed" if rc == 0 else "failed"
+                row["message"] = "local answer proxy completed" if rc == 0 else f"local answer proxy failed: {rc}"
+                exit_code = exit_code or rc
+        else:
+            row["status"] = "external_harness_not_implemented"
+            row["message"] = "official harness adapter is not implemented in Helicopter; use the plan artifact"
+            exit_code = 1
+
+        if not getattr(args, "dry_run", False) and row["status"] not in {"completed", "dry_run"}:
+            _write_plan(plan_path, plan)
+        rows.append(row)
+    return rows, exit_code
+
+
 def convert_agent_outputs(
     source: AgentHarnessSource,
     *,
@@ -432,6 +623,17 @@ def format_agent_harness_output(rows: list[dict[str, Any]], output_format: str) 
         lines = [f"total\t{len(rows)}"]
         lines.extend(f"{key}\t{counts[key]}" for key in sorted(counts))
         return "\n".join(lines) + "\n"
+    if rows and "message" in rows[0]:
+        columns = (
+            "benchmark",
+            "pipeline",
+            "harness_profile",
+            "status",
+            "missing_tools",
+            "message",
+            "plan_path",
+        )
+        return _format_text_rows(rows, columns)
     columns = (
         "benchmark",
         "pipeline",
@@ -487,4 +689,8 @@ def run_agent_harness(args: Any, *, root: Path, env: dict[str, str], config: dic
             end="",
         )
         return 0
+    if action == "run":
+        rows, exit_code = run_agent_benchmarks(source, root=root, env=env, config=config, args=args)
+        print(format_agent_harness_output(rows, getattr(args, "format", "text")), end="")
+        return exit_code
     raise SystemExit(f"unknown agent harness action: {action}")
