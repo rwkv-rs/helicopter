@@ -270,11 +270,35 @@ class StreamedQwen35HybridExecutor:
             raise ContractError("active layer must not also be listed as a frozen converted layer")
         if any(not 0 <= index < num_layers for index in converted_layer_indices):
             raise ContractError("streamed converted layer index is out of range")
+        if attention_mask is not None and not torch.all(attention_mask.to(torch.bool)):
+            raise ContractError(
+                "RWKV7 distillation uses fixed packed rows and does not permit padding"
+            )
         hidden_states, position_ids, position_embeddings, causal_mask = self._prepare_inputs(
             input_ids, attention_mask, position_ids
         )
         context = HybridRecurrentContext()
         with torch.no_grad():
+            if active_layer_index > 0 and 0 not in converted_layer_indices:
+                # The Qwen source prefix does not expose RWKV7's cross-layer
+                # v_first stream. Run only a frozen layer-0 RWKV7 shadow block
+                # on the aligned layer-0 input; discard its block output and
+                # retain the detached v_first stream for the active mixer.
+                _, shadow_adapter = self._run_loaded_layer(
+                    0,
+                    hidden_states.detach(),
+                    position_ids,
+                    position_embeddings,
+                    causal_mask,
+                    mixer=frozen_mixer_provider(0),
+                    context=context,
+                    is_active=False,
+                )
+                if shadow_adapter is None or context.v_first is None:
+                    raise ContractError(
+                        "frozen RWKV7 layer-0 shadow did not produce v_first"
+                    )
+                context.v_first = context.v_first.detach()
             for layer_index in range(active_layer_index):
                 mixer = (
                     frozen_mixer_provider(layer_index)

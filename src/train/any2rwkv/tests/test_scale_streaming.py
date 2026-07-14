@@ -30,14 +30,67 @@ from any2rwkv.streamed_teacher import (
 )
 from any2rwkv.streamed_distill_runner import (
     _WarmStartMixerProvider,
+    _commit_streamed_generation,
     _head_partition_errors,
+    _estimate_streamed_workload,
+    _load_committed_generation,
     _read_streamed_baselines,
+    _supervised_prediction_window,
     _write_streamed_baseline,
 )
 from any2rwkv.target import rwkv7_mixer_specs
 
 
 class LayerTensorStoreTests(unittest.TestCase):
+    def test_signals_layer_one_derives_v_first_from_frozen_layer_zero_shadow(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = read_checkpoint(
+                write_fixture(root / "source", layers=4), require_final_layers=False
+            )
+            target_payload = build_target_config(
+                source.config, require_final_layers=False
+            )
+            config = Any2RWKVProxyConfig(**target_payload)
+            source_text = source.config.get("text_config", source.config)
+            source_types = source_text["layer_types"]
+            rope = source_text.get("rope_parameters", {})
+            rotary_dim = int(
+                source_text.get("head_dim", 16)
+                * float(rope.get("partial_rotary_factor", 1.0))
+            )
+            rotary_dim -= rotary_dim % 2
+            mixers = [
+                ProjectionBoundaryRWKV7Attention(
+                    config,
+                    layer_index,
+                    source_used_rope=source_types[layer_index] == "full_attention",
+                    rotary_dim=rotary_dim,
+                    rope_theta=float(rope.get("rope_theta", 10_000.0)),
+                )
+                for layer_index in range(4)
+            ]
+            teacher = StreamedQwen35Teacher(
+                source, device="cpu", dtype=torch.float32
+            )
+            output = StreamedQwen35HybridExecutor(teacher).forward(
+                torch.tensor([[1, 2, 3, 4]], dtype=torch.long),
+                active_layer_index=1,
+                active_mixer=mixers[1],
+                converted_layer_indices=set(),
+                frozen_mixer_provider=lambda layer_index: mixers[layer_index],
+            )
+            self.assertEqual(output.active_mixer_output.shape, (1, 4, 64))
+            with self.assertRaisesRegex(ContractError, "does not permit padding"):
+                StreamedQwen35HybridExecutor(teacher).forward(
+                    torch.tensor([[1, 2, 3, 0]], dtype=torch.long),
+                    attention_mask=torch.tensor([[1, 1, 1, 0]], dtype=torch.long),
+                    active_layer_index=1,
+                    active_mixer=mixers[1],
+                    converted_layer_indices=set(),
+                    frozen_mixer_provider=lambda layer_index: mixers[layer_index],
+                )
+
     def test_fixture_layers_are_indexed_and_loaded_without_mutating_source(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             source_dir = Path(temporary) / "source"
@@ -161,6 +214,49 @@ class LayerTensorStoreTests(unittest.TestCase):
 
 
 class ChunkedTokenKLTests(unittest.TestCase):
+    def test_scale_estimate_counts_teacher_student_and_suffix_weight_movement(self) -> None:
+        class Plan:
+            supervised_tokens = 512
+            stage_tokens_per_layer = {
+                "signals": 512,
+                "block": 1024,
+                "global": 2048,
+            }
+            corrective_max_sweeps = 1
+            accumulation_steps = 1
+
+        estimate = _estimate_streamed_workload(
+            source_weight_bytes=4_000,
+            num_layers=4,
+            plan=Plan(),
+        )
+        self.assertEqual(estimate["teacher_full_forwards"], 44)
+        self.assertEqual(estimate["student_full_forwards"], 44)
+        self.assertEqual(estimate["suffix_layer_backward_reloads"], 66)
+        self.assertEqual(estimate["layer_zero_shadow_loads"], 3)
+        self.assertEqual(estimate["estimated_weight_bytes_moved"], 509_000)
+
+    def test_supervised_prediction_window_keeps_exact_target_budget(self) -> None:
+        logits = torch.arange(1 * 7 * 3).reshape(1, 7, 3)
+        tokens = torch.arange(7).reshape(1, 7)
+        selected, labels = _supervised_prediction_window(
+            logits, tokens, start=2, targets=4
+        )
+        torch.testing.assert_close(selected, logits[:, 1:5])
+        torch.testing.assert_close(labels, tokens[:, 2:6])
+        self.assertEqual(labels.numel(), 4)
+        perfect = torch.full((1, 7, 10), -20.0)
+        for position in range(6):
+            perfect[0, position, position + 1] = 20.0
+        aligned_logits, aligned_labels = _supervised_prediction_window(
+            perfect, tokens, start=2, targets=4
+        )
+        loss = torch.nn.functional.cross_entropy(
+            aligned_logits.reshape(-1, aligned_logits.shape[-1]),
+            aligned_labels.reshape(-1),
+        )
+        self.assertLess(float(loss), 1e-6)
+
     def test_head_partition_errors_report_each_target_head(self) -> None:
         teacher = torch.ones(1, 2, 8)
         student = teacher.clone()
@@ -213,6 +309,85 @@ class ActiveLayerOptimizerTests(unittest.TestCase):
 
 
 class RWKV7MixerLayerStoreTests(unittest.TestCase):
+    def test_generation_commit_restores_one_atomic_mixer_optimizer_cursor_and_trace(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = read_checkpoint(
+                write_fixture(root / "source", layers=4), require_final_layers=False
+            )
+            target_config = build_target_config(source.config, require_final_layers=False)
+            specs = tuple(
+                spec
+                for layer_index in range(4)
+                for spec in rwkv7_mixer_specs(layer_index, hidden_size=64)
+            )
+            plan = plan_warm_start(source, specs, variant=WarmStartVariant.MAPPED)
+            export_hf_checkpoint(
+                source,
+                root / "zero-step",
+                target_config=target_config,
+                target_specs=specs,
+                target_tensor_provider=WarmStartTensorProvider(source, specs, plan),
+            )
+            store = RWKV7MixerLayerStore(root / "zero-step", root / "overlays")
+            mixer = store.load_mixer(2, device="cpu", dtype=torch.float32)
+            optimizer = ActiveLayerOptimizer(learning_rate=1e-3)
+            optimizer.activate(2, mixer)
+            snapshot = optimizer.release()
+            progress_dir = root / "progress"
+            trace_path = root / "active-layer-trace.jsonl"
+            progress = {
+                "schema_version": 2,
+                "binding": {"source": "a" * 64},
+                "next_visit": 7,
+                "active_layer": 2,
+                "consumed": 512,
+                "data_cursor": 9,
+            }
+            _commit_streamed_generation(
+                progress_dir=progress_dir,
+                trace_path=trace_path,
+                mixer_store=store,
+                active_layer=2,
+                mixer=mixer,
+                optimizer_snapshot=snapshot,
+                phase="microstep",
+                committed_layer_state={},
+                progress=progress,
+                trace_row={"visit_index": 7, "data_cursor": 9},
+            )
+            expected = {
+                name: tensor.detach().clone() for name, tensor in mixer.state_dict().items()
+            }
+            with trace_path.open("a", encoding="utf-8") as handle:
+                handle.write('{"orphan": true}\n')
+            changed = store.load_mixer(2, device="cpu", dtype=torch.float32)
+            with torch.no_grad():
+                next(changed.parameters()).add_(3)
+            store.save_mixer(2, changed, cursor={"orphan": True})
+            orphan = store.load_mixer(3, device="cpu", dtype=torch.float32)
+            with torch.no_grad():
+                next(orphan.parameters()).add_(7)
+            store.save_mixer(3, orphan, cursor={"uncommitted_next_layer": True})
+            (progress_dir / "optimizer-layer-003.pt").write_bytes(b"orphan")
+            restored_progress, restored_optimizer = _load_committed_generation(
+                progress_dir,
+                trace_path=trace_path,
+                mixer_store=store,
+                progress_dir=progress_dir,
+            )
+            self.assertEqual(restored_progress["next_visit"], 7)
+            self.assertEqual(restored_optimizer.layer_index, 2)
+            self.assertEqual(
+                trace_path.read_text(encoding="utf-8"),
+                '{"data_cursor": 9, "visit_index": 7}\n',
+            )
+            restored = store.load_mixer(2, device="cpu", dtype=torch.float32)
+            for name, tensor in restored.state_dict().items():
+                torch.testing.assert_close(tensor, expected[name], rtol=0, atol=0)
+            self.assertFalse((root / "overlays/layer-003.safetensors").exists())
+            self.assertFalse((progress_dir / "optimizer-layer-003.pt").exists())
+
     def test_streamed_warm_start_provider_matches_mapped_checkpoint_one_layer_at_a_time(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -306,6 +481,37 @@ class RWKV7MixerLayerStoreTests(unittest.TestCase):
             untouched = store.load_mixer(1, device="cpu", dtype=torch.float32)
             self.assertFalse((root / "overlays/layer-001.safetensors").exists())
             self.assertTrue(untouched.state_dict())
+
+    def test_all_layer_fingerprint_changes_with_selected_overlay(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = read_checkpoint(
+                write_fixture(root / "source", layers=4), require_final_layers=False
+            )
+            target_config = build_target_config(source.config, require_final_layers=False)
+            specs = tuple(
+                spec
+                for layer_index in range(4)
+                for spec in rwkv7_mixer_specs(layer_index, hidden_size=64)
+            )
+            plan = plan_warm_start(source, specs, variant=WarmStartVariant.MAPPED)
+            export_hf_checkpoint(
+                source,
+                root / "zero-step",
+                target_config=target_config,
+                target_specs=specs,
+                target_tensor_provider=WarmStartTensorProvider(source, specs, plan),
+            )
+            store = RWKV7MixerLayerStore(root / "zero-step", root / "overlays")
+            for layer_index in range(4):
+                mixer = store.load_mixer(layer_index, device="cpu", dtype=torch.float32)
+                store.save_mixer(layer_index, mixer, cursor={"visit": 0})
+            before = store.fingerprint()
+            mixer = store.load_mixer(2, device="cpu", dtype=torch.float32)
+            with torch.no_grad():
+                next(mixer.parameters()).add_(0.5)
+            store.save_mixer(2, mixer, cursor={"visit": 1})
+            self.assertNotEqual(store.fingerprint(), before)
 
     def test_sweep_snapshot_restores_selected_all_layer_overlay(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

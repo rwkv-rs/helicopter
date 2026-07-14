@@ -57,6 +57,10 @@ class QwenRWKV7MixerAdapter(nn.Module):
         if position_ids is None:
             position_ids = torch.arange(tokens, device=hidden_states.device).view(1, -1).expand(batch, -1)
         valid = _valid_tokens(attention_mask, hidden_states)
+        if not torch.all(valid):
+            raise ContractError(
+                "RWKV7 distillation uses fixed packed rows and does not permit padding"
+            )
         if hidden_states.is_cuda and hidden_states.dtype == torch.bfloat16:
             if torch.any(valid[:, 1:].to(torch.int8) > valid[:, :-1].to(torch.int8)):
                 raise ContractError(
@@ -87,8 +91,12 @@ class QwenRWKV7MixerAdapter(nn.Module):
         outputs: list[Tensor] = []
         signal_rows: dict[str, list[Tensor]] = {}
         v_first_rows: list[Tensor] = []
+        if self.rwkv.layer_idx and self.context.v_first is None:
+            raise ContractError(
+                "nonzero RWKV7 layers require the aligned frozen layer-0 v_first stream"
+            )
         for token in range(tokens):
-            if self.rwkv.layer_idx and self.context.v_first is not None:
+            if self.rwkv.layer_idx:
                 v_first = self.context.v_first[:, token]
             else:
                 v_first = torch.zeros(batch, hidden, device=hidden_states.device, dtype=hidden_states.dtype)

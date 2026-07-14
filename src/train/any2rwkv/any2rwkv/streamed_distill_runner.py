@@ -4,7 +4,10 @@ import hashlib
 import io
 import json
 import math
+import os
 import random
+import shutil
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -98,12 +101,6 @@ def run_streamed_distillation(
         zero_step_dir,
         run_dir / "streamed-mixer-layers",
     )
-    teacher = StreamedQwen35Teacher(
-        source_manifest,
-        device=device,
-        dtype=dtype,
-    )
-    executor = StreamedQwen35HybridExecutor(teacher)
     num_layers = source_manifest.contract.num_hidden_layers
     visits = [
         (False, layer, stage, budget)
@@ -129,6 +126,32 @@ def run_streamed_distillation(
         "training_config_sha256": file_sha256(training_config),
         "execution_mode": "streamed_layer_store",
     }
+    execution_estimate = _estimate_streamed_workload(
+        source_weight_bytes=sum(shard.stat().st_size for shard in source_manifest.shards),
+        num_layers=num_layers,
+        plan=plan,
+        baseline_rows=min(8, len(validation_rows)),
+    )
+    execution_estimate["limit_weight_bytes_moved"] = (
+        plan.max_estimated_weight_bytes_moved
+    )
+    execution_estimate["accepted"] = (
+        plan.max_estimated_weight_bytes_moved is None
+        or execution_estimate["estimated_weight_bytes_moved"]
+        <= plan.max_estimated_weight_bytes_moved
+    )
+    write_json(run_dir / "execution-estimate.json", execution_estimate)
+    if not execution_estimate["accepted"]:
+        raise ContractError(
+            "streamed distillation execution estimate exceeds the frozen weight-movement "
+            "budget; use a distributed resident/expert-sharded backend or reduce the plan"
+        )
+    teacher = StreamedQwen35Teacher(
+        source_manifest,
+        device=device,
+        dtype=dtype,
+    )
+    executor = StreamedQwen35HybridExecutor(teacher)
     baseline_rows = validation_rows[: min(8, len(validation_rows))]
     if not baseline_rows:
         raise ContractError("streamed migration baseline split is empty")
@@ -177,17 +200,36 @@ def run_streamed_distillation(
     next_visit = 0
     consumed = 0
     data_cursor = 0
+    committed_layer_state: dict[str, dict[str, object]] = {}
+    resumed_optimizer_snapshot = None
     if resume is not None:
-        progress = _load_progress(resume)
+        progress, resumed_optimizer_snapshot = _load_committed_generation(
+            resume,
+            trace_path=trace_path,
+            mixer_store=mixer_store,
+            progress_dir=progress_dir,
+        )
         if progress["binding"] != binding:
             raise ContractError("streamed resume binding differs from source/data/plan")
         next_visit = int(progress["next_visit"])
         consumed = int(progress["consumed"])
         data_cursor = int(progress["data_cursor"])
+        committed_layer_state = dict(progress.get("committed_layer_state", {}))
         torch.set_rng_state(progress["torch_rng"])
         torch.cuda.set_rng_state_all(progress["cuda_rng"])
         random.setstate(progress["python_rng"])
     else:
+        if (progress_dir / "latest.json").exists():
+            raise ContractError(
+                "streamed run already has progress; pass --resume instead of starting over"
+            )
+        # A crash before the first latest.json contains no committed update.
+        # Discard any half-published overlay/generation and restart from zero-step.
+        mixer_store.discard_all_overlays()
+        trace_path.unlink(missing_ok=True)
+        if progress_dir.exists():
+            shutil.rmtree(progress_dir)
+        progress_dir.mkdir(parents=True)
         torch.manual_seed(plan.seed)
         torch.cuda.manual_seed_all(plan.seed)
         random.seed(plan.seed)
@@ -203,7 +245,12 @@ def run_streamed_distillation(
             json.loads(sweep_path.read_text(encoding="utf-8")).get("sweeps", [])
         )
     total_length = plan.burn_in_tokens + plan.supervised_tokens
-    stop = bool(controller.history and controller.history[-1].get("stop", False))
+    committed_sweep_boundary = progressive_visits + len(controller.history) * num_layers
+    stop = bool(
+        controller.history
+        and controller.history[-1].get("stop", False)
+        and next_visit >= committed_sweep_boundary
+    )
     for visit_index, (fully_recurrent, active_layer, stage, token_budget) in enumerate(visits):
         if stop:
             break
@@ -214,13 +261,18 @@ def run_streamed_distillation(
             if visit_index < progressive_visits
             else (visit_index - progressive_visits) // num_layers
         )
-        if sweep_index is not None and sweep_index < len(controller.history):
-            continue
         mixer = mixer_store.load_mixer(active_layer, device=device, dtype=dtype)
         optimizer = ActiveLayerOptimizer(learning_rate=plan.learning_rate)
-        optimizer_snapshot = _load_optimizer_snapshot(
-            progress_dir / f"optimizer-layer-{active_layer:03d}.pt"
+        optimizer_snapshot = (
+            resumed_optimizer_snapshot
+            if resumed_optimizer_snapshot is not None
+            and visit_index == next_visit
+            and int(progress.get("active_layer", -1)) == active_layer
+            else _load_optimizer_snapshot(
+                progress_dir / f"optimizer-layer-{active_layer:03d}.pt"
+            )
         )
+        resumed_optimizer_snapshot = None
         signal_names = trainable_names[active_layer] if stage == "signals" else None
         optimizer.activate(
             active_layer,
@@ -228,6 +280,7 @@ def run_streamed_distillation(
             snapshot=optimizer_snapshot,
             trainable_names=signal_names,
         )
+        snapshot = optimizer_snapshot
         if visit_index != next_visit:
             consumed = 0
         converted_layers = (
@@ -263,9 +316,20 @@ def run_streamed_distillation(
             teacher_mixer = teacher_output.active_mixer_output[:, start:stop_token].to(device)
             student_block = student_output.active_block_output[:, start:stop_token]
             teacher_block = teacher_output.active_block_output[:, start:stop_token].to(device)
-            student_logits = student_output.logits[:, start:stop_token]
-            teacher_logits = teacher_output.logits[:, start:stop_token].to(device)
-            labels = input_ids[:, start:stop_token]
+            student_logits, labels = _supervised_prediction_window(
+                student_output.logits,
+                input_ids,
+                start=start,
+                targets=plan.supervised_tokens,
+            )
+            teacher_logits, teacher_labels = _supervised_prediction_window(
+                teacher_output.logits.to(device),
+                input_ids,
+                start=start,
+                targets=plan.supervised_tokens,
+            )
+            if not torch.equal(labels, teacher_labels):
+                raise ContractError("teacher/student supervised token windows differ")
             teacher_state = teacher_output.active_recurrent_state
             state_supervision = "not_available_for_source_attention"
             state_mse = student_logits.new_zeros(())
@@ -308,8 +372,8 @@ def run_streamed_distillation(
                     vocab_chunk_size=DEFAULT_VOCAB_CHUNK_SIZE,
                 ),
                 shifted_ce=torch.nn.functional.cross_entropy(
-                    student_logits[:, :-1].reshape(-1, student_logits.shape[-1]),
-                    labels[:, 1:].reshape(-1),
+                    student_logits.reshape(-1, student_logits.shape[-1]),
+                    labels.reshape(-1),
                 ),
                 rollout=(
                     normalized_mse(student_logits, teacher_logits)
@@ -317,7 +381,10 @@ def run_streamed_distillation(
                     else student_logits.new_zeros(())
                 ),
             )
-            total = losses.weighted(LossWeights.for_stage(stage))
+            loss_weights = LossWeights.for_stage(stage)
+            if teacher_state is None:
+                loss_weights = replace(loss_weights, state_mse=0.0)
+            total = losses.weighted(loss_weights)
             stepped = optimizer.backward(
                 total,
                 accumulation_steps=plan.accumulation_steps,
@@ -330,10 +397,8 @@ def run_streamed_distillation(
                 )
             )
             data_cursor += 1
-            consumed += int(attention_mask[:, start:].sum())
-            _append_trace(
-                trace_path,
-                {
+            consumed += int(attention_mask[:, start:stop_token].sum())
+            trace_row = {
                     **binding,
                     "visit_index": visit_index,
                     "active_layer": active_layer,
@@ -344,38 +409,40 @@ def run_streamed_distillation(
                     "optimizer_stepped": stepped,
                     "gradient_norm": gradient_norm,
                     "state_supervision": state_supervision,
+                    "state_loss_effective": teacher_state is not None,
+                    "loss_weights": {
+                        name: float(value)
+                        for name, value in loss_weights.__dict__.items()
+                    },
                     "head_error_space": "target-hidden-channel-partitions-after-source-output-projection",
                     "head_normalized_mse": head_errors,
                     "losses": {
                         name: float(value.detach())
                         for name, value in losses.__dict__.items()
                     },
-                },
-            )
+                }
             snapshot = optimizer.release()
-            mixer_store.save_mixer(
-                active_layer,
-                mixer,
-                cursor={
-                    "visit_index": visit_index,
-                    "consumed": consumed,
-                    "data_cursor": data_cursor,
-                },
-            )
-            optimizer_path = progress_dir / f"optimizer-layer-{active_layer:03d}.pt"
-            _save_optimizer_snapshot(optimizer_path, snapshot)
-            _save_progress(
-                progress_dir,
-                {
-                    "schema_version": 1,
+            committed_layer_state = _commit_streamed_generation(
+                progress_dir=progress_dir,
+                trace_path=trace_path,
+                mixer_store=mixer_store,
+                active_layer=active_layer,
+                mixer=mixer,
+                optimizer_snapshot=snapshot,
+                phase="microstep",
+                committed_layer_state=committed_layer_state,
+                progress={
+                    "schema_version": 2,
                     "binding": binding,
                     "next_visit": visit_index,
+                    "active_layer": active_layer,
                     "consumed": consumed,
                     "data_cursor": data_cursor,
                     "torch_rng": torch.get_rng_state(),
                     "cuda_rng": torch.cuda.get_rng_state_all(),
                     "python_rng": random.getstate(),
                 },
+                trace_row=trace_row,
             )
             if consumed < token_budget or snapshot.accumulation_step:
                 mixer = mixer_store.load_mixer(active_layer, device=device, dtype=dtype)
@@ -386,20 +453,39 @@ def run_streamed_distillation(
                     snapshot=snapshot,
                     trainable_names=signal_names,
                 )
+        completed_consumed = consumed
+        stage_boundary = not fully_recurrent and active_layer == num_layers - 1
+        sweep_boundary = fully_recurrent and active_layer == 0
+        evidence_boundary = stage_boundary or sweep_boundary
         consumed = 0
         next_visit = visit_index + 1
-        _save_progress(
-            progress_dir,
-            {
-                "schema_version": 1,
+        if snapshot is None:
+            raise ContractError("streamed visit completed without an optimizer snapshot")
+        committed_layer_state = _commit_streamed_generation(
+            progress_dir=progress_dir,
+            trace_path=trace_path,
+            mixer_store=mixer_store,
+            active_layer=active_layer,
+            mixer=mixer,
+            optimizer_snapshot=snapshot,
+            phase=(
+                f"{stage}-data-complete"
+                if evidence_boundary
+                else "visit-complete"
+            ),
+            committed_layer_state=committed_layer_state,
+            progress={
+                "schema_version": 2,
                 "binding": binding,
-                "next_visit": next_visit,
-                "consumed": 0,
+                "next_visit": visit_index if evidence_boundary else next_visit,
+                "active_layer": active_layer,
+                "consumed": completed_consumed if evidence_boundary else 0,
                 "data_cursor": data_cursor,
                 "torch_rng": torch.get_rng_state(),
                 "cuda_rng": torch.cuda.get_rng_state_all(),
                 "python_rng": random.getstate(),
             },
+            trace_row=None,
         )
         if not fully_recurrent and active_layer == num_layers - 1:
             baseline_name = {
@@ -430,6 +516,35 @@ def run_streamed_distillation(
                 ),
                 token_budget=stage_budget,
             )
+            pre_sweep_fingerprint = None
+            if stage == "global":
+                pre_sweep = mixer_store.snapshot(
+                    run_dir / "streamed-sweeps" / "pre-sweep"
+                )
+                pre_sweep_fingerprint = mixer_store.snapshot_fingerprint(pre_sweep)
+            committed_layer_state = _commit_streamed_generation(
+                progress_dir=progress_dir,
+                trace_path=trace_path,
+                mixer_store=mixer_store,
+                active_layer=active_layer,
+                mixer=mixer,
+                optimizer_snapshot=snapshot,
+                phase=f"{stage}-complete",
+                committed_layer_state=committed_layer_state,
+                progress={
+                    "schema_version": 2,
+                    "binding": binding,
+                    "next_visit": next_visit,
+                    "active_layer": active_layer,
+                    "consumed": 0,
+                    "data_cursor": data_cursor,
+                    "torch_rng": torch.get_rng_state(),
+                    "cuda_rng": torch.cuda.get_rng_state_all(),
+                    "python_rng": random.getstate(),
+                    "pre_sweep_fingerprint": pre_sweep_fingerprint,
+                },
+                trace_row=None,
+            )
         if fully_recurrent and active_layer == 0:
             sweep_metrics = _score_streamed_candidate(
                 teacher,
@@ -441,19 +556,36 @@ def run_streamed_distillation(
                 dtype,
             )
             validation_kl = sweep_metrics["mean_token_kl"]
-            snapshot = mixer_store.snapshot(
+            sweep_snapshot = mixer_store.snapshot(
                 run_dir / "streamed-sweeps" / f"sweep-{sweep_index:02d}"
             )
-            sweep = controller.complete(
-                start_checkpoint=(
-                    str(zero_step_dir)
-                    if sweep_index == 0
-                    else str(run_dir / "streamed-sweeps" / f"sweep-{sweep_index - 1:02d}")
-                ),
-                end_checkpoint=str(snapshot),
-                validation_kl=validation_kl,
-                token_budget=plan.stage_tokens_per_layer["global"] * num_layers,
+            start_checkpoint = (
+                str(run_dir / "streamed-sweeps" / "pre-sweep")
+                if sweep_index == 0
+                else str(
+                    run_dir
+                    / "streamed-sweeps"
+                    / f"sweep-{sweep_index - 1:02d}"
+                )
             )
+            if sweep_index < len(controller.history):
+                sweep = dict(controller.history[sweep_index])
+                if sweep.get("end_checkpoint") != str(sweep_snapshot):
+                    raise ContractError("persisted corrective sweep checkpoint differs")
+            else:
+                sweep = controller.complete(
+                    start_checkpoint=start_checkpoint,
+                    end_checkpoint=str(sweep_snapshot),
+                    validation_kl=validation_kl,
+                    token_budget=plan.stage_tokens_per_layer["global"] * num_layers,
+                )
+                sweep["start_checkpoint_fingerprint"] = mixer_store.snapshot_fingerprint(
+                    Path(start_checkpoint)
+                )
+                sweep["end_checkpoint_fingerprint"] = mixer_store.snapshot_fingerprint(
+                    sweep_snapshot
+                )
+                controller.history[-1] = sweep
             write_json(sweep_path, {"schema_version": 1, "sweeps": controller.history})
             _write_streamed_baseline(
                 baseline_path,
@@ -467,6 +599,32 @@ def run_streamed_distillation(
                 * num_layers,
             )
             stop = bool(sweep["stop"])
+            committed_layer_state = _commit_streamed_generation(
+                progress_dir=progress_dir,
+                trace_path=trace_path,
+                mixer_store=mixer_store,
+                active_layer=active_layer,
+                mixer=mixer,
+                optimizer_snapshot=snapshot,
+                phase=f"sweep-{sweep_index:02d}-complete",
+                committed_layer_state=committed_layer_state,
+                progress={
+                    "schema_version": 2,
+                    "binding": binding,
+                    "next_visit": next_visit,
+                    "active_layer": active_layer,
+                    "consumed": 0,
+                    "data_cursor": data_cursor,
+                    "torch_rng": torch.get_rng_state(),
+                    "cuda_rng": torch.cuda.get_rng_state_all(),
+                    "python_rng": random.getstate(),
+                    "sweep_index": sweep_index,
+                    "sweep_checkpoint_fingerprint": sweep.get(
+                        "end_checkpoint_fingerprint"
+                    ),
+                },
+                trace_row=None,
+            )
             if stop:
                 break
     if controller.history:
@@ -551,6 +709,82 @@ def _encode_tokens(tokens, total_length, device):
     return input_ids, attention_mask, position_ids
 
 
+def _estimate_streamed_workload(
+    *, source_weight_bytes, num_layers, plan, baseline_rows=0
+):
+    def rounded_microbatches(tokens):
+        raw = math.ceil(tokens / plan.supervised_tokens)
+        return (
+            math.ceil(raw / plan.accumulation_steps)
+            * plan.accumulation_steps
+        )
+
+    batches = {
+        stage: rounded_microbatches(tokens)
+        for stage, tokens in plan.stage_tokens_per_layer.items()
+    }
+    progressive_batches = sum(batches.values()) * num_layers
+    sweep_batches = (
+        batches["global"] * num_layers * plan.corrective_max_sweeps
+    )
+    teacher_forwards = progressive_batches + sweep_batches
+    student_forwards = teacher_forwards
+    suffix_layer_reloads = 0
+    for stage_batches in batches.values():
+        suffix_layer_reloads += stage_batches * sum(range(num_layers))
+    suffix_layer_reloads += (
+        batches["global"]
+        * sum(range(num_layers))
+        * plan.corrective_max_sweeps
+    )
+    per_layer_bytes = math.ceil(source_weight_bytes / num_layers)
+    baseline_evaluations = 6 + 3 + plan.corrective_max_sweeps + 1
+    baseline_forwards = baseline_evaluations * baseline_rows
+    shadow_layer_loads = batches["signals"] * max(0, num_layers - 1)
+    generation_writes = teacher_forwards * per_layer_bytes * 2
+    estimated = (
+        teacher_forwards * source_weight_bytes
+        + student_forwards * source_weight_bytes
+        + suffix_layer_reloads * per_layer_bytes
+        + baseline_forwards * source_weight_bytes * 2
+        + shadow_layer_loads * per_layer_bytes
+        + generation_writes
+    )
+    return {
+        "schema_version": 1,
+        "estimator": "streamed-layer-store-conservative-v1",
+        "source_weight_bytes": source_weight_bytes,
+        "num_layers": num_layers,
+        "microbatches_per_layer": batches,
+        "teacher_full_forwards": teacher_forwards,
+        "student_full_forwards": student_forwards,
+        "suffix_layer_backward_reloads": suffix_layer_reloads,
+        "baseline_full_forwards": baseline_forwards,
+        "layer_zero_shadow_loads": shadow_layer_loads,
+        "estimated_generation_write_bytes": generation_writes,
+        "estimated_weight_bytes_moved": estimated,
+        "assumptions": [
+            "one full source checkpoint scan per teacher forward",
+            "one full source-shell scan per student forward",
+            "one average source layer reload per checkpointed suffix backward",
+            "mixer plus optimizer generation writes bounded by two average source layers",
+            "does not count activation, filesystem cache, snapshot/export, or network bytes",
+        ],
+    }
+
+
+def _supervised_prediction_window(logits, input_ids, *, start, targets):
+    """Align exactly ``targets`` next-token predictions after prefix burn-in."""
+    if start < 1 or targets < 1:
+        raise ContractError(
+            "streamed next-token supervision requires burn_in_tokens >= 1 and targets >= 1"
+        )
+    stop = start + targets
+    if stop > input_ids.shape[-1] or stop - 1 > logits.shape[-2]:
+        raise ContractError("supervised prediction window exceeds the packed row")
+    return logits[:, start - 1 : stop - 1], input_ids[:, start:stop]
+
+
 def _head_partition_errors(student: Tensor, teacher: Tensor, *, heads: int) -> list[float]:
     if student.shape != teacher.shape or student.shape[-1] % heads:
         raise ContractError(
@@ -569,6 +803,13 @@ def _append_trace(path: Path, row: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row, sort_keys=True) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    directory = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def _atomic_torch_save(path: Path, payload: object) -> str:
@@ -577,8 +818,16 @@ def _atomic_torch_save(path: Path, payload: object) -> str:
     content = buffer.getvalue()
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_bytes(content)
-    temporary.replace(path)
+    with temporary.open("wb") as handle:
+        handle.write(content)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+    directory = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
     return hashlib.sha256(content).hexdigest()
 
 
@@ -605,20 +854,289 @@ def _load_optimizer_snapshot(path: Path) -> ActiveLayerOptimizerSnapshot | None:
     return snapshot
 
 
-def _save_progress(root: Path, payload: dict[str, object]) -> None:
-    progress_path = root / "progress.pt"
-    sha = _atomic_torch_save(progress_path, payload)
-    write_json(root / "latest.json", {"schema_version": 1, "path": progress_path.name, "sha256": sha})
+def _commit_streamed_generation(
+    *,
+    progress_dir: Path,
+    trace_path: Path,
+    mixer_store: RWKV7MixerLayerStore,
+    active_layer: int,
+    mixer,
+    optimizer_snapshot: ActiveLayerOptimizerSnapshot,
+    phase: str,
+    committed_layer_state: dict[str, dict[str, object]],
+    progress: dict[str, object],
+    trace_row: dict[str, object] | None,
+) -> dict[str, dict[str, object]]:
+    cursor = {
+        "visit_index": int(progress["next_visit"]),
+        "active_layer": active_layer,
+        "consumed": int(progress["consumed"]),
+        "data_cursor": int(progress["data_cursor"]),
+        "phase": phase,
+    }
+    generation_name = (
+        f"v{cursor['visit_index']:04d}-l{active_layer:03d}-"
+        f"d{cursor['data_cursor']:012d}-c{cursor['consumed']:012d}-{phase}"
+    )
+    generations = progress_dir / "generations"
+    generations.mkdir(parents=True, exist_ok=True)
+    generation = generations / generation_name
+    temporary = generations / f".{generation_name}.tmp"
+    pointer_path = progress_dir / "latest.json"
+    if generation.is_dir() and pointer_path.is_file():
+        pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+        manifest_path = generation / "manifest.json"
+        if (
+            pointer.get("generation") == generation_name
+            and manifest_path.is_file()
+            and pointer.get("manifest_sha256") == file_sha256(manifest_path)
+        ):
+            existing_progress = torch.load(
+                generation / "progress.pt",
+                map_location="cpu",
+                weights_only=False,
+            )
+            if existing_progress.get("commit_cursor") != cursor:
+                raise ContractError(
+                    "latest streamed generation name matches but cursor differs"
+                )
+            existing_state = existing_progress.get("committed_layer_state")
+            if not isinstance(existing_state, dict):
+                raise ContractError("latest streamed generation lacks layer-state map")
+            return {
+                str(layer): dict(record)
+                for layer, record in existing_state.items()
+            }
+    if temporary.exists():
+        shutil.rmtree(temporary)
+    if generation.exists():
+        shutil.rmtree(generation)
+    temporary.mkdir()
+    mixer_metadata = mixer_store.save_generation(
+        temporary / "mixer",
+        active_layer,
+        mixer,
+        cursor=cursor,
+    )
+    optimizer_path = temporary / "optimizer.pt"
+    _save_optimizer_snapshot(optimizer_path, optimizer_snapshot)
+    next_committed_layer_state = {
+        str(layer): dict(record)
+        for layer, record in committed_layer_state.items()
+    }
+    next_committed_layer_state[str(active_layer)] = {
+        "generation": generation_name,
+        "mixer_sha256": mixer_metadata["sha256"],
+        "optimizer_sha256": file_sha256(optimizer_path),
+        "cursor": cursor,
+    }
+    progress = {
+        **progress,
+        "commit_cursor": cursor,
+        "committed_layer_state": next_committed_layer_state,
+    }
+    progress_sha = _atomic_torch_save(temporary / "progress.pt", progress)
+    if trace_row is not None:
+        (temporary / "trace.json").write_text(
+            json.dumps(trace_row, sort_keys=True) + "\n", encoding="utf-8"
+        )
+    manifest = {
+        "schema_version": 1,
+        "generation": generation_name,
+        "cursor": cursor,
+        "mixer_sha256": mixer_metadata["sha256"],
+        "optimizer_sha256": file_sha256(optimizer_path),
+        "progress_sha256": progress_sha,
+        "trace_sha256": (
+            file_sha256(temporary / "trace.json") if trace_row is not None else None
+        ),
+    }
+    write_json(temporary / "manifest.json", manifest)
+    _fsync_tree(temporary)
+    generation.parent.mkdir(parents=True, exist_ok=True)
+    temporary.rename(generation)
+    generation_directory = os.open(generation.parent, os.O_RDONLY)
+    try:
+        os.fsync(generation_directory)
+    finally:
+        os.close(generation_directory)
+
+    mixer_store.restore_generation(
+        generation / "mixer", active_layer, expected_cursor=cursor
+    )
+    published_optimizer = progress_dir / f"optimizer-layer-{active_layer:03d}.pt"
+    staged = published_optimizer.with_suffix(published_optimizer.suffix + ".generation")
+    shutil.copy2(generation / "optimizer.pt", staged)
+    staged.replace(published_optimizer)
+    write_json(
+        published_optimizer.with_suffix(published_optimizer.suffix + ".json"),
+        {
+            "schema_version": 1,
+            "path": published_optimizer.name,
+            "sha256": file_sha256(published_optimizer),
+        },
+    )
+    if trace_row is not None:
+        _append_trace(trace_path, trace_row)
+    trace_size = trace_path.stat().st_size if trace_path.exists() else 0
+    trace_sha256 = file_sha256(trace_path) if trace_path.exists() else None
+    write_json(
+        progress_dir / "latest.json",
+        {
+            "schema_version": 2,
+            "generation": generation_name,
+            "manifest_sha256": file_sha256(generation / "manifest.json"),
+            "trace_size": trace_size,
+            "trace_sha256": trace_sha256,
+        },
+    )
+    _reclaim_unreferenced_generations(
+        generations,
+        {
+            str(record["generation"])
+            for record in next_committed_layer_state.values()
+        },
+    )
+    return next_committed_layer_state
 
 
-def _load_progress(path: Path) -> dict[str, object]:
+def _fsync_tree(root: Path) -> None:
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            with path.open("rb") as handle:
+                os.fsync(handle.fileno())
+    for directory_path in sorted(
+        (path for path in root.rglob("*") if path.is_dir()),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    ):
+        descriptor = os.open(directory_path, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    descriptor = os.open(root, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _reclaim_unreferenced_generations(
+    generations: Path, referenced: set[str]
+) -> None:
+    for candidate in generations.iterdir():
+        if candidate.name in referenced:
+            continue
+        if candidate.is_dir():
+            shutil.rmtree(candidate)
+        else:
+            candidate.unlink(missing_ok=True)
+    descriptor = os.open(generations, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _load_committed_generation(
+    path: Path,
+    *,
+    trace_path: Path,
+    mixer_store: RWKV7MixerLayerStore,
+    progress_dir: Path,
+) -> tuple[dict[str, object], ActiveLayerOptimizerSnapshot]:
     root = path if path.is_dir() else path.parent
     pointer_path = root / "latest.json" if path.is_dir() else path
     pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
-    progress_path = root / str(pointer["path"])
-    if file_sha256(progress_path) != pointer["sha256"]:
-        raise ContractError("streamed progress SHA-256 mismatch")
-    return torch.load(progress_path, map_location="cpu", weights_only=False)
+    if pointer.get("schema_version") != 2:
+        raise ContractError("legacy non-transactional streamed progress cannot be resumed")
+    generation = root / "generations" / str(pointer["generation"])
+    manifest_path = generation / "manifest.json"
+    if (
+        not manifest_path.is_file()
+        or file_sha256(manifest_path) != pointer.get("manifest_sha256")
+    ):
+        raise ContractError("streamed generation manifest SHA-256 mismatch")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    cursor = manifest.get("cursor")
+    if not isinstance(cursor, dict):
+        raise ContractError("streamed generation has no commit cursor")
+    progress_path = generation / "progress.pt"
+    optimizer_path = generation / "optimizer.pt"
+    if (
+        file_sha256(progress_path) != manifest.get("progress_sha256")
+        or file_sha256(optimizer_path) != manifest.get("optimizer_sha256")
+    ):
+        raise ContractError("streamed generation progress/optimizer SHA-256 mismatch")
+    expected_trace_size = int(pointer.get("trace_size", 0))
+    actual_trace_size = trace_path.stat().st_size if trace_path.exists() else 0
+    if actual_trace_size < expected_trace_size:
+        raise ContractError("committed streamed trace is shorter than latest generation")
+    if actual_trace_size > expected_trace_size:
+        with trace_path.open("r+b") as handle:
+            handle.truncate(expected_trace_size)
+            handle.flush()
+            os.fsync(handle.fileno())
+    actual_trace_sha256 = file_sha256(trace_path) if trace_path.exists() else None
+    if actual_trace_sha256 != pointer.get("trace_sha256"):
+        raise ContractError("committed streamed trace SHA-256 mismatch")
+    progress = torch.load(progress_path, map_location="cpu", weights_only=False)
+    if progress.get("commit_cursor") != cursor:
+        raise ContractError("streamed generation progress cursor mismatch")
+    committed = progress.get("committed_layer_state")
+    if not isinstance(committed, dict):
+        raise ContractError("streamed generation lacks committed per-layer state")
+    for layer in range(mixer_store.factory.config.num_hidden_layers):
+        if str(layer) in committed:
+            continue
+        mixer_store.discard_overlay(layer)
+        optimizer_file = progress_dir / f"optimizer-layer-{layer:03d}.pt"
+        optimizer_file.unlink(missing_ok=True)
+        optimizer_file.with_suffix(optimizer_file.suffix + ".json").unlink(
+            missing_ok=True
+        )
+    for layer_text, record in committed.items():
+        if not isinstance(record, dict):
+            raise ContractError("invalid committed streamed layer-state record")
+        layer = int(layer_text)
+        layer_generation = root / "generations" / str(record.get("generation"))
+        layer_optimizer = layer_generation / "optimizer.pt"
+        layer_cursor = record.get("cursor")
+        if (
+            not isinstance(layer_cursor, dict)
+            or file_sha256(layer_optimizer) != record.get("optimizer_sha256")
+        ):
+            raise ContractError(f"committed optimizer generation mismatch at layer {layer}")
+        restored_metadata = mixer_store.restore_generation(
+            layer_generation / "mixer",
+            layer,
+            expected_cursor=layer_cursor,
+        )
+        if restored_metadata.get("sha256") != record.get("mixer_sha256"):
+            raise ContractError(f"committed mixer generation mismatch at layer {layer}")
+        published = progress_dir / f"optimizer-layer-{layer:03d}.pt"
+        staged = published.with_suffix(published.suffix + ".resume")
+        shutil.copy2(layer_optimizer, staged)
+        staged.replace(published)
+        write_json(
+            published.with_suffix(published.suffix + ".json"),
+            {
+                "schema_version": 1,
+                "path": published.name,
+                "sha256": file_sha256(published),
+            },
+        )
+    _reclaim_unreferenced_generations(
+        root / "generations",
+        {str(record["generation"]) for record in committed.values()},
+    )
+    active_layer = int(cursor["active_layer"])
+    published_optimizer = progress_dir / f"optimizer-layer-{active_layer:03d}.pt"
+    optimizer = _load_optimizer_snapshot(published_optimizer)
+    if optimizer is None:
+        raise ContractError("committed streamed optimizer snapshot is absent")
+    return progress, optimizer
 
 
 def _read_streamed_baselines(
@@ -698,19 +1216,30 @@ def _score_streamed_candidate(
                 ),
             )
             start = plan.burn_in_tokens
-            reference_logits = reference.logits[:, start:].to(device)
-            candidate_logits = candidate.logits[:, start:]
-            labels = input_ids[:, start:]
+            reference_logits, labels = _supervised_prediction_window(
+                reference.logits.to(device),
+                input_ids,
+                start=start,
+                targets=plan.supervised_tokens,
+            )
+            candidate_logits, candidate_labels = _supervised_prediction_window(
+                candidate.logits,
+                input_ids,
+                start=start,
+                targets=plan.supervised_tokens,
+            )
+            if not torch.equal(labels, candidate_labels):
+                raise ContractError("candidate/reference evaluation windows differ")
             teacher_ce.append(
                 torch.nn.functional.cross_entropy(
-                    reference_logits[:, :-1].reshape(-1, reference_logits.shape[-1]),
-                    labels[:, 1:].reshape(-1),
+                    reference_logits.reshape(-1, reference_logits.shape[-1]),
+                    labels.reshape(-1),
                 )
             )
             student_ce.append(
                 torch.nn.functional.cross_entropy(
-                    candidate_logits[:, :-1].reshape(-1, candidate_logits.shape[-1]),
-                    labels[:, 1:].reshape(-1),
+                    candidate_logits.reshape(-1, candidate_logits.shape[-1]),
+                    labels.reshape(-1),
                 )
             )
             kl_rows.append(
@@ -740,8 +1269,24 @@ def _score_streamed_candidate(
 
 
 def _export_streamed_checkpoint(source, zero_step_dir, mixer_store, destination):
+    binding = {
+        "schema_version": 1,
+        "source_config_sha256": source.file_hashes["config.json"],
+        "source_shard_sha256": {
+            shard.name: source.file_hashes[shard.name] for shard in source.shards
+        },
+        "target_config_sha256": file_sha256(zero_step_dir / "config.json"),
+        "selected_mixer_fingerprint": mixer_store.fingerprint(),
+    }
+    binding_path = destination / "any2rwkv-export-binding.json"
     if destination.is_dir():
         _validate_complete_export(destination)
+        if not binding_path.is_file() or json.loads(
+            binding_path.read_text(encoding="utf-8")
+        ) != binding:
+            raise ContractError(
+                "existing streamed HF export does not match the selected mixer snapshot"
+            )
         return
     temporary = destination.with_name(destination.name + ".partial")
     target_config = json.loads((zero_step_dir / "config.json").read_text(encoding="utf-8"))
@@ -772,8 +1317,10 @@ def _export_streamed_checkpoint(source, zero_step_dir, mixer_store, destination)
         target_specs=specs,
         target_tensor_provider=provide,
         resume_partial=True,
+        external_resume_binding=binding,
     )
     _validate_complete_export(temporary)
+    write_json(temporary / "any2rwkv-export-binding.json", binding)
     temporary.rename(destination)
 
 

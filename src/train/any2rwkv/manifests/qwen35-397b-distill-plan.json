@@ -2,6 +2,7 @@
   "schema_version": 1,
   "classification": "qwen35-397b-text-backbone-streamed-layer-distillation",
   "execution_mode": "streamed_layer_store",
+  "max_estimated_weight_bytes_moved": 1000000000000000,
   "seed": 20260714,
   "learning_rate": 0.00005,
   "burn_in_tokens": 128,
@@ -25,5 +26,6 @@
     "frozen_suffix": "reentrant reload on backward",
     "vocab_kl": "exact 8192-token chunks"
   },
+  "execution_budget_note": "The current streamed_layer_store runner must fail before GPU launch when its conservative estimate exceeds 1 PB. A scale training run requires a distributed resident or expert-sharded backend; conversion-only preflight remains allowed.",
   "gate": "May start only after the real proxy has passed P0, migration, P1, and BF16 serving acceptance."
 }

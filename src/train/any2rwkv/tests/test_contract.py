@@ -251,8 +251,19 @@ class ContractTests(unittest.TestCase):
                         target_specs=specs,
                         max_shard_bytes=64 * 1024,
                         resume_partial=True,
+                        external_resume_binding={"mixer_fingerprint": "a" * 64},
                     )
             self.assertTrue((interrupted / ".export-progress.json").is_file())
+            with self.assertRaisesRegex(ContractError, "resume binding differs"):
+                export_hf_checkpoint(
+                    source,
+                    interrupted,
+                    target_config=target_config,
+                    target_specs=specs,
+                    max_shard_bytes=64 * 1024,
+                    resume_partial=True,
+                    external_resume_binding={"mixer_fingerprint": "b" * 64},
+                )
             resumed = export_hf_checkpoint(
                 source,
                 interrupted,
@@ -260,6 +271,7 @@ class ContractTests(unittest.TestCase):
                 target_specs=specs,
                 max_shard_bytes=64 * 1024,
                 resume_partial=True,
+                external_resume_binding={"mixer_fingerprint": "a" * 64},
             )
             clean = export_hf_checkpoint(
                 source,
@@ -267,6 +279,7 @@ class ContractTests(unittest.TestCase):
                 target_config=target_config,
                 target_specs=specs,
                 max_shard_bytes=64 * 1024,
+                external_resume_binding={"mixer_fingerprint": "a" * 64},
             )
             self.assertEqual(resumed["files"], clean["files"])
             self.assertFalse((interrupted / ".export-progress.json").exists())

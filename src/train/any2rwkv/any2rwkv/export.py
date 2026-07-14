@@ -91,6 +91,7 @@ def export_hf_checkpoint(
     target_tensors: Mapping[str, torch.Tensor] | None = None,
     target_tensor_provider: Callable[[TensorSpec], torch.Tensor] | None = None,
     resume_partial: bool = False,
+    external_resume_binding: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Stream a deterministic structural target checkpoint in standard HF layout.
 
@@ -119,6 +120,7 @@ def export_hf_checkpoint(
                 "target_specs": [spec.__dict__ for spec in target_specs],
                 "max_shard_bytes": max_shard_bytes,
                 "seed": seed,
+                "external_resume_binding": external_resume_binding,
             },
             sort_keys=True,
             default=str,

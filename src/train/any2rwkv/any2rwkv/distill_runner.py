@@ -48,6 +48,7 @@ class DistillationPlan:
     corrective_min_delta: float
     activation_checkpointing: bool
     execution_mode: str
+    max_estimated_weight_bytes_moved: int | None
 
 
 def read_distillation_plan(path: Path) -> DistillationPlan:
@@ -75,6 +76,11 @@ def read_distillation_plan(path: Path) -> DistillationPlan:
         float(payload.get("corrective_min_delta", -1)),
         activation_checkpointing,
         str(payload.get("execution_mode", "resident")),
+        (
+            int(payload["max_estimated_weight_bytes_moved"])
+            if "max_estimated_weight_bytes_moved" in payload
+            else None
+        ),
     )
     if (
         plan.seed < 0
@@ -87,6 +93,10 @@ def read_distillation_plan(path: Path) -> DistillationPlan:
         or plan.corrective_max_sweeps < plan.corrective_min_sweeps
         or plan.corrective_min_delta < 0
         or plan.execution_mode not in {"resident", "streamed_layer_store"}
+        or (
+            plan.max_estimated_weight_bytes_moved is not None
+            and plan.max_estimated_weight_bytes_moved <= 0
+        )
     ):
         raise ContractError("distillation plan contains invalid numeric limits")
     return plan

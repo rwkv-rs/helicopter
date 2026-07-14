@@ -27,7 +27,11 @@ helicopter any2rwkv quantize
 
 每次 run 使用独立 output；source checkpoint 只读。`convert` 先写 zero-step checkpoint、完整双轴 mapping ledger 和六种 warm-start plan。`distill` 读取不可变数据 manifest 与训练 plan，依次执行 isolated signals/block、`0..N-1` progressive global、首次 fully recurrent 与 `N-1..0` corrective sweep，并原子保存 active layer optimizer、累计梯度、RNG、data cursor 和 sweep cursor。
 
+streamed runner 的每个 microstep 使用不可变 generation 事务提交 mixer、optimizer、RNG、cursor 和 trace offset，最后只原子替换 `latest.json`；resume 会恢复同一 generation 并截断未提交 trace 尾部。首轮 corrective sweep 从 hash-bound `pre-sweep` snapshot 开始，最终 HF export 也必须匹配 selected all-layer mixer fingerprint，禁止复用旧导出。
+
 确定性 60 层 fixture pilot 的输入由 `scripts/write_tiny_pilot_inputs.py` 生成，再由 `scripts/prepare_data.py` 产生互斥 split；它只能证明结构、梯度和恢复 invariant，不能作为能力结果。真实 Qwen3.5-2B 是 24 层 integration/convergence proxy，也不能替代 397B 质量证据。
+
+397B 训练计划还带有启动前 execution estimate：记录 teacher/student full forward、checkpointed suffix reload 和保守权重搬运量。当前单 GPU `streamed_layer_store` 估算超过冻结的 1 PB 上限时必须 fail-fast；此时只能做 conversion/preflight，训练必须先接入 distributed resident 或 expert-sharded backend，不能靠继续排队 GPU 绕过。
 
 ## 质量与量化
 

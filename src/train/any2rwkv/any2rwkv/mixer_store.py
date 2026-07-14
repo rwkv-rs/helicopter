@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -119,8 +120,71 @@ class RWKV7MixerLayerStore:
         *,
         cursor: dict[str, object],
     ) -> dict[str, object]:
+        return self._write_mixer_files(
+            self.overlay_dir, layer_index, mixer, cursor=cursor
+        )
+
+    def save_generation(
+        self,
+        destination: Path,
+        layer_index: int,
+        mixer: ProjectionBoundaryRWKV7Attention,
+        *,
+        cursor: dict[str, object],
+    ) -> dict[str, object]:
+        destination.mkdir(parents=True, exist_ok=False)
+        return self._write_mixer_files(
+            destination, layer_index, mixer, cursor=cursor
+        )
+
+    def restore_generation(
+        self,
+        source: Path,
+        layer_index: int,
+        *,
+        expected_cursor: dict[str, object],
+    ) -> dict[str, object]:
+        tensor_path = source / f"layer-{layer_index:03d}.safetensors"
+        metadata_path = source / f"layer-{layer_index:03d}.json"
+        if not tensor_path.is_file() or not metadata_path.is_file():
+            raise ContractError(f"incomplete streamed mixer generation: {source}")
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if (
+            metadata.get("layer_index") != layer_index
+            or metadata.get("sha256") != file_sha256(tensor_path)
+            or metadata.get("cursor") != expected_cursor
+        ):
+            raise ContractError(
+                f"streamed mixer generation hash/cursor mismatch: {source}"
+            )
+        for generated in (tensor_path, metadata_path):
+            target = self.overlay_dir / generated.name
+            temporary = target.with_suffix(target.suffix + ".generation")
+            shutil.copy2(generated, temporary)
+            temporary.replace(target)
+        return metadata
+
+    def discard_overlay(self, layer_index: int) -> None:
+        """Remove an uncommitted layer publication so loads fall back to base."""
+        for suffix in (".safetensors", ".json"):
+            (self.overlay_dir / f"layer-{layer_index:03d}{suffix}").unlink(
+                missing_ok=True
+            )
+
+    def discard_all_overlays(self) -> None:
+        for layer_index in range(self.factory.config.num_hidden_layers):
+            self.discard_overlay(layer_index)
+
+    def _write_mixer_files(
+        self,
+        directory: Path,
+        layer_index: int,
+        mixer: ProjectionBoundaryRWKV7Attention,
+        *,
+        cursor: dict[str, object],
+    ) -> dict[str, object]:
         prefix = f"model.layers.{layer_index}.attn."
-        path = self.overlay_dir / f"layer-{layer_index:03d}.safetensors"
+        path = directory / f"layer-{layer_index:03d}.safetensors"
         temporary = path.with_suffix(path.suffix + ".tmp")
         save_file(
             {
@@ -137,7 +201,7 @@ class RWKV7MixerLayerStore:
             "sha256": file_sha256(path),
             "cursor": cursor,
         }
-        write_json(self.overlay_dir / f"layer-{layer_index:03d}.json", metadata)
+        write_json(directory / f"layer-{layer_index:03d}.json", metadata)
         return metadata
 
     def snapshot(self, destination: Path) -> Path:
@@ -166,7 +230,13 @@ class RWKV7MixerLayerStore:
                     except OSError:
                         shutil.copy2(source, target)
         self._validate_snapshot(temporary)
+        _fsync_tree(temporary)
         temporary.rename(destination)
+        parent = os.open(destination.parent, os.O_RDONLY)
+        try:
+            os.fsync(parent)
+        finally:
+            os.close(parent)
         return destination
 
     def restore_snapshot(self, source: Path) -> None:
@@ -187,6 +257,41 @@ class RWKV7MixerLayerStore:
                     except OSError:
                         shutil.copy2(snapshot_path, temporary)
                 temporary.replace(target)
+
+    def fingerprint(self) -> str:
+        """Hash the exact all-layer overlay selected for export."""
+        rows = []
+        for layer_index in range(self.factory.config.num_hidden_layers):
+            tensor_path = self.overlay_dir / f"layer-{layer_index:03d}.safetensors"
+            metadata_path = self.overlay_dir / f"layer-{layer_index:03d}.json"
+            if not tensor_path.is_file() or not metadata_path.is_file():
+                raise ContractError(
+                    f"cannot fingerprint incomplete mixer overlay at layer {layer_index}"
+                )
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            digest = file_sha256(tensor_path)
+            if metadata.get("layer_index") != layer_index or metadata.get("sha256") != digest:
+                raise ContractError(f"mixer overlay fingerprint mismatch at layer {layer_index}")
+            rows.append({"layer_index": layer_index, "sha256": digest})
+        canonical = json.dumps(rows, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
+
+    def snapshot_fingerprint(self, source: Path) -> str:
+        source = source.resolve()
+        self._validate_snapshot(source)
+        rows = [
+            {
+                "layer_index": layer_index,
+                "sha256": file_sha256(
+                    source / f"layer-{layer_index:03d}.safetensors"
+                ),
+            }
+            for layer_index in range(self.factory.config.num_hidden_layers)
+        ]
+        canonical = json.dumps(
+            rows, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
 
     def _validate_snapshot(self, source: Path) -> None:
         for layer_index in range(self.factory.config.num_hidden_layers):
@@ -244,3 +349,25 @@ class RWKV7MixerLayerStore:
                 for name in names:
                     state[name.removeprefix(prefix)] = handle.get_tensor(name)
         return state
+
+
+def _fsync_tree(root: Path) -> None:
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            with path.open("rb") as handle:
+                os.fsync(handle.fileno())
+    for directory in sorted(
+        (path for path in root.rglob("*") if path.is_dir()),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    ):
+        descriptor = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    descriptor = os.open(root, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
