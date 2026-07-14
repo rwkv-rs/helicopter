@@ -149,6 +149,7 @@ class HybridModelPatcher:
             raise ContractError("teacher/student mixer layer counts differ")
         self.records: list[PatchedLayer] = []
         self.context = HybridRecurrentContext()
+        self._v_first_shadow_handle = None
         self._original_layer_forwards = [layer.forward for layer in self.layers]
         for index, (layer, mixer) in enumerate(zip(self.layers, mixers, strict=True)):
             if hasattr(layer, "linear_attn"):
@@ -200,6 +201,7 @@ class HybridModelPatcher:
                 raise ContractError("converted_layers contains an out-of-range layer")
             frozen_students.discard(active_layer)
         self.context.v_first = None
+        self._remove_v_first_shadow()
         self._restore_layer_forwards()
         for record in self.records:
             use_student = record.index in frozen_students or record.index == active_layer
@@ -210,7 +212,28 @@ class HybridModelPatcher:
                     parameter.grad = None
         if checkpoint_suffix:
             self._checkpoint_frozen_suffix(active_layer)
+        if active_layer > 0 and 0 not in frozen_students:
+            shadow = self.records[0].adapter.rwkv
+
+            def populate_v_first(_module, args, kwargs):
+                hidden = kwargs.get("hidden_states")
+                if hidden is None and args:
+                    hidden = args[0]
+                if hidden is None:
+                    raise ContractError("teacher layer-0 shadow could not resolve hidden_states")
+                with torch.no_grad():
+                    self.context.v_first = shadow.project_v_first_sequence(hidden).detach()
+
+            self._v_first_shadow_handle = self.layers[0].register_forward_pre_hook(
+                populate_v_first,
+                with_kwargs=True,
+            )
         return self.records[active_layer].adapter
+
+    def _remove_v_first_shadow(self) -> None:
+        if self._v_first_shadow_handle is not None:
+            self._v_first_shadow_handle.remove()
+            self._v_first_shadow_handle = None
 
     def _restore_layer_forwards(self) -> None:
         for layer, original in zip(
@@ -237,6 +260,7 @@ class HybridModelPatcher:
             layer.forward = MethodType(checkpointed, layer)
 
     def restore(self) -> None:
+        self._remove_v_first_shadow()
         self._restore_layer_forwards()
         for record in self.records:
             setattr(self.layers[record.index], record.attribute, record.original)

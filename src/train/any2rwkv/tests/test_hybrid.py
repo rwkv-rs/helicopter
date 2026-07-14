@@ -47,6 +47,41 @@ class SourceModel(nn.Module):
 
 
 class HybridCheckpointTests(unittest.TestCase):
+    def test_nonzero_active_layer_gets_detached_frozen_layer0_v_first(self) -> None:
+        source = tiny_qwen35_config(layers=3, moe=False)
+        source["mtp_num_hidden_layers"] = 0
+        config = Any2RWKV7Config(
+            **build_target_config(source, require_final_layers=False)
+        )
+        teacher = SourceModel(3, config.hidden_size)
+        mixers = [
+            ProjectionBoundaryRWKV7Attention(
+                config,
+                layer,
+                source_used_rope=False,
+                rotary_dim=0,
+                rope_theta=10_000.0,
+            )
+            for layer in range(3)
+        ]
+        patcher = HybridModelPatcher(teacher, mixers)
+        patcher.configure(active_layer=1, converted_prefix=0)
+        output = teacher(
+            torch.randn(2, 4, config.hidden_size),
+            attention_mask=torch.ones(2, 4),
+            position_ids=torch.arange(4).view(1, -1).expand(2, -1),
+        ).logits
+        self.assertIsNotNone(patcher.context.v_first)
+        self.assertFalse(patcher.context.v_first.requires_grad)
+        output.square().mean().backward()
+        self.assertTrue(
+            all(parameter.grad is None for parameter in mixers[0].parameters())
+        )
+        self.assertTrue(
+            any(parameter.grad is not None for parameter in mixers[1].parameters())
+        )
+        patcher.restore()
+
     def test_frozen_suffix_checkpoint_keeps_teacher_eval_and_gradient_bridge(self) -> None:
         source = tiny_qwen35_config(layers=3, moe=False)
         source["mtp_num_hidden_layers"] = 0

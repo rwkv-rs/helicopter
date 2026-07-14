@@ -105,6 +105,14 @@ class ProjectionBoundaryRWKV7Attention(NativeRWKV7Attention):
         signals = {"r": r, "decay": decay, "k": k, "v": v, "a": normalized_key, "erase": a}
         return output, x, state, v_first, signals
 
+    def project_v_first_sequence(self, x: Tensor) -> Tensor:
+        """Project the frozen layer-0 value stream without running recurrence."""
+        if x.ndim != 3:
+            raise ValueError("v_first shadow projection expects x=[B,T,C]")
+        previous = torch.cat((torch.zeros_like(x[:, :1]), x[:, :-1]), dim=1)
+        mixed_v = x + (previous - x) * self.x_v.reshape(1, 1, x.shape[-1])
+        return self.v_proj(mixed_v)
+
     def forward_sequence(
         self,
         x: Tensor,
