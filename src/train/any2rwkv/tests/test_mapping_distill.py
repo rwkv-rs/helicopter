@@ -23,6 +23,7 @@ from any2rwkv.distill import (
 from any2rwkv.errors import CoverageError
 from any2rwkv.calibration import file_sha256
 from any2rwkv.distill_runner import (
+    _initial_trainable_names,
     _write_baseline_result,
     read_distillation_plan,
     read_distillation_texts,
@@ -32,6 +33,27 @@ from any2rwkv.mapping import MappingLedger, SourceDisposition, SourceEntry, Targ
 
 
 class MappingTests(unittest.TestCase):
+    def test_resident_trainable_names_target_adapter_rwkv_namespace(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "warm-start-plan.json").write_text(
+                json.dumps(
+                    {
+                        "entries": [
+                            {
+                                "target": "model.layers.0.attn.r_proj.weight",
+                                "provenance": "initialized",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                _initial_trainable_names(root, 1),
+                [{"rwkv.r_proj.weight"}],
+            )
+
     def test_baseline_result_is_written_atomically_and_bound(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "migration-baselines.json"

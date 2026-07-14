@@ -516,7 +516,9 @@ def _initial_trainable_names(run_dir: Path, layer_count: int) -> list[set[str]]:
             continue
         if not 0 <= layer < layer_count:
             raise ContractError(f"warm-start trainable target has invalid layer: {target}")
-        rows[layer].add(parts[1])
+        # The resident trainer owns QwenRWKV7MixerAdapter modules, whose
+        # native mixer is registered under the ``rwkv`` child namespace.
+        rows[layer].add(f"rwkv.{parts[1]}")
     if any(not names for names in rows):
         missing = [index for index, names in enumerate(rows) if not names]
         raise ContractError(
