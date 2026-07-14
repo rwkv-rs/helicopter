@@ -27,6 +27,8 @@ CARGO_REGISTRY_MIRROR_NAME="${CARGO_REGISTRY_MIRROR_NAME:-rsproxy-sparse}"
 VLLM="$ROOT/src/infer/vllm-rwkv"
 RWKV_LM="$ROOT/src/train/rwkv-lm"
 VERL="$ROOT/src/train/verl-rwkv"
+RWKV_HF="$ROOT/src/train/rwkv-hf"
+ANY2RWKV="$ROOT/src/train/any2rwkv"
 STAMP_DIR="$VENV/.helicopter-stamps"
 VLLM_STAMP="$STAMP_DIR/vllm-native.sha256"
 
@@ -88,7 +90,7 @@ clean_submodule_venvs() {
   [[ "$CLEAN_SUBMODULE_VENVS" == "1" ]] || return 0
 
   local env_dir
-  for env_dir in "$VLLM/.venv" "$VERL/.venv" "$RWKV_LM/.venv"; do
+  for env_dir in "$VLLM/.venv" "$VERL/.venv" "$RWKV_LM/.venv" "$RWKV_HF/.venv" "$ANY2RWKV/.venv"; do
     [[ -e "$env_dir" ]] || continue
     [[ "$env_dir" == "$ROOT"/src/*/.venv ]] || die "refusing to remove unexpected venv path: $env_dir"
     run rm -rf "$env_dir"
@@ -267,6 +269,26 @@ import verl
 PY
 }
 
+rwkv_hf_ready() {
+  "$VENV/bin/python" - <<'PY' >/dev/null
+import rwkv7_hf
+PY
+}
+
+any2rwkv_ready() {
+  "$VENV/bin/python" - "$ANY2RWKV" <<'PY' >/dev/null
+import pathlib
+import sys
+
+import any2rwkv
+
+expected = pathlib.Path(sys.argv[1]).resolve()
+actual = pathlib.Path(any2rwkv.__file__).resolve()
+if expected not in actual.parents:
+    raise SystemExit(f"any2rwkv import resolved outside product package: {actual}")
+PY
+}
+
 install_vllm_package() {
   local pip=( "$UV" pip install )
   [[ -n "$UV_INDEX_URL" ]] && pip+=(--index-url "$UV_INDEX_URL")
@@ -305,6 +327,24 @@ install_rwkv_lm_package() {
   else
     echo "rwkv-lm has no local package metadata; dependencies are covered by pyproject.toml"
   fi
+}
+
+install_rwkv_hf_package() {
+  local pip=( "$UV" pip install )
+  [[ -n "$UV_INDEX_URL" ]] && pip+=(--index-url "$UV_INDEX_URL")
+  pip+=(--project "$ROOT" --python "$VENV/bin/python" )
+
+  run "${pip[@]}" --no-deps -e "$RWKV_HF"
+  [[ "${DRY_RUN:-0}" == "1" ]] || rwkv_hf_ready
+}
+
+install_any2rwkv_package() {
+  local pip=( "$UV" pip install )
+  [[ -n "$UV_INDEX_URL" ]] && pip+=(--index-url "$UV_INDEX_URL")
+  pip+=(--project "$ROOT" --python "$VENV/bin/python" )
+
+  run "${pip[@]}" --no-deps -e "$ANY2RWKV"
+  [[ "${DRY_RUN:-0}" == "1" ]] || any2rwkv_ready
 }
 
 install_verl_package() {
@@ -357,6 +397,8 @@ configure_cuda_arch_list
 clean_vllm_cmake_cache
 install_vllm_package
 install_rwkv_lm_package
+install_rwkv_hf_package
+install_any2rwkv_package
 install_verl_package
 check_python_packages
 

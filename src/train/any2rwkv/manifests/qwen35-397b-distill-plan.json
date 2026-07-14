@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "classification": "qwen35-397b-text-backbone-streamed-layer-distillation",
+  "execution_mode": "streamed_layer_store",
+  "seed": 20260714,
+  "learning_rate": 0.00005,
+  "burn_in_tokens": 128,
+  "supervised_tokens": 512,
+  "accumulation_steps": 4,
+  "activation_checkpointing": true,
+  "stage_tokens_per_layer": {
+    "signals": 16384,
+    "block": 65536,
+    "global": 262144
+  },
+  "corrective_min_sweeps": 1,
+  "corrective_max_sweeps": 3,
+  "corrective_min_delta": 0.001,
+  "resident_contract": {
+    "source_decoder_layers": 1,
+    "target_mixers": 1,
+    "optimizers": 1,
+    "source_checkpoint": "read-only",
+    "teacher_signals": "bounded active-layer capture",
+    "frozen_suffix": "reentrant reload on backward",
+    "vocab_kl": "exact 8192-token chunks"
+  },
+  "gate": "May start only after the real proxy has passed P0, migration, P1, and BF16 serving acceptance."
+}

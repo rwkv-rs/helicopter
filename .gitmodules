@@ -7,3 +7,6 @@
 [submodule "src/infer/vllm-rwkv"]
 	path = src/infer/vllm-rwkv
 	url = https://github.com/rwkv-rs/vllm-rwkv
+[submodule "src/train/rwkv-hf"]
+	path = src/train/rwkv-hf
+	url = https://github.com/rwkv-rs/hf-adapter.git

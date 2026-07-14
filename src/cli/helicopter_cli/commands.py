@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +15,17 @@ from .paths import resolve_path
 
 WKV_MODES = ("fp16", "fp32io16")
 EMB_DEVICES = ("cpu", "gpu")
+ANY2RWKV_ACTIONS = (
+    "fetch-source",
+    "verify-source",
+    "preflight",
+    "convert",
+    "distill",
+    "validate-p0",
+    "quantize",
+    "evaluate",
+)
+ANY2RWKV_PRECISIONS = ("bf16", "fp16", "fp32io16", "nvfp4")
 
 
 @dataclass
@@ -674,3 +687,209 @@ def build_takeoff_plan(
         *(args.override or []),
     ]
     return CommandPlan(command=command, cwd=verl_path, shown_env=shown_env, env=plan_env)
+
+
+def _checkout_sha(path: Path) -> str:
+    try:
+        return subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise SystemExit(f"cannot resolve pinned checkout SHA for {path}: {error}") from error
+
+
+def build_any2rwkv_plan(
+    args: Any,
+    *,
+    root: Path,
+    env: dict[str, str],
+    config: dict[str, Any],
+) -> CommandPlan:
+    if args.action not in ANY2RWKV_ACTIONS:
+        raise SystemExit(f"unsupported any2rwkv action: {args.action}")
+    settings = table(config, "any2rwkv")
+    paths = table(config, "paths")
+    if args.action in {"fetch-source", "verify-source"}:
+        manifest = resolve_path(str(args.source), root=root, env=env)
+        destination = resolve_path(str(args.output), root=root, env=env)
+        if not args.dry_run and not manifest.is_file():
+            raise SystemExit(f"any2rwkv source manifest not found: {manifest}")
+        manifest_payload = {}
+        if manifest.is_file():
+            try:
+                manifest_payload = json.loads(manifest.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as error:
+                raise SystemExit(f"cannot read any2rwkv source manifest: {error}") from error
+        scale_gate_value = getattr(args, "scale_gate", None)
+        if (
+            args.action == "fetch-source"
+            and manifest_payload.get("classification") == "final-scale-source-preflight-only"
+            and not scale_gate_value
+        ):
+            raise SystemExit("397B fetch-source requires --scale-gate from an accepted real-proxy run")
+        python = python_executable(
+            config, root=root, env=env, require_configured=not args.dry_run
+        )
+        command = [
+            python,
+            "-m",
+            "any2rwkv.cli",
+            args.action,
+            "--manifest",
+            str(manifest),
+            "--destination",
+            str(destination),
+        ]
+        if scale_gate_value:
+            command.extend(
+                (
+                    "--scale-gate",
+                    str(resolve_path(str(scale_gate_value), root=root, env=env)),
+                )
+            )
+        return CommandPlan(
+            command=command,
+            cwd=root,
+            shown_env={},
+            env=strip_vllm_env(env),
+        )
+    rwkv_hf = resolve_path(str(paths.get("rwkv_hf_path", "src/train/rwkv-hf")), root=root, env=env)
+    rwkv_lm = resolve_path(str(paths.get("rwkv_lm_path", "src/train/rwkv-lm")), root=root, env=env)
+    expected_hf_sha = str(pick(args.rwkv_hf_sha, settings.get("rwkv_hf_sha"), default=""))
+    expected_lm_sha = str(pick(args.rwkv_lm_sha, settings.get("rwkv_lm_sha"), default=""))
+    if len(expected_hf_sha) != 40 or len(expected_lm_sha) != 40:
+        raise SystemExit("any2rwkv requires full 40-character rwkv_hf_sha and rwkv_lm_sha before workload launch")
+    for checkout, expected, label in (
+        (rwkv_hf, expected_hf_sha, "rwkv-hf"),
+        (rwkv_lm, expected_lm_sha, "rwkv-lm"),
+    ):
+        if not checkout.is_dir():
+            raise SystemExit(f"{label} checkout not found: {checkout}")
+        actual = _checkout_sha(checkout)
+        if actual != expected:
+            raise SystemExit(f"{label} SHA mismatch: expected {expected}, found {actual}")
+
+    source = resolve_path(str(args.source), root=root, env=env)
+    output = resolve_path(str(args.output), root=root, env=env)
+    if not args.dry_run and not source.is_dir():
+        raise SystemExit(f"source HF checkpoint not found: {source}")
+    if source == output or source in output.parents:
+        raise SystemExit("output must be independent from the read-only source checkpoint")
+    precision = str(pick(args.precision, settings.get("precision"), default="fp32io16"))
+    if precision not in ANY2RWKV_PRECISIONS:
+        raise SystemExit(f"unsupported any2rwkv precision: {precision}")
+    if args.action == "quantize" and not args.calibration_manifest:
+        raise SystemExit("NVFP4 quantization requires an independent calibration manifest")
+    if args.action == "distill" and (
+        not getattr(args, "dataset_manifest", None)
+        or not getattr(args, "training_config", None)
+    ):
+        raise SystemExit(
+            "distillation requires --dataset-manifest and --training-config"
+        )
+    if args.action == "validate-p0" and not getattr(args, "kernel_oracle", None):
+        raise SystemExit("P0 validation requires --kernel-oracle from the managed native-kernel run")
+    if args.action == "evaluate" and (
+        not getattr(args, "teacher", None)
+        or not getattr(args, "evaluation_manifest", None)
+        or not getattr(args, "p0_evidence", None)
+        or not getattr(args, "migration_baselines", None)
+    ):
+        raise SystemExit(
+            "evaluation requires --teacher, --evaluation-manifest, --p0-evidence, and --migration-baselines"
+        )
+    if not args.dry_run:
+        required_files = []
+        if args.action == "distill":
+            required_files.extend(
+                (args.dataset_manifest, args.training_config)
+            )
+        elif args.action == "validate-p0":
+            required_files.append(args.kernel_oracle)
+        elif args.action == "evaluate":
+            teacher = resolve_path(str(args.teacher), root=root, env=env)
+            if not teacher.is_dir():
+                raise SystemExit(f"teacher HF checkpoint not found: {teacher}")
+            required_files.extend(
+                (
+                    args.evaluation_manifest,
+                    args.p0_evidence,
+                    args.migration_baselines,
+                )
+            )
+        elif args.action == "quantize":
+            required_files.append(args.calibration_manifest)
+        for value in required_files:
+            path = resolve_path(str(value), root=root, env=env)
+            if not path.is_file():
+                raise SystemExit(f"required any2rwkv manifest not found: {path}")
+        for value in (
+            getattr(args, "ruler_scores", None),
+            getattr(args, "downstream_scores", None),
+        ):
+            if value:
+                path = resolve_path(str(value), root=root, env=env)
+                if not path.is_file():
+                    raise SystemExit(f"optional any2rwkv score manifest not found: {path}")
+    if args.action != "quantize" and precision == "nvfp4":
+        raise SystemExit("nvfp4 precision is only valid for the quantize action")
+
+    python = python_executable(config, root=root, env=env, require_configured=not args.dry_run)
+    command = [
+        python,
+        "-m",
+        "any2rwkv.cli",
+        args.action,
+        "--source",
+        str(source),
+        "--output",
+        str(output),
+        "--precision",
+        precision,
+        "--rwkv-hf-sha",
+        expected_hf_sha,
+        "--rwkv-lm-sha",
+        expected_lm_sha,
+    ]
+    for option, value in (
+        ("--contract", args.contract),
+        ("--calibration-manifest", args.calibration_manifest),
+        ("--run-id", args.run_id),
+        ("--dataset-manifest", getattr(args, "dataset_manifest", None)),
+        ("--training-config", getattr(args, "training_config", None)),
+        ("--resume", getattr(args, "resume", None)),
+        ("--kernel-oracle", getattr(args, "kernel_oracle", None)),
+        ("--teacher", getattr(args, "teacher", None)),
+        ("--evaluation-manifest", getattr(args, "evaluation_manifest", None)),
+        ("--p0-evidence", getattr(args, "p0_evidence", None)),
+        ("--migration-baselines", getattr(args, "migration_baselines", None)),
+        ("--ruler-scores", getattr(args, "ruler_scores", None)),
+        ("--downstream-scores", getattr(args, "downstream_scores", None)),
+    ):
+        if value:
+            command.extend((option, str(resolve_path(str(value), root=root, env=env)) if option != "--run-id" else str(value)))
+    if args.allow_proxy_layers:
+        command.append("--allow-proxy-layers")
+    shown_env = {
+        "VLLM_RWKV7_WKV_MODE": "fp32io16" if args.action != "quantize" else "fp16",
+        # fp32io16 is the recurrent-state/kernel policy; rwkv-lm's model I/O
+        # dtype remains BF16 on the correctness path.
+        "RWKV_FLOAT_MODE": (
+            "bf16" if precision in {"bf16", "fp32io16"} else precision
+        ),
+    }
+    if args.action == "distill":
+        shown_env.update(
+            {
+                "RWKV_JIT_ON": "0",
+                "RWKV_HEAD_SIZE": "64",
+                "RWKV_MY_TESTING": "x070",
+                "RWKV_TRAIN_TYPE": "infctx",
+            }
+        )
+    plan_env = strip_vllm_env(env)
+    plan_env.update(shown_env)
+    return CommandPlan(command=command, cwd=root, shown_env=shown_env, env=plan_env)

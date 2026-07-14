@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "any2rwkv"
+version = "0.1.0"
+description = "Contract-first Qwen3.5 text-backbone to native RWKV7 migration"
+requires-python = ">=3.12"
+dependencies = ["torch", "transformers>=5.5.3,<5.14,!=5.6.0", "safetensors", "huggingface-hub", "tokenizers>=0.21.1"]
+
+[project.scripts]
+any2rwkv = "any2rwkv.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["any2rwkv*"]

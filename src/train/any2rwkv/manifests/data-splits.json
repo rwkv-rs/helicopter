@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "status": "contract-template-requires-local-preparation",
+  "generator": "any2rwkv.data/v1",
+  "network_policy": "offline-only; inputs and tokenizer must already exist locally",
+  "dataset": {
+    "repository": "HuggingFaceFW/fineweb-edu",
+    "revision": "87f09149ef4734204d70ed1d046ddc9ca3f2b8f9",
+    "subset": "sample-10BT",
+    "minimum_materialized_qwen_tokens": 65000000,
+    "local_input_files": "required: path, SHA-256, byte size",
+    "combined_input_sha256": "required before training"
+  },
+  "tokenizer": {
+    "repository": "Qwen/Qwen3.5-2B",
+    "revision": "15852e8c16360a2fea060d615a32b45270f8a8fc",
+    "local_tree_sha256": "required before training",
+    "chat_template_sha256": "required before training"
+  },
+  "packing": {
+    "burn_in_tokens": 128,
+    "supervised_tokens": 512,
+    "packed_row_tokens": 640,
+    "drop_incomplete_tail": true,
+    "document_separator": "tokenizer eos_token_id when available"
+  },
+  "split_assignment": {
+    "algorithm": "sha256(any2rwkv-split-v1\\0seed\\0sample_id)",
+    "seed": 20260714,
+    "ratios": {
+      "distill_train": "0.94",
+      "nvfp4_calibration": "0.01",
+      "validation": "0.02",
+      "ruler": "0.01",
+      "downstream": "0.01",
+      "smoke": "0.01"
+    },
+    "sample_ids_mutually_exclusive": true,
+    "quality_gate_splits": [
+      "downstream",
+      "ruler",
+      "smoke",
+      "validation"
+    ],
+    "calibration_forbidden_from_quality_gates": true
+  },
+  "deduplication": {
+    "exact": "SHA-256 over NFKC and whitespace-normalized content; policy is drop or reject",
+    "near": "word-ngram bottom-k MinHash/LSH candidates followed by exact Jaccard; pair-level report required",
+    "report": "deduplication-report.json with sample ids, split provenance, score, threshold, algorithm parameters and incomplete-candidate warning"
+  },
+  "required_before_run": [
+    "prepared status",
+    "dataset repository, revision and local input SHA-256",
+    "tokenizer repository, revision and local tree SHA-256",
+    "chat template SHA-256",
+    "split JSONL SHA-256, row count, token count and source sample-id digest",
+    "exact and near-duplicate report SHA-256",
+    "empty calibration-quality-gate overlap",
+    "teacher baseline",
+    "frozen generation rubric and scorer revision"
+  ]
+}

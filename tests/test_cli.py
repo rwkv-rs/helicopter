@@ -55,6 +55,35 @@ def takeoff_args(**overrides: object) -> Namespace:
     return Namespace(**values)
 
 
+def any2rwkv_args(**overrides: object) -> Namespace:
+    values = {
+        "action": "convert",
+        "source": "/weights/Qwen3.5-397B-A17B",
+        "output": "/outputs/any2rwkv/run-1",
+        "dry_run": True,
+        "precision": None,
+        "rwkv_hf_sha": None,
+        "rwkv_lm_sha": None,
+        "contract": None,
+        "calibration_manifest": None,
+        "dataset_manifest": None,
+        "training_config": None,
+        "resume": None,
+        "kernel_oracle": None,
+        "teacher": None,
+        "evaluation_manifest": None,
+        "p0_evidence": None,
+        "migration_baselines": None,
+        "ruler_scores": None,
+        "downstream_scores": None,
+        "scale_gate": None,
+        "run_id": "run-1",
+        "allow_proxy_layers": False,
+    }
+    values.update(overrides)
+    return Namespace(**values)
+
+
 def command_options(command: list[str]) -> dict[str, str | bool]:
     options: dict[str, str | bool] = {}
     index = 0
@@ -650,6 +679,130 @@ class CommandPlanTests(unittest.TestCase):
             f"Python executable not found: {venv_python}; run scripts/install_local.sh "
             "or set HELICOPTER_PYTHON / paths.python",
         )
+
+
+class Any2RWKVPlanTests(unittest.TestCase):
+    def test_source_fetch_is_a_managed_explicit_plan(self) -> None:
+        plan = commands.build_any2rwkv_plan(
+            any2rwkv_args(
+                action="fetch-source",
+                source="src/train/any2rwkv/manifests/qwen35-2b-proxy.json",
+                output="/home/caizus/Weights/Qwen/Qwen3.5-2B/revision",
+            ),
+            root=ROOT,
+            env={},
+            config=load_example_config(),
+        )
+        self.assertEqual(plan.command[1:4], ["-m", "any2rwkv.cli", "fetch-source"])
+        self.assertIn("--manifest", plan.command)
+        self.assertIn("--destination", plan.command)
+        self.assertNotIn("VLLM_RWKV7_WKV_MODE", plan.env)
+
+    def test_scale_fetch_requires_and_forwards_accepted_proxy_gate(self) -> None:
+        manifest = "src/train/any2rwkv/manifests/qwen35-397b-scale.json"
+        with self.assertRaisesRegex(SystemExit, "requires --scale-gate"):
+            commands.build_any2rwkv_plan(
+                any2rwkv_args(action="fetch-source", source=manifest),
+                root=ROOT,
+                env={},
+                config=load_example_config(),
+            )
+        plan = commands.build_any2rwkv_plan(
+            any2rwkv_args(
+                action="fetch-source",
+                source=manifest,
+                scale_gate="artifacts/feat-any2rwkv/proxy-p1",
+            ),
+            root=ROOT,
+            env={},
+            config=load_example_config(),
+        )
+        self.assertIn("--scale-gate", plan.command)
+        self.assertIn(
+            str(ROOT / "artifacts/feat-any2rwkv/proxy-p1"), plan.command
+        )
+
+    def test_conversion_plan_is_explicit_and_pins_both_native_dependencies(self) -> None:
+        loaded = load_example_config()
+        plan = commands.build_any2rwkv_plan(
+            any2rwkv_args(), root=ROOT, env={}, config=loaded
+        )
+        self.assertEqual(plan.command[1:3], ["-m", "any2rwkv.cli"])
+        self.assertEqual(plan.command[3], "convert")
+        self.assertIn("1e81ce7adf2c9aeec21ed43a2435f8aa3a81e043", plan.command)
+        self.assertIn("39b1e8e0a6aaa7e32d1a12ac1111b68f2f98489b", plan.command)
+        self.assertEqual(plan.env["VLLM_RWKV7_WKV_MODE"], "fp32io16")
+
+    def test_quantize_requires_calibration_before_workload_launch(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "calibration manifest"):
+            commands.build_any2rwkv_plan(
+                any2rwkv_args(action="quantize", precision="nvfp4"),
+                root=ROOT,
+                env={},
+                config=load_example_config(),
+            )
+
+    def test_distill_requires_frozen_data_and_schedule_before_launch(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "dataset-manifest"):
+            commands.build_any2rwkv_plan(
+                any2rwkv_args(action="distill"),
+                root=ROOT,
+                env={},
+                config=load_example_config(),
+            )
+
+    def test_distill_plan_pins_native_rwkv_lm_kernel_contract(self) -> None:
+        plan = commands.build_any2rwkv_plan(
+            any2rwkv_args(
+                action="distill",
+                dataset_manifest="data.json",
+                training_config="plan.json",
+            ),
+            root=ROOT,
+            env={},
+            config=load_example_config(),
+        )
+        self.assertEqual(plan.env["RWKV_TRAIN_TYPE"], "infctx")
+        self.assertEqual(plan.env["RWKV_HEAD_SIZE"], "64")
+        self.assertEqual(plan.env["RWKV_MY_TESTING"], "x070")
+        self.assertEqual(plan.env["RWKV_FLOAT_MODE"], "bf16")
+        self.assertEqual(plan.env["VLLM_RWKV7_WKV_MODE"], "fp32io16")
+
+    def test_p0_validation_requires_managed_native_kernel_evidence(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "--kernel-oracle"):
+            commands.build_any2rwkv_plan(
+                any2rwkv_args(action="validate-p0"),
+                root=ROOT,
+                env={},
+                config=load_example_config(),
+            )
+
+    def test_evaluate_requires_teacher_manifest_p0_and_migration_evidence(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "--teacher"):
+            commands.build_any2rwkv_plan(
+                any2rwkv_args(action="evaluate"),
+                root=ROOT,
+                env={},
+                config=load_example_config(),
+            )
+
+    def test_output_must_not_modify_or_nest_under_source(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "read-only source"):
+            commands.build_any2rwkv_plan(
+                any2rwkv_args(source="/tmp/source", output="/tmp/source/output"),
+                root=ROOT,
+                env={},
+                config=load_example_config(),
+            )
+
+    def test_sha_mismatch_fails_before_gpu_workload(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "rwkv-hf SHA mismatch"):
+            commands.build_any2rwkv_plan(
+                any2rwkv_args(rwkv_hf_sha="0" * 40),
+                root=ROOT,
+                env={},
+                config=load_example_config(),
+            )
 
 
 if __name__ == "__main__":

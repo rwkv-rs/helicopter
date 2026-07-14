@@ -6,6 +6,15 @@
 [infer]
 enable_auto_tool_choice = false
 
+[any2rwkv]
+rwkv_hf_sha = "1e81ce7adf2c9aeec21ed43a2435f8aa3a81e043"
+rwkv_lm_sha = "39b1e8e0a6aaa7e32d1a12ac1111b68f2f98489b"
+precision = "fp32io16"
+
+[paths]
+rwkv_hf_path = "src/train/rwkv-hf"
+rwkv_lm_path = "src/train/rwkv-lm"
+
 [takeoff.grpo]
 project_name = "verl_rwkv_grpo"
 experiment_name = "rwkv7_grpo_vllm"

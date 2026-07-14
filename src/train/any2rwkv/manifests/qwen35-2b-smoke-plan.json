@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "classification": "real-24-layer-proxy-pipeline-smoke-not-p1",
+  "seed": 20260714,
+  "learning_rate": 0.0001,
+  "burn_in_tokens": 16,
+  "supervised_tokens": 16,
+  "accumulation_steps": 1,
+  "activation_checkpointing": true,
+  "stage_tokens_per_layer": {
+    "signals": 16,
+    "block": 32,
+    "global": 64
+  },
+  "corrective_min_sweeps": 1,
+  "corrective_max_sweeps": 1,
+  "corrective_min_delta": 0.0,
+  "notes": [
+    "仅用于在真实 Qwen3.5-2B checkpoint 上验证 loader、native kernel、梯度、checkpoint、baseline 和 sweep 状态机。",
+    "该预算不能用于 P1/P2、能力保持或 397B scale gate。"
+  ]
+}

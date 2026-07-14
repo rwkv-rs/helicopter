@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "classification": "final-scale-source-preflight-only",
+  "repository": "Qwen/Qwen3.5-397B-A17B",
+  "revision": "8472618112abcbd45acbcdc58436aff4233c23f7",
+  "remote_read_only_path": "/home/caizus/Weights/Qwen/Qwen3.5-397B-A17B/8472618112abcbd45acbcdc58436aff4233c23f7",
+  "selected_component": "text backbone",
+  "vision_disposition": "intentionally-unmapped",
+  "source_mutability": "read-only",
+  "scale_gate": "Do not download or start conversion until the real proxy has passed canonical, mapping, gradient, resume, migration, P1, service, and complete metadata gates.",
+  "output_policy": "/home/caizus/Projects/MachineLearning/helicopter/workspaces/feat-any2rwkv/outputs/<run-id>; never nested under or overwriting the source checkpoint"
+}

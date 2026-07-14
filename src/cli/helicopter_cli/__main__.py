@@ -5,6 +5,9 @@ import argparse
 from .commands import (
     EMB_DEVICES,
     WKV_MODES,
+    ANY2RWKV_ACTIONS,
+    ANY2RWKV_PRECISIONS,
+    build_any2rwkv_plan,
     build_infer_plan,
     build_takeoff_plan,
     prepend_venv_path,
@@ -52,6 +55,31 @@ def build_parser() -> argparse.ArgumentParser:
     takeoff.add_argument("--emb-device", choices=EMB_DEVICES)
     takeoff.add_argument("--override", action="append", help="extra Hydra override passed to verl")
     takeoff.set_defaults(plan_builder=build_takeoff_plan)
+
+    any2rwkv = subparsers.add_parser("any2rwkv", help="fetch, verify, convert, distill, quantize, or evaluate Qwen3.5 text backbones")
+    add_common_options(any2rwkv)
+    any2rwkv.add_argument("action", choices=ANY2RWKV_ACTIONS)
+    any2rwkv.add_argument("--source", required=True, help="read-only HF checkpoint directory, or frozen source manifest for fetch/verify")
+    any2rwkv.add_argument("--output", required=True, help="independent run output directory, or frozen source destination for fetch/verify")
+    any2rwkv.add_argument("--precision", choices=ANY2RWKV_PRECISIONS)
+    any2rwkv.add_argument("--rwkv-hf-sha")
+    any2rwkv.add_argument("--rwkv-lm-sha")
+    any2rwkv.add_argument("--contract", help="frozen contract.lock.json")
+    any2rwkv.add_argument("--calibration-manifest")
+    any2rwkv.add_argument("--dataset-manifest")
+    any2rwkv.add_argument("--training-config")
+    any2rwkv.add_argument("--resume")
+    any2rwkv.add_argument("--kernel-oracle", help="JSON from the managed native RWKV7 kernel validation")
+    any2rwkv.add_argument("--teacher")
+    any2rwkv.add_argument("--evaluation-manifest")
+    any2rwkv.add_argument("--p0-evidence")
+    any2rwkv.add_argument("--migration-baselines")
+    any2rwkv.add_argument("--ruler-scores")
+    any2rwkv.add_argument("--downstream-scores")
+    any2rwkv.add_argument("--scale-gate", help="accepted real-proxy run directory required before 397B fetch")
+    any2rwkv.add_argument("--run-id")
+    any2rwkv.add_argument("--allow-proxy-layers", action="store_true", help="permit a non-60-layer real proxy; never marks it final")
+    any2rwkv.set_defaults(plan_builder=build_any2rwkv_plan)
 
     return parser
 

@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "classification": "real-24-layer-proxy-p1-pilot",
+  "seed": 20260714,
+  "learning_rate": 0.0001,
+  "burn_in_tokens": 128,
+  "supervised_tokens": 512,
+  "accumulation_steps": 4,
+  "activation_checkpointing": true,
+  "stage_tokens_per_layer": {
+    "signals": 65536,
+    "block": 262144,
+    "global": 1048576
+  },
+  "corrective_min_sweeps": 1,
+  "corrective_max_sweeps": 3,
+  "corrective_min_delta": 0.001,
+  "notes": [
+    "约 55M supervised token，量级接近 ARWKV early result，仅作为 P1 pilot。",
+    "若 migration baseline 或 P1 失败，先扫 10/90、25/75、50/50 局部/全局配比，不直接扩大到 397B。",
+    "每个 optimizer step 原子保存完整 mixer/optimizer/scheduler/RNG/data cursor 状态。"
+  ]
+}

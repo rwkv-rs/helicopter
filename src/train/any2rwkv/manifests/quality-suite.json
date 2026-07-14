@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "frozen_at": "2026-07-14",
+  "pairing_unit": "identical sample id within teacher and student",
+  "bootstrap": {
+    "method": "paired-percentile",
+    "samples": 10000,
+    "confidence": 0.95,
+    "seed": 20260714
+  },
+  "generation": {
+    "temperature": 0.0,
+    "do_sample": false,
+    "seed": 20260714,
+    "chat_template": "source tokenizer chat_template",
+    "scorer": "RULER/downstream use task-native automatic scorers; free-form smoke uses the separately frozen minimum-usability judge"
+  },
+  "ruler": {
+    "repository": "https://github.com/NVIDIA/RULER.git",
+    "revision": "4809570a2a40e803bfe341773e561524224c2e7c",
+    "branch_at_freeze": "rulerv2-ns",
+    "implementation_repository": "https://github.com/NVIDIA-NeMo/Skills.git",
+    "implementation_revision": "74b8649734a6ecc2d3beca89311e1a5e02da48fa",
+    "suite": "RULERv2",
+    "task_count": 12,
+    "tasks": [
+      "mk_niah_basic",
+      "mk_niah_easy",
+      "mk_niah_medium",
+      "mk_niah_hard",
+      "mv_niah_basic",
+      "mv_niah_easy",
+      "mv_niah_medium",
+      "mv_niah_hard",
+      "qa_basic",
+      "qa_easy",
+      "qa_medium",
+      "qa_hard"
+    ],
+    "categories": ["retrieval", "multi-hop-tracing", "question-answering"],
+    "context_lengths": [4096, 8192, 16384, 32768, 65536, 131072],
+    "samples_per_task_length": 100,
+    "seed": 42,
+    "seed_source": "NeMo-Skills ruler2 prepare.py hard-coded --random_seed 42",
+    "aggregate": "unweighted macro mean over task-length buckets",
+    "proxy_required_lengths": [4096, 8192, 16384, 32768],
+    "scale_required_lengths": [4096, 8192, 16384, 32768, 65536, 131072]
+  },
+  "downstream": {
+    "repository": "https://github.com/EleutherAI/lm-evaluation-harness.git",
+    "revision": "f4d4b3de3ee6741a7151a9fe74945ee515262f4c",
+    "tasks": [
+      {"name": "mmlu", "num_fewshot": 5, "metric": "acc"},
+      {"name": "gsm8k_cot", "num_fewshot": 8, "metric": "exact_match"},
+      {"name": "arc_challenge", "num_fewshot": 25, "metric": "acc_norm"},
+      {"name": "hellaswag", "num_fewshot": 10, "metric": "acc_norm"},
+      {"name": "truthfulqa_mc2", "num_fewshot": 0, "metric": "acc"},
+      {"name": "winogrande", "num_fewshot": 5, "metric": "acc"}
+    ],
+    "aggregate": "unweighted macro mean over the six frozen task scores",
+    "limit": null
+  },
+  "smoke": {
+    "prompt_count": 32,
+    "new_tokens_per_prompt": 128,
+    "pass_rule": "operational generation passes and frozen judge returns coherent=true and relevant=true",
+    "rubric_id": "any2rwkv-coherence-relevance-v1",
+    "judge_repository": "Qwen/Qwen3.5-2B",
+    "judge_revision": "15852e8c16360a2fea060d615a32b45270f8a8fc",
+    "judge_temperature": 0.0,
+    "judge_prompt": "Given PROMPT and RESPONSE, return one JSON object with boolean fields coherent and relevant. coherent means grammatical or otherwise intelligible, non-degenerate language without a dominant repetition loop. relevant means the response attempts to address or naturally continue the prompt. Judge only these two minimum usability properties; do not require factual correctness or a particular style.",
+    "minimum_pass_rate": 0.9
+  },
+  "quality_separation": {
+    "ruler_and_downstream_are_quality_gate_data": true,
+    "nvfp4_calibration_use_forbidden": true,
+    "teacher_and_student_use_identical_inputs": true
+  }
+}

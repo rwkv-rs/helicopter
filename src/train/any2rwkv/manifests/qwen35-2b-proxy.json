@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "classification": "real-proxy-model-not-60-layer-isomorphic",
+  "repository": "Qwen/Qwen3.5-2B",
+  "revision": "15852e8c16360a2fea060d615a32b45270f8a8fc",
+  "weight_file": "model.safetensors-00001-of-00001.safetensors",
+  "weight_sha256": "aa33250c4fc64891ddfaba3a314fd9542ea371843c387178b425fbcc5ed680b1",
+  "tokenizer_repository": "Qwen/Qwen3.5-2B",
+  "tokenizer_revision": "15852e8c16360a2fea060d615a32b45270f8a8fc",
+  "remote_read_only_path": "/home/caizus/Weights/Qwen/Qwen3.5-2B/15852e8c16360a2fea060d615a32b45270f8a8fc",
+  "source_layout": {
+    "top_level": "multimodal Qwen3.5 checkpoint",
+    "selected_component": "text_config and language-model tensors only",
+    "vision_disposition": "intentionally-unmapped",
+    "num_hidden_layers": 24,
+    "hidden_size": 2048,
+    "head_dim": 256,
+    "role": "real checkpoint integration and convergence proxy"
+  },
+  "limitations": [
+    "This is not a 60-layer architecture-isomorphic proxy for Qwen3.5-397B-A17B.",
+    "Its results cannot satisfy or replace the 397B scale quality gate.",
+    "The deterministic 60-layer fixture validates layout and invariants but is not a capability result."
+  ]
+}
