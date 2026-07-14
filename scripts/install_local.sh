@@ -358,7 +358,10 @@ install_rwkv_hf_package() {
   [[ -n "$UV_INDEX_URL" ]] && pip+=(--index-url "$UV_INDEX_URL")
   pip+=(--project "$ROOT" --python "$VENV/bin/python" )
 
-  run "${pip[@]}" --no-deps -e "$RWKV_HF"
+  # uv sync has already installed the locked build backend into the workspace
+  # venv. Reuse it so editable installation remains offline/reproducible when
+  # the remote package index is unavailable.
+  run "${pip[@]}" --no-deps --no-build-isolation -e "$RWKV_HF"
   [[ "${DRY_RUN:-0}" == "1" ]] || rwkv_hf_ready
 }
 
@@ -367,7 +370,7 @@ install_any2rwkv_package() {
   [[ -n "$UV_INDEX_URL" ]] && pip+=(--index-url "$UV_INDEX_URL")
   pip+=(--project "$ROOT" --python "$VENV/bin/python" )
 
-  run "${pip[@]}" --no-deps -e "$ANY2RWKV"
+  run "${pip[@]}" --no-deps --no-build-isolation -e "$ANY2RWKV"
   [[ "${DRY_RUN:-0}" == "1" ]] || any2rwkv_ready
 }
 
