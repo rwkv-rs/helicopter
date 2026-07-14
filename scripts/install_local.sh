@@ -14,6 +14,7 @@ UV_SYNC_INEXACT="${UV_SYNC_INEXACT:-1}"
 CLEAN_SUBMODULE_VENVS="${CLEAN_SUBMODULE_VENVS:-1}"
 CLEAN_VLLM_CMAKE_CACHE="${CLEAN_VLLM_CMAKE_CACHE:-1}"
 VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE:-cuda}"
+VLLM_BUILD_PROFILE="${HELICOPTER_VLLM_BUILD_PROFILE:-full}"
 VLLM_VERSION_OVERRIDE="${VLLM_VERSION_OVERRIDE:-}"
 VLLM_REBUILD="${VLLM_REBUILD:-auto}"
 VERL_REINSTALL="${VERL_REINSTALL:-auto}"
@@ -234,6 +235,7 @@ sync_uv_env() {
 vllm_native_fingerprint() {
   {
     printf 'VLLM_TARGET_DEVICE=%s\n' "$VLLM_TARGET_DEVICE"
+    printf 'VLLM_BUILD_PROFILE=%s\n' "$VLLM_BUILD_PROFILE"
     printf 'VLLM_VERSION_OVERRIDE=%s\n' "$VLLM_VERSION_OVERRIDE"
     printf 'CMAKE_BUILD_TYPE=%s\n' "$CMAKE_BUILD_TYPE"
     printf 'TORCH_CUDA_ARCH_LIST=%s\n' "${TORCH_CUDA_ARCH_LIST:-}"
@@ -256,10 +258,29 @@ PY
 }
 
 vllm_native_ready() {
-  "$VENV/bin/python" - <<'PY' >/dev/null
+  "$VENV/bin/python" - "$VLLM_BUILD_PROFILE" <<'PY' >/dev/null
+import importlib.util
+import sys
+
 import vllm
-import vllm._C_stable_libtorch
 import vllm.rwkv7_ops
+from vllm.build_profile import get_build_profile_metadata
+
+expected = sys.argv[1]
+metadata = get_build_profile_metadata()
+if metadata.profile != expected:
+    raise SystemExit(
+        f"vLLM build profile mismatch: expected={expected} actual={metadata.profile}"
+    )
+stable = importlib.util.find_spec("vllm._C_stable_libtorch")
+if expected == "full":
+    if stable is None:
+        raise SystemExit("full vLLM profile lacks _C_stable_libtorch")
+elif expected == "rwkv":
+    if stable is not None:
+        raise SystemExit("RWKV-only vLLM profile unexpectedly contains generic stable ops")
+else:
+    raise SystemExit(f"unsupported vLLM build profile: {expected}")
 PY
 }
 
@@ -307,6 +328,7 @@ install_vllm_package() {
 
   run env \
     VLLM_TARGET_DEVICE="$VLLM_TARGET_DEVICE" \
+    VLLM_BUILD_PROFILE="$VLLM_BUILD_PROFILE" \
     VLLM_VERSION_OVERRIDE="$VLLM_VERSION_OVERRIDE" \
     VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED:-0}" \
     CMAKE_BUILD_TYPE="$CMAKE_BUILD_TYPE" \
