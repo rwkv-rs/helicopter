@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import fnmatch
 import json
 import os
 import shutil
@@ -25,6 +26,23 @@ SOURCE_PATTERNS = (
     "model*.safetensors",
     "model.safetensors.index.json",
 )
+
+
+def _copy_frozen_seed(seed: Path, temporary: Path) -> list[str]:
+    if not seed.is_dir():
+        raise ContractError(f"frozen source seed directory is missing: {seed}")
+    temporary.mkdir(parents=True)
+    copied: list[str] = []
+    for source in sorted(seed.iterdir()):
+        if not source.is_file() or not any(
+            fnmatch.fnmatch(source.name, pattern) for pattern in SOURCE_PATTERNS
+        ):
+            continue
+        shutil.copy2(source, temporary / source.name)
+        copied.append(source.name)
+    if not copied:
+        raise ContractError(f"frozen source seed contains no checkpoint files: {seed}")
+    return copied
 
 
 def fetch_source(
@@ -59,12 +77,25 @@ def fetch_source(
     if temporary.exists():
         raise ContractError(f"partial source directory requires explicit repair before retry: {temporary}")
     temporary.parent.mkdir(parents=True, exist_ok=True)
-    snapshot_download(
-        repo_id=repository,
-        revision=revision,
-        local_dir=temporary,
-        allow_patterns=list(SOURCE_PATTERNS),
-    )
+    seed_value = manifest.get("remote_seed_path")
+    if seed_value is not None:
+        seed = Path(str(seed_value)).resolve()
+        if seed == destination.resolve() or destination.resolve() in seed.parents:
+            raise ContractError("frozen source seed must be independent from its destination")
+        copied = _copy_frozen_seed(seed, temporary)
+        acquisition = {
+            "mode": "verified-local-seed",
+            "seed_path": str(seed),
+            "copied_files": copied,
+        }
+    else:
+        snapshot_download(
+            repo_id=repository,
+            revision=revision,
+            local_dir=temporary,
+            allow_patterns=list(SOURCE_PATTERNS),
+        )
+        acquisition = {"mode": "huggingface-snapshot-download"}
     cache = temporary / ".cache"
     if cache.exists():
         shutil.rmtree(cache)
@@ -89,6 +120,7 @@ def fetch_source(
                 "schema_version": 1,
                 "repository": repository,
                 "revision": revision,
+                "acquisition": acquisition,
                 "files": hashes,
                 "scale_gate": scale_evidence,
             },
@@ -107,6 +139,7 @@ def fetch_source(
         "path": str(destination),
         "repository": repository,
         "revision": revision,
+        "acquisition": acquisition,
         "files": hashes,
         "scale_gate": scale_evidence,
     }

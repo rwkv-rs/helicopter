@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -209,6 +210,40 @@ class ContractTests(unittest.TestCase):
                 verify_source(manifest, source)
             weight.chmod(0o444)
             self.assertTrue(verify_source(manifest, source)["read_only"])
+
+    def test_proxy_source_fetch_can_freeze_a_manifest_bound_local_seed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            seed = write_fixture(root / "seed", layers=4)
+            weight = seed / "model.safetensors"
+            original_mode = weight.stat().st_mode
+            revision = "c" * 40
+            destination = root / revision
+            manifest = root / "proxy.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "classification": "real-proxy-model-not-60-layer-isomorphic",
+                        "repository": "fixture/proxy",
+                        "revision": revision,
+                        "weight_file": weight.name,
+                        "weight_sha256": sha256_file(weight),
+                        "remote_read_only_path": str(destination),
+                        "remote_seed_path": str(seed),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch("any2rwkv.source.snapshot_download") as download:
+                result = fetch_source(manifest, destination)
+                download.assert_not_called()
+            self.assertEqual(result["acquisition"]["mode"], "verified-local-seed")
+            self.assertEqual(weight.stat().st_mode, original_mode)
+            self.assertFalse(
+                (destination / weight.name).stat().st_mode
+                & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH)
+            )
+            self.assertTrue(verify_source(manifest, destination)["read_only"])
 
     def test_hf_export_resumes_after_a_committed_shard_crash(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
