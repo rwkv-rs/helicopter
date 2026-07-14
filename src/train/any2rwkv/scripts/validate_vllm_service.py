@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Produce direct-vLLM evidence and validate the OpenAI-compatible service."""
+"""Validate Any2RWKV through vLLM's generic Transformers backend.
+
+Any2RWKV retains Qwen components and is not a pure RWKV model.  This harness
+must therefore never rely on vllm-rwkv's native pure-RWKV model loader.
+"""
 
 from __future__ import annotations
 
@@ -15,6 +19,10 @@ import urllib.request
 from pathlib import Path
 
 from any2rwkv.artifacts import checkpoint_sha256
+
+
+MODEL_IMPL = "transformers"
+LOADER_CONTRACT = "generic-transformers-backend-not-pure-rwkv"
 
 
 def _json_request(url: str, payload: dict | None = None) -> dict:
@@ -67,15 +75,22 @@ def _stream_text(url: str, payload: dict) -> str:
     return "".join(pieces)
 
 
+def _build_engine(model: str, tensor_parallel_size: int):
+    from vllm import LLM
+
+    return LLM(
+        model=model,
+        tensor_parallel_size=tensor_parallel_size,
+        trust_remote_code=True,
+        model_impl=MODEL_IMPL,
+    )
+
+
 def write_direct(args: argparse.Namespace) -> None:
-    from vllm import LLM, SamplingParams
+    from vllm import SamplingParams
 
     prompts = json.loads(Path(args.prompts).read_text(encoding="utf-8"))["prompts"]
-    engine = LLM(
-        model=args.model,
-        tensor_parallel_size=args.tensor_parallel_size,
-        trust_remote_code=True,
-    )
+    engine = _build_engine(args.model, args.tensor_parallel_size)
     params = SamplingParams(temperature=0, max_tokens=args.max_tokens, logprobs=1)
     outputs = engine.generate(prompts, params)
     rows = []
@@ -96,6 +111,8 @@ def write_direct(args: argparse.Namespace) -> None:
                 "schema_version": 1,
                 "model": args.model,
                 "model_sha256": checkpoint_sha256(Path(args.model)),
+                "model_impl": MODEL_IMPL,
+                "loader_contract": LOADER_CONTRACT,
                 "tensor_parallel_size": args.tensor_parallel_size,
                 "temperature": 0,
                 "rows": rows,
@@ -111,6 +128,14 @@ def validate_service(args: argparse.Namespace) -> None:
     direct = json.loads(Path(args.direct).read_text(encoding="utf-8"))
     if direct.get("schema_version") != 1 or not direct.get("rows"):
         raise RuntimeError("direct vLLM evidence must use schema_version=1 and contain rows")
+    if (
+        direct.get("model_impl") != MODEL_IMPL
+        or direct.get("loader_contract") != LOADER_CONTRACT
+    ):
+        raise RuntimeError(
+            "Any2RWKV serving evidence must use the generic Transformers backend, "
+            "not the pure-RWKV loader"
+        )
     checkpoint_digest = checkpoint_sha256(Path(args.checkpoint))
     if checkpoint_digest != direct.get("model_sha256"):
         raise RuntimeError("service checkpoint differs from direct-loader evidence")
@@ -205,6 +230,8 @@ def validate_service(args: argparse.Namespace) -> None:
         "passed": passed,
         "model_sha256": checkpoint_digest,
         "served_model": args.served_model,
+        "model_impl": MODEL_IMPL,
+        "loader_contract": LOADER_CONTRACT,
         "direct_manifest_sha256": hashlib.sha256(
             Path(args.direct).read_bytes()
         ).hexdigest(),

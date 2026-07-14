@@ -161,6 +161,8 @@ class ArtifactTests(unittest.TestCase):
                     "model_sha256": student_sha,
                     "warmups": 20,
                     "requests": 100,
+                    "model_impl": "transformers",
+                    "loader_contract": "generic-transformers-backend-not-pure-rwkv",
                 },
             )
             write_json(

@@ -89,7 +89,14 @@ def default_contract_lock(product_root: Path | None = None) -> dict[str, Any]:
         "burn_in": {"seed": 20260714, "reset": "document", "cold_and_warmed": True},
         "corrective_sweeps": {"order": "59..0", "min_sweeps": 1, "max_sweeps": 3, "min_delta": 0.001},
         "bootstrap": {"samples": 10000, "seed": 20260714, "method": "paired-percentile", "confidence": 0.95},
-        "serving": {"warmups": 20, "requests": 100, "logprob_max_abs": 0.001, "memory_drift": "max(2%,256MiB)"},
+        "serving": {
+            "warmups": 20,
+            "requests": 100,
+            "logprob_max_abs": 0.001,
+            "memory_drift": "max(2%,256MiB)",
+            "model_impl": "transformers",
+            "loader_contract": "generic-transformers-backend-not-pure-rwkv",
+        },
     }
     if product_root is not None:
         references = {
@@ -257,6 +264,9 @@ def verify_scale_gate(output: Path) -> dict[str, str]:
         or service.get("model_sha256") != student_sha
         or service.get("warmups") != 20
         or service.get("requests") != 100
+        or service.get("model_impl") != "transformers"
+        or service.get("loader_contract")
+        != "generic-transformers-backend-not-pure-rwkv"
     ):
         raise ValueError("397B scale gate requires accepted student-bound BF16 serving evidence")
     smoke_path = output / "smoke-rubric.json"

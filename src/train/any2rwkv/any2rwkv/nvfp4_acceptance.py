@@ -67,7 +67,13 @@ def validate_nvfp4_acceptance(
         failures.append("p0:checkpoint-binding-or-evidence-missing")
     elif any(not isinstance(row, dict) or row.get("passed") is not True for row in evidence.values()):
         failures.append("p0:evidence-failed")
-    if service.get("model_sha256") != nvfp4_sha or service.get("passed") is not True:
+    if (
+        service.get("model_sha256") != nvfp4_sha
+        or service.get("passed") is not True
+        or service.get("model_impl") != "transformers"
+        or service.get("loader_contract")
+        != "generic-transformers-backend-not-pure-rwkv"
+    ):
         failures.append("serving:checkpoint-binding-or-acceptance-failed")
     loading = roundtrip.get("loading_info")
     if (

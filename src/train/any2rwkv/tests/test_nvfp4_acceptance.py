@@ -40,7 +40,12 @@ class NVFP4AcceptanceTests(unittest.TestCase):
                 },
             )
             write(p0, {"student_sha256": nvfp4_sha, "evidence": {"canonical": {"passed": True}}})
-            write(service, {"model_sha256": nvfp4_sha, "passed": True})
+            write(service, {
+                "model_sha256": nvfp4_sha,
+                "passed": True,
+                "model_impl": "transformers",
+                "loader_contract": "generic-transformers-backend-not-pure-rwkv",
+            })
             write(roundtrip, {"checkpoint": str(nvfp4), "loading_info": {"missing_keys": [], "unexpected_keys": [], "mismatched_keys": [], "error_msgs": []}, "prompt_count": 32, "new_tokens": 128})
             write(performance, {"bf16_sha256": bf16_sha, "nvfp4_sha256": nvfp4_sha, "decode_throughput_gain": 0.16, "ttft_p95_regression": 0.04, "tpot_p95_regression": 0.04, "peak_memory_reduction": 0.11})
             result = validate_nvfp4_acceptance(
