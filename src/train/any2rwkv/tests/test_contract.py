@@ -13,9 +13,14 @@ from any2rwkv.configuration_any2rwkv import (
     Any2RWKVHybridConfig,
     Any2RWKVProxyConfig,
 )
+from any2rwkv.modeling_any2rwkv import Any2RWKVProxyForCausalLM
 from any2rwkv.contract import build_target_config, validate_source_config
 from any2rwkv.errors import ContractError
-from any2rwkv.export import export_hf_checkpoint, export_text_teacher_checkpoint
+from any2rwkv.export import (
+    export_hf_checkpoint,
+    export_text_teacher_checkpoint,
+    refresh_hf_runtime_files,
+)
 from any2rwkv import export as export_module
 from any2rwkv.fixture import tiny_qwen35_config, write_fixture
 from any2rwkv.roundtrip import validate_sharded_checkpoint
@@ -24,6 +29,22 @@ from any2rwkv.target import build_zero_step_ledger
 
 
 class ContractTests(unittest.TestCase):
+    def test_tied_source_restores_lm_head_from_preserved_embedding(self) -> None:
+        source = tiny_qwen35_config(layers=4)
+        source["tie_word_embeddings"] = True
+        target = build_target_config(source, require_final_layers=False)
+        config = Any2RWKVProxyConfig(**target)
+        model = Any2RWKVProxyForCausalLM(config)
+
+        self.assertEqual(
+            model.all_tied_weights_keys,
+            {"lm_head.weight": "model.embed_tokens.weight"},
+        )
+        self.assertEqual(
+            model.lm_head.weight.data_ptr(),
+            model.model.embed_tokens.weight.data_ptr(),
+        )
+
     def test_final_target_is_text_only_and_all_60_layers_recurrent(self) -> None:
         source = tiny_qwen35_config()
         target = build_target_config(source)
@@ -140,6 +161,45 @@ class ContractTests(unittest.TestCase):
             self.assertTrue(any("linear_attn" in name for name in index))
             self.assertTrue(any("self_attn" in name for name in index))
             self.assertFalse(any(name.startswith("mtp.") for name in index))
+
+    def test_runtime_refresh_repairs_checkpoint_code_and_manifest_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = read_checkpoint(
+                write_fixture(root / "source", layers=4),
+                require_final_layers=False,
+            )
+            _, specs, _ = build_zero_step_ledger(
+                tuple(source.tensor_names()),
+                layer_count=4,
+                hidden_size=64,
+                source_shard_hashes=tuple(
+                    source.file_hashes[path.name] for path in source.shards
+                ),
+            )
+            target = root / "target"
+            export_hf_checkpoint(
+                source,
+                target,
+                target_config=build_target_config(
+                    source.config, require_final_layers=False
+                ),
+                target_specs=specs,
+            )
+            (target / "modeling_any2rwkv.py").write_text("stale\n", encoding="utf-8")
+
+            hashes = refresh_hf_runtime_files(target)
+            manifest = json.loads(
+                (target / "roundtrip-manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                manifest["files"]["modeling_any2rwkv.py"],
+                hashes["modeling_any2rwkv.py"],
+            )
+            self.assertIn(
+                "_tied_weights_keys",
+                (target / "modeling_any2rwkv.py").read_text(encoding="utf-8"),
+            )
 
     def test_scale_source_verification_hashes_pinned_read_only_60_layer_tree(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -25,7 +25,7 @@ from .distill import (
     normalized_mse,
 )
 from .errors import ContractError
-from .export import export_hf_checkpoint
+from .export import export_hf_checkpoint, refresh_hf_runtime_files
 from .migration_init import (
     WarmStartTensorProvider,
     WarmStartVariant,
@@ -1468,6 +1468,7 @@ def _export_streamed_checkpoint(source, zero_step_dir, mixer_store, destination)
             raise ContractError(
                 "existing streamed HF export does not match the selected mixer snapshot"
             )
+        refresh_hf_runtime_files(destination)
         return
     temporary = destination.with_name(destination.name + ".partial")
     target_config = json.loads((zero_step_dir / "config.json").read_text(encoding="utf-8"))

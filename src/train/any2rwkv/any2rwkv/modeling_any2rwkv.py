@@ -204,7 +204,11 @@ class Any2RWKV7ForCausalLM(PreTrainedModel, GenerationMixin):
     _no_split_modules = ["Any2RWKV7DecoderLayer"]
     supports_gradient_checkpointing = False
     accepts_loss_kwargs = False
-    _tied_weights_keys = {}
+    # Qwen3.5 checkpoints may preserve the language-model head by tying it to
+    # the token embedding and therefore omit ``lm_head.weight`` from the
+    # serialized state dict.  Advertise the exact HF tying relation so strict
+    # loading restores that semantic instead of reporting a missing weight.
+    _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
 
     @classmethod
     def _supports_default_dynamic_cache(cls) -> bool:

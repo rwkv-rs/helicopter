@@ -16,6 +16,36 @@ from .errors import ContractError
 from .target import TensorSpec, canonical_text_name, is_sequence_mixer, is_vision_tensor
 
 
+HF_RUNTIME_MODULES = (
+    "configuration_any2rwkv.py",
+    "modeling_any2rwkv.py",
+    "mixer.py",
+    "kernel.py",
+    "errors.py",
+)
+
+
+def refresh_hf_runtime_files(output: Path) -> dict[str, str]:
+    """Refresh checkpoint-local HF code without rewriting model weights."""
+    if not (output / "config.json").is_file() or not (
+        output / "model.safetensors.index.json"
+    ).is_file():
+        raise ContractError(f"cannot refresh incomplete HF checkpoint: {output}")
+    package_root = Path(__file__).resolve().parent
+    hashes: dict[str, str] = {}
+    for module_name in HF_RUNTIME_MODULES:
+        shutil.copy2(package_root / module_name, output / module_name)
+        hashes[module_name] = sha256_file(output / module_name)
+    manifest_path = output / "roundtrip-manifest.json"
+    if manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        files = manifest.get("files")
+        if isinstance(files, dict):
+            files.update(hashes)
+            write_json(manifest_path, manifest)
+    return hashes
+
+
 def _dtype(name: str) -> torch.dtype:
     try:
         return getattr(torch, name)
@@ -228,19 +258,11 @@ def export_hf_checkpoint(
         {"metadata": {"total_size": total_weight_bytes}, "weight_map": dict(sorted(weight_map.items()))},
     )
     write_json(output / "config.json", target_config)
-    package_root = Path(__file__).resolve().parent
     # Transformers resolves every relative import of the dynamic modeling file
     # before importing the model class. Keep this as the complete local module
     # closure: strict-loading an export must not require an installed
     # ``any2rwkv`` package.
-    for module_name in (
-        "configuration_any2rwkv.py",
-        "modeling_any2rwkv.py",
-        "mixer.py",
-        "kernel.py",
-        "errors.py",
-    ):
-        shutil.copy2(package_root / module_name, output / module_name)
+    refresh_hf_runtime_files(output)
     for source_file in source.tokenizer_files:
         shutil.copy2(source_file, output / source_file.name)
     if not (output / "generation_config.json").is_file():
