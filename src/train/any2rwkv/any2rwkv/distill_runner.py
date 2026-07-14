@@ -710,10 +710,11 @@ def run_distillation(
         mixers,
         materialize_warm_start(source_manifest, specs, mapped_plan),
     )
+    trace_path = run_dir / "active-layer-trace.jsonl"
     engine = LayerwiseDistillationEngine(
         patcher,
         lr=plan.learning_rate,
-        trace_path=run_dir / "active-layer-trace.jsonl",
+        trace_path=trace_path,
         activation_checkpointing=plan.activation_checkpointing,
         trace_binding={
             "source_manifest_sha256": file_sha256(run_dir / "source-manifest.json"),
