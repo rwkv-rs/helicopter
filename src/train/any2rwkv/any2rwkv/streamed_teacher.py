@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
+import threading
 from typing import Callable
 
 import torch
@@ -47,9 +48,22 @@ class StreamedHybridOutput:
 class Qwen35TeacherLayerLoader:
     """Construct and strictly load one frozen Qwen3.5 decoder layer on demand."""
 
-    def __init__(self, checkpoint: CheckpointManifest) -> None:
+    def __init__(
+        self,
+        checkpoint: CheckpointManifest,
+        *,
+        cache_layers: bool = False,
+    ) -> None:
         self.checkpoint = checkpoint
         self.tensor_store = LayerTensorStore(checkpoint)
+        self.cache_layers = cache_layers
+        self._layer_cache: dict[
+            tuple[int, torch.device, torch.dtype], LoadedTeacherLayer
+        ] = {}
+        self._layer_leases = {
+            index: threading.Lock()
+            for index in range(checkpoint.contract.num_hidden_layers)
+        }
         text_config = checkpoint.config.get("text_config", checkpoint.config)
         if not isinstance(text_config, dict):
             raise ContractError("Qwen3.5 text_config must be an object")
@@ -85,6 +99,10 @@ class Qwen35TeacherLayerLoader:
         dtype: torch.dtype,
     ) -> LoadedTeacherLayer:
         target_device = torch.device(device)
+        cache_key = (layer_index, target_device, dtype)
+        cached = self._layer_cache.get(cache_key)
+        if cached is not None:
+            return cached
         construction = torch.device("meta") if target_device.type == "cuda" else nullcontext()
         with construction:
             module = self.layer_class(self.config, layer_index)
@@ -108,7 +126,39 @@ class Qwen35TeacherLayerLoader:
                 f"missing={incompatible.missing_keys} unexpected={incompatible.unexpected_keys}"
             )
         module.eval().requires_grad_(False)
-        return LoadedTeacherLayer(layer_index, module, source_tensor_bytes)
+        loaded = LoadedTeacherLayer(layer_index, module, source_tensor_bytes)
+        if self.cache_layers:
+            self._layer_cache[cache_key] = loaded
+        return loaded
+
+    @contextmanager
+    def layer_lease(self, layer_index: int):
+        try:
+            lease = self._layer_leases[layer_index]
+        except KeyError as error:
+            raise ContractError(
+                f"decoder layer index out of range: {layer_index}"
+            ) from error
+        if not lease.acquire(blocking=False):
+            raise ContractError(
+                f"cached teacher layer {layer_index} does not permit overlapping execution"
+            )
+        try:
+            yield
+        finally:
+            lease.release()
+
+    @property
+    def cached_layer_bytes(self) -> int:
+        return sum(
+            tensor.numel() * tensor.element_size()
+            for loaded in self._layer_cache.values()
+            for tensor in (*loaded.module.parameters(), *loaded.module.buffers())
+        )
+
+    @property
+    def cached_layer_count(self) -> int:
+        return len(self._layer_cache)
 
 
 class StreamedQwen35Teacher:
@@ -120,8 +170,12 @@ class StreamedQwen35Teacher:
         *,
         device: torch.device | str,
         dtype: torch.dtype,
+        cache_layers: bool = False,
     ) -> None:
-        self.loader = Qwen35TeacherLayerLoader(checkpoint)
+        self.loader = Qwen35TeacherLayerLoader(
+            checkpoint,
+            cache_layers=cache_layers,
+        )
         self.device = torch.device(device)
         self.dtype = dtype
         global_names = ["model.embed_tokens.weight", "model.norm.weight"]
@@ -151,6 +205,17 @@ class StreamedQwen35Teacher:
 
             rotary_class = Qwen3_5TextRotaryEmbedding
         self.rotary = rotary_class(self.loader.config, device=self.device)
+
+    @property
+    def resident_global_bytes(self) -> int:
+        tensors = (
+            self.embedding_weight,
+            self.norm_weight,
+            self.lm_head_weight,
+            *self.rotary.parameters(),
+            *self.rotary.buffers(),
+        )
+        return sum(tensor.numel() * tensor.element_size() for tensor in tensors)
 
     def forward(
         self,
@@ -182,45 +247,49 @@ class StreamedQwen35Teacher:
         captured_mixer = None
         captured_block = None
         captured_state = None
-        with torch.inference_mode():
+        # Cached teacher modules are reused by the hybrid executor, whose
+        # frozen suffix must preserve input gradients back to the active
+        # RWKV7 layer. inference_mode would taint reused tensors for autograd.
+        with torch.no_grad():
             for layer_index in range(self.loader.tensor_store.num_layers):
-                loaded = self.loader.load_layer(
-                    layer_index,
-                    device=self.device,
-                    dtype=self.dtype,
-                )
-                hook = None
-                if layer_index == capture_layer_index:
-                    captured_input = hidden_states.detach().cpu()
-                    mixer = getattr(loaded.module, "linear_attn", None) or getattr(
-                        loaded.module, "self_attn", None
+                with self.loader.layer_lease(layer_index):
+                    loaded = self.loader.load_layer(
+                        layer_index,
+                        device=self.device,
+                        dtype=self.dtype,
                     )
+                    hook = None
+                    if layer_index == capture_layer_index:
+                        captured_input = hidden_states.detach().cpu()
+                        mixer = getattr(loaded.module, "linear_attn", None) or getattr(
+                            loaded.module, "self_attn", None
+                        )
 
-                    def capture_mixer(module, args, output):
-                        nonlocal captured_mixer
-                        value = output[0] if isinstance(output, tuple) else output
-                        captured_mixer = value.detach().cpu()
+                        def capture_mixer(module, args, output):
+                            nonlocal captured_mixer
+                            value = output[0] if isinstance(output, tuple) else output
+                            captured_mixer = value.detach().cpu()
 
-                    hook = mixer.register_forward_hook(capture_mixer)
-                try:
-                    capture_cache = (
-                        DynamicCache(config=self.loader.config)
-                        if layer_index == capture_layer_index
-                        and self.loader.config.layer_types[layer_index] == "linear_attention"
-                        else None
-                    )
-                    hidden_states = loaded.module(
-                        hidden_states,
-                        position_embeddings=position_embeddings,
-                        attention_mask=causal_mask,
-                        position_ids=position_ids,
-                        past_key_values=capture_cache,
-                    )
-                    if isinstance(hidden_states, tuple):
-                        hidden_states = hidden_states[0]
-                finally:
-                    if hook is not None:
-                        hook.remove()
+                        hook = mixer.register_forward_hook(capture_mixer)
+                    try:
+                        capture_cache = (
+                            DynamicCache(config=self.loader.config)
+                            if layer_index == capture_layer_index
+                            and self.loader.config.layer_types[layer_index] == "linear_attention"
+                            else None
+                        )
+                        hidden_states = loaded.module(
+                            hidden_states,
+                            position_embeddings=position_embeddings,
+                            attention_mask=causal_mask,
+                            position_ids=position_ids,
+                            past_key_values=capture_cache,
+                        )
+                        if isinstance(hidden_states, tuple):
+                            hidden_states = hidden_states[0]
+                    finally:
+                        if hook is not None:
+                            hook.remove()
                 if layer_index == capture_layer_index:
                     captured_block = hidden_states.detach().cpu()
                     if capture_cache is not None:
@@ -409,39 +478,47 @@ class StreamedQwen35HybridExecutor:
         context,
         is_active,
     ):
-        loaded = self.teacher.loader.load_layer(
-            layer_index,
-            device=self.teacher.device,
-            dtype=self.teacher.dtype,
-        )
-        adapter = None
-        if mixer is not None:
-            if hasattr(loaded.module, "linear_attn"):
-                attribute, returns_tuple = "linear_attn", False
-            elif hasattr(loaded.module, "self_attn"):
-                attribute, returns_tuple = "self_attn", True
-            else:
-                raise ContractError(f"streamed Qwen layer {layer_index} has no sequence mixer")
-            mixer.to(device=self.teacher.device, dtype=self.teacher.dtype)
-            mixer.eval()
-            if not is_active:
-                mixer.requires_grad_(False)
-            adapter = QwenRWKV7MixerAdapter(
-                mixer,
-                returns_attention_tuple=returns_tuple,
-                context=context,
+        with self.teacher.loader.layer_lease(layer_index):
+            loaded = self.teacher.loader.load_layer(
+                layer_index,
+                device=self.teacher.device,
+                dtype=self.teacher.dtype,
             )
-            adapter.eval()
-            if not is_active:
-                adapter.requires_grad_(False)
-            setattr(loaded.module, attribute, adapter)
-        output = loaded.module(
-            hidden_states,
-            position_embeddings=position_embeddings,
-            attention_mask=causal_mask,
-            position_ids=position_ids,
-            use_cache=False,
-        )
+            adapter = None
+            original_mixer = None
+            attribute = None
+            if mixer is not None:
+                if hasattr(loaded.module, "linear_attn"):
+                    attribute, returns_tuple = "linear_attn", False
+                elif hasattr(loaded.module, "self_attn"):
+                    attribute, returns_tuple = "self_attn", True
+                else:
+                    raise ContractError(f"streamed Qwen layer {layer_index} has no sequence mixer")
+                mixer.to(device=self.teacher.device, dtype=self.teacher.dtype)
+                mixer.eval()
+                if not is_active:
+                    mixer.requires_grad_(False)
+                adapter = QwenRWKV7MixerAdapter(
+                    mixer,
+                    returns_attention_tuple=returns_tuple,
+                    context=context,
+                )
+                adapter.eval()
+                if not is_active:
+                    adapter.requires_grad_(False)
+                original_mixer = getattr(loaded.module, attribute)
+                setattr(loaded.module, attribute, adapter)
+            try:
+                output = loaded.module(
+                    hidden_states,
+                    position_embeddings=position_embeddings,
+                    attention_mask=causal_mask,
+                    position_ids=position_ids,
+                    use_cache=False,
+                )
+            finally:
+                if attribute is not None:
+                    setattr(loaded.module, attribute, original_mixer)
         if isinstance(output, tuple):
             output = output[0]
         return output, adapter

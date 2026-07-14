@@ -113,6 +113,23 @@ class RWKV7MixerLayerStore:
             )
         return mixer
 
+    def estimated_mixer_bytes(self, dtype: torch.dtype) -> tuple[int, ...]:
+        result = []
+        element_size = torch.empty((), dtype=dtype).element_size()
+        for layer_index in range(self.factory.config.num_hidden_layers):
+            mixer = self.factory.create(
+                layer_index,
+                device="meta",
+                dtype=dtype,
+            )
+            result.append(
+                sum(
+                    tensor.numel() * element_size
+                    for tensor in (*mixer.parameters(), *mixer.buffers())
+                )
+            )
+        return tuple(result)
+
     def save_mixer(
         self,
         layer_index: int,

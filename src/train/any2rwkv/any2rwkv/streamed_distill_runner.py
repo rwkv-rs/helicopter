@@ -32,6 +32,7 @@ from .migration_init import (
     plan_warm_start,
 )
 from .mapping import finalize_fitted_mapping
+from .layer_store import LayerTensorStore
 from .mixer_store import RWKV7MixerFactory, RWKV7MixerLayerStore
 from .streamed_teacher import StreamedQwen35HybridExecutor, StreamedQwen35Teacher
 from .streaming_training import ActiveLayerOptimizer, ActiveLayerOptimizerSnapshot
@@ -116,6 +117,22 @@ def run_streamed_distillation(
     progress_dir = run_dir / "streamed-checkpoints"
     progress_dir.mkdir(parents=True, exist_ok=True)
     trace_path = run_dir / "active-layer-trace.jsonl"
+    cache_teacher_layers = bool(getattr(plan, "cache_teacher_layers", False))
+    source_weight_bytes = sum(
+        shard.stat().st_size for shard in source_manifest.shards
+    )
+    max_teacher_cache_bytes = getattr(plan, "max_teacher_cache_bytes", None)
+    estimated_teacher_layer_bytes = LayerTensorStore(
+        source_manifest
+    ).estimated_layer_bytes(dtype)
+    if cache_teacher_layers and (
+        max_teacher_cache_bytes is None
+        or estimated_teacher_layer_bytes > max_teacher_cache_bytes
+    ):
+        raise ContractError(
+            "teacher layer cache exceeds max_teacher_cache_bytes before CUDA allocation: "
+            f"required={estimated_teacher_layer_bytes} limit={max_teacher_cache_bytes}"
+        )
     binding = {
         "source_config_sha256": source_manifest.file_hashes["config.json"],
         "source_shard_sha256": {
@@ -124,16 +141,31 @@ def run_streamed_distillation(
         },
         "dataset_manifest_sha256": file_sha256(dataset_manifest),
         "training_config_sha256": file_sha256(training_config),
+        "zero_step_checkpoint_sha256": checkpoint_sha256(zero_step_dir),
+        "warm_start_plan_sha256": file_sha256(run_dir / "warm-start-plan.json"),
+        "streamed_runner_sha256": file_sha256(Path(__file__)),
+        "streamed_teacher_sha256": file_sha256(
+            Path(__file__).with_name("streamed_teacher.py")
+        ),
+        "streaming_training_sha256": file_sha256(
+            Path(__file__).with_name("streaming_training.py")
+        ),
         "execution_mode": "streamed_layer_store",
+        "teacher_layer_cache": "cuda" if cache_teacher_layers else "none",
     }
     execution_estimate = _estimate_streamed_workload(
-        source_weight_bytes=sum(shard.stat().st_size for shard in source_manifest.shards),
+        source_weight_bytes=source_weight_bytes,
         num_layers=num_layers,
         plan=plan,
         baseline_rows=min(8, len(validation_rows)),
+        target_mixer_bytes=max(mixer_store.estimated_mixer_bytes(dtype)),
     )
     execution_estimate["limit_weight_bytes_moved"] = (
         plan.max_estimated_weight_bytes_moved
+    )
+    execution_estimate["max_teacher_cache_bytes"] = max_teacher_cache_bytes
+    execution_estimate["estimated_teacher_layer_bytes"] = (
+        estimated_teacher_layer_bytes
     )
     execution_estimate["accepted"] = (
         plan.max_estimated_weight_bytes_moved is None
@@ -146,10 +178,12 @@ def run_streamed_distillation(
             "streamed distillation execution estimate exceeds the frozen weight-movement "
             "budget; use a distributed resident/expert-sharded backend or reduce the plan"
         )
+    torch.cuda.reset_peak_memory_stats(device)
     teacher = StreamedQwen35Teacher(
         source_manifest,
         device=device,
         dtype=dtype,
+        cache_layers=cache_teacher_layers,
     )
     executor = StreamedQwen35HybridExecutor(teacher)
     baseline_rows = validation_rows[: min(8, len(validation_rows))]
@@ -197,6 +231,29 @@ def run_streamed_distillation(
         )
         del provider
         torch.cuda.empty_cache()
+    if cache_teacher_layers and teacher.loader.cached_layer_count < num_layers:
+        cache_input_ids, cache_attention_mask, cache_position_ids = _encode_tokens(
+            baseline_rows[0],
+            plan.burn_in_tokens + plan.supervised_tokens,
+            device,
+        )
+        teacher.forward(
+            cache_input_ids,
+            attention_mask=cache_attention_mask,
+            position_ids=cache_position_ids,
+        )
+    residency_path = run_dir / "teacher-residency.json"
+    residency = _teacher_residency(
+        teacher,
+        device=device,
+        max_teacher_cache_bytes=max_teacher_cache_bytes,
+        max_cuda_reserved_bytes=plan.max_cuda_reserved_bytes,
+    )
+    write_json(residency_path, residency)
+    if not residency["accepted"]:
+        raise ContractError(
+            "resident teacher exceeds the frozen cache or CUDA reserved-memory limit"
+        )
     next_visit = 0
     consumed = 0
     data_cursor = 0
@@ -389,6 +446,23 @@ def run_streamed_distillation(
                 total,
                 accumulation_steps=plan.accumulation_steps,
             )
+            if (
+                plan.max_cuda_reserved_bytes is not None
+                and torch.cuda.max_memory_reserved(device)
+                > plan.max_cuda_reserved_bytes
+            ):
+                write_json(
+                    residency_path,
+                    _teacher_residency(
+                        teacher,
+                        device=device,
+                        max_teacher_cache_bytes=max_teacher_cache_bytes,
+                        max_cuda_reserved_bytes=plan.max_cuda_reserved_bytes,
+                    ),
+                )
+                raise ContractError(
+                    "distillation exceeds max_cuda_reserved_bytes during active-layer training"
+                )
             gradient_norm = math.sqrt(
                 sum(
                     float(parameter.grad.detach().float().square().sum())
@@ -665,6 +739,13 @@ def run_streamed_distillation(
         student_sha256=trained_sha,
         trace_sha256=file_sha256(trace_path),
     )
+    residency = _teacher_residency(
+        teacher,
+        device=device,
+        max_teacher_cache_bytes=max_teacher_cache_bytes,
+        max_cuda_reserved_bytes=plan.max_cuda_reserved_bytes,
+    )
+    write_json(residency_path, residency)
     return {
         "status": "distilled-bf16-streamed",
         "checkpoint": str(trained_dir),
@@ -675,11 +756,47 @@ def run_streamed_distillation(
         "stopped_by_sweep_gate": stop,
         "execution_mode": "streamed_layer_store",
         "resident_contract": {
-            "source_decoder_layers": 1,
+            "source_decoder_layers": (
+                num_layers if cache_teacher_layers else 1
+            ),
+            "teacher_layer_bytes": residency["teacher_layer_bytes"],
+            "teacher_global_bytes": residency["teacher_global_bytes"],
+            "cuda_peak_allocated_bytes": residency["cuda_peak_allocated_bytes"],
+            "cuda_peak_reserved_bytes": residency["cuda_peak_reserved_bytes"],
             "target_mixers": 1,
             "optimizers": 1,
             "frozen_suffix": "reentrant-reload-on-backward",
         },
+    }
+
+
+def _teacher_residency(
+    teacher,
+    *,
+    device,
+    max_teacher_cache_bytes,
+    max_cuda_reserved_bytes,
+):
+    teacher_layer_bytes = teacher.loader.cached_layer_bytes
+    peak_reserved = torch.cuda.max_memory_reserved(device)
+    accepted = (
+        (max_teacher_cache_bytes is None or teacher_layer_bytes <= max_teacher_cache_bytes)
+        and (
+            max_cuda_reserved_bytes is None
+            or peak_reserved <= max_cuda_reserved_bytes
+        )
+    )
+    return {
+        "schema_version": 1,
+        "teacher_layer_cache": "cuda" if teacher.loader.cache_layers else "none",
+        "cached_decoder_layers": teacher.loader.cached_layer_count,
+        "teacher_layer_bytes": teacher_layer_bytes,
+        "teacher_global_bytes": teacher.resident_global_bytes,
+        "max_teacher_cache_bytes": max_teacher_cache_bytes,
+        "cuda_peak_allocated_bytes": torch.cuda.max_memory_allocated(device),
+        "cuda_peak_reserved_bytes": peak_reserved,
+        "max_cuda_reserved_bytes": max_cuda_reserved_bytes,
+        "accepted": accepted,
     }
 
 
@@ -710,7 +827,12 @@ def _encode_tokens(tokens, total_length, device):
 
 
 def _estimate_streamed_workload(
-    *, source_weight_bytes, num_layers, plan, baseline_rows=0
+    *,
+    source_weight_bytes,
+    num_layers,
+    plan,
+    baseline_rows=0,
+    target_mixer_bytes=None,
 ):
     def rounded_microbatches(tokens):
         raw = math.ceil(tokens / plan.supervised_tokens)
@@ -738,22 +860,70 @@ def _estimate_streamed_workload(
         * plan.corrective_max_sweeps
     )
     per_layer_bytes = math.ceil(source_weight_bytes / num_layers)
+    if target_mixer_bytes is None:
+        target_mixer_bytes = per_layer_bytes
     baseline_evaluations = 6 + 3 + plan.corrective_max_sweeps + 1
     baseline_forwards = baseline_evaluations * baseline_rows
     shadow_layer_loads = batches["signals"] * max(0, num_layers - 1)
     generation_writes = teacher_forwards * per_layer_bytes * 2
-    estimated = (
-        teacher_forwards * source_weight_bytes
-        + student_forwards * source_weight_bytes
-        + suffix_layer_reloads * per_layer_bytes
-        + baseline_forwards * source_weight_bytes * 2
-        + shadow_layer_loads * per_layer_bytes
-        + generation_writes
+    target_mixer_reloads = (
+        student_forwards * num_layers + suffix_layer_reloads
     )
+    target_mixer_read_bytes = target_mixer_reloads * target_mixer_bytes
+    cache_teacher_layers = bool(getattr(plan, "cache_teacher_layers", False))
+    if cache_teacher_layers:
+        teacher_source_reads = source_weight_bytes
+        student_source_shell_reads = 0
+        suffix_source_reloads = 0
+        baseline_teacher_reads = 0
+        baseline_student_reads = baseline_forwards * source_weight_bytes
+        estimated = (
+            teacher_source_reads
+            + baseline_student_reads
+            + shadow_layer_loads * per_layer_bytes
+            + target_mixer_read_bytes
+            + generation_writes
+        )
+        estimator = "resident-teacher-streamed-target-conservative-v2"
+        assumptions = [
+            "teacher globals and layers are read once and retained on the teacher device",
+            "hybrid source-shell forwards and checkpointed suffix recomputation reuse cached teacher layers",
+            "each warm-start baseline student evaluation conservatively counts one full source scan",
+            "mixer plus optimizer generation writes bounded by two average source layers",
+            "target mixer reads use the largest materialized target mixer tensor size",
+            "does not count activation, filesystem cache, snapshot/export, or network bytes",
+        ]
+    else:
+        teacher_source_reads = teacher_forwards * source_weight_bytes
+        student_source_shell_reads = student_forwards * source_weight_bytes
+        suffix_source_reloads = suffix_layer_reloads * per_layer_bytes
+        baseline_teacher_reads = baseline_forwards * source_weight_bytes
+        baseline_student_reads = baseline_forwards * source_weight_bytes
+        estimated = (
+            teacher_source_reads
+            + student_source_shell_reads
+            + suffix_source_reloads
+            + baseline_teacher_reads
+            + baseline_student_reads
+            + shadow_layer_loads * per_layer_bytes
+            + target_mixer_read_bytes
+            + generation_writes
+        )
+        estimator = "streamed-layer-store-conservative-v2"
+        assumptions = [
+            "one full source checkpoint scan per teacher forward",
+            "one full source-shell scan per student forward",
+            "one average source layer reload per checkpointed suffix backward",
+            "target mixer reads use the largest materialized target mixer tensor size",
+            "mixer plus optimizer generation writes bounded by two average source layers",
+            "does not count activation, filesystem cache, snapshot/export, or network bytes",
+        ]
     return {
         "schema_version": 1,
-        "estimator": "streamed-layer-store-conservative-v1",
+        "estimator": estimator,
+        "teacher_layer_cache": "cuda" if cache_teacher_layers else "none",
         "source_weight_bytes": source_weight_bytes,
+        "target_mixer_bytes_upper_bound": target_mixer_bytes,
         "num_layers": num_layers,
         "microbatches_per_layer": batches,
         "teacher_full_forwards": teacher_forwards,
@@ -761,15 +931,15 @@ def _estimate_streamed_workload(
         "suffix_layer_backward_reloads": suffix_layer_reloads,
         "baseline_full_forwards": baseline_forwards,
         "layer_zero_shadow_loads": shadow_layer_loads,
+        "estimated_teacher_source_read_bytes": teacher_source_reads,
+        "estimated_student_source_shell_read_bytes": student_source_shell_reads,
+        "estimated_suffix_source_reload_bytes": suffix_source_reloads,
+        "estimated_baseline_teacher_read_bytes": baseline_teacher_reads,
+        "estimated_baseline_student_read_bytes": baseline_student_reads,
+        "estimated_target_mixer_read_bytes": target_mixer_read_bytes,
         "estimated_generation_write_bytes": generation_writes,
         "estimated_weight_bytes_moved": estimated,
-        "assumptions": [
-            "one full source checkpoint scan per teacher forward",
-            "one full source-shell scan per student forward",
-            "one average source layer reload per checkpointed suffix backward",
-            "mixer plus optimizer generation writes bounded by two average source layers",
-            "does not count activation, filesystem cache, snapshot/export, or network bytes",
-        ],
+        "assumptions": assumptions,
     }
 
 

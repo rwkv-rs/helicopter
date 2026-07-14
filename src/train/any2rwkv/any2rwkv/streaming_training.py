@@ -18,6 +18,7 @@ class ActiveLayerOptimizerSnapshot:
     micro_step: int
     optimizer_step: int
     accumulation_step: int
+    parameter_signature: tuple[tuple[str, tuple[int, ...], str], ...]
 
 
 class ActiveLayerOptimizer:
@@ -72,6 +73,11 @@ class ActiveLayerOptimizer:
             return
         if snapshot.layer_index != layer_index:
             raise ContractError("optimizer snapshot belongs to a different layer")
+        parameter_signature = _parameter_signature(module)
+        if snapshot.parameter_signature != parameter_signature:
+            raise ContractError(
+                "optimizer snapshot parameter signature differs from the active layer"
+            )
         optimizer.load_state_dict(snapshot.optimizer)
         scheduler.load_state_dict(snapshot.scheduler)
         self.micro_step = snapshot.micro_step
@@ -125,6 +131,7 @@ class ActiveLayerOptimizer:
             self.micro_step,
             self.optimizer_step,
             self.accumulation_step,
+            _parameter_signature(self.module),
         )
         self.module.requires_grad_(False)
         for parameter in self.module.parameters():
@@ -146,3 +153,12 @@ def _to_cpu(value: Any) -> Any:
     if isinstance(value, tuple):
         return tuple(_to_cpu(item) for item in value)
     return value
+
+
+def _parameter_signature(
+    module: nn.Module,
+) -> tuple[tuple[str, tuple[int, ...], str], ...]:
+    return tuple(
+        (name, tuple(parameter.shape), str(parameter.dtype))
+        for name, parameter in module.named_parameters()
+    )

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
 from safetensors import safe_open
+import torch
 from torch import Tensor
 
 from .checkpoint import CheckpointManifest, sha256_file
@@ -122,6 +124,21 @@ class LayerTensorStore:
                 for canonical_name, source_name in names:
                     tensors[canonical_name] = handle.get_tensor(source_name)
         return tensors
+
+    def estimated_layer_bytes(self, dtype: torch.dtype) -> int:
+        """Return decoder tensor bytes after conversion to the runtime dtype."""
+        element_size = torch.empty((), dtype=dtype).element_size()
+        total = 0
+        for entries in self._layers.values():
+            by_shard: dict[Path, list[str]] = {}
+            for _, source_name, shard_path in entries:
+                by_shard.setdefault(shard_path, []).append(source_name)
+            for shard_path, source_names in by_shard.items():
+                with safe_open(shard_path, framework="pt", device="cpu") as handle:
+                    for source_name in source_names:
+                        shape = handle.get_slice(source_name).get_shape()
+                        total += math.prod(shape) * element_size
+        return total
 
     def _entries(self, layer_index: int) -> tuple[tuple[str, str, Path], ...]:
         try:

@@ -21,7 +21,7 @@ from any2rwkv.distill import (
     save_sharded_training_checkpoint,
     save_training_checkpoint,
 )
-from any2rwkv.errors import CoverageError
+from any2rwkv.errors import ContractError, CoverageError
 from any2rwkv.calibration import file_sha256
 from any2rwkv.distill_runner import (
     _initial_trainable_names,
@@ -271,6 +271,9 @@ class DistillationInvariantTests(unittest.TestCase):
                         "corrective_min_sweeps": 1,
                         "corrective_max_sweeps": 3,
                         "corrective_min_delta": 0.001,
+                        "cache_teacher_layers": True,
+                        "max_teacher_cache_bytes": 8000000000,
+                        "max_cuda_reserved_bytes": 90000000000,
                     }
                 ),
                 encoding="utf-8",
@@ -282,6 +285,17 @@ class DistillationInvariantTests(unittest.TestCase):
                 ("signals", "block", "global"),
             )
             self.assertEqual(parsed_plan.execution_mode, "resident")
+            self.assertTrue(parsed_plan.cache_teacher_layers)
+            self.assertEqual(parsed_plan.max_teacher_cache_bytes, 8000000000)
+            self.assertEqual(parsed_plan.max_cuda_reserved_bytes, 90000000000)
+            invalid_plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            del invalid_plan["max_teacher_cache_bytes"]
+            plan_path.write_text(json.dumps(invalid_plan), encoding="utf-8")
+            with self.assertRaisesRegex(
+                ContractError,
+                "invalid numeric limits",
+            ):
+                read_distillation_plan(plan_path)
             data = root / "train.jsonl"
             data.write_text('{"text":"one"}\n{"text":"two"}\n', encoding="utf-8")
             manifest = root / "data.json"

@@ -49,6 +49,9 @@ class DistillationPlan:
     activation_checkpointing: bool
     execution_mode: str
     max_estimated_weight_bytes_moved: int | None
+    cache_teacher_layers: bool
+    max_teacher_cache_bytes: int | None
+    max_cuda_reserved_bytes: int | None
 
 
 def read_distillation_plan(path: Path) -> DistillationPlan:
@@ -64,6 +67,9 @@ def read_distillation_plan(path: Path) -> DistillationPlan:
     activation_checkpointing = payload.get("activation_checkpointing", True)
     if type(activation_checkpointing) is not bool:
         raise ContractError("activation_checkpointing must be a JSON boolean")
+    cache_teacher_layers = payload.get("cache_teacher_layers", False)
+    if type(cache_teacher_layers) is not bool:
+        raise ContractError("cache_teacher_layers must be a JSON boolean")
     plan = DistillationPlan(
         int(payload.get("seed", 0)),
         float(payload.get("learning_rate", 0)),
@@ -81,6 +87,17 @@ def read_distillation_plan(path: Path) -> DistillationPlan:
             if "max_estimated_weight_bytes_moved" in payload
             else None
         ),
+        cache_teacher_layers,
+        (
+            int(payload["max_teacher_cache_bytes"])
+            if "max_teacher_cache_bytes" in payload
+            else None
+        ),
+        (
+            int(payload["max_cuda_reserved_bytes"])
+            if "max_cuda_reserved_bytes" in payload
+            else None
+        ),
     )
     if (
         plan.seed < 0
@@ -96,6 +113,22 @@ def read_distillation_plan(path: Path) -> DistillationPlan:
         or (
             plan.max_estimated_weight_bytes_moved is not None
             and plan.max_estimated_weight_bytes_moved <= 0
+        )
+        or (
+            plan.max_teacher_cache_bytes is not None
+            and plan.max_teacher_cache_bytes <= 0
+        )
+        or (
+            plan.cache_teacher_layers
+            and plan.max_teacher_cache_bytes is None
+        )
+        or (
+            plan.max_cuda_reserved_bytes is not None
+            and plan.max_cuda_reserved_bytes <= 0
+        )
+        or (
+            plan.cache_teacher_layers
+            and plan.max_cuda_reserved_bytes is None
         )
     ):
         raise ContractError("distillation plan contains invalid numeric limits")

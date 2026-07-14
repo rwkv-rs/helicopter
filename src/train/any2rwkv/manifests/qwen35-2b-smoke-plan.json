@@ -8,6 +8,9 @@
   "accumulation_steps": 1,
   "activation_checkpointing": true,
   "execution_mode": "streamed_layer_store",
+  "cache_teacher_layers": true,
+  "max_teacher_cache_bytes": 8000000000,
+  "max_cuda_reserved_bytes": 90000000000,
   "stage_tokens_per_layer": {
     "signals": 16,
     "block": 32,

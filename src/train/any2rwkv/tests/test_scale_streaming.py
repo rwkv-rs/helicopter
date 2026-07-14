@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import torch
 
@@ -117,6 +118,33 @@ class LayerTensorStoreTests(unittest.TestCase):
             self.assertEqual(loaded.layer_index, 41)
             self.assertGreater(loaded.source_tensor_bytes, 0)
             self.assertTrue(all(not parameter.requires_grad for parameter in loaded.module.parameters()))
+            with loader.layer_lease(41):
+                with self.assertRaisesRegex(
+                    ContractError,
+                    "does not permit overlapping execution",
+                ):
+                    with loader.layer_lease(41):
+                        pass
+
+    def test_cached_teacher_reads_each_source_layer_once_across_forwards(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source_dir = Path(temporary) / "source"
+            write_fixture(source_dir, layers=4)
+            teacher = StreamedQwen35Teacher(
+                read_checkpoint(source_dir, require_final_layers=False),
+                device="cpu",
+                dtype=torch.float32,
+                cache_layers=True,
+            )
+            input_ids = torch.tensor([[1, 2, 3, 4]], dtype=torch.long)
+            with mock.patch.object(
+                teacher.loader.tensor_store,
+                "load_layer",
+                wraps=teacher.loader.tensor_store.load_layer,
+            ) as load_layer:
+                teacher.forward(input_ids)
+                teacher.forward(input_ids)
+            self.assertEqual(load_layer.call_count, 4)
 
     def test_streamed_teacher_matches_resident_fixture_forward(self) -> None:
         from transformers import AutoModelForCausalLM
@@ -188,16 +216,25 @@ class LayerTensorStoreTests(unittest.TestCase):
                     strict=True,
                 )
             teacher = StreamedQwen35Teacher(
-                source, device="cpu", dtype=torch.float32
+                source,
+                device="cpu",
+                dtype=torch.float32,
+                cache_layers=True,
             )
             executor = StreamedQwen35HybridExecutor(teacher)
             active_layer_index = 2
+            input_ids = torch.tensor([[1, 2, 3, 4]], dtype=torch.long)
+            expected_teacher_logits = teacher.forward(input_ids).logits.clone()
             output = executor.forward(
-                torch.tensor([[1, 2, 3, 4]], dtype=torch.long),
+                input_ids,
                 active_layer_index=active_layer_index,
                 active_mixer=mixers[active_layer_index],
                 converted_layer_indices={0, 1, 3},
                 frozen_mixer_provider=lambda layer_index: mixers[layer_index],
+            )
+            torch.testing.assert_close(
+                teacher.forward(input_ids).logits,
+                expected_teacher_logits,
             )
             output.logits.square().mean().backward()
             self.assertTrue(
@@ -234,7 +271,31 @@ class ChunkedTokenKLTests(unittest.TestCase):
         self.assertEqual(estimate["student_full_forwards"], 44)
         self.assertEqual(estimate["suffix_layer_backward_reloads"], 66)
         self.assertEqual(estimate["layer_zero_shadow_loads"], 3)
-        self.assertEqual(estimate["estimated_weight_bytes_moved"], 509_000)
+        self.assertEqual(estimate["estimated_weight_bytes_moved"], 751_000)
+
+    def test_scale_estimate_reuses_resident_teacher_layers(self) -> None:
+        class Plan:
+            supervised_tokens = 512
+            stage_tokens_per_layer = {
+                "signals": 512,
+                "block": 1024,
+                "global": 2048,
+            }
+            corrective_max_sweeps = 1
+            accumulation_steps = 1
+            cache_teacher_layers = True
+
+        estimate = _estimate_streamed_workload(
+            source_weight_bytes=4_000,
+            num_layers=4,
+            plan=Plan(),
+        )
+        self.assertEqual(estimate["teacher_layer_cache"], "cuda")
+        self.assertEqual(
+            estimate["estimator"],
+            "resident-teacher-streamed-target-conservative-v2",
+        )
+        self.assertEqual(estimate["estimated_weight_bytes_moved"], 337_000)
 
     def test_supervised_prediction_window_keeps_exact_target_budget(self) -> None:
         logits = torch.arange(1 * 7 * 3).reshape(1, 7, 3)
@@ -282,6 +343,17 @@ class ChunkedTokenKLTests(unittest.TestCase):
 
 
 class ActiveLayerOptimizerTests(unittest.TestCase):
+    def test_snapshot_signature_allows_stage_trainable_set_expansion(self) -> None:
+        module = torch.nn.Linear(4, 4, bias=True)
+        signals = ActiveLayerOptimizer(learning_rate=1e-2)
+        signals.activate(3, module, trainable_names={"weight"})
+        snapshot = signals.release()
+
+        block = ActiveLayerOptimizer(learning_rate=1e-2)
+        block.activate(3, module, snapshot=snapshot, trainable_names=None)
+        self.assertTrue(module.weight.requires_grad)
+        self.assertTrue(module.bias.requires_grad)
+
     def test_mid_accumulation_snapshot_restores_without_resident_optimizer_list(self) -> None:
         torch.manual_seed(31)
         initial = torch.nn.Linear(4, 4, bias=False)
@@ -306,6 +378,14 @@ class ActiveLayerOptimizerTests(unittest.TestCase):
         second.activate(17, resumed, snapshot=snapshot)
         self.assertTrue(second.backward(resumed(value).square().mean(), accumulation_steps=2))
         torch.testing.assert_close(resumed.weight, uninterrupted.weight, rtol=0, atol=0)
+
+        incompatible = ActiveLayerOptimizer(learning_rate=1e-2)
+        with self.assertRaisesRegex(ContractError, "parameter signature differs"):
+            incompatible.activate(
+                17,
+                torch.nn.Linear(4, 5, bias=False),
+                snapshot=snapshot,
+            )
 
 
 class RWKV7MixerLayerStoreTests(unittest.TestCase):
