@@ -13,7 +13,7 @@ from safetensors.torch import save_file
 from torch import Tensor
 from transformers import AutoModelForCausalLM
 
-from .artifacts import checkpoint_sha256
+from .artifacts import checkpoint_sha256, write_json
 from .calibration import file_sha256
 from .checkpoint import read_checkpoint
 from .distill import (

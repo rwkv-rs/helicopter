@@ -23,6 +23,7 @@ from any2rwkv.distill import (
 from any2rwkv.errors import CoverageError
 from any2rwkv.calibration import file_sha256
 from any2rwkv.distill_runner import (
+    _write_baseline_result,
     read_distillation_plan,
     read_distillation_texts,
     read_packed_token_rows,
@@ -31,6 +32,21 @@ from any2rwkv.mapping import MappingLedger, SourceDisposition, SourceEntry, Targ
 
 
 class MappingTests(unittest.TestCase):
+    def test_baseline_result_is_written_atomically_and_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "migration-baselines.json"
+            binding = {"source_sha256": "a" * 64}
+            _write_baseline_result(
+                path,
+                name="random",
+                metrics={"mean_token_kl": 1.25},
+                binding=binding,
+                token_budget=32,
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["binding"], binding)
+            self.assertEqual(payload["baselines"]["random"]["token_budget"], 32)
+
     def test_fitted_provenance_is_committed_only_after_training_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
