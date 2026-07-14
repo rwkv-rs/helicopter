@@ -135,7 +135,25 @@ def write_json(path: Path, payload: Any) -> None:
 
 
 def git_sha(path: Path) -> str:
-    return subprocess.run(["git", "-C", str(path), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+    try:
+        return subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError) as error:
+        manifest = path / ".helicopter-dev/source-revisions.json"
+        try:
+            revision = json.loads(manifest.read_text(encoding="utf-8"))["product_commit"]
+        except (OSError, KeyError, json.JSONDecodeError) as manifest_error:
+            raise RuntimeError(
+                f"cannot resolve product commit for {path}: {error}; "
+                f"managed revision manifest unavailable: {manifest_error}"
+            ) from error
+        if not isinstance(revision, str) or len(revision) != 40:
+            raise RuntimeError(f"invalid managed product commit: {revision!r}")
+        return revision
 
 
 def initialize_run(

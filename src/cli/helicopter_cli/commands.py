@@ -689,7 +689,7 @@ def build_takeoff_plan(
     return CommandPlan(command=command, cwd=verl_path, shown_env=shown_env, env=plan_env)
 
 
-def _checkout_sha(path: Path) -> str:
+def _checkout_sha(path: Path, *, root: Path) -> str:
     try:
         return subprocess.run(
             ["git", "-C", str(path), "rev-parse", "HEAD"],
@@ -698,7 +698,19 @@ def _checkout_sha(path: Path) -> str:
             text=True,
         ).stdout.strip()
     except (OSError, subprocess.CalledProcessError) as error:
-        raise SystemExit(f"cannot resolve pinned checkout SHA for {path}: {error}") from error
+        manifest_path = root / ".helicopter-dev/source-revisions.json"
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            key = path.resolve().relative_to(root.resolve()).as_posix()
+            revision = payload["submodules"][key]
+        except (OSError, KeyError, ValueError, json.JSONDecodeError) as manifest_error:
+            raise SystemExit(
+                f"cannot resolve pinned checkout SHA for {path}: {error}; "
+                f"managed revision manifest unavailable: {manifest_error}"
+            ) from error
+        if not isinstance(revision, str) or len(revision) != 40:
+            raise SystemExit(f"invalid managed checkout SHA for {path}: {revision!r}")
+        return revision
 
 
 def build_any2rwkv_plan(
@@ -768,7 +780,7 @@ def build_any2rwkv_plan(
     ):
         if not checkout.is_dir():
             raise SystemExit(f"{label} checkout not found: {checkout}")
-        actual = _checkout_sha(checkout)
+        actual = _checkout_sha(checkout, root=root)
         if actual != expected:
             raise SystemExit(f"{label} SHA mismatch: expected {expected}, found {actual}")
 
