@@ -37,23 +37,42 @@ def main() -> int:
         raise SystemExit(f"managed RWKV kernel environment mismatch: {mismatch}")
     kernel = load_rwkv_lm_kernel()
     generator = torch.Generator(device="cuda").manual_seed(20260714)
-    signals = [
-        torch.randn(1, 32, 64, generator=generator, device="cuda", dtype=torch.bfloat16).requires_grad_(True)
-        for _ in range(6)
-    ]
-    state = torch.randn(1, 1, 64, 64, generator=generator, device="cuda", dtype=torch.float32).requires_grad_(True)
+    def bf16_signal(scale: float) -> torch.Tensor:
+        return (
+            torch.randn(1, 32, 64, generator=generator, device="cuda")
+            .mul_(scale)
+            .to(torch.bfloat16)
+            .requires_grad_(True)
+        )
+
+    r, w, k, v = (bf16_signal(scale) for scale in (0.1, 0.5, 0.1, 0.1))
+    direction = torch.nn.functional.normalize(
+        torch.randn(1, 32, 64, generator=generator, device="cuda"), dim=-1
+    ).to(torch.bfloat16)
+    gate = torch.sigmoid(
+        torch.randn(1, 32, 64, generator=generator, device="cuda").mul_(0.5)
+    ).to(torch.bfloat16)
+    erase = (-direction).contiguous().requires_grad_(True)
+    write = (direction * gate).contiguous().requires_grad_(True)
+    signals = [r, w, k, v, erase, write]
+    state = (
+        torch.randn(1, 1, 64, 64, generator=generator, device="cuda")
+        .mul_(0.01)
+        .requires_grad_(True)
+    )
     full_output, full_state = kernel(state, *signals)
     first_output, middle_state = kernel(state, *(value[:, :16] for value in signals))
     second_output, final_state = kernel(middle_state, *(value[:, 16:] for value in signals))
     chunk_output = torch.cat((first_output, second_output), dim=1)
-    output_max_abs = float((full_output - chunk_output).abs().max())
-    state_max_abs = float((full_state - final_state).abs().max())
+    output_max_abs = float((full_output - chunk_output).detach().abs().max())
+    state_max_abs = float((full_state - final_state).detach().abs().max())
     loss = full_output.float().square().mean() + full_state.square().mean() * 0.01
     gradients = torch.autograd.grad(loss, (state, *signals))
     result = {
         "schema_version": 1,
         "status": "pass" if output_max_abs <= 0.02 and state_max_abs <= 0.003 else "fail",
         "kernel": "rwkv-lm/RWKV7_STATEPASSING_CLAMPW_CUDA",
+        "signal_domain": "native decay plus normalized rank-1 erase/write",
         "state_dtype": str(state.dtype),
         "signal_dtype": str(signals[0].dtype),
         "output_max_abs": output_max_abs,
