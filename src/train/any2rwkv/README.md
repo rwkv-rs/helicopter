@@ -27,7 +27,7 @@ helicopter any2rwkv quantize
 
 每次 run 使用独立 output；source checkpoint 只读。`convert` 先写 zero-step checkpoint、完整双轴 mapping ledger 和六种 warm-start plan。`distill` 读取不可变数据 manifest 与训练 plan，依次执行 isolated signals/block、`0..N-1` progressive global、首次 fully recurrent 与 `N-1..0` corrective sweep，并原子保存 active layer optimizer、累计梯度、RNG、data cursor 和 sweep cursor。
 
-streamed runner 的每个 microstep 使用不可变 generation 事务提交 mixer、optimizer、RNG、cursor 和 trace offset，最后只原子替换 `latest.json`；resume 会恢复同一 generation 并截断未提交 trace 尾部。首轮 corrective sweep 从 hash-bound `pre-sweep` snapshot 开始，最终 HF export 也必须匹配 selected all-layer mixer fingerprint，禁止复用旧导出。
+streamed runner 的每个 microstep 使用不可变 generation 事务提交 mixer、optimizer、RNG、cursor 和 trace offset，最后只原子替换 `latest.json`；resume 会恢复同一 generation 并截断未提交 trace 尾部。首轮 corrective sweep 从 hash-bound `pre-sweep` snapshot 开始，最终 HF export 也必须匹配 selected all-layer mixer fingerprint，禁止复用旧导出。真实 2B smoke 也固定使用该模式，避免 resident runner 为每个 layer visit 重写全量 mixer/optimizer checkpoint。
 
 确定性 60 层 fixture pilot 的输入由 `scripts/write_tiny_pilot_inputs.py` 生成，再由 `scripts/prepare_data.py` 产生互斥 split；它只能证明结构、梯度和恢复 invariant，不能作为能力结果。真实 Qwen3.5-2B 是 24 层 integration/convergence proxy，也不能替代 397B 质量证据。
 

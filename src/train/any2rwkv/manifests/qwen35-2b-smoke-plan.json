@@ -7,6 +7,7 @@
   "supervised_tokens": 16,
   "accumulation_steps": 1,
   "activation_checkpointing": true,
+  "execution_mode": "streamed_layer_store",
   "stage_tokens_per_layer": {
     "signals": 16,
     "block": 32,
