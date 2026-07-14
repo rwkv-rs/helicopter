@@ -7,7 +7,7 @@
   "weight_sha256": "aa33250c4fc64891ddfaba3a314fd9542ea371843c387178b425fbcc5ed680b1",
   "tokenizer_repository": "Qwen/Qwen3.5-2B",
   "tokenizer_revision": "15852e8c16360a2fea060d615a32b45270f8a8fc",
-  "remote_read_only_path": "/home/caizus/Weights/Qwen/Qwen3.5-2B",
+  "remote_read_only_path": "/home/caizus/Weights/Qwen/Qwen3.5-2B/15852e8c16360a2fea060d615a32b45270f8a8fc",
   "source_layout": {
     "top_level": "multimodal Qwen3.5 checkpoint",
     "selected_component": "text_config and language-model tensors only",
