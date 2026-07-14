@@ -898,6 +898,7 @@ def build_any2rwkv_plan(
             {
                 "RWKV_JIT_ON": "0",
                 "RWKV_HEAD_SIZE": "64",
+                "RWKV_HEAD_L2WRAP_CE_CHUNK": "0",
                 "RWKV_MY_TESTING": "x070",
                 "RWKV_TRAIN_TYPE": "infctx",
             }

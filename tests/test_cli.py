@@ -764,6 +764,7 @@ class Any2RWKVPlanTests(unittest.TestCase):
         )
         self.assertEqual(plan.env["RWKV_TRAIN_TYPE"], "infctx")
         self.assertEqual(plan.env["RWKV_HEAD_SIZE"], "64")
+        self.assertEqual(plan.env["RWKV_HEAD_L2WRAP_CE_CHUNK"], "0")
         self.assertEqual(plan.env["RWKV_MY_TESTING"], "x070")
         self.assertEqual(plan.env["RWKV_FLOAT_MODE"], "bf16")
         self.assertEqual(plan.env["VLLM_RWKV7_WKV_MODE"], "fp32io16")
