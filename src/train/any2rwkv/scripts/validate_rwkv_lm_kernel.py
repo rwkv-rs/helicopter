@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Managed GPU validation for the canonical rwkv-lm state-passing kernel.
 
-Run with cwd=src/train/rwkv-lm through helicopter-dev remote run. Required
-RWKV_* settings are intentionally supplied by the managed command contract.
+Run through helicopter-dev remote run. Required RWKV_* settings are
+intentionally supplied by the managed command contract; the product loader
+resolves the pinned rwkv-lm checkout without relying on caller cwd.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from pathlib import Path
 
 import torch
 
-from any2rwkv.kernel import NativeRwkv7Kernel
+from any2rwkv.kernel import load_rwkv_lm_kernel
 
 
 def main() -> int:
@@ -30,9 +31,7 @@ def main() -> int:
     mismatch = {key: (os.environ.get(key), value) for key, value in required.items() if os.environ.get(key) != value}
     if mismatch:
         raise SystemExit(f"managed RWKV kernel environment mismatch: {mismatch}")
-    from src.model import RWKV7_STATEPASSING_CLAMPW_CUDA
-
-    kernel = NativeRwkv7Kernel(RWKV7_STATEPASSING_CLAMPW_CUDA)
+    kernel = load_rwkv_lm_kernel()
     generator = torch.Generator(device="cuda").manual_seed(20260714)
     signals = [
         torch.randn(1, 32, 64, generator=generator, device="cuda", dtype=torch.bfloat16).requires_grad_(True)
