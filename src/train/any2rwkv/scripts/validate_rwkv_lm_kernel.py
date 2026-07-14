@@ -26,7 +26,11 @@ def main() -> int:
         "RWKV_JIT_ON": "0",
         "RWKV_HEAD_SIZE": "64",
         "RWKV_MY_TESTING": "x070",
+        "RWKV_KERNEL": "",
+        "RWKV_HEAD_L2WRAP_CE_CHUNK": "0",
         "RWKV_TRAIN_TYPE": "infctx",
+        "RWKV_FLOAT_MODE": "bf16",
+        "VLLM_RWKV7_WKV_MODE": "fp32io16",
     }
     mismatch = {key: (os.environ.get(key), value) for key, value in required.items() if os.environ.get(key) != value}
     if mismatch:
