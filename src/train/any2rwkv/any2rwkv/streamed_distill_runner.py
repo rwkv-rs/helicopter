@@ -60,14 +60,18 @@ class _WarmStartMixerProvider:
         }
         plan = plan_warm_start(source, self.specs, variant=variant)
         self.tensor_provider = WarmStartTensorProvider(source, self.specs, plan)
+        self._state_cache: dict[int, dict[str, Tensor]] = {}
 
     def load_mixer(self, index: int, *, device, dtype):
         mixer = self.factory.create(index, device="cpu", dtype=dtype)
         prefix = f"model.layers.{index}.attn."
-        state = {
-            spec.name.removeprefix(prefix): self.tensor_provider(spec)
-            for spec in self.by_layer[index]
-        }
+        state = self._state_cache.get(index)
+        if state is None:
+            state = {
+                spec.name.removeprefix(prefix): self.tensor_provider(spec)
+                for spec in self.by_layer[index]
+            }
+            self._state_cache[index] = state
         incompatible = mixer.load_state_dict(state, strict=False)
         if incompatible.missing_keys or incompatible.unexpected_keys:
             raise ContractError(
@@ -867,7 +871,9 @@ def _estimate_streamed_workload(
     shadow_layer_loads = batches["signals"] * max(0, num_layers - 1)
     generation_writes = teacher_forwards * per_layer_bytes * 2
     target_mixer_reloads = (
-        student_forwards * num_layers + suffix_layer_reloads
+        student_forwards * num_layers
+        + suffix_layer_reloads
+        + baseline_forwards * num_layers
     )
     target_mixer_read_bytes = target_mixer_reloads * target_mixer_bytes
     cache_teacher_layers = bool(getattr(plan, "cache_teacher_layers", False))
@@ -876,7 +882,9 @@ def _estimate_streamed_workload(
         student_source_shell_reads = 0
         suffix_source_reloads = 0
         baseline_teacher_reads = 0
-        baseline_student_reads = baseline_forwards * source_weight_bytes
+        baseline_student_reads = (
+            6 * source_weight_bytes if baseline_rows else 0
+        )
         estimated = (
             teacher_source_reads
             + baseline_student_reads
@@ -888,7 +896,7 @@ def _estimate_streamed_workload(
         assumptions = [
             "teacher globals and layers are read once and retained on the teacher device",
             "hybrid source-shell forwards and checkpointed suffix recomputation reuse cached teacher layers",
-            "each warm-start baseline student evaluation conservatively counts one full source scan",
+            "six warm-start variants materialize each target mixer state once on CPU",
             "mixer plus optimizer generation writes bounded by two average source layers",
             "target mixer reads use the largest materialized target mixer tensor size",
             "does not count activation, filesystem cache, snapshot/export, or network bytes",
@@ -898,7 +906,9 @@ def _estimate_streamed_workload(
         student_source_shell_reads = student_forwards * source_weight_bytes
         suffix_source_reloads = suffix_layer_reloads * per_layer_bytes
         baseline_teacher_reads = baseline_forwards * source_weight_bytes
-        baseline_student_reads = baseline_forwards * source_weight_bytes
+        baseline_student_reads = (
+            6 * source_weight_bytes if baseline_rows else 0
+        )
         estimated = (
             teacher_source_reads
             + student_source_shell_reads
@@ -914,6 +924,7 @@ def _estimate_streamed_workload(
             "one full source checkpoint scan per teacher forward",
             "one full source-shell scan per student forward",
             "one average source layer reload per checkpointed suffix backward",
+            "six warm-start variants materialize each target mixer state once on CPU",
             "target mixer reads use the largest materialized target mixer tensor size",
             "mixer plus optimizer generation writes bounded by two average source layers",
             "does not count activation, filesystem cache, snapshot/export, or network bytes",

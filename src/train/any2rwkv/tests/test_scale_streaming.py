@@ -43,6 +43,42 @@ from any2rwkv.target import rwkv7_mixer_specs
 
 
 class LayerTensorStoreTests(unittest.TestCase):
+    def test_warm_start_provider_materializes_each_layer_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = read_checkpoint(
+                write_fixture(root / "source", layers=4),
+                require_final_layers=False,
+            )
+            target_config = build_target_config(
+                source.config,
+                require_final_layers=False,
+            )
+            specs = tuple(
+                spec
+                for layer_index in range(4)
+                for spec in rwkv7_mixer_specs(layer_index, hidden_size=64)
+            )
+            plan = plan_warm_start(source, specs, variant=WarmStartVariant.MAPPED)
+            export_hf_checkpoint(
+                source,
+                root / "zero-step",
+                target_config=target_config,
+                target_specs=specs,
+                target_tensor_provider=WarmStartTensorProvider(source, specs, plan),
+            )
+            provider = _WarmStartMixerProvider(
+                source,
+                root / "zero-step",
+                WarmStartVariant.MAPPED,
+            )
+            provider.tensor_provider = mock.Mock(wraps=provider.tensor_provider)
+            provider.load_mixer(2, device="cpu", dtype=torch.float32)
+            first_count = provider.tensor_provider.call_count
+            provider.load_mixer(2, device="cpu", dtype=torch.float32)
+            self.assertGreater(first_count, 0)
+            self.assertEqual(provider.tensor_provider.call_count, first_count)
+
     def test_signals_layer_one_derives_v_first_from_frozen_layer_zero_shadow(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
