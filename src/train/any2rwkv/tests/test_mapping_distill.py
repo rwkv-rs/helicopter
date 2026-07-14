@@ -13,6 +13,7 @@ from any2rwkv.distill import (
     ActiveLayerTrainer,
     HybridReplacementRunner,
     LossWeights,
+    LossBreakdown,
     SweepController,
     load_sharded_training_checkpoint,
     load_training_checkpoint,
@@ -33,6 +34,15 @@ from any2rwkv.mapping import MappingLedger, SourceDisposition, SourceEntry, Targ
 
 
 class MappingTests(unittest.TestCase):
+    def test_loss_breakdown_keeps_nonleaf_autograd_graph(self) -> None:
+        leaf = torch.tensor(2.0, requires_grad=True)
+        nonleaf = leaf.square()
+        losses = LossBreakdown(*(nonleaf for _ in range(7)))
+        total = losses.weighted(LossWeights.for_stage("signals"))
+        total.backward()
+        self.assertIsNotNone(leaf.grad)
+        self.assertGreater(float(leaf.grad), 0.0)
+
     def test_resident_trainable_names_target_adapter_rwkv_namespace(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

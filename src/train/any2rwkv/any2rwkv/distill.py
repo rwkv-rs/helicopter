@@ -4,7 +4,7 @@ import hashlib
 import io
 import json
 import random
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
@@ -27,12 +27,15 @@ class LossBreakdown:
     shifted_ce: Tensor
     rollout: Tensor
 
+    def items(self):
+        return tuple((field.name, getattr(self, field.name)) for field in fields(self))
+
     @property
     def total(self) -> Tensor:
-        return sum(asdict(self).values())
+        return sum(value for _, value in self.items())
 
     def weighted(self, weights: "LossWeights") -> Tensor:
-        return sum(getattr(self, name) * getattr(weights, name) for name in asdict(self))
+        return sum(value * getattr(weights, name) for name, value in self.items())
 
 
 @dataclass(frozen=True)

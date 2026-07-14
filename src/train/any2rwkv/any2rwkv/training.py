@@ -194,7 +194,7 @@ class LayerwiseDistillationEngine:
             "supervised_tokens": self.window.supervised_tokens,
             "loss_weights": asdict(self.weights),
             "state_supervision": state_supervision,
-            "losses": {name: float(value.detach()) for name, value in asdict(losses).items()},
+            "losses": {name: float(value.detach()) for name, value in losses.items()},
             "total_loss": float(total.detach()),
             "active_gradient_norm": float(gradient_norm),
             "binding": self.trace_binding,
