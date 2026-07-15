@@ -1335,6 +1335,10 @@ def main() -> int:
             "rollout_throughput": "response tokens divided by gen stage wall time",
             "train_throughput": "policy-loss tokens divided by actor update wall time",
             "full_step_throughput": "prompt plus response tokens divided by complete step wall time",
+            "wall_clock_to_quality": (
+                "FileLogger monotonic elapsed time from trainer Tracking creation through each validation log; "
+                "includes training, metric/postprocessing, logging, and validation after initialization"
+            ),
             "correctness_min_rollout_is_effective_sample_size": CORRECTNESS_MIN_ROLLOUT_IS_ESS,
             "correctness_max_rollout_is_weight": CORRECTNESS_MAX_ROLLOUT_IS_WEIGHT,
             "cross_runtime_probability_diff": "diagnostic only; native BF16 and vLLM FP16 are non-like-for-like",
