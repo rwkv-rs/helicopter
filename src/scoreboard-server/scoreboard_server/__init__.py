@@ -1,5 +1,6 @@
-"""Authenticated HTTP scoreboard service for Helicopter evaluations."""
+"""FastAPI/PostgreSQL scoreboard service for Helicopter."""
 
 from .application import create_app
+from .db.repository import ScoreboardStore
 
-__all__ = ["create_app"]
+__all__ = ["ScoreboardStore", "create_app"]
