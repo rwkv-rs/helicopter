@@ -1,0 +1,27 @@
+{
+  "lighteval_revision": "64f4f5ae173626509fad6e477ca4ee56ebb26129",
+  "generator": ".venv/bin/python -m pytest src/eval/lighteval/tests/test_framework_parity.py",
+  "cases": [
+    {
+      "task": "lighteval/math/gsm8k@0",
+      "row": {"question": "What is 1+1?", "answer": "#### 2"},
+      "completion": "2",
+      "expected_prompt": "Question: What is 1+1?\nAnswer:",
+      "expected_metrics": {"extractive_match": 1.0}
+    },
+    {
+      "task": "lighteval/knowledge/mmlu-abstract-algebra@0",
+      "row": {"question": "Which option?", "subject": "abstract_algebra", "choices": ["zero", "one", "two", "three"], "answer": 1},
+      "completion": "B",
+      "expected_prompt": "The following are multiple choice questions (with answers) about abstract algebra.\n\nQuestion: Which option?\nA. zero\nB. one\nC. two\nD. three\nAnswer:",
+      "expected_metrics": {"em": 1.0}
+    },
+    {
+      "task": "lighteval/math/math-500@2",
+      "row": {"problem": "Compute 1+1.", "solution": "We get 2.", "answer": "2", "subject": "Algebra", "level": 1, "unique_id": "x"},
+      "completion": "\\boxed{2}",
+      "expected_prompt": "Solve the following problem. The final line of your response MUST be of the following format:\n\"ANSWER: $ANSWER\" (without quotes) where $ANSWER is the final answer. Think step by step before answering.\n\nCompute 1+1.",
+      "expected_metrics": {"pass@k:k=1&n=1": 1.0}
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+{"id":"double-integer","prompt":"Read one integer from standard input and print twice its value. Return only executable Python source code.","cases":[{"stdin":"21\n","expected_stdout":"42\n"},{"stdin":"-3\n","expected_stdout":"-6\n"}]}

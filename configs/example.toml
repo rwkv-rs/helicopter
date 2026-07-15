@@ -6,32 +6,27 @@
 [infer]
 enable_auto_tool_choice = false
 
-[lighteval]
-provider = "openai"
-base_url = "http://127.0.0.1:8000/v1"
-output_dir = "results/lighteval"
-save_details = true
-dataset_loading_processes = 1
-load_tasks_multilingual = true
-custom_tasks = "src/cli/helicopter_cli/lighteval_rwkv_skills_tasks.py"
-max_new_tokens = 512
-
-[function_calling]
-output_dir = "results/function_calling"
-max_new_tokens = 768
-concurrent_requests = 1
-request_timeout = 120
-server_timeout = 600
-
-[agent_harness]
-output_dir = "results/agent_harness"
-n_concurrent = 1
+[eval]
+# Workload identity fields may be overridden by explicit CLI flags. Secrets are
+# read only from --endpoint-api-key-env / --scoreboard-token-env and never TOML.
+endpoint_url = "http://127.0.0.1:8000/v1"
+checkpoint_sha256 = "replace-with-64-character-checkpoint-digest"
+tokenizer_revision = "rwkv-tokenizer-v1"
+chat_template_revision = "rwkv-chat-v1"
+server_revision = "replace-with-vllm-rwkv-commit"
+wkv_mode = "fp32io16"
+precision = "fp16-io-fp32-state"
+gemm_policy = "fp32-accumulation"
+launch_contract = "helicopter-eval-v1"
+output_root = "results/lighteval"
+cot_mode = "none"
+math_repair_strategy = "A"
+allow_non_comparable = false
 
 [takeoff.grpo]
 project_name = "verl_rwkv_grpo"
 experiment_name = "rwkv7_grpo_vllm"
 wkv_mode = "fp32io16"
-emb_device = "gpu"
 train_batch_size = 56
 ppo_mini_batch_size = 56
 ppo_micro_batch_size = 1
@@ -74,7 +69,6 @@ max_model_len = 8192
 [models."g1d-0.4b".infer]
 vllm_bin = "/home/chase/GitHub/vllm-rwkv/.venv/bin/vllm"
 wkv_mode = "fp16"
-emb_device = "gpu"
 gpu_memory_utilization = 0.45
 max_num_seqs = 8
 max_num_batched_tokens = 8192
@@ -88,3 +82,21 @@ VLLM_USE_FLASHINFER_SAMPLER = "0"
 file = "rwkv7-g1g-7.2b-20260523-ctx8192.pth"
 served_model_name = "g1g-7.2b"
 max_model_len = 8192
+
+[models."g1h-7.2b-eval"]
+path = "/home/caizus/Weights/RWKV/rwkv7/pth/rwkv7-g1h-7.2b-20260710-ctx10240.pth"
+served_model_name = "rwkv7-g1h-7.2b-eval"
+sha256 = "1fe61e5c4b9037ffd4723a11c4de146d99c26bcd89e00a61afa67ef653d215e8"
+max_model_len = 10240
+
+[models."g1h-7.2b-eval".infer]
+wkv_mode = "fp32io16"
+gpu_memory_utilization = 0.9
+max_num_seqs = 8
+max_num_batched_tokens = 10240
+tokenizer_revision = "sha256:e6dee3d4e31b4d5c40ac99508ac6c701ceef4bed681bf2167ce9a908552bca89"
+chat_template_revision = "sha256:87a5c16f5f052451b2daa261baed47a08a4d15e7e0e3888761beda2a836cecfe"
+server_revision = "f011c5873967d683d6ce6f9a9cf5165ac591cd4a"
+precision = "fp16-io-fp32-state"
+gemm_policy = "fp32-accumulation"
+launch_contract = "helicopter-eval-v1"

@@ -2,22 +2,21 @@ from __future__ import annotations
 
 import os
 import sys
+import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
-from .config import dataset_root, resolve_model_entry, resolve_model_path, table
+from .config import dataset_root, resolve_model_path, table
 from .env import env_value, pick
 from .paths import resolve_path
 
 
 WKV_MODES = ("fp16", "fp32io16")
-EMB_DEVICES = ("cpu", "gpu")
-LIGHTEVAL_BACKENDS = ("endpoint-litellm",)
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class CommandPlan:
     command: list[str]
     cwd: Path
@@ -60,7 +59,9 @@ def python_executable(
     require_configured: bool = False,
 ) -> str:
     paths = table(config, "paths")
-    python_value = pick(paths.get("python"), env_value(env, "HELICOPTER_PYTHON", "PYTHON"))
+    python_value = pick(
+        paths.get("python"), env_value(env, "HELICOPTER_PYTHON", "PYTHON")
+    )
     if python_value:
         python = resolve_path(str(python_value), root=root, env=env)
         if require_configured and not os.access(python, os.X_OK):
@@ -88,12 +89,9 @@ def apply_rwkv_env(
     command_env: dict[str, str],
     *,
     wkv_mode: str | None,
-    emb_device: str | None,
 ) -> None:
     if wkv_mode is not None:
         command_env["VLLM_RWKV7_WKV_MODE"] = wkv_mode
-    if emb_device is not None:
-        command_env["VLLM_RWKV7_EMB_DEVICE"] = emb_device
 
 
 def strip_vllm_env(env: dict[str, str]) -> dict[str, str]:
@@ -107,7 +105,9 @@ def parse_vllm_env_overrides(values: list[str] | None) -> dict[str, str]:
         if not separator or not key:
             raise SystemExit(f"invalid --vllm-env value: {value!r}; expected KEY=VALUE")
         if not key.startswith("VLLM_"):
-            raise SystemExit(f"invalid --vllm-env key: {key}; key must start with VLLM_")
+            raise SystemExit(
+                f"invalid --vllm-env key: {key}; key must start with VLLM_"
+            )
         parsed[key] = env_value
     return parsed
 
@@ -119,10 +119,12 @@ def config_vllm_env(infer: dict[str, Any]) -> dict[str, str]:
     if not isinstance(value, dict):
         raise SystemExit("[infer].vllm_env must be a TOML table")
     parsed: dict[str, str] = {}
-    for key, env_value in value.items():
+    for key, configured_value in value.items():
         if not str(key).startswith("VLLM_"):
-            raise SystemExit(f"invalid [infer].vllm_env key: {key}; key must start with VLLM_")
-        parsed[str(key)] = str(env_value)
+            raise SystemExit(
+                f"invalid [infer].vllm_env key: {key}; key must start with VLLM_"
+            )
+        parsed[str(key)] = str(configured_value)
     return parsed
 
 
@@ -154,7 +156,9 @@ def takeoff_value(
     return pick(env_value(env, env_key), takeoff.get(config_key), default)
 
 
-def append_hydra_override(overrides: list[str], key: str, value: Any, *, optional: bool = False) -> None:
+def append_hydra_override(
+    overrides: list[str], key: str, value: Any, *, optional: bool = False
+) -> None:
     if optional and (value is None or str(value) == ""):
         return
     overrides.append(f"{key}={format_hydra_value(value)}")
@@ -177,14 +181,12 @@ def hydra_bool(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def bool_value(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in {"1", "true", "yes", "on"}
-
-
-def reward_function_path(takeoff: dict[str, Any], env: dict[str, str], verl_path: Path) -> Path:
-    configured_path = takeoff_value(takeoff, env, "reward_function_path", "REWARD_FUNCTION_PATH")
+def reward_function_path(
+    takeoff: dict[str, Any], env: dict[str, str], verl_path: Path
+) -> Path:
+    configured_path = takeoff_value(
+        takeoff, env, "reward_function_path", "REWARD_FUNCTION_PATH"
+    )
     if configured_path:
         return Path(str(configured_path))
 
@@ -202,359 +204,6 @@ def reward_function_path(takeoff: dict[str, Any], env: dict[str, str], verl_path
         f"{reward_function!r}; use math_verify, math_dapo, or reward_function_path"
     )
 
-def append_cli_option(command: list[str], option: str, value: Any, *, optional: bool = True) -> None:
-    if optional and (value is None or str(value) == ""):
-        return
-    command.extend([option, str(value)])
-
-
-def append_cli_flag(command: list[str], option: str, value: Any) -> None:
-    if value is not None and bool_value(value):
-        command.append(option)
-
-
-def normalize_openai_base_url(base_url: str) -> str:
-    """Ensure an OpenAI-compatible base URL carries a path (defaulting to /v1).
-
-    Mirrors the behavior of the removed openai_client.normalize_api_base(): a
-    bare host such as ``http://host:8000`` becomes ``http://host:8000/v1`` so
-    LiteLLM posts to ``.../v1/chat/completions``. URLs that already have a path
-    (``.../v1``, ``.../custom``) are left untouched apart from trailing-slash
-    trimming.
-    """
-    trimmed = base_url.rstrip("/")
-    parsed = urlsplit(trimmed)
-    if parsed.scheme and parsed.netloc and parsed.path == "":
-        return f"{trimmed}/v1"
-    return trimmed
-
-
-def local_openai_base_url(config: dict[str, Any], env: dict[str, str], args: Any) -> str:
-    lighteval = table(config, "lighteval")
-    runtime = table(config, "runtime")
-    configured = pick(
-        getattr(args, "base_url", None),
-        env_value(env, "HELICOPTER_EVAL_BASE_URL", "OPENAI_BASE_URL"),
-        lighteval.get("base_url"),
-    )
-    if configured:
-        return normalize_openai_base_url(str(configured))
-
-    host = str(pick(runtime.get("client_host"), default="127.0.0.1"))
-    port = str(pick(runtime.get("port"), default="8000"))
-    return f"http://{host}:{port}/v1"
-
-
-def is_local_base_url(base_url: str) -> bool:
-    return any(token in base_url for token in ("127.0.0.1", "localhost", "0.0.0.0"))
-
-
-def lighteval_model_name(model_name: str, provider: str | None) -> str:
-    if provider and "/" not in model_name:
-        return f"{provider}/{model_name}"
-    return model_name
-
-
-def lighteval_output_dir(config: dict[str, Any], *, root: Path, env: dict[str, str], args: Any) -> str:
-    lighteval = table(config, "lighteval")
-    value = pick(getattr(args, "output_dir", None), lighteval.get("output_dir"), "results/lighteval")
-    return str(resolve_path(str(value), root=root, env=env))
-
-
-def lighteval_path_arg(value: Any, *, root: Path, env: dict[str, str]) -> str | None:
-    if value is None or str(value) == "":
-        return None
-    text = str(value)
-    suffix = Path(text).suffix.lower()
-    if suffix in {".yaml", ".yml", ".py", ".txt"}:
-        return str(resolve_path(text, root=root, env=env))
-    return text
-
-
-def build_lighteval_model_args(
-    args: Any,
-    *,
-    root: Path,
-    env: dict[str, str],
-    config: dict[str, Any],
-) -> tuple[str, str | None]:
-    raw_model_args = lighteval_path_arg(getattr(args, "model_args", None), root=root, env=env)
-    api_key = pick(
-        getattr(args, "api_key", None),
-        env_value(env, "HELICOPTER_EVAL_API_KEY", "OPENAI_API_KEY"),
-        table(config, "lighteval").get("api_key"),
-    )
-    if raw_model_args:
-        if not api_key and is_local_base_url(local_openai_base_url(config, env, args)):
-            api_key = "EMPTY"
-        return raw_model_args, str(api_key) if api_key else None
-
-    model = resolve_model_entry(config, args.model)
-    lighteval = table(config, "lighteval")
-    provider = str(pick(getattr(args, "provider", None), lighteval.get("provider"), "openai"))
-    served_model_name = str(
-        pick(
-            getattr(args, "lighteval_model_name", None),
-            model.get("served_model_name"),
-            model.get("requested_name"),
-            args.model,
-        )
-    )
-    model_name = lighteval_model_name(served_model_name, provider)
-    base_url = local_openai_base_url(config, env, args)
-
-    parts = [
-        f"model_name={model_name}",
-        f"provider={provider}",
-        f"base_url={base_url}",
-    ]
-    concurrent_requests = pick(
-        getattr(args, "concurrent_requests", None),
-        env_value(env, "HELICOPTER_EVAL_CONCURRENT_REQUESTS"),
-        lighteval.get("concurrent_requests"),
-    )
-    max_model_length = pick(
-        getattr(args, "max_model_length", None),
-        env_value(env, "HELICOPTER_EVAL_MAX_MODEL_LENGTH"),
-        lighteval.get("max_model_length"),
-        model.get("max_model_len"),
-    )
-    max_new_tokens = pick(
-        getattr(args, "max_new_tokens", None),
-        env_value(env, "HELICOPTER_EVAL_MAX_NEW_TOKENS"),
-        lighteval.get("max_new_tokens"),
-    )
-    if concurrent_requests is not None:
-        parts.append(f"concurrent_requests={concurrent_requests}")
-    if max_model_length is not None:
-        parts.append(f"max_model_length={max_model_length}")
-    if max_new_tokens is not None:
-        parts.append(f"generation_parameters={{max_new_tokens:{max_new_tokens}}}")
-
-    if not api_key and is_local_base_url(base_url):
-        api_key = "EMPTY"
-    return ",".join(parts), str(api_key) if api_key else None
-
-
-def build_lighteval_plan(
-    args: Any,
-    *,
-    root: Path,
-    env: dict[str, str],
-    config: dict[str, Any],
-) -> CommandPlan:
-    if args.backend != "endpoint-litellm":
-        raise SystemExit(f"unsupported LightEval backend: {args.backend}")
-
-    lighteval = table(config, "lighteval")
-    python = python_executable(config, root=root, env=env)
-    model_args, api_key = build_lighteval_model_args(args, root=root, env=env, config=config)
-    command = [
-        python,
-        "-m",
-        "lighteval",
-        "endpoint",
-        "litellm",
-        model_args,
-        args.tasks,
-        "--output-dir",
-        lighteval_output_dir(config, root=root, env=env, args=args),
-    ]
-
-    for option, value in (
-        ("--max-samples", pick(getattr(args, "max_samples", None), lighteval.get("max_samples"))),
-        (
-            "--dataset-loading-processes",
-            pick(
-                getattr(args, "dataset_loading_processes", None),
-                lighteval.get("dataset_loading_processes"),
-            ),
-        ),
-        (
-            "--num-fewshot-seeds",
-            pick(getattr(args, "num_fewshot_seeds", None), lighteval.get("num_fewshot_seeds")),
-        ),
-        (
-            "--custom-tasks",
-            lighteval_path_arg(
-                pick(getattr(args, "custom_tasks", None), lighteval.get("custom_tasks")),
-                root=root,
-                env=env,
-            ),
-        ),
-        ("--results-org", pick(getattr(args, "results_org", None), lighteval.get("results_org"))),
-        ("--job-id", getattr(args, "job_id", None)),
-    ):
-        append_cli_option(command, option, value)
-
-    save_details = pick(getattr(args, "save_details", None), lighteval.get("save_details"), True)
-    append_cli_flag(command, "--save-details", save_details)
-    append_cli_flag(
-        command,
-        "--load-tasks-multilingual",
-        pick(getattr(args, "load_tasks_multilingual", None), lighteval.get("load_tasks_multilingual")),
-    )
-    append_cli_flag(command, "--push-to-hub", pick(getattr(args, "push_to_hub", None), lighteval.get("push_to_hub")))
-    append_cli_flag(
-        command,
-        "--public-run",
-        pick(getattr(args, "public_run", None), lighteval.get("public_run")),
-    )
-
-    for extra in getattr(args, "extra", None) or []:
-        command.append(str(extra))
-
-    shown_env = {"PYTHON": python}
-    plan_env = strip_vllm_env(env)
-    if api_key:
-        plan_env["OPENAI_API_KEY"] = api_key
-    return CommandPlan(command=command, cwd=root, shown_env=shown_env, env=plan_env)
-
-
-# Output formats each lighteval-tasks action's delegate parser actually accepts.
-# The shared front-end parser allows the union of these, so we validate the
-# (action, format) pair here rather than letting the spawned subprocess exit 2.
-_LIGHTEVAL_TASKS_FORMATS: dict[str, frozenset[str]] = {
-    "export": frozenset({"text", "jsonl"}),
-    "judges": frozenset({"text", "jsonl", "summary"}),
-    "coverage": frozenset({"text", "jsonl", "summary", "tasks"}),
-}
-
-
-def validate_lighteval_tasks_args(args: Any) -> None:
-    """Reject flag combinations the front-end accepts but the delegate rejects.
-
-    The shared ``lighteval-tasks`` parser exposes --format/--contains/--limit/
-    --include-supersets for every action, but the underlying subcommands support
-    different subsets. Fail fast with a clear message instead of forwarding an
-    argument that makes the spawned process exit 2 (or silently drop it).
-    """
-    action = args.task_action
-    fmt = getattr(args, "format", None)
-    allowed = _LIGHTEVAL_TASKS_FORMATS.get(action)
-    if allowed is not None and fmt is not None and fmt not in allowed:
-        raise SystemExit(
-            f"helicopter eval lighteval-tasks {action} does not support --format {fmt}; "
-            f"choose one of: {', '.join(sorted(allowed))}"
-        )
-
-    if action == "coverage":
-        for flag, value in (
-            ("--contains", getattr(args, "contains", None)),
-            ("--limit", getattr(args, "limit", None)),
-            ("--include-supersets", getattr(args, "include_supersets", None)),
-        ):
-            if value:
-                raise SystemExit(f"helicopter eval lighteval-tasks coverage does not support {flag}")
-    elif action == "judges":
-        if getattr(args, "include_supersets", None):
-            raise SystemExit(
-                "helicopter eval lighteval-tasks judges does not support --include-supersets; "
-                "supersets are always expanded to their member tasks"
-            )
-    elif action in {"list", "dump"}:
-        unsupported = [
-            flag
-            for flag, value in (
-                ("--output", getattr(args, "output", None)),
-                ("--contains", getattr(args, "contains", None)),
-                ("--limit", getattr(args, "limit", None)),
-                ("--include-supersets", getattr(args, "include_supersets", None)),
-            )
-            if value
-        ]
-        if unsupported:
-            raise SystemExit(
-                f"helicopter eval lighteval-tasks {action} does not support "
-                f"{', '.join(unsupported)}; use `export` for filtering and file output"
-            )
-
-
-def build_lighteval_tasks_plan(
-    args: Any,
-    *,
-    root: Path,
-    env: dict[str, str],
-    config: dict[str, Any],
-) -> CommandPlan:
-    validate_lighteval_tasks_args(args)
-    python = python_executable(config, root=root, env=env)
-    lighteval = table(config, "lighteval")
-    custom_tasks = lighteval_path_arg(
-        pick(getattr(args, "custom_tasks", None), lighteval.get("custom_tasks")),
-        root=root,
-        env=env,
-    )
-    load_tasks_multilingual = pick(
-        getattr(args, "load_tasks_multilingual", None),
-        lighteval.get("load_tasks_multilingual"),
-    )
-
-    if args.task_action in {"export", "coverage", "judges"}:
-        command = [python, "-m", "helicopter_cli.lighteval_tasks", args.task_action]
-        append_cli_flag(command, "--load-multilingual", load_tasks_multilingual)
-        append_cli_option(command, "--custom-tasks", custom_tasks)
-        append_cli_option(command, "--output", getattr(args, "output", None))
-        append_cli_option(command, "--format", getattr(args, "format", None))
-        if args.task_action == "coverage":
-            append_cli_option(
-                command,
-                "--source",
-                lighteval_path_arg(getattr(args, "source", None), root=root, env=env),
-            )
-            append_cli_option(command, "--source-format", getattr(args, "source_format", None))
-            append_cli_option(command, "--candidate-limit", getattr(args, "candidate_limit", None))
-        if args.task_action == "judges" and getattr(args, "tasks", None):
-            command.append(args.tasks)
-        # --contains/--limit are only defined by the export and judges delegates;
-        # --include-supersets only by export. coverage rejects all three (guarded
-        # in validate_lighteval_tasks_args above).
-        if args.task_action in {"export", "judges"}:
-            for pattern in getattr(args, "contains", None) or []:
-                append_cli_option(command, "--contains", pattern, optional=False)
-            append_cli_option(command, "--limit", getattr(args, "limit", None))
-        if args.task_action == "export":
-            append_cli_flag(command, "--include-supersets", getattr(args, "include_supersets", None))
-        return CommandPlan(command=command, cwd=root, shown_env={"PYTHON": python}, env=strip_vllm_env(env))
-
-    if args.task_action == "inspect":
-        if not args.tasks:
-            raise SystemExit("helicopter eval lighteval-tasks inspect requires a task id")
-        if bool_value(getattr(args, "show_config", False)):
-            command = [python, "-m", "helicopter_cli.lighteval_tasks", "inspect", args.tasks]
-            append_cli_flag(command, "--load-multilingual", load_tasks_multilingual)
-            append_cli_option(command, "--num-samples", getattr(args, "num_samples", None))
-            append_cli_option(command, "--custom-tasks", custom_tasks)
-            append_cli_flag(command, "--show-config", getattr(args, "show_config", None))
-            return CommandPlan(command=command, cwd=root, shown_env={"PYTHON": python}, env=strip_vllm_env(env))
-
-        command = [python, "-m", "lighteval", "tasks", args.task_action]
-        command.append(args.tasks)
-        append_cli_flag(command, "--load-multilingual", load_tasks_multilingual)
-        append_cli_option(command, "--num-samples", getattr(args, "num_samples", None))
-        append_cli_flag(command, "--show-config", getattr(args, "show_config", None))
-    else:
-        command = [python, "-m", "lighteval", "tasks", args.task_action]
-        append_cli_flag(command, "--load-tasks-multilingual", load_tasks_multilingual)
-
-    append_cli_option(command, "--custom-tasks", custom_tasks)
-    return CommandPlan(command=command, cwd=root, shown_env={"PYTHON": python}, env=strip_vllm_env(env))
-
-
-def build_lighteval_export_plan(
-    args: Any,
-    *,
-    root: Path,
-    env: dict[str, str],
-    config: dict[str, Any],
-) -> CommandPlan:
-    python = python_executable(config, root=root, env=env)
-    command = [python, "-m", "helicopter_cli.lighteval_export"]
-    for detail in args.details:
-        command.append(str(resolve_path(str(detail), root=root, env=env)))
-    append_cli_option(command, "--output", getattr(args, "output", None))
-    append_cli_option(command, "--format", getattr(args, "format", None))
-    return CommandPlan(command=command, cwd=root, shown_env={"PYTHON": python}, env=strip_vllm_env(env))
 
 def build_grpo_hydra_overrides(
     *,
@@ -572,7 +221,9 @@ def build_grpo_hydra_overrides(
     train_files = env_value(env, "TRAIN_FILES")
     if train_files is None:
         if "train_files" in dataset:
-            train_files = format_hydra_file_list(dataset["train_files"], root=root, env=env)
+            train_files = format_hydra_file_list(
+                dataset["train_files"], root=root, env=env
+            )
         else:
             train_files = f"['{data_root}/train.parquet']"
 
@@ -583,8 +234,12 @@ def build_grpo_hydra_overrides(
         else:
             val_files = f"['{data_root}/test.parquet']"
 
-    dynamic_bsz = takeoff_value(takeoff, env, "rwkv_use_dynamic_bsz", "RWKV_USE_DYNAMIC_BSZ", False)
-    ppo_micro_batch_size = takeoff_value(takeoff, env, "ppo_micro_batch_size", "PPO_MICRO_BATCH_SIZE", 8)
+    dynamic_bsz = takeoff_value(
+        takeoff, env, "rwkv_use_dynamic_bsz", "RWKV_USE_DYNAMIC_BSZ", False
+    )
+    ppo_micro_batch_size = takeoff_value(
+        takeoff, env, "ppo_micro_batch_size", "PPO_MICRO_BATCH_SIZE", 8
+    )
     ppo_max_token_len_per_gpu = takeoff_value(
         takeoff,
         env,
@@ -607,7 +262,9 @@ def build_grpo_hydra_overrides(
     )
     rollout_n = takeoff_value(takeoff, env, "rollout_n", "ROLLOUT_N", 8)
     rollout_top_p = takeoff_value(takeoff, env, "rollout_top_p", "ROLLOUT_TOP_P", 0.8)
-    rollout_max_num_seqs = takeoff_value(takeoff, env, "rollout_max_num_seqs", "ROLLOUT_MAX_NUM_SEQS")
+    rollout_max_num_seqs = takeoff_value(
+        takeoff, env, "rollout_max_num_seqs", "ROLLOUT_MAX_NUM_SEQS"
+    )
     rollout_max_num_batched_tokens = takeoff_value(
         takeoff,
         env,
@@ -620,18 +277,6 @@ def build_grpo_hydra_overrides(
         "rollout_n_gpus_per_node",
         "ROLLOUT_NGPUS_PER_NODE",
     )
-    rollout_data_parallel_size = takeoff_value(
-        takeoff,
-        env,
-        "rollout_data_parallel_size",
-        "ROLLOUT_DP",
-    )
-    rollout_pipeline_parallel_size = takeoff_value(
-        takeoff,
-        env,
-        "rollout_pipeline_parallel_size",
-        "ROLLOUT_PP",
-    )
     trainer_n_gpus_per_node = takeoff_value(
         takeoff,
         env,
@@ -640,10 +285,14 @@ def build_grpo_hydra_overrides(
         num_devices,
     )
     rwkv_ctx_len = takeoff_value(takeoff, env, "ctx_len", "RWKV_CTX_LEN")
-    rwkv_infctx = hydra_bool(takeoff_value(takeoff, env, "infctx", "RWKV_INFCTX", False))
+    rwkv_infctx = hydra_bool(
+        takeoff_value(takeoff, env, "infctx", "RWKV_INFCTX", False)
+    )
     rwkv_chunk_ctx = takeoff_value(takeoff, env, "chunk_ctx", "RWKV_CHUNK_CTX")
     val_do_sample = takeoff_value(takeoff, env, "val_do_sample", "VAL_DO_SAMPLE", True)
-    val_temperature = takeoff_value(takeoff, env, "val_temperature", "VAL_TEMPERATURE", 1)
+    val_temperature = takeoff_value(
+        takeoff, env, "val_temperature", "VAL_TEMPERATURE", 1
+    )
     val_top_k = takeoff_value(takeoff, env, "val_top_k", "VAL_TOP_K", 32)
     val_top_p = takeoff_value(takeoff, env, "val_top_p", "VAL_TOP_P", 0.28)
     val_n = takeoff_value(takeoff, env, "val_n", "VAL_N", 4)
@@ -667,7 +316,9 @@ def build_grpo_hydra_overrides(
         if rwkv_chunk_ctx <= 0:
             raise SystemExit("infctx requires chunk_ctx > 0")
         if rwkv_chunk_ctx % 16 != 0:
-            raise SystemExit("infctx chunk_ctx must be divisible by RWKV CUDA chunk length 16")
+            raise SystemExit(
+                "infctx chunk_ctx must be divisible by RWKV CUDA chunk length 16"
+            )
         if rwkv_ctx_len is not None and str(rwkv_ctx_len).strip():
             try:
                 rwkv_ctx_len = int(rwkv_ctx_len)
@@ -807,7 +458,9 @@ def build_grpo_hydra_overrides(
         rollout_max_num_batched_tokens,
         optional=True,
     )
-    append_hydra_override(overrides, "rollout.n_gpus_per_node", rollout_n_gpus_per_node, optional=True)
+    append_hydra_override(
+        overrides, "rollout.n_gpus_per_node", rollout_n_gpus_per_node, optional=True
+    )
     for config_key, env_key, hydra_key in (
         (
             "rollout_n_gpus_per_node",
@@ -815,7 +468,11 @@ def build_grpo_hydra_overrides(
             "actor_rollout_ref.rollout.n_gpus_per_node",
         ),
         ("rollout_mode", "ROLLOUT_MODE", "actor_rollout_ref.rollout.mode"),
-        ("rollout_data_parallel_size", "ROLLOUT_DP", "actor_rollout_ref.rollout.data_parallel_size"),
+        (
+            "rollout_data_parallel_size",
+            "ROLLOUT_DP",
+            "actor_rollout_ref.rollout.data_parallel_size",
+        ),
         (
             "rollout_pipeline_parallel_size",
             "ROLLOUT_PP",
@@ -886,23 +543,24 @@ def build_infer_plan(
         infer.get("wkv_mode"),
     )
     wkv_mode = str(wkv_mode_value) if wkv_mode_value is not None else None
-    emb_device_value = pick(
-        args.emb_device,
-        env_value(env, "HELICOPTER_INFER_EMB_DEVICE", "VLLM_RWKV7_EMB_DEVICE"),
-        infer.get("emb_device"),
-    )
-    emb_device = str(emb_device_value) if emb_device_value is not None else None
     host = str(pick(args.host, runtime.get("host"), default="0.0.0.0"))
     port = str(pick(args.port, runtime.get("port"), default="8000"))
     served_model_name = str(
-        pick(args.served_model_name, model.get("served_model_name"), model.get("requested_name"), args.model)
+        pick(
+            args.served_model_name,
+            model.get("served_model_name"),
+            model.get("requested_name"),
+            args.model,
+        )
     )
 
     if not args.dry_run and not model_path.is_file():
         raise SystemExit(f"RWKV checkpoint not found: {model_path}")
 
     vllm_bin = str(
-        resolve_path(str(infer.get("vllm_bin")), root=root, env=env) if infer.get("vllm_bin") else "vllm"
+        resolve_path(str(infer.get("vllm_bin")), root=root, env=env)
+        if infer.get("vllm_bin")
+        else "vllm"
     )
     command = [
         vllm_bin,
@@ -919,6 +577,74 @@ def build_infer_plan(
         "--served-model-name",
         served_model_name,
     ]
+
+    if args.serve_evaluation:
+        attestation_values = {
+            "wkv_mode": wkv_mode,
+            "checkpoint_sha256": pick(args.checkpoint_sha256, model.get("sha256")),
+            "tokenizer_revision": pick(
+                args.tokenizer_revision, infer.get("tokenizer_revision")
+            ),
+            "chat_template_revision": pick(
+                args.chat_template_revision, infer.get("chat_template_revision")
+            ),
+            "server_revision": pick(args.server_revision, infer.get("server_revision")),
+            "precision": pick(args.precision, infer.get("precision")),
+            "gemm_policy": pick(args.gemm_policy, infer.get("gemm_policy")),
+            "launch_contract": pick(args.launch_contract, infer.get("launch_contract")),
+        }
+        missing = sorted(
+            name for name, value in attestation_values.items() if not value
+        )
+        if missing:
+            raise SystemExit(
+                "evaluation server attestation fields are required: "
+                + ", ".join(missing)
+            )
+        checkpoint_digest = str(attestation_values["checkpoint_sha256"])
+        if len(checkpoint_digest) != 64 or any(
+            character not in "0123456789abcdef" for character in checkpoint_digest
+        ):
+            raise SystemExit(
+                "evaluation checkpoint SHA-256 must be lowercase hexadecimal"
+            )
+        if not args.dry_run:
+            actual_digest = _sha256_file(model_path)
+            if actual_digest != checkpoint_digest:
+                raise SystemExit(
+                    "evaluation checkpoint digest mismatch: "
+                    f"expected {checkpoint_digest}, found {actual_digest}"
+                )
+        contract = {
+            "schema_version": 1,
+            "model": {
+                "served_name": served_model_name,
+                "checkpoint_sha256": checkpoint_digest,
+                "tokenizer_revision": str(attestation_values["tokenizer_revision"]),
+                "chat_template_revision": str(
+                    attestation_values["chat_template_revision"]
+                ),
+            },
+            "provider": {
+                "server_revision": str(attestation_values["server_revision"]),
+                "wkv_mode": str(attestation_values["wkv_mode"]),
+                "precision": str(attestation_values["precision"]),
+                "gemm_policy": str(attestation_values["gemm_policy"]),
+                "launch_contract": str(attestation_values["launch_contract"]),
+            },
+            "capabilities": [
+                "openai-chat",
+                "output-token-ids",
+                "terminal-reason",
+                "prompt-evidence",
+            ],
+        }
+        command.extend(
+            [
+                "--helicopter-attestation-json",
+                json.dumps(contract, sort_keys=True, separators=(",", ":")),
+            ]
+        )
 
     option_values = {
         "--tensor-parallel-size": pick(
@@ -955,17 +681,29 @@ def build_infer_plan(
         infer.get("enable_auto_tool_choice"),
         default=False,
     )
-    if auto_tool_choice if isinstance(auto_tool_choice, bool) else str(auto_tool_choice).strip().lower() in {"1", "true", "yes", "on"}:
+    if (
+        auto_tool_choice
+        if isinstance(auto_tool_choice, bool)
+        else str(auto_tool_choice).strip().lower() in {"1", "true", "yes", "on"}
+    ):
         command.append("--enable-auto-tool-choice")
 
     shown_env = {
         **config_vllm_env(infer),
         **parse_vllm_env_overrides(args.vllm_env),
     }
-    apply_rwkv_env(shown_env, wkv_mode=wkv_mode, emb_device=emb_device)
+    apply_rwkv_env(shown_env, wkv_mode=wkv_mode)
     plan_env = strip_vllm_env(env)
     plan_env.update(shown_env)
     return CommandPlan(command=command, cwd=root, shown_env=shown_env, env=plan_env)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(8 * 1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def build_takeoff_plan(
@@ -992,22 +730,42 @@ def build_takeoff_plan(
     takeoff = {**takeoff_common, **takeoff_algo}
 
     verl_path = resolve_path(
-        str(pick(paths.get("verl_path"), env_value(env, "HELICOPTER_VERL_PATH", "VERL_PATH"), "src/train/verl-rwkv")),
+        str(
+            pick(
+                paths.get("verl_path"),
+                env_value(env, "HELICOPTER_VERL_PATH", "VERL_PATH"),
+                "src/train/verl-rwkv",
+            )
+        ),
         root=root,
         env=env,
     )
     rwkv_lm_path = resolve_path(
-        str(pick(paths.get("rwkv_lm_path"), env_value(env, "RWKV_LM_PATH", "HELICOPTER_RWKV_LM_PATH"), "src/train/rwkv-lm")),
+        str(
+            pick(
+                paths.get("rwkv_lm_path"),
+                env_value(env, "RWKV_LM_PATH", "HELICOPTER_RWKV_LM_PATH"),
+                "src/train/rwkv-lm",
+            )
+        ),
         root=root,
         env=env,
     )
     vllm_rwkv_path = resolve_path(
-        str(pick(paths.get("vllm_rwkv_path"), env_value(env, "HELICOPTER_VLLM_RWKV_PATH", "VLLM_RWKV_PATH"), "src/infer/vllm-rwkv")),
+        str(
+            pick(
+                paths.get("vllm_rwkv_path"),
+                env_value(env, "HELICOPTER_VLLM_RWKV_PATH", "VLLM_RWKV_PATH"),
+                "src/infer/vllm-rwkv",
+            )
+        ),
         root=root,
         env=env,
     )
 
-    has_train_files = "train_files" in dataset or env_value(env, "TRAIN_FILES") is not None
+    has_train_files = (
+        "train_files" in dataset or env_value(env, "TRAIN_FILES") is not None
+    )
     has_val_files = "val_files" in dataset or env_value(env, "VAL_FILES") is not None
     dataset_uses_explicit_files = has_train_files and has_val_files
     if not args.dry_run:
@@ -1016,7 +774,11 @@ def build_takeoff_plan(
             (rwkv_lm_path, "rwkv-lm repository not found"),
             (vllm_rwkv_path, "vllm-rwkv repository not found"),
         ):
-            exists = path.is_dir() if "repository" in message or "root" in message else path.is_file()
+            exists = (
+                path.is_dir()
+                if "repository" in message or "root" in message
+                else path.is_file()
+            )
             if not exists:
                 raise SystemExit(f"{message}: {path}")
         if not dataset_uses_explicit_files and not data_root.is_dir():
@@ -1030,13 +792,6 @@ def build_takeoff_plan(
             default="fp32io16",
         )
     )
-    emb_device_value = pick(
-        args.emb_device,
-        env_value(env, "HELICOPTER_TAKEOFF_EMB_DEVICE"),
-        takeoff.get("emb_device"),
-        default="gpu",
-    )
-    emb_device = str(emb_device_value) if emb_device_value is not None else None
     num_nodes = pick(
         args.num_nodes,
         env_value(env, "HELICOPTER_NUM_NODES", "NNODES"),
@@ -1054,7 +809,7 @@ def build_takeoff_plan(
 
     python = python_executable(config, root=root, env=env, require_configured=True)
     shown_env: dict[str, str] = {}
-    apply_rwkv_env(shown_env, wkv_mode=wkv_mode, emb_device=emb_device)
+    apply_rwkv_env(shown_env, wkv_mode=wkv_mode)
     shown_env["PYTHON"] = python
     shown_env["RWKV_MODEL_PATH"] = str(model_path)
     shown_env["RWKV_LM_PATH"] = str(rwkv_lm_path)
@@ -1062,7 +817,9 @@ def build_takeoff_plan(
     plan_env.update(shown_env)
     current_pythonpath = plan_env.get("PYTHONPATH")
     plan_env["PYTHONPATH"] = (
-        f"{vllm_rwkv_path}{os.pathsep}{current_pythonpath}" if current_pythonpath else str(vllm_rwkv_path)
+        f"{vllm_rwkv_path}{os.pathsep}{current_pythonpath}"
+        if current_pythonpath
+        else str(vllm_rwkv_path)
     )
     shown_env["PYTHONPATH"] = plan_env["PYTHONPATH"]
 
@@ -1084,4 +841,6 @@ def build_takeoff_plan(
         ),
         *(args.override or []),
     ]
-    return CommandPlan(command=command, cwd=verl_path, shown_env=shown_env, env=plan_env)
+    return CommandPlan(
+        command=command, cwd=verl_path, shown_env=shown_env, env=plan_env
+    )
