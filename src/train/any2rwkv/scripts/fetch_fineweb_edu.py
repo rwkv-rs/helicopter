@@ -73,7 +73,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SystemExit(f"local tokenizer path does not exist: {tokenizer_path}")
     output = args.output.resolve()
     if output.exists():
-        raise SystemExit(f"refusing to overwrite existing dataset input: {output}")
+        manifest = output.with_suffix(output.suffix + ".manifest.json")
+        if manifest.is_file():
+            existing = json.loads(manifest.read_text(encoding="utf-8"))
+            matches = (
+                existing.get("repository") == args.repository
+                and existing.get("revision") == args.revision
+                and existing.get("subset") == args.subset
+                and existing.get("split") == args.split
+                and existing.get("data_file") == args.data_file
+                and int(existing.get("target_tokens", -1)) == args.target_tokens
+                and existing.get("sha256") == file_sha256(output)
+                and int(existing.get("materialized_tokens", -1)) >= args.target_tokens
+            )
+            if matches:
+                print(json.dumps(existing, sort_keys=True))
+                return 0
+        raise SystemExit(f"refusing to overwrite unmatched dataset input: {output}")
     output.parent.mkdir(parents=True, exist_ok=True)
     tokenizer = AutoTokenizer.from_pretrained(
         tokenizer_path,
@@ -110,7 +126,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     seen_ids: set[str] = set()
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            for source_row in stream:
+            iterator = iter(stream)
+            for source_row in iterator:
                 text = source_row.get("text")
                 if not isinstance(text, str) or not text.strip():
                     continue
@@ -134,6 +151,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 tokens += token_count
                 if tokens >= args.target_tokens:
                     break
+            close = getattr(iterator, "close", None)
+            if callable(close):
+                close()
             handle.flush()
             os.fsync(handle.fileno())
         if tokens < args.target_tokens:

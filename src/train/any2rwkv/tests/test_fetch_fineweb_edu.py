@@ -68,6 +68,25 @@ class FetchFineWebEduTests(unittest.TestCase):
             self.assertEqual(manifest["data_file"], "sample/10BT/000.parquet")
             self.assertEqual(manifest["revision"], "abc123")
 
+            with (
+                mock.patch.object(MODULE.AutoTokenizer, "from_pretrained") as tokenizer_load,
+                mock.patch.object(MODULE, "load_dataset") as load_dataset_again,
+            ):
+                repeated = MODULE.main(
+                    [
+                        "--repository", "owner/data",
+                        "--revision", "abc123",
+                        "--subset", "sample-10BT",
+                        "--data-file", "sample/10BT/000.parquet",
+                        "--tokenizer-path", str(tokenizer),
+                        "--target-tokens", "4",
+                        "--output", str(output),
+                    ]
+                )
+            self.assertEqual(repeated, 0)
+            tokenizer_load.assert_not_called()
+            load_dataset_again.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
