@@ -14,6 +14,7 @@ UV_SYNC_INEXACT="${UV_SYNC_INEXACT:-1}"
 CLEAN_SUBMODULE_VENVS="${CLEAN_SUBMODULE_VENVS:-1}"
 CLEAN_VLLM_CMAKE_CACHE="${CLEAN_VLLM_CMAKE_CACHE:-1}"
 VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE:-cuda}"
+VLLM_BUILD_PROFILE="${VLLM_BUILD_PROFILE:-$INSTALL_PROFILE}"
 VLLM_VERSION_OVERRIDE="${VLLM_VERSION_OVERRIDE:-}"
 VLLM_REBUILD="${VLLM_REBUILD:-auto}"
 VERL_REINSTALL="${VERL_REINSTALL:-auto}"
@@ -23,6 +24,8 @@ UV_INDEX_URL="${UV_INDEX_URL:-${PYPI_INDEX_URL:-}}"
 HF_ENDPOINT="${HF_ENDPOINT:-}"
 CARGO_REGISTRY_MIRROR="${CARGO_REGISTRY_MIRROR:-}"
 CARGO_REGISTRY_MIRROR_NAME="${CARGO_REGISTRY_MIRROR_NAME:-rsproxy-sparse}"
+
+export VLLM_BUILD_PROFILE
 
 VLLM="$ROOT/src/infer/vllm-rwkv"
 RWKV_LM="$ROOT/src/train/rwkv-lm"
@@ -254,10 +257,17 @@ PY
 }
 
 vllm_native_ready() {
-  "$VENV/bin/python" - <<'PY' >/dev/null
+  local -a modules=(vllm._C_stable_libtorch vllm.rwkv7_ops)
+  [[ "$VLLM_BUILD_PROFILE" == "rwkv" ]] &&
+    modules=(vllm._rapid_sampling vllm.rwkv7_ops)
+  "$VENV/bin/python" - "${modules[@]}" <<'PY' >/dev/null
+import importlib
+import sys
+
 import vllm
-import vllm._C_stable_libtorch
-import vllm.rwkv7_ops
+
+for module in sys.argv[1:]:
+    importlib.import_module(module)
 PY
 }
 
