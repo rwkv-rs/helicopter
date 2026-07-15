@@ -994,21 +994,45 @@ def verify_validation_curve(path: Path, *, expected_rounds: int) -> dict[str, An
         if line.strip()
     ]
     cumulative_samples = 0
-    cumulative_wall_seconds = 0.0
     curve = []
+    training_trajectory = []
     for record in records:
         data = record.get("data", {})
+        elapsed_seconds = record.get("elapsed_seconds")
+        if elapsed_seconds is None:
+            raise RuntimeError("global-batch quality records require monotonic elapsed_seconds")
+        elapsed_seconds = float(elapsed_seconds)
+        if not math.isfinite(elapsed_seconds) or elapsed_seconds <= 0:
+            raise RuntimeError("global-batch quality elapsed_seconds must be finite and positive")
         if "training/actual_samples" in data:
             samples = data["training/actual_samples"]
             if not isinstance(samples, int) or isinstance(samples, bool) or samples < 0:
                 raise RuntimeError("validation curve encountered an invalid training sample count")
             cumulative_samples += samples
-        for timing_key in ("timing_s/step", "timing_s/testing"):
-            if timing_key in data:
-                value = float(data[timing_key])
-                if not math.isfinite(value) or value <= 0:
-                    raise RuntimeError(f"validation curve encountered invalid {timing_key}")
-                cumulative_wall_seconds += value
+        if "training/global_step" in data:
+            trajectory_values = {
+                key: float(data[key])
+                for key in (
+                    "critic/rewards/mean",
+                    "actor/entropy",
+                    "actor/grad_norm",
+                    "actor/optimizer_steps",
+                    "training/actual_samples",
+                    "training/actual_prompt_tokens",
+                    "training/actual_response_tokens",
+                    "training/actual_total_tokens",
+                )
+            }
+            if any(not math.isfinite(value) for value in trajectory_values.values()):
+                raise RuntimeError("global-batch quality training trajectory contains a non-finite value")
+            training_trajectory.append(
+                {
+                    "step": record.get("step"),
+                    "cumulative_samples": cumulative_samples,
+                    "elapsed_seconds": elapsed_seconds,
+                    **trajectory_values,
+                }
+            )
         validation_metrics = {
             key: float(value)
             for key, value in data.items()
@@ -1024,7 +1048,7 @@ def verify_validation_curve(path: Path, *, expected_rounds: int) -> dict[str, An
             {
                 "step": record.get("step"),
                 "cumulative_samples": cumulative_samples,
-                "cumulative_wall_seconds": cumulative_wall_seconds,
+                "cumulative_wall_seconds": elapsed_seconds,
                 "testing_seconds": float(data["timing_s/testing"]),
                 "metrics": validation_metrics,
             }
@@ -1048,6 +1072,13 @@ def verify_validation_curve(path: Path, *, expected_rounds: int) -> dict[str, An
         raise RuntimeError(
             f"validation curve expected {expected_rounds} training rounds, found {len(training_steps)}"
         )
+    if len(training_trajectory) != expected_rounds:
+        raise RuntimeError("global-batch quality training trajectory is incomplete")
+    if any(
+        later["elapsed_seconds"] <= earlier["elapsed_seconds"]
+        for earlier, later in zip(training_trajectory, training_trajectory[1:])
+    ):
+        raise RuntimeError("global-batch quality elapsed_seconds must increase across training rounds")
     common_metrics = sorted(set.intersection(*(set(point["metrics"]) for point in curve)))
     accuracy_metrics = [key for key in common_metrics if key.endswith("/acc/mean@1")]
     if not accuracy_metrics:
@@ -1056,9 +1087,43 @@ def verify_validation_curve(path: Path, *, expected_rounds: int) -> dict[str, An
         "points": curve,
         "common_metrics": common_metrics,
         "accuracy_metrics": accuracy_metrics,
+        "training_trajectory": training_trajectory,
         "final_cumulative_samples": expected_samples,
         "final_cumulative_wall_seconds": curve[-1]["cumulative_wall_seconds"],
     }
+
+
+def verify_global_batch_quality_schedule(
+    config: dict[str, Any], validation: dict[str, Any], *, expected_rounds: int
+) -> None:
+    takeoff = config["takeoff"]["grpo"]
+    batch_size = int(takeoff["train_batch_size"])
+    expected = {
+        56: {"rounds": 14, "test_freq": 2},
+        112: {"rounds": 7, "test_freq": 1},
+    }
+    if batch_size not in expected:
+        raise RuntimeError("global-batch quality runs require train_batch_size 56 or 112")
+    contract = expected[batch_size]
+    if int(takeoff["ppo_mini_batch_size"]) != batch_size:
+        raise RuntimeError("global-batch quality requires ppo_mini_batch_size == train_batch_size")
+    if int(takeoff["rollout_n"]) != 8:
+        raise RuntimeError("global-batch quality requires rollout_n=8")
+    if expected_rounds != contract["rounds"]:
+        raise RuntimeError(
+            f"global-batch quality batch {batch_size} requires {contract['rounds']} rounds"
+        )
+    if int(takeoff["test_freq"]) != contract["test_freq"]:
+        raise RuntimeError(
+            f"global-batch quality batch {batch_size} requires test_freq={contract['test_freq']}"
+        )
+    expected_sample_axis = list(range(0, 6272 + 1, 896))
+    observed_sample_axis = [point["cumulative_samples"] for point in validation["points"]]
+    if observed_sample_axis != expected_sample_axis:
+        raise RuntimeError(
+            "global-batch quality validation must run every 896 response samples: "
+            f"expected {expected_sample_axis}, found {observed_sample_axis}"
+        )
 
 
 def verify_gpu_telemetry(summary: dict[str, Any]) -> None:
@@ -1414,6 +1479,9 @@ def main() -> int:
                     )
                 metadata["validation"] = verify_validation_curve(
                     metrics_path, expected_rounds=expected_rounds
+                )
+                verify_global_batch_quality_schedule(
+                    config, metadata["validation"], expected_rounds=expected_rounds
                 )
         elif run_phase == "nsys":
             metadata["correctness"] = verify_correctness_metrics(metrics_path, expected_rounds=expected_rounds)

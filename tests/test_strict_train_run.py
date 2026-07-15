@@ -439,6 +439,7 @@ def test_validation_curve_tracks_equal_sample_and_wall_clock_axis(tmp_path):
     records = [
         {
             "step": 0,
+            "elapsed_seconds": 3.0,
             "data": {
                 "val-core/dapo/reward/acc/mean@1": 0.10,
                 "timing_s/testing": 3.0,
@@ -446,9 +447,17 @@ def test_validation_curve_tracks_equal_sample_and_wall_clock_axis(tmp_path):
         },
         {
             "step": 1,
+            "elapsed_seconds": 9.0,
             "data": {
                 "training/global_step": 1,
                 "training/actual_samples": 8,
+                "training/actual_prompt_tokens": 16,
+                "training/actual_response_tokens": 24,
+                "training/actual_total_tokens": 40,
+                "critic/rewards/mean": 0.2,
+                "actor/entropy": 0.3,
+                "actor/grad_norm": 1.0,
+                "actor/optimizer_steps": 1.0,
                 "timing_s/step": 2.0,
                 "val-core/dapo/reward/acc/mean@1": 0.20,
                 "timing_s/testing": 4.0,
@@ -469,11 +478,61 @@ def test_validation_curve_tracks_equal_sample_and_wall_clock_axis(tmp_path):
 def test_validation_curve_requires_initial_timing(tmp_path):
     path = tmp_path / "metrics.jsonl"
     path.write_text(
-        json.dumps({"step": 0, "data": {"val-core/dapo/reward/acc/mean@1": 0.1}}) + "\n"
+        json.dumps(
+            {
+                "step": 0,
+                "elapsed_seconds": 1.0,
+                "data": {"val-core/dapo/reward/acc/mean@1": 0.1},
+            }
+        )
+        + "\n"
     )
 
     with pytest.raises(RuntimeError, match="timing_s/testing"):
         strict_train_run.verify_validation_curve(path, expected_rounds=0)
+
+
+@pytest.mark.parametrize(("batch_size", "rounds", "test_freq"), [(56, 14, 2), (112, 7, 1)])
+def test_global_batch_quality_schedule_is_equal_sampled(batch_size, rounds, test_freq):
+    config = {
+        "takeoff": {
+            "grpo": {
+                "train_batch_size": batch_size,
+                "ppo_mini_batch_size": batch_size,
+                "rollout_n": 8,
+                "test_freq": test_freq,
+            }
+        }
+    }
+    validation = {
+        "points": [
+            {"cumulative_samples": cumulative_samples}
+            for cumulative_samples in range(0, 6272 + 1, 896)
+        ]
+    }
+
+    strict_train_run.verify_global_batch_quality_schedule(
+        config, validation, expected_rounds=rounds
+    )
+
+
+def test_global_batch_quality_schedule_rejects_sparse_validation():
+    config = {
+        "takeoff": {
+            "grpo": {
+                "train_batch_size": 112,
+                "ppo_mini_batch_size": 112,
+                "rollout_n": 8,
+                "test_freq": 1,
+            }
+        }
+    }
+    validation = {"points": [{"cumulative_samples": 0}, {"cumulative_samples": 6272}]}
+
+    with pytest.raises(RuntimeError, match="every 896"):
+        strict_train_run.verify_global_batch_quality_schedule(
+            config, validation, expected_rounds=7
+        )
 
 
 @pytest.mark.parametrize(
