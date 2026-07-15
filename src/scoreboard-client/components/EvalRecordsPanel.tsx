@@ -117,8 +117,14 @@ function EvalTable({ records, taskId }: { records: EvalRecord[]; taskId: number 
                 <td className="pre">{record.answer?.slice(0, 140) || "—"}</td>
                 <td className="pre">{record.ref_answer?.slice(0, 140) || "—"}</td>
                 <td>
-                  <span className={`badge ${record.is_passed ? "pass" : "fail"}`}>
-                    {record.is_passed ? "pass" : "fail"}
+                  <span
+                    className={`badge ${record.is_passed === null ? "" : record.is_passed ? "pass" : "fail"}`}
+                  >
+                    {record.is_passed === null
+                      ? "n/a"
+                      : record.is_passed
+                        ? "pass"
+                        : "fail"}
                   </span>
                 </td>
                 <td className="dim">{record.fail_reason?.slice(0, 80) || "—"}</td>
@@ -182,8 +188,20 @@ function ContextModal({
               <span>sample={record.sample_index}</span>
               <span>repeat={record.repeat_index}</span>
               <span>pass={record.pass_index}</span>
-              <span className={record.is_passed ? "outcome-pass" : "outcome-fail"}>
-                {record.is_passed ? "passed" : "failed"}
+              <span
+                className={
+                  record.is_passed === null
+                    ? ""
+                    : record.is_passed
+                      ? "outcome-pass"
+                      : "outcome-fail"
+                }
+              >
+                {record.is_passed === null
+                  ? "not applicable"
+                  : record.is_passed
+                    ? "passed"
+                    : "failed"}
               </span>
             </div>
           </div>

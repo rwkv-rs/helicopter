@@ -5,6 +5,7 @@ import json
 import os
 import re
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
@@ -28,6 +29,7 @@ class ArtifactManifest:
     identities: Mapping[str, Any]
     accounting: dict[str, int]
     artifacts: tuple[ArtifactEntry, ...]
+    completed_at: str | None
 
 
 class RunArtifacts:
@@ -102,13 +104,14 @@ class RunArtifacts:
             )
         accounting.validate()
         manifest = ArtifactManifest(
-            schema_version=1,
+            schema_version=2,
             run_id=self.run_id,
             status=status,
             identity_digest=identity_digest,
             identities=dict(identities),
             accounting=asdict(accounting),
             artifacts=tuple(self._entries),
+            completed_at=datetime.now(timezone.utc).isoformat(),
         )
         path = self.run_dir / "manifest.json"
         encoded = (
@@ -153,11 +156,28 @@ def verify_manifest(manifest_path: Path) -> ArtifactManifest:
             identities=payload["identities"],
             accounting=payload["accounting"],
             artifacts=tuple(ArtifactEntry(**entry) for entry in payload["artifacts"]),
+            completed_at=(
+                str(payload["completed_at"])
+                if payload.get("completed_at") is not None
+                else None
+            ),
         )
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError("artifact manifest schema is invalid") from error
-    if manifest.schema_version != 1 or manifest_path.parent.name != manifest.run_id:
+    if (
+        manifest.schema_version not in {1, 2}
+        or manifest_path.parent.name != manifest.run_id
+    ):
         raise ValueError("artifact manifest run identity is invalid")
+    if manifest.schema_version == 2:
+        if manifest.completed_at is None:
+            raise ValueError("artifact manifest completed_at is missing")
+        try:
+            completed_at = datetime.fromisoformat(manifest.completed_at)
+        except ValueError as error:
+            raise ValueError("artifact manifest completed_at is invalid") from error
+        if completed_at.tzinfo is None:
+            raise ValueError("artifact manifest completed_at must include timezone")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", manifest.run_id):
         raise ValueError("artifact manifest run id is unsafe")
     if not re.fullmatch(r"[0-9a-f]{64}", manifest.identity_digest):

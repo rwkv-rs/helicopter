@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import getpass
 import os
 import socket
 import subprocess
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -21,6 +23,45 @@ from lighteval_runner.contracts import EvaluationRequest
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVER = ROOT / "src/scoreboard-server"
+_DATABASE_SCRIPT = '''
+import asyncio
+import os
+import sys
+
+import asyncpg
+
+
+async def main():
+    kwargs = {
+        "host": os.environ.get("PGHOST", "/var/run/postgresql"),
+        "port": int(os.environ.get("PGPORT", "5432")),
+        "user": os.environ["PGUSER"],
+        "database": os.environ.get("PGDATABASE", "postgres"),
+    }
+    password = os.environ.get("PGPASSWORD")
+    if password:
+        kwargs["password"] = password
+    connection = await asyncpg.connect(**kwargs)
+    database = sys.argv[2]
+    try:
+        if sys.argv[1] == "create":
+            await connection.execute(f'CREATE DATABASE "{database}"')
+        else:
+            await connection.execute(
+                """
+                SELECT pg_terminate_backend(pid)
+                FROM pg_stat_activity
+                WHERE datname = $1 AND pid <> pg_backend_pid()
+                """,
+                database,
+            )
+            await connection.execute(f'DROP DATABASE IF EXISTS "{database}"')
+    finally:
+        await connection.close()
+
+
+asyncio.run(main())
+'''
 
 
 class _ProviderHandler(BaseHTTPRequestHandler):
@@ -117,70 +158,86 @@ def _unused_port() -> int:
 
 
 @contextmanager
-def _scoreboard_server(tmp_path: Path):
-    port = _unused_port()
-    env = {
+def _temporary_scoreboard_database():
+    database = f"helicopter_eval_e2e_{uuid.uuid4().hex[:12]}"
+    maintenance_env = {
         **os.environ,
-        "SCOREBOARD_DATABASE_URL": f"sqlite:///{tmp_path / 'scoreboard.db'}",
-        "SCOREBOARD_CORS_ORIGINS": "https://scoreboard.example",
-        "SCOREBOARD_AUTH_TOKENS": json.dumps(
-            {
-                "publisher-token": {"subject": "e2e", "roles": ["publisher"]},
-                "reader-token": {"subject": "reader", "roles": ["evidence_reader"]},
-                "admin-token": {"subject": "admin", "roles": ["admin"]},
-            }
-        ),
+        "PGHOST": os.environ.get("PGHOST", "/var/run/postgresql"),
+        "PGUSER": os.environ.get("PGUSER", getpass.getuser()),
+        "PGDATABASE": os.environ.get("PGDATABASE", "postgres"),
     }
-    process = subprocess.Popen(
-        [
-            str(SERVER / ".venv/bin/python"),
-            "-m",
-            "uvicorn",
-            "scoreboard_server.application:app",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port),
-            "--log-level",
-            "warning",
-        ],
-        cwd=SERVER,
-        env=env,
-    )
-    base_url = f"http://127.0.0.1:{port}"
+    command = [str(SERVER / ".venv/bin/python"), "-c", _DATABASE_SCRIPT]
+    subprocess.run([*command, "create", database], env=maintenance_env, check=True)
     try:
-        for _attempt in range(100):
-            if process.poll() is not None:
-                raise RuntimeError("scoreboard exited before becoming ready")
-            try:
-                if (
-                    httpx.get(f"{base_url}/api/v1/health", timeout=0.2).status_code
-                    == 200
-                ):
-                    break
-            except httpx.HTTPError:
-                time.sleep(0.05)
-        else:
-            raise RuntimeError("scoreboard did not become ready")
-        response = httpx.post(
-            f"{base_url}/api/v1/admin/migrations",
-            headers={"Authorization": "Bearer admin-token"},
-        )
-        response.raise_for_status()
-        yield base_url
+        yield {
+            "SCOREBOARD_DB_HOST": maintenance_env["PGHOST"],
+            "SCOREBOARD_DB_PORT": maintenance_env.get("PGPORT", "5432"),
+            "SCOREBOARD_DB_USER": maintenance_env["PGUSER"],
+            "SCOREBOARD_DB_PASSWORD": maintenance_env.get("PGPASSWORD", ""),
+            "SCOREBOARD_DB_NAME": database,
+        }
     finally:
-        process.terminate()
+        subprocess.run([*command, "drop", database], env=maintenance_env, check=True)
+
+
+@contextmanager
+def _scoreboard_server():
+    port = _unused_port()
+    with _temporary_scoreboard_database() as database_env:
+        env = {
+            **os.environ,
+            **database_env,
+            "SCOREBOARD_AUTH_TOKENS": json.dumps(
+                {
+                    "publisher-token": {"subject": "e2e", "roles": ["publisher"]},
+                }
+            ),
+        }
+        process = subprocess.Popen(
+            [
+                str(SERVER / ".venv/bin/python"),
+                "-m",
+                "uvicorn",
+                "scoreboard_server.application:app",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                "--log-level",
+                "warning",
+            ],
+            cwd=SERVER,
+            env=env,
+        )
+        base_url = f"http://127.0.0.1:{port}"
         try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
+            for _attempt in range(100):
+                if process.poll() is not None:
+                    raise RuntimeError("scoreboard exited before becoming ready")
+                try:
+                    if (
+                        httpx.get(f"{base_url}/api/health", timeout=0.2).status_code
+                        == 200
+                    ):
+                        break
+                except httpx.HTTPError:
+                    time.sleep(0.05)
+            else:
+                raise RuntimeError("scoreboard did not become ready")
+            yield base_url
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
 
 
 def test_evaluator_artifact_http_publish_and_idempotent_retry(tmp_path: Path) -> None:
     with (
         _provider_server() as provider_port,
-        _scoreboard_server(tmp_path) as scoreboard_url,
+        _scoreboard_server() as scoreboard_url,
     ):
         request = EvaluationRequest(
             model="rwkv-test",
@@ -198,6 +255,7 @@ def test_evaluator_artifact_http_publish_and_idempotent_retry(tmp_path: Path) ->
             precision="fp16-io-fp32-state",
             gemm_policy="fp32-accumulation",
             launch_contract="launch-v1",
+            product_revision="d" * 40,
             allow_non_comparable=True,
             publish_to_scoreboard=True,
             scoreboard_url=scoreboard_url,
@@ -206,18 +264,22 @@ def test_evaluator_artifact_http_publish_and_idempotent_retry(tmp_path: Path) ->
         outcome = run_evaluation(request)
         assert outcome.is_success
         assert outcome.publication_status == "published"
+        assert outcome.publication_task_id is not None
         retry = retry_scoreboard_publication(
             manifest_path=outcome.manifest_path,
             scoreboard_url=scoreboard_url,
             scoreboard_token="publisher-token",
         )
         assert retry.is_success
-        detail = httpx.get(
-            f"{scoreboard_url}/api/v1/runs/{outcome.run_id}",
-            headers={"Authorization": "Bearer reader-token"},
+        records = httpx.get(
+            f"{scoreboard_url}/api/eval-records",
+            params={"task_id": outcome.publication_task_id},
         )
-        detail.raise_for_status()
-        assert detail.json()["status"] == "completed"
+        records.raise_for_status()
+        assert json.loads(records.json()["records"][0]["answer"]) == {
+            "name": "search",
+            "arguments": {"query": "rwkv"},
+        }
         receipt = json.loads(
             (outcome.manifest_path.parent / "publication.json").read_text()
         )
@@ -225,3 +287,6 @@ def test_evaluator_artifact_http_publish_and_idempotent_retry(tmp_path: Path) ->
             "published",
             "published",
         ]
+        assert {attempt["task_id"] for attempt in receipt["attempts"]} == {
+            outcome.publication_task_id
+        }

@@ -19,6 +19,7 @@ class ScoringEvidence:
 
 @dataclass(frozen=True, slots=True)
 class SampleResult:
+    sample_index: int
     sample_id: str
     prompt: str
     status: SampleStatus
@@ -29,10 +30,13 @@ class SampleResult:
     provenance: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     error_code: str | None = None
     error_message: str | None = None
+    reference_answer: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "metrics", MappingProxyType(dict(self.metrics)))
         object.__setattr__(self, "provenance", MappingProxyType(dict(self.provenance)))
+        if self.sample_index < 0:
+            raise ValueError("sample_index must be non-negative")
         if self.attempt <= 0:
             raise ValueError("sample attempt must be positive")
         if self.status is SampleStatus.SCORED:
@@ -69,6 +73,7 @@ class SampleResult:
                 ),
             }
         return {
+            "sample_index": self.sample_index,
             "sample_id": self.sample_id,
             "attempt": self.attempt,
             "status": self.status.value,
@@ -80,6 +85,7 @@ class SampleResult:
             "metrics": dict(self.metrics),
             "error_code": self.error_code,
             "error_message": self.error_message,
+            "reference_answer": self.reference_answer,
             "provenance": dict(self.provenance),
         }
 

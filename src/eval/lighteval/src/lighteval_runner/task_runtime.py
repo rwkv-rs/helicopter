@@ -18,6 +18,7 @@ class HarnessFailure(RuntimeError):
 class PreparedSample:
     context: ContextDocument
     scoring_state: object
+    reference_answer: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

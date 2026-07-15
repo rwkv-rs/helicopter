@@ -83,7 +83,17 @@ class FunctionCallingRuntime:
                 ContextSection("query", "user", prompt, 100),
             )
         )
-        return PreparedSample(context=context, scoring_state=expected_call)
+        reference = json.dumps(
+            {"name": expected_call.name, "arguments": expected_call.arguments},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        return PreparedSample(
+            context=context,
+            scoring_state=expected_call,
+            reference_answer=reference,
+        )
 
     def score(
         self,

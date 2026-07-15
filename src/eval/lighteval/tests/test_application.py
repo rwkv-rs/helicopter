@@ -140,6 +140,7 @@ def test_application_runs_task_native_prompt_score_and_immutable_artifact(
             precision="fp16-io-fp32-state",
             gemm_policy="fp32-accumulation",
             launch_contract="launch-v1",
+            product_revision="d" * 40,
             cot_mode="cot",
         )
     )
@@ -193,6 +194,7 @@ def test_application_records_provider_failure_without_fabricating_score(
             precision="fp16-io-fp32-state",
             gemm_policy="fp32-accumulation",
             launch_contract="launch-v1",
+            product_revision="d" * 40,
         )
     )
     assert outcome.run_status == "failed"
@@ -219,6 +221,7 @@ def _proxy_request(tmp_path: Path, task: str) -> EvaluationRequest:
         precision="fp16-io-fp32-state",
         gemm_policy="fp32-accumulation",
         launch_contract="launch-v1",
+        product_revision="d" * 40,
         allow_non_comparable=True,
     )
 

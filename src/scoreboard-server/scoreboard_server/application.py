@@ -6,12 +6,22 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from scoreboard_server.db.connection import close_db, init_db
+from scoreboard_server.db.evaluation_publications import EvaluationPublicationRepository
 from scoreboard_server.db.repository import ScoreboardStore
 from scoreboard_server.db.settings import DatabaseSettings
 from scoreboard_server.routes.api import register_api_routes
+from scoreboard_server.services.api.evaluation_publications import (
+    EvaluationPublicationService,
+    TokenGrant,
+    publication_grants_from_env,
+)
 
 
-def create_app(settings: DatabaseSettings | None = None) -> FastAPI:
+def create_app(
+    settings: DatabaseSettings | None = None,
+    *,
+    publication_grants: dict[str, TokenGrant] | None = None,
+) -> FastAPI:
     resolved = settings or DatabaseSettings.from_env()
 
     @asynccontextmanager
@@ -30,7 +40,13 @@ def create_app(settings: DatabaseSettings | None = None) -> FastAPI:
         allow_headers=["*"],
     )
     store = ScoreboardStore(settings=resolved)
-    register_api_routes(app, store)
+    publication_service = EvaluationPublicationService(
+        EvaluationPublicationRepository(resolved),
+        publication_grants
+        if publication_grants is not None
+        else publication_grants_from_env(),
+    )
+    register_api_routes(app, store, publication_service)
     return app
 
 

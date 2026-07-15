@@ -533,32 +533,65 @@ class ScoreboardStore:
         include_context: bool = True,
         include_preview: bool = False,
     ) -> list[dict[str, Any]]:
-        query = EvalRecord.filter(completion__task_id=int(task_id)).select_related("completion")
         if only_wrong:
-            query = query.filter(is_passed=False)
-        query = query.order_by("completion__sample_index", "completion__avg_repeat_index", "completion__pass_index", "eval_id")
-        if offset > 0:
-            query = query.offset(offset)
-        if limit is not None and limit > 0:
-            query = query.limit(limit)
-        rows = await query
+            query = EvalRecord.filter(
+                completion__task_id=int(task_id), is_passed=False
+            ).select_related("completion")
+            query = query.order_by(
+                "completion__sample_index",
+                "completion__avg_repeat_index",
+                "completion__pass_index",
+                "eval_id",
+            )
+            if offset > 0:
+                query = query.offset(offset)
+            if limit is not None and limit > 0:
+                query = query.limit(limit)
+            pairs = [(row.completion, row) for row in await query]
+        else:
+            completion_query = Completion.filter(task_id=int(task_id)).order_by(
+                "sample_index", "avg_repeat_index", "pass_index", "completions_id"
+            )
+            if offset > 0:
+                completion_query = completion_query.offset(offset)
+            if limit is not None and limit > 0:
+                completion_query = completion_query.limit(limit)
+            completions = await completion_query
+            completion_ids = [row.completions_id for row in completions]
+            eval_rows = (
+                await EvalRecord.filter(completion_id__in=completion_ids)
+                if completion_ids
+                else []
+            )
+            eval_by_completion = {row.completion_id: row for row in eval_rows}
+            pairs = [
+                (completion, eval_by_completion.get(completion.completions_id))
+                for completion in completions
+            ]
         payloads: list[dict[str, Any]] = []
-        for row in rows:
-            context = row.completion.context if isinstance(row.completion.context, dict) else {}
+        for completion, eval_row in pairs:
+            context = completion.context if isinstance(completion.context, dict) else {}
             preview = ""
             stages = context.get("stages")
             if isinstance(stages, list) and stages and isinstance(stages[0], Mapping):
                 preview = str(stages[0].get("prompt") or "")[:240]
             elif include_preview:
                 preview = str(context)[:240]
+            evidence = context.get("evidence")
+            if not isinstance(evidence, Mapping):
+                evidence = {}
             item = {
-                "sample_index": row.completion.sample_index,
-                "repeat_index": row.completion.avg_repeat_index,
-                "pass_index": row.completion.pass_index,
-                "is_passed": row.is_passed,
-                "answer": row.answer,
-                "ref_answer": row.ref_answer,
-                "fail_reason": row.fail_reason,
+                "sample_index": completion.sample_index,
+                "repeat_index": completion.avg_repeat_index,
+                "pass_index": completion.pass_index,
+                "is_passed": eval_row.is_passed if eval_row is not None else None,
+                "answer": (
+                    eval_row.answer
+                    if eval_row is not None
+                    else str(evidence.get("scored_completion") or "")
+                ),
+                "ref_answer": eval_row.ref_answer if eval_row is not None else "",
+                "fail_reason": eval_row.fail_reason if eval_row is not None else "",
                 "context_preview": preview,
             }
             if include_context:
@@ -580,7 +613,15 @@ class ScoreboardStore:
             completion__avg_repeat_index=int(repeat_index),
             completion__pass_index=int(pass_index),
         ).select_related("completion").order_by("-eval_id").first()
-        return row.completion.context if row else None
+        if row is not None:
+            return row.completion.context
+        completion = await Completion.filter(
+            task_id=int(task_id),
+            sample_index=int(sample_index),
+            avg_repeat_index=int(repeat_index),
+            pass_index=int(pass_index),
+        ).first()
+        return completion.context if completion is not None else None
 
     async def get_task_bundle(self, *, task_id: str) -> dict[str, Any] | None:
         task = await Task.filter(task_id=int(task_id)).select_related("model", "benchmark").first()

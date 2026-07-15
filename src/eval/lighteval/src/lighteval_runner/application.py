@@ -169,6 +169,7 @@ def _execute_evaluation(
         publication_retry_identity=(
             publication.retry_identity if request.publish_to_scoreboard else None
         ),
+        publication_task_id=publication.task_id,
         summary={
             **finalized.metrics,
             "generated_samples": finalized.generated_samples,
@@ -343,12 +344,14 @@ def _execute_samples(
     try:
         for index, row in enumerate(prepared.selected):
             try:
-                result = evaluator.evaluate(row.row_id, row.payload)
+                result = evaluator.evaluate(index, row.row_id, row.payload)
             except KeyboardInterrupt:
                 cancelled = True
                 samples.extend(
-                    evaluator.cancelled(pending.row_id)
-                    for pending in prepared.selected[index:]
+                    evaluator.cancelled(pending_index, pending.row_id)
+                    for pending_index, pending in enumerate(
+                        prepared.selected[index:], start=index
+                    )
                 )
                 break
             if result.formatter_rejection is not None:
@@ -475,6 +478,8 @@ def _commit_run(
         prepared.definition,
         prepared.provider.observed,
         prepared.provider.decision,
+        product_revision=request.product_revision,
+        product_dirty=request.product_dirty,
     )
     identity_digest = _digest(identity)
     artifacts.write_json("samples.json", list(evidence.samples))
@@ -569,6 +574,7 @@ def _publish_if_requested(
             "status": publication.status,
             "retry_identity": publication.retry_identity,
             "error": publication.error,
+            "task_id": publication.task_id,
         },
     )
     return publication
@@ -589,6 +595,7 @@ def retry_scoreboard_publication(
             "status": publication.status,
             "retry_identity": publication.retry_identity,
             "error": publication.error,
+            "task_id": publication.task_id,
         },
     )
     return EvaluationOutcome(
@@ -598,6 +605,7 @@ def retry_scoreboard_publication(
         publication_status=publication.status,
         publication_error=publication.error,
         publication_retry_identity=publication.retry_identity,
+        publication_task_id=publication.task_id,
     )
 
 
