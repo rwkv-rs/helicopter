@@ -75,6 +75,10 @@ def resolve_model_path(
     entry = resolve_model_entry(config, model_name)
     paths = table(config, "paths")
 
+    strict_checkpoint_path = env_value(env, "HELICOPTER_CHECKPOINT_PATH")
+    if strict_checkpoint_path:
+        return resolve_path(strict_checkpoint_path, root=root, env=env), entry
+
     if "path" in entry:
         return resolve_path(str(entry["path"]), root=root, env=env), entry
 

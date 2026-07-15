@@ -1,0 +1,65 @@
+[infer]
+enable_auto_tool_choice = false
+
+[paths]
+rwkv_lm_path = "src/train/rwkv-lm"
+
+[takeoff.grpo]
+project_name = "helicopter-math"
+experiment_name = "strict-on-policy-correctness-smoke"
+wkv_mode = "fp32io16"
+emb_device = "gpu"
+adv_estimator = "maxrl"
+reward_manager = "dapo"
+reward_function = "math_verify"
+train_batch_size = 8
+train_max_samples = 4096
+val_max_samples = 1024
+ppo_mini_batch_size = 8
+seed = 42
+ppo_epochs = 1
+ppo_micro_batch_size = 1
+max_prompt_length = 256
+max_response_length = 128
+ppo_max_token_len_per_gpu = 2048
+rwkv_use_dynamic_bsz = true
+ctx_len = 10240
+infctx = true
+chunk_ctx = 2048
+actor_lr = "1e-6"
+actor_lr_warmup_steps = 0
+actor_weight_decay = 0.1
+actor_entropy_coeff = 0
+actor_grad_clip = 1.0
+actor_use_kl_loss = true
+actor_kl_loss_coef = 0.0
+actor_kl_loss_type = "low_var_kl"
+clip_ratio_low = 0.2
+clip_ratio_high = 0.28
+clip_ratio_c = 10.0
+rollout_n = 2
+trainer_n_gpus_per_node = 8
+rollout_tensor_parallel_size = 1
+rollout_data_parallel_size = 1
+rollout_pipeline_parallel_size = 1
+rollout_gpu_memory_utilization = 0.6
+rollout_max_num_seqs = 16
+rollout_max_num_batched_tokens = 2048
+rollout_update_weights_bucket_megabytes = 64
+total_epochs = 1
+total_training_steps = 2
+save_freq = -1
+test_freq = -1
+val_before_train = false
+val_n = 1
+rwkv_generation_prompt = "open_think"
+val_rwkv_generation_prompt = "open_think"
+
+[datasets.dapo_smoke]
+train_files = ["${DATASETS_PATH}/DAPO/dapo-math-17k.parquet"]
+val_files = ["${DATASETS_PATH}/DAPO/dapo-math-17k.parquet"]
+
+[models."g1h-7.2b"]
+file = "rwkv7-g1h-7.2b-20260710-ctx10240.pth"
+served_model_name = "g1h-7.2b"
+max_model_len = 10240
