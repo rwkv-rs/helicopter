@@ -239,10 +239,10 @@ class CommandPlanTests(unittest.TestCase):
 
         plan = build_takeoff_plan(loaded_config, venv_python=venv_python)
         overrides = hydra_map(plan)
-        selected_rollout_capacity = {
-            "actor_rollout_ref.rollout.gpu_memory_utilization": "0.6",
-            "actor_rollout_ref.rollout.max_num_seqs": "64",
-            "actor_rollout_ref.rollout.max_num_batched_tokens": "8192",
+        optional_rollout_keys = {
+            "actor_rollout_ref.rollout.gpu_memory_utilization",
+            "actor_rollout_ref.rollout.max_num_seqs",
+            "actor_rollout_ref.rollout.max_num_batched_tokens",
         }
 
         self.assertEqual(plan.cwd, ROOT / "src/train/verl-rwkv")
@@ -311,10 +311,7 @@ class CommandPlanTests(unittest.TestCase):
                 "trainer.val_before_train": "True",
             },
         )
-        self.assertEqual(
-            {key: overrides[key] for key in selected_rollout_capacity},
-            selected_rollout_capacity,
-        )
+        self.assertEqual(optional_rollout_keys & overrides.keys(), set())
         self.assertEqual(
             overrides[
                 "+actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend"
@@ -361,10 +358,10 @@ class CommandPlanTests(unittest.TestCase):
             "VLLM_RWKV_PATH",
             "VLLM_USE_V2_MODEL_RUNNER",
         }
-        selected_rollout_capacity = {
-            "actor_rollout_ref.rollout.gpu_memory_utilization": "0.6",
-            "actor_rollout_ref.rollout.max_num_seqs": "64",
-            "actor_rollout_ref.rollout.max_num_batched_tokens": "8192",
+        forbidden_override_keys = {
+            "actor_rollout_ref.rollout.gpu_memory_utilization",
+            "actor_rollout_ref.rollout.max_num_seqs",
+            "actor_rollout_ref.rollout.max_num_batched_tokens",
         }
 
         self.assertEqual(plan.env["VLLM_RWKV7_WKV_MODE"], "fp32io16")
@@ -372,10 +369,7 @@ class CommandPlanTests(unittest.TestCase):
         self.assertNotIn("VLLM_RWKV7_ALLOW_FP16_ACCUMULATION", plan.env)
         self.assertEqual(plan.env["PYTHONPATH"], str(ROOT / "src/infer/vllm-rwkv"))
         self.assertEqual(forbidden_env_keys & plan.env.keys(), set())
-        self.assertEqual(
-            {key: overrides[key] for key in selected_rollout_capacity},
-            selected_rollout_capacity,
-        )
+        self.assertEqual(forbidden_override_keys & overrides.keys(), set())
 
     def test_strict_smoke_limits_dataset_before_filtering_and_pins_seed(self) -> None:
         loaded_config, _ = config.load_config(ROOT, str(STRICT_SMOKE_CONFIG))

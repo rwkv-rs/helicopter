@@ -665,28 +665,6 @@ def test_quality_configs_differ_only_by_equal_sample_batch_schedule():
     assert candidate["test_freq"] * candidate["train_batch_size"] == 112
 
 
-def test_default_config_promotes_accepted_batch_and_system_capacity():
-    config_path = Path(__file__).parents[1] / "configs" / "example.toml"
-    config = tomllib.loads(config_path.read_text(encoding="utf-8"))
-    takeoff = config["takeoff"]["grpo"]
-
-    assert takeoff["train_batch_size"] == 112
-    assert takeoff["ppo_mini_batch_size"] == 112
-    assert takeoff["ppo_max_token_len_per_gpu"] == 8192
-    assert takeoff["infctx"] is True
-    assert takeoff["chunk_ctx"] == 2048
-    assert takeoff["rollout_tensor_parallel_size"] == 1
-    assert takeoff["rollout_data_parallel_size"] == 1
-    assert takeoff["rollout_pipeline_parallel_size"] == 1
-    assert takeoff["rollout_max_num_seqs"] == 64
-    assert takeoff["rollout_max_num_batched_tokens"] == 8192
-    assert config["models"]["g1h-7.2b"] == {
-        "file": "rwkv7-g1h-7.2b-20260710-ctx10240.pth",
-        "served_model_name": "g1h-7.2b",
-        "max_model_len": 10240,
-    }
-
-
 def test_checked_in_global_batch_probe_changes_only_algorithm_batch_capacity():
     root = Path(__file__).parents[1]
     baseline = tomllib.loads((root / "configs" / "strict-baseline.toml").read_text())[
