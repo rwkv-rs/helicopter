@@ -69,7 +69,9 @@ class SampleEvaluator:
         self._endpoint = endpoint
         self._context = context
 
-    def evaluate(self, row_id: str, payload: Mapping[str, Any]) -> SampleEvaluation:
+    def evaluate(
+        self, sample_index: int, row_id: str, payload: Mapping[str, Any]
+    ) -> SampleEvaluation:
         try:
             prepared = self._runtime.prepare(payload)
         except (KeyError, TypeError, ValueError) as error:
@@ -132,6 +134,7 @@ class SampleEvaluator:
         ) as error:
             return SampleEvaluation(
                 evidence=_error_sample(
+                    sample_index,
                     row_id,
                     prompt,
                     SampleStatus.PROVIDER_ERROR,
@@ -170,6 +173,7 @@ class SampleEvaluator:
         except ModelOutputRejected as error:
             return self._scoring_error(
                 row_id,
+                sample_index,
                 prompt,
                 generation,
                 scoring,
@@ -180,6 +184,7 @@ class SampleEvaluator:
         except HarnessFailure as error:
             return self._scoring_error(
                 row_id,
+                sample_index,
                 prompt,
                 generation,
                 scoring,
@@ -190,6 +195,7 @@ class SampleEvaluator:
         except Exception as error:
             return self._scoring_error(
                 row_id,
+                sample_index,
                 prompt,
                 generation,
                 scoring,
@@ -199,12 +205,14 @@ class SampleEvaluator:
             )
 
         evidence = SampleResult(
+            sample_index=sample_index,
             sample_id=row_id,
             prompt=prompt,
             status=SampleStatus.SCORED,
             metrics=metrics,
             generation=generation,
             scoring=scoring,
+            reference_answer=prepared.reference_answer,
             provenance={
                 "cache": {
                     "status": "disabled",
@@ -228,8 +236,9 @@ class SampleEvaluator:
         return SampleEvaluation(evidence, None, primary, True, generation.truncated)
 
     @staticmethod
-    def cancelled(row_id: str) -> dict[str, Any]:
+    def cancelled(sample_index: int, row_id: str) -> dict[str, Any]:
         return _error_sample(
+            sample_index,
             row_id,
             "",
             SampleStatus.CANCELLED,
@@ -240,6 +249,7 @@ class SampleEvaluator:
     def _scoring_error(
         self,
         row_id: str,
+        sample_index: int,
         prompt: str,
         generation: GenerationOutcome,
         scoring: ScoringEvidence,
@@ -249,6 +259,7 @@ class SampleEvaluator:
     ) -> SampleEvaluation:
         return SampleEvaluation(
             evidence=_error_sample(
+                sample_index,
                 row_id,
                 prompt,
                 status,
@@ -265,6 +276,7 @@ class SampleEvaluator:
 
 
 def _error_sample(
+    sample_index: int,
     sample_id: str,
     prompt: str,
     status: SampleStatus,
@@ -275,6 +287,7 @@ def _error_sample(
     scoring: ScoringEvidence | None = None,
 ) -> dict[str, Any]:
     return SampleResult(
+        sample_index=sample_index,
         sample_id=sample_id,
         prompt=prompt,
         status=status,

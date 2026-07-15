@@ -3,6 +3,7 @@ from __future__ import annotations
 import httpx
 import pytest
 import hashlib
+import gzip
 import json
 
 from lighteval_runner.execution import RunStatus, SampleAccounting
@@ -15,39 +16,17 @@ from lighteval_runner.results.scoreboard import (
 )
 
 
-def test_http_publication_uses_versioned_authenticated_idempotent_state_machine() -> (
-    None
-):
+def test_http_publication_uses_one_authenticated_idempotent_put() -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        if request.url.path == "/api/v1/runs":
-            return httpx.Response(
-                201,
-                json={
-                    "run_id": "run-1",
-                    "status": "planned",
-                    "revision": 1,
-                    "disposition": "created",
-                },
-            )
-        if request.url.path.endswith("/resume"):
-            return httpx.Response(
-                200,
-                json={
-                    "run_id": "run-1",
-                    "status": "running",
-                    "revision": 2,
-                    "disposition": "created",
-                },
-            )
         return httpx.Response(
-            200,
+            201,
             json={
                 "run_id": "run-1",
                 "status": "completed",
-                "revision": 4,
+                "task_id": 7,
                 "disposition": "created",
             },
         )
@@ -60,23 +39,25 @@ def test_http_publication_uses_versioned_authenticated_idempotent_state_machine(
     )
     result = client.publish(
         run_id="run-1",
-        create_payload={"run_id": "run-1"},
-        ingest_payload={"terminal_status": "completed"},
-        ingest_identity="ingest:digest",
+        payload={"terminal_status": "completed"},
+        idempotency_key="publish:digest",
     )
     assert result.status == "published"
+    assert result.task_id == 7
     assert [request.url.path for request in requests] == [
-        "/api/v1/runs",
-        "/api/v1/runs/run-1/resume",
-        "/api/v1/runs/run-1/ingest",
+        "/api/v1/evaluation-publications/run-1"
     ]
+    assert requests[0].method == "PUT"
     assert requests[0].headers["authorization"] == "Bearer secret"
-    assert requests[0].headers["idempotency-key"] == "create:run-1"
-    assert requests[2].headers["idempotency-key"] == "ingest:digest"
-    assert requests[2].headers["if-match"] == "2"
+    assert requests[0].headers["content-encoding"] == "gzip"
+    assert json.loads(gzip.decompress(requests[0].content)) == {
+        "terminal_status": "completed"
+    }
+    assert requests[0].headers["idempotency-key"] == "publish:digest"
+    assert "if-match" not in requests[0].headers
 
 
-def test_publication_retry_skips_resume_for_existing_terminal_run() -> None:
+def test_publication_retry_repeats_the_same_put() -> None:
     paths: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -86,7 +67,7 @@ def test_publication_retry_skips_resume_for_existing_terminal_run() -> None:
             json={
                 "run_id": "run-1",
                 "status": "completed",
-                "revision": 4,
+                "task_id": 7,
                 "disposition": "unchanged",
             },
         )
@@ -99,13 +80,12 @@ def test_publication_retry_skips_resume_for_existing_terminal_run() -> None:
     assert (
         client.publish(
             run_id="run-1",
-            create_payload={"run_id": "run-1"},
-            ingest_payload={"terminal_status": "completed"},
-            ingest_identity="ingest:digest",
+            payload={"terminal_status": "completed"},
+            idempotency_key="publish:digest",
         ).status
         == "published"
     )
-    assert paths == ["/api/v1/runs", "/api/v1/runs/run-1/ingest"]
+    assert paths == ["/api/v1/evaluation-publications/run-1"]
 
 
 def test_publication_never_falls_back_when_http_backend_fails() -> None:
@@ -121,23 +101,70 @@ def test_publication_never_falls_back_when_http_backend_fails() -> None:
     with pytest.raises(ScoreboardPublicationError, match=r"503 \(down\)"):
         client.publish(
             run_id="run-1",
-            create_payload={"run_id": "run-1"},
-            ingest_payload={"terminal_status": "completed"},
-            ingest_identity="ingest:digest",
+            payload={"terminal_status": "completed"},
+            idempotency_key="publish:digest",
         )
 
 
 def test_retry_publication_reconstructs_only_the_committed_run(
     tmp_path, monkeypatch
 ) -> None:
-    identity = {"task": {"primary_metric": "score"}, "model": {"name": "rwkv"}}
+    identity = {
+        "task": {"primary_metric": "score"},
+        "model": {"name": "rwkv"},
+        "evaluator": {"product_revision": "a" * 40, "dirty": False},
+    }
     digest = hashlib.sha256(
         json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     accounting = SampleAccounting(1, 1, 0, 1, 1, 0, 1)
     artifacts = RunArtifacts(tmp_path, run_id="run-1")
     artifacts.write_json(
-        "samples.json", [{"sample_id": "sample-1", "status": "scored"}]
+        "samples.json",
+        [
+            {
+                "sample_index": 0,
+                "sample_id": "sample-1",
+                "attempt": 1,
+                "status": "scored",
+                "prompt": "question",
+                "raw_completion": "answer",
+                "scored_completion": "answer",
+                "generation": {
+                    "raw_completion": "answer",
+                    "output_token_ids": [1, 0],
+                    "output_token_count": 2,
+                    "finish_reason": "stop",
+                    "stop_reason": 0,
+                    "terminal_reason": "stop",
+                    "truncated": False,
+                    "generation_limit": 16,
+                    "prompt_text": "question",
+                    "prompt_token_ids": [1],
+                    "request_id": "request-1",
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": 2,
+                        "total_tokens": 3,
+                    },
+                },
+                "scoring": {
+                    "raw_completion": "answer",
+                    "scored_completion": "answer",
+                    "scorer_revision": "scorer-v1",
+                    "repair_strategy": "A",
+                    "repair_action": "none",
+                },
+                "metrics": {"score": 1.0},
+                "error_code": None,
+                "error_message": None,
+                "reference_answer": "answer",
+                "provenance": {},
+            }
+        ],
+    )
+    artifacts.write_json(
+        "performance.json", {"token_usage_attribution": "not_attributable"}
     )
     artifacts.write_json(
         "summary.json",
@@ -162,7 +189,7 @@ def test_retry_publication_reconstructs_only_the_committed_run(
 
         def publish(self, **kwargs):
             captured["publish"] = kwargs
-            return PublicationResult("published", kwargs["ingest_identity"])
+            return PublicationResult("published", kwargs["idempotency_key"])
 
         def close(self):
             pass
@@ -175,4 +202,7 @@ def test_retry_publication_reconstructs_only_the_committed_run(
     )
     assert result.status == "published"
     assert captured["publish"]["run_id"] == "run-1"
-    assert captured["publish"]["ingest_payload"]["metrics"] == {"score": 1.0}
+    assert captured["publish"]["payload"]["metrics"] == {"score": 1.0}
+    assert captured["publish"]["payload"]["performance"] == {
+        "token_usage_attribution": "not_attributable"
+    }

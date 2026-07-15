@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import subprocess
 from typing import Any
 
 from .commands import (
@@ -207,6 +208,7 @@ def _run_evaluation(
         else root / output_root_value
     )
     scoreboard_url = resolved.get("scoreboard_url")
+    product_revision, product_dirty = _git_identity(root)
     request = EvaluationRequest(
         model=args.model,
         task=args.task,
@@ -239,6 +241,8 @@ def _run_evaluation(
         allow_non_comparable=bool(resolved.get("allow_non_comparable")),
         config_digest=resolved.identity_digest(),
         config_evidence=resolved.redacted_payload(),
+        product_revision=product_revision,
+        product_dirty=product_dirty,
     )
     if args.dry_run:
         print(
@@ -249,9 +253,45 @@ def _run_evaluation(
     print(
         f"eval run={outcome.run_id} status={outcome.run_status} manifest={outcome.manifest_path}"
     )
+    if outcome.publication_task_id is not None:
+        print(f"scoreboard publication task={outcome.publication_task_id}")
     if outcome.publication_error:
         print(f"scoreboard publication failed: {outcome.publication_error}")
     return 0 if outcome.is_success else 1
+
+
+def _git_identity(root: Path) -> tuple[str, bool]:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise ValueError("cannot determine evaluator product revision") from error
+    revision = result.stdout.strip()
+    if len(revision) != 40 or any(
+        character not in "0123456789abcdef" for character in revision
+    ):
+        raise ValueError("evaluator product revision is not a full Git commit SHA")
+    try:
+        status = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise ValueError("cannot determine evaluator worktree state") from error
+    return revision, bool(status.stdout.strip())
 
 
 def _retry_evaluation_publication(
@@ -277,7 +317,7 @@ def _retry_evaluation_publication(
     )
     print(
         f"eval publish run={outcome.run_id} status={outcome.publication_status} "
-        f"retry={outcome.publication_retry_identity}"
+        f"task={outcome.publication_task_id} retry={outcome.publication_retry_identity}"
     )
     if outcome.publication_error:
         print(f"scoreboard publication failed: {outcome.publication_error}")

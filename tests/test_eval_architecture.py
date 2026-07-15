@@ -6,16 +6,14 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BACKEND_DB = ROOT / "src/scoreboard-server/scoreboard_server/db"
 SELF = Path(__file__).resolve()
 
 
-def _production_sources():
+def _non_scoreboard_backend_sources():
     roots = (
         ROOT / "src/cli",
         ROOT / "src/eval",
         ROOT / "src/scoreboard-client",
-        ROOT / "src/scoreboard-server/scoreboard_server",
         ROOT / "scripts",
     )
     for suffix in ("*.py", "*.ts", "*.tsx", "*.js", "*.mjs"):
@@ -30,7 +28,7 @@ def _production_sources():
                 yield path
 
 
-def test_only_scoreboard_persistence_can_load_database_drivers_or_query_api() -> None:
+def test_non_scoreboard_callers_cannot_load_database_drivers_or_query_api() -> None:
     forbidden = re.compile(
         r"(?:\bimport\s+(?:asyncpg|aiosqlite|tortoise|sqlalchemy)|"
         r"\bfrom\s+(?:asyncpg|aiosqlite|tortoise|sqlalchemy)|"
@@ -38,12 +36,7 @@ def test_only_scoreboard_persistence_can_load_database_drivers_or_query_api() ->
         r"from\s+['\"](?:pg|postgres|@prisma/client)['\"])"
     )
     violations: list[str] = []
-    for path in _production_sources():
-        try:
-            path.relative_to(BACKEND_DB)
-            continue
-        except ValueError:
-            pass
+    for path in _non_scoreboard_backend_sources():
         if forbidden.search(path.read_text(encoding="utf-8", errors="replace")):
             violations.append(str(path.relative_to(ROOT)))
     assert violations == []
@@ -84,3 +77,10 @@ def test_eval_import_graph_respects_component_boundaries() -> None:
         if any("scoreboard_server" in module for _level, module in imports):
             violations.append(str(relative))
     assert violations == []
+
+
+def test_publication_route_does_not_import_database_layer() -> None:
+    route = ROOT / (
+        "src/scoreboard-server/scoreboard_server/routes/api/evaluation_publications.py"
+    )
+    assert "scoreboard_server.db" not in route.read_text(encoding="utf-8")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from importlib import import_module
+import json
 from typing import Any, Mapping
 
 from lighteval.models.model_output import ModelResponse
@@ -44,7 +45,17 @@ class LightEvalTaskRuntime:
 
     def prepare(self, row: Mapping[str, Any]) -> PreparedSample:
         doc = self._config.prompt_function(dict(row), task_name=self._task_name)
-        return PreparedSample(context=from_lighteval_doc(doc), scoring_state=doc)
+        golds = doc.get_golds()
+        reference = (
+            str(golds[0])
+            if len(golds) == 1
+            else json.dumps(golds, sort_keys=True, ensure_ascii=False, default=str)
+        )
+        return PreparedSample(
+            context=from_lighteval_doc(doc),
+            scoring_state=doc,
+            reference_answer=reference,
+        )
 
     def score(
         self,

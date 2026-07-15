@@ -20,6 +20,7 @@ ROUTE_LEAVES = {
     "api/capture_page.py",
     "api/eval_context.py",
     "api/eval_records.py",
+    "api/evaluation_publications.py",
     "api/health.py",
     "api/leaderboard.py",
     "api/meta.py",
@@ -52,11 +53,13 @@ def test_scoreboard_server_uses_layered_backend_layout() -> None:
         "db/models/checker.py",
         "db/models/completion.py",
         "db/models/eval_record.py",
+        "db/models/evaluation_publication.py",
         "db/models/scheduler_lease.py",
         "db/models/score.py",
         "db/models/score_model.py",
         "db/models/task.py",
         "db/repository.py",
+        "db/evaluation_publications.py",
         "db/resume.py",
         "db/schema.py",
         "db/settings.py",
@@ -65,7 +68,9 @@ def test_scoreboard_server_uses_layered_backend_layout() -> None:
     expected_modules.update(f"routes/{path}" for path in ROUTE_LEAVES)
     expected_modules.update(f"dtos/{path}" for path in ROUTE_LEAVES)
     expected_modules.update(f"services/{path}" for path in ROUTE_LEAVES)
-    missing = sorted(path for path in expected_modules if not (PACKAGE_ROOT / path).is_file())
+    missing = sorted(
+        path for path in expected_modules if not (PACKAGE_ROOT / path).is_file()
+    )
     assert missing == []
 
     disallowed_root_modules = {
@@ -79,7 +84,9 @@ def test_scoreboard_server_uses_layered_backend_layout() -> None:
         "screenshot.py",
         "service.py",
     }
-    present = sorted(path for path in disallowed_root_modules if (PACKAGE_ROOT / path).exists())
+    present = sorted(
+        path for path in disallowed_root_modules if (PACKAGE_ROOT / path).exists()
+    )
     assert present == []
 
     assert not (PACKAGE_ROOT / "db/models.py").exists()

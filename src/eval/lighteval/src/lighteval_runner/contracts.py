@@ -24,6 +24,8 @@ class EvaluationRequest:
     precision: str
     gemm_policy: str
     launch_contract: str
+    product_revision: str
+    product_dirty: bool = False
     cot_mode: str = "none"
     math_repair_strategy: str = "A"
     generation_limit_override: int | None = None
@@ -72,6 +74,10 @@ class EvaluationRequest:
             not self.scoreboard_url or not self.scoreboard_token
         ):
             raise ValueError("scoreboard publication requires URL and token")
+        if len(self.product_revision) != 40 or any(
+            character not in "0123456789abcdef" for character in self.product_revision
+        ):
+            raise ValueError("product_revision must be a lowercase Git commit")
         if self.config_digest and (
             len(self.config_digest) != 64
             or any(
@@ -97,6 +103,7 @@ class EvaluationOutcome:
     publication_status: str
     publication_error: str | None = None
     publication_retry_identity: str | None = None
+    publication_task_id: int | None = None
     summary: dict[str, int | float | str | None] | None = None
 
     @property

@@ -106,6 +106,26 @@ def test_manifest_verification_detects_corrupt_artifact_without_directory_discov
         verify_manifest(manifest_path)
 
 
+def test_legacy_v1_manifest_remains_verifiable(tmp_path):
+    writer = RunArtifacts(tmp_path, run_id="legacy-run")
+    writer.write_json("samples.json", [])
+    manifest_path = writer.finalize(
+        status=RunStatus.COMPLETED,
+        identity_digest=IDENTITY,
+        identities=IDENTITIES,
+        accounting=ACCOUNTING,
+    )
+    payload = json.loads(manifest_path.read_text())
+    payload["schema_version"] = 1
+    payload.pop("completed_at")
+    manifest_path.write_text(json.dumps(payload))
+
+    manifest = verify_manifest(manifest_path)
+
+    assert manifest.schema_version == 1
+    assert manifest.completed_at is None
+
+
 def test_concurrent_run_creation_has_exactly_one_owner(tmp_path):
     def create():
         try:
