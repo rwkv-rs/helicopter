@@ -268,11 +268,13 @@ class CommandPlanTests(unittest.TestCase):
             {
                 key: overrides[key]
                 for key in (
+                    "data.train_batch_size",
                     "data.max_prompt_length",
                     "data.max_response_length",
                     "data.seed",
                     "reward.custom_reward_function.path",
                     "actor_rollout_ref.actor.use_dynamic_bsz",
+                    "actor_rollout_ref.actor.ppo_mini_batch_size",
                     "actor_rollout_ref.actor.ppo_epochs",
                     "actor_rollout_ref.actor.data_loader_seed",
                     "actor_rollout_ref.model.path",
@@ -289,6 +291,7 @@ class CommandPlanTests(unittest.TestCase):
                 )
             },
             {
+                "data.train_batch_size": "56",
                 "data.max_prompt_length": "1024",
                 "data.max_response_length": "7168",
                 "data.seed": "42",
@@ -296,6 +299,7 @@ class CommandPlanTests(unittest.TestCase):
                     ROOT / "src/train/verl-rwkv/examples/rwkv_trainer/math_verify_reward.py"
                 ),
                 "actor_rollout_ref.actor.use_dynamic_bsz": "False",
+                "actor_rollout_ref.actor.ppo_mini_batch_size": "56",
                 "actor_rollout_ref.actor.ppo_epochs": "1",
                 "actor_rollout_ref.actor.data_loader_seed": "42",
                 "actor_rollout_ref.model.path": "/weights/RWKV/rwkv7-g1g-1.5b-20260526-ctx8192.pth",

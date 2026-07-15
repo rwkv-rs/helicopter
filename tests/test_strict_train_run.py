@@ -681,6 +681,27 @@ def test_checked_in_global_batch_probe_changes_only_algorithm_batch_capacity():
     assert candidate["train_batch_size"] == candidate["ppo_mini_batch_size"] == 112
 
 
+def test_batch_112_is_scoped_to_explicit_experiment_configs():
+    root = Path(__file__).parents[1]
+    configs_with_batch_112 = set()
+
+    for config_path in (root / "configs").glob("*.toml"):
+        takeoff = tomllib.loads(config_path.read_text(encoding="utf-8"))["takeoff"][
+            "grpo"
+        ]
+        if 112 in {
+            takeoff["train_batch_size"],
+            takeoff["ppo_mini_batch_size"],
+        }:
+            assert takeoff["train_batch_size"] == takeoff["ppo_mini_batch_size"] == 112
+            configs_with_batch_112.add(config_path.name)
+
+    assert configs_with_batch_112 == {
+        "strict-global-batch-112.toml",
+        "strict-quality-b112.toml",
+    }
+
+
 def test_global_batch_quality_schedule_rejects_sparse_validation():
     config = {
         "takeoff": {
