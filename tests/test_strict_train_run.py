@@ -4,6 +4,7 @@ import io
 import json
 import signal
 import sys
+import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -514,6 +515,47 @@ def test_global_batch_quality_schedule_is_equal_sampled(batch_size, rounds, test
     strict_train_run.verify_global_batch_quality_schedule(
         config, validation, expected_rounds=rounds
     )
+
+
+@pytest.mark.parametrize(
+    ("config_name", "batch_size", "rounds", "test_freq"),
+    [
+        ("strict-quality-b56.toml", 56, 14, 2),
+        ("strict-quality-b112.toml", 112, 7, 1),
+    ],
+)
+def test_checked_in_quality_configs_share_equal_sample_contract(
+    config_name, batch_size, rounds, test_freq
+):
+    config_path = Path(__file__).parents[1] / "configs" / config_name
+    config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    takeoff = config["takeoff"]["grpo"]
+
+    assert takeoff["train_batch_size"] == batch_size
+    assert takeoff["ppo_mini_batch_size"] == batch_size
+    assert takeoff["total_training_steps"] == rounds
+    assert takeoff["test_freq"] == test_freq
+    assert takeoff["val_before_train"] is True
+    assert takeoff["rollout_n"] == 8
+    assert takeoff["ppo_max_token_len_per_gpu"] == 8192
+    assert takeoff["rollout_max_num_seqs"] == 64
+    assert takeoff["rollout_max_num_batched_tokens"] == 8192
+
+
+def test_checked_in_global_batch_probe_changes_only_algorithm_batch_capacity():
+    root = Path(__file__).parents[1]
+    baseline = tomllib.loads((root / "configs" / "strict-baseline.toml").read_text())[
+        "takeoff"
+    ]["grpo"]
+    candidate = tomllib.loads(
+        (root / "configs" / "strict-global-batch-112.toml").read_text()
+    )["takeoff"]["grpo"]
+
+    allowed_changes = {"experiment_name", "train_batch_size", "ppo_mini_batch_size"}
+    assert {
+        key for key in baseline.keys() | candidate.keys() if baseline.get(key) != candidate.get(key)
+    } == allowed_changes
+    assert candidate["train_batch_size"] == candidate["ppo_mini_batch_size"] == 112
 
 
 def test_global_batch_quality_schedule_rejects_sparse_validation():
