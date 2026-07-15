@@ -5,17 +5,13 @@
   "type": "module",
   "scripts": {
     "dev": "next dev",
-    "start": "next start",
     "build": "next build",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "smoke": "playwright test",
-    "generate:openapi": "../scoreboard-server/.venv/bin/python ../scoreboard-server/scripts/export_openapi.py ../scoreboard-server/openapi.json && openapi-typescript ../scoreboard-server/openapi.json -o lib/generated/schema.ts",
-    "check:generated": "bun run generate:openapi && git diff --exit-code -- lib/generated/schema.ts ../scoreboard-server/openapi.json"
+    "smoke": "playwright test"
   },
   "dependencies": {
     "next": "^16.1.0",
-    "openapi-fetch": "^0.15.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "recharts": "^3.8.0"
@@ -25,7 +21,6 @@
     "@types/node": "^25.0.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
-    "openapi-typescript": "^7.10.1",
     "typescript": "^5.7.2"
   }
 }
