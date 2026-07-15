@@ -8,14 +8,22 @@ version = "0.1.0"
 requires-python = ">=3.12,<3.13"
 dependencies = []
 
+[project.optional-dependencies]
+eval = [
+  "lighteval-runner",
+  "lighteval @ git+https://github.com/huggingface/lighteval.git@64f4f5ae173626509fad6e477ca4ee56ebb26129",
+]
+full = [
+  "lighteval-runner",
+  "lighteval @ git+https://github.com/huggingface/lighteval.git@64f4f5ae173626509fad6e477ca4ee56ebb26129",
+]
+
 [project.scripts]
 helicopter = "helicopter_cli.__main__:main"
 
 [dependency-groups]
 eval = [
-  "lighteval[extended_tasks,litellm,multilingual] @ git+https://github.com/huggingface/lighteval.git@64f4f5ae173626509fad6e477ca4ee56ebb26129",
-  "language-data",
-  "more-itertools",
+  "lighteval-runner",
 ]
 
 rwkv = [
@@ -126,18 +134,20 @@ rwkv = [
 ]
 
 full = [
-  "latex2sympy2-extended",
+  "lighteval-runner",
   "liger-kernel",
-  "math-verify",
   "pre-commit",
 ]
 
 [tool.uv]
 package = true
 
+[tool.uv.workspace]
+members = ["src/eval/lighteval"]
+
+[tool.uv.sources]
+lighteval-runner = { workspace = true }
+
 [tool.setuptools.packages.find]
 where = ["src/cli"]
 include = ["helicopter_cli*"]
-
-[tool.setuptools.package-data]
-helicopter_cli = ["lighteval_data/*.jsonl"]

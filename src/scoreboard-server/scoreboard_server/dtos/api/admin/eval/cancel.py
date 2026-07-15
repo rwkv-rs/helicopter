@@ -1,6 +1,0 @@
-from __future__ import annotations
-
-from typing import Any, TypeAlias
-
-
-AdminEvalCancelResponse: TypeAlias = dict[str, Any]

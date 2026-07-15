@@ -19,7 +19,9 @@ DEFAULT_EXAMPLE_CONFIG = Path("configs/example.toml")
 def default_config_path(root: Path) -> Path:
     local_dir = root / DEFAULT_LOCAL_CONFIG_DIR
     if local_dir.exists():
-        local_configs = sorted(path for path in local_dir.glob("*.toml") if path.is_file())
+        local_configs = sorted(
+            path for path in local_dir.glob("*.toml") if path.is_file()
+        )
         if local_configs:
             return local_configs[-1]
     return root / DEFAULT_EXAMPLE_CONFIG
@@ -88,7 +90,9 @@ def resolve_model_path(
         env_value(env, "WEIGHT_PATH", "HELICOPTER_WEIGHT_PATH"),
     )
     if not base_value:
-        raise SystemExit("WEIGHT_PATH is not set and config paths.weight_path is missing")
+        raise SystemExit(
+            "WEIGHT_PATH is not set and config paths.weight_path is missing"
+        )
 
     base = resolve_path(str(base_value), root=root, env=env)
     base_dir = base.parent if base.suffix == ".pth" else base

@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=77.0.3", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lighteval-runner"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "httpx[socks]>=0.28.1,<0.29.0",
+  "language-data",
+  "lighteval @ git+https://github.com/huggingface/lighteval.git@64f4f5ae173626509fad6e477ca4ee56ebb26129",
+  "more-itertools",
+  "pyarrow>=19.0.0",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=9.0.2,<10.0.0",
+  "ruff>=0.14.0,<0.16.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["lighteval_runner*"]
+
+[tool.setuptools.package-data]
+lighteval_runner = ["tasks/assets/*.jsonl"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

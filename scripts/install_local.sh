@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
 VENV="${VENV:-$ROOT/.venv}"
 UV="${UV:-uv}"
-INSTALL_PROFILE="${INSTALL_PROFILE:-rwkv}"
+INSTALL_COMPONENTS="${INSTALL_COMPONENTS:-rwkv-hf,rwkv-lm}"
 INSTALL_SYSTEM_DEPS="${INSTALL_SYSTEM_DEPS:-0}"
 UPDATE_UV="${UPDATE_UV:-1}"
 UV_UPGRADE="${UV_UPGRADE:-1}"
@@ -27,6 +27,9 @@ CARGO_REGISTRY_MIRROR_NAME="${CARGO_REGISTRY_MIRROR_NAME:-rsproxy-sparse}"
 VLLM="$ROOT/src/infer/vllm-rwkv"
 RWKV_LM="$ROOT/src/train/rwkv-lm"
 VERL="$ROOT/src/train/verl-rwkv"
+LIGHTEVAL_RUNNER="$ROOT/src/eval/lighteval"
+SCOREBOARD_SERVER="$ROOT/src/scoreboard-server"
+SCOREBOARD_CLIENT="$ROOT/src/scoreboard-client"
 STAMP_DIR="$VENV/.helicopter-stamps"
 VLLM_STAMP="$STAMP_DIR/vllm-native.sha256"
 
@@ -127,7 +130,35 @@ install_system_deps() {
   have apt-get || die "INSTALL_SYSTEM_DEPS=1 currently supports apt-get only"
   run sudo apt-get update
   run sudo apt-get install -y --no-install-recommends \
-    build-essential curl git ninja-build pkg-config
+    build-essential curl git ninja-build pkg-config python3-minimal
+}
+
+check_eval_sandbox_env() {
+  profile_has_eval || return 0
+
+  local missing=()
+  [[ -x /usr/bin/python3 ]] || missing+=("/usr/bin/python3")
+  if ((${#missing[@]})); then
+    install_system_deps
+    missing=()
+    [[ -x /usr/bin/python3 ]] || missing+=("/usr/bin/python3")
+  fi
+  ((${#missing[@]} == 0)) ||
+    die "missing coding sandbox prerequisites: ${missing[*]}; rerun with INSTALL_SYSTEM_DEPS=1"
+
+  local landlock_abi
+  landlock_abi="$(/usr/bin/python3 - <<'PY'
+import ctypes
+
+libc = ctypes.CDLL(None, use_errno=True)
+print(libc.syscall(444, None, 0, 1))
+PY
+)"
+  [[ "$landlock_abi" =~ ^[1-9][0-9]*$ ]] ||
+    die "Landlock is unavailable; coding evaluation requires kernel filesystem isolation"
+  [[ -r /proc/sys/kernel/seccomp/actions_avail ]] &&
+    grep -qw errno /proc/sys/kernel/seccomp/actions_avail ||
+    die "seccomp errno filters are unavailable; coding evaluation requires syscall isolation"
 }
 
 check_compiler_env() {
@@ -217,16 +248,90 @@ sync_uv_env() {
   local sync_args=(sync)
   [[ -n "$UV_INDEX_URL" ]] && sync_args+=(--index-url "$UV_INDEX_URL")
   [[ "$UV_SYNC_INEXACT" == "1" ]] && sync_args+=(--inexact)
-  sync_args+=(--project "$ROOT" --python "$PYTHON_VERSION" --no-default-groups --group rwkv)
+  sync_args+=(--project "$ROOT" --python "$PYTHON_VERSION" --no-default-groups)
   [[ "$UV_UPGRADE" == "1" ]] && sync_args+=(--upgrade)
 
-  case "$INSTALL_PROFILE" in
-    rwkv) ;;
-    full) sync_args+=(--group full) ;;
-    *) die "unknown INSTALL_PROFILE=$INSTALL_PROFILE; use rwkv or full" ;;
-  esac
+  profile_has_rwkv && sync_args+=(--group rwkv)
+  profile_has_eval && sync_args+=(--group eval)
 
   run "$UV" "${sync_args[@]}"
+}
+
+has_component() {
+  [[ ",$INSTALL_COMPONENTS," == *",$1,"* ]]
+}
+
+validate_components() {
+  local component
+  local -a components
+  IFS=',' read -r -a components <<<"$INSTALL_COMPONENTS"
+  ((${#components[@]})) || die "INSTALL_COMPONENTS must not be empty"
+  for component in "${components[@]}"; do
+    case "$component" in
+      rwkv-hf|rwkv-lm|vllm-rwkv|verl-rwkv|lighteval|scoreboard-server|scoreboard-client) ;;
+      *) die "unknown INSTALL_COMPONENTS entry: $component" ;;
+    esac
+  done
+}
+
+profile_has_rwkv() {
+  has_component rwkv-hf || has_component rwkv-lm || has_component vllm-rwkv || has_component verl-rwkv
+}
+
+profile_has_eval() {
+  has_component lighteval
+}
+
+profile_has_scoreboard_server() { has_component scoreboard-server; }
+profile_has_scoreboard_client() { has_component scoreboard-client; }
+
+profile_has_vllm() { has_component vllm-rwkv; }
+profile_has_rwkv_lm() { has_component rwkv-lm; }
+profile_has_verl() { has_component verl-rwkv; }
+
+ensure_bun() {
+  profile_has_scoreboard_client || return 0
+  if ! have bun; then
+    have curl || die "bun is missing and curl is not available to install it"
+    run sh -c 'curl -fsSL https://bun.sh/install | bash'
+    export PATH="$HOME/.bun/bin:$PATH"
+  fi
+  have bun || die "bun installation finished but bun is still not on PATH"
+}
+
+sync_scoreboard_server_env() {
+  profile_has_scoreboard_server || return 0
+  [[ -f "$SCOREBOARD_SERVER/uv.lock" ]] || die "scoreboard server lock is missing"
+  local sync_args=(sync --project "$SCOREBOARD_SERVER" --python "$PYTHON_VERSION" --group dev)
+  if [[ "$UV_UPGRADE" == "1" ]]; then
+    sync_args+=(--upgrade)
+  else
+    sync_args+=(--locked)
+  fi
+  [[ -n "$UV_INDEX_URL" ]] && sync_args+=(--index-url "$UV_INDEX_URL")
+  run "$UV" "${sync_args[@]}"
+}
+
+sync_lighteval_dev_dependencies() {
+  profile_has_eval || return 0
+  local sync_args=(sync --project "$LIGHTEVAL_RUNNER" --python "$PYTHON_VERSION" --group dev --locked --inexact)
+  [[ -n "$UV_INDEX_URL" ]] && sync_args+=(--index-url "$UV_INDEX_URL")
+  run "$UV" "${sync_args[@]}"
+}
+
+sync_scoreboard_client_env() {
+  profile_has_scoreboard_client || return 0
+  [[ -f "$SCOREBOARD_CLIENT/bun.lock" ]] || die "scoreboard client lock is missing"
+  ensure_bun
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    print_cmd bun install --frozen-lockfile
+    return 0
+  fi
+  if [[ "$UV_UPGRADE" == "1" ]]; then
+    (cd "$SCOREBOARD_CLIENT" && bun install)
+  else
+    (cd "$SCOREBOARD_CLIENT" && bun install --frozen-lockfile)
+  fi
 }
 
 vllm_native_fingerprint() {
@@ -254,10 +359,17 @@ PY
 }
 
 vllm_native_ready() {
-  "$VENV/bin/python" - <<'PY' >/dev/null
+  VLLM_BUILD_PROFILE="${VLLM_BUILD_PROFILE:-full}" "$VENV/bin/python" - <<'PY' >/dev/null
+import importlib
+import os
+
 import vllm
-import vllm._C_stable_libtorch
-import vllm.rwkv7_ops
+
+required = ["vllm._rapid_sampling", "vllm.rwkv7_ops"]
+if os.environ["VLLM_BUILD_PROFILE"] == "full":
+    required.append("vllm._C_stable_libtorch")
+for module in required:
+    importlib.import_module(module)
 PY
 }
 
@@ -349,15 +461,26 @@ configure_network
 configure_build_dirs
 clean_submodule_venvs
 ensure_uv
-check_compiler_env
+validate_components
+profile_has_rwkv && check_compiler_env
+check_eval_sandbox_env
 sync_uv_env
-check_native_env
-check_cuda_env
-configure_cuda_arch_list
-clean_vllm_cmake_cache
-install_vllm_package
-install_rwkv_lm_package
-install_verl_package
+sync_lighteval_dev_dependencies
+sync_scoreboard_server_env
+sync_scoreboard_client_env
+if profile_has_vllm; then
+  check_native_env
+  check_cuda_env
+  configure_cuda_arch_list
+  clean_vllm_cmake_cache
+  install_vllm_package
+fi
+if profile_has_rwkv_lm; then
+  install_rwkv_lm_package
+fi
+if profile_has_verl; then
+  install_verl_package
+fi
 check_python_packages
 
 clean_submodule_venvs
