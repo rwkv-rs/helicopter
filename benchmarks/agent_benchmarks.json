@@ -1,0 +1,423 @@
+{
+  "description": "Agent benchmark scope used for run planning. Entries under benchmarks are agent-domain candidates; entries under excluded are intentionally not treated as agent benchmarks.",
+  "pipelines": [
+    {
+      "name": "coding_agent",
+      "display_name": "Coding Agent",
+      "scope": "Repository repair, terminal execution, complete-repo generation, and long-horizon software engineering tasks.",
+      "benchmarks": ["swe_bench_verified", "swe_bench_multilingual", "swe_bench_pro", "terminal_bench_2_1", "nl2repo", "deepswe", "hy_backend_2_0", "hy_swe_max"]
+    },
+    {
+      "name": "search_agent",
+      "display_name": "Search Agent",
+      "scope": "Browser search, wide information collection, and multi-step deep research tasks.",
+      "benchmarks": ["browsecomp", "wide_search", "deepsearchqa"]
+    },
+    {
+      "name": "tool_mcp_agent",
+      "display_name": "Tool / MCP Agent",
+      "scope": "Tool discovery, tool selection, MCP workflows, long-horizon tool use, and skill package use.",
+      "benchmarks": ["mcp_atlas", "toolathlon", "skillsbench", "hy_skillsworld"]
+    },
+    {
+      "name": "office_enterprise_workflow_agent",
+      "display_name": "Office / Enterprise Workflow Agent",
+      "scope": "Professional services, documents, spreadsheets, enterprise systems, and product or operations workflows.",
+      "benchmarks": ["apex_agents", "claweval", "wildclawbench", "hy_companybench", "prodbench", "hy_finmodelbench", "e_bench"]
+    },
+    {
+      "name": "stem_tool_agent",
+      "display_name": "STEM Tool Agent",
+      "scope": "Tool-augmented expert STEM QA and programming-assisted mathematical problem solving.",
+      "benchmarks": ["hle_with_tools", "hy_euler_pro"]
+    }
+  ],
+  "harness_profiles": {
+    "swebench_official_docker": {
+      "kind": "swebench",
+      "sandbox": "docker",
+      "official_source": "https://github.com/SWE-bench/SWE-bench",
+      "entrypoint": "python -m swebench.harness.run_evaluation",
+      "required_tools": ["docker"],
+      "prediction_artifact": "predictions.jsonl with instance_id, model_name_or_path, and model_patch",
+      "notes": "Official evaluation applies generated patches inside Docker images and runs the task test script."
+    },
+    "terminal_bench_official_docker": {
+      "kind": "terminal_bench",
+      "sandbox": "docker",
+      "official_source": "https://github.com/laude-institute/terminal-bench",
+      "entrypoint": "tb run or harbor run",
+      "required_tools": ["docker"],
+      "prediction_artifact": "agent trajectory and task result produced by the official terminal sandbox",
+      "notes": "Use the official Terminal-Bench or Harbor adapter path; do not convert it into a final-answer task."
+    },
+    "browsecomp_answer_proxy": {
+      "kind": "browser_search_answer",
+      "sandbox": "none",
+      "official_source": "https://openai.com/index/browsecomp/",
+      "entrypoint": "helicopter eval run browsecomp",
+      "required_tools": [],
+      "prediction_artifact": "final answer text",
+      "notes": "Current local task scores final answers only; a browser-runtime harness is still separate work."
+    },
+    "browser_research_external": {
+      "kind": "browser_research",
+      "sandbox": "browser_or_container",
+      "official_source": null,
+      "entrypoint": "external official harness",
+      "required_tools": [],
+      "prediction_artifact": "structured research answer and trace",
+      "notes": "Requires the benchmark's official search/runtime harness before formal scores."
+    },
+    "tool_mcp_external": {
+      "kind": "tool_mcp",
+      "sandbox": "container_or_mcp_servers",
+      "official_source": null,
+      "entrypoint": "external official harness",
+      "required_tools": [],
+      "prediction_artifact": "tool-call trajectory and verifier result",
+      "notes": "Requires real MCP/tool servers and official verifier contracts."
+    },
+    "workflow_external": {
+      "kind": "workflow_agent",
+      "sandbox": "container_or_application_runtime",
+      "official_source": null,
+      "entrypoint": "external official harness",
+      "required_tools": [],
+      "prediction_artifact": "workflow trace plus rubric or state verifier result",
+      "notes": "Requires the official task environment rather than a single-turn prompt."
+    },
+    "stem_tool_external": {
+      "kind": "stem_tool_agent",
+      "sandbox": "tool_runtime",
+      "official_source": null,
+      "entrypoint": "external official harness",
+      "required_tools": [],
+      "prediction_artifact": "tool-augmented answer and trace",
+      "notes": "Requires the benchmark's tool policy and verifier before formal scores."
+    },
+    "internal_external": {
+      "kind": "internal_agent",
+      "sandbox": "internal_runtime",
+      "official_source": null,
+      "entrypoint": "internal harness",
+      "required_tools": [],
+      "prediction_artifact": "internal verifier result",
+      "notes": "Name-only placeholder; not externally reproducible."
+    }
+  },
+  "benchmarks": [
+    {
+      "name": "swe_bench_multilingual",
+      "display_name": "SWE-bench Multilingual",
+      "field": "agent",
+      "problem_domain": "multilingual software engineering issue repair",
+      "pipeline": "coding_agent",
+      "harness_profile": "swebench_official_docker",
+      "capabilities": ["read repository", "localize bug", "edit code", "run tests", "produce patch"],
+      "reproducibility": "public_external_harness",
+      "run_status": "external_harness_required",
+      "priority": "primary"
+    },
+    {
+      "name": "swe_bench_verified",
+      "display_name": "SWE-bench Verified",
+      "field": "agent",
+      "problem_domain": "verified Python repository issue repair",
+      "pipeline": "coding_agent",
+      "harness_profile": "swebench_official_docker",
+      "official_dataset": "SWE-bench/SWE-bench_Verified",
+      "capabilities": ["read repository", "localize bug", "edit code", "run tests", "produce patch"],
+      "reproducibility": "public_harness",
+      "run_status": "local_lighteval_proxy_available",
+      "priority": "primary",
+      "notes": "Local LightEval task uses patch text proxy metrics, not official apply-and-test resolved rate."
+    },
+    {
+      "name": "swe_bench_pro",
+      "display_name": "SWE-bench Pro",
+      "field": "agent",
+      "problem_domain": "hard software engineering repair",
+      "pipeline": "coding_agent",
+      "harness_profile": "swebench_official_docker",
+      "capabilities": ["large repository navigation", "bugfix", "feature fix", "testing"],
+      "reproducibility": "public_external_harness",
+      "run_status": "external_harness_required",
+      "priority": "primary"
+    },
+    {
+      "name": "terminal_bench_2_1",
+      "display_name": "Terminal-Bench 2.1",
+      "field": "agent",
+      "problem_domain": "terminal environment tasks",
+      "pipeline": "coding_agent",
+      "harness_profile": "terminal_bench_official_docker",
+      "official_dataset": "terminal-bench@2.0",
+      "capabilities": ["shell operation", "environment setup", "build", "debug", "service launch", "script execution"],
+      "reproducibility": "public_external_harness",
+      "run_status": "external_harness_required",
+      "priority": "primary"
+    },
+    {
+      "name": "nl2repo",
+      "display_name": "NL2Repo",
+      "field": "agent",
+      "problem_domain": "natural language to complete repository",
+      "pipeline": "coding_agent",
+      "harness_profile": "workflow_external",
+      "capabilities": ["repository creation", "architecture", "multi-file implementation", "dependency management", "pytest verification"],
+      "reproducibility": "public_external_harness",
+      "run_status": "external_harness_required",
+      "priority": "primary"
+    },
+    {
+      "name": "deepswe",
+      "display_name": "DeepSWE",
+      "field": "agent",
+      "problem_domain": "long-horizon software engineering",
+      "pipeline": "coding_agent",
+      "harness_profile": "workflow_external",
+      "capabilities": ["long horizon coding", "multi-language repositories", "programmatic verifier"],
+      "reproducibility": "public_external_harness",
+      "run_status": "external_harness_required",
+      "priority": "primary"
+    },
+    {
+      "name": "browsecomp",
+      "display_name": "BrowseComp",
+      "field": "agent",
+      "problem_domain": "browser search and hard-to-find information",
+      "pipeline": "search_agent",
+      "harness_profile": "browsecomp_answer_proxy",
+      "capabilities": ["persistent search", "source location", "verification", "short factual answer"],
+      "reproducibility": "public_dataset",
+      "run_status": "local_lighteval_answer_eval_available",
+      "priority": "primary",
+      "notes": "Local LightEval task evaluates final answers only; it is not a browser-runtime harness."
+    },
+    {
+      "name": "wide_search",
+      "display_name": "WideSearch",
+      "field": "agent",
+      "problem_domain": "wide search and structured information collection",
+      "pipeline": "search_agent",
+      "harness_profile": "browser_research_external",
+      "capabilities": ["large-scale collection", "multi-source synthesis", "structured output", "bilingual tasks"],
+      "reproducibility": "public_external_harness",
+      "run_status": "external_harness_required",
+      "priority": "primary"
+    },
+    {
+      "name": "deepsearchqa",
+      "display_name": "DeepSearchQA",
+      "field": "agent",
+      "problem_domain": "deep research and multi-step search",
+      "pipeline": "search_agent",
+      "harness_profile": "browser_research_external",
+      "capabilities": ["search planning", "deduplication", "entity resolution", "stop decision"],
+      "reproducibility": "public_external_harness",
+      "run_status": "external_harness_required",
+      "priority": "primary"
+    },
+    {
+      "name": "mcp_atlas",
+      "display_name": "MCP Atlas",
+      "field": "agent",
+      "problem_domain": "MCP tool use",
+      "pipeline": "tool_mcp_agent",
+      "harness_profile": "tool_mcp_external",
+      "capabilities": ["tool discovery", "tool selection", "argument construction", "multi-tool orchestration"],
+      "reproducibility": "public_external_harness",
+      "run_status": "external_harness_required",
+      "priority": "primary"
+    },
+    {
+      "name": "toolathlon",
+      "display_name": "Toolathlon",
+      "field": "agent",
+      "problem_domain": "general tool use",
+      "pipeline": "tool_mcp_agent",
+      "harness_profile": "tool_mcp_external",
+      "capabilities": ["long-horizon tool calls", "real software environments", "business workflows"],
+      "reproducibility": "public_external_harness",
+      "run_status": "external_harness_required",
+      "priority": "primary"
+    },
+    {
+      "name": "apex_agents",
+      "display_name": "Apex-Agent / APEX-Agents",
+      "field": "agent",
+      "problem_domain": "professional services workflows",
+      "pipeline": "office_enterprise_workflow_agent",
+      "harness_profile": "workflow_external",
+      "capabilities": ["documents", "spreadsheets", "PDF", "email", "chat", "calendar", "cross-application workflow"],
+      "reproducibility": "public_external_harness",
+      "run_status": "external_harness_required",
+      "priority": "primary"
+    },
+    {
+      "name": "claweval",
+      "display_name": "ClawEval",
+      "field": "agent",
+      "problem_domain": "general real-world agent workflows",
+      "pipeline": "office_enterprise_workflow_agent",
+      "harness_profile": "workflow_external",
+      "capabilities": ["end-to-end task completion", "human-verified tasks", "rubric scoring"],
+      "reproducibility": "public_external_harness",
+      "run_status": "external_harness_required",
+      "priority": "primary"
+    },
+    {
+      "name": "wildclawbench",
+      "display_name": "WildClawBench",
+      "field": "agent",
+      "problem_domain": "real runtime agent workflows",
+      "pipeline": "office_enterprise_workflow_agent",
+      "harness_profile": "workflow_external",
+      "capabilities": ["CLI runtime", "native tools", "long-horizon tasks", "bilingual tasks", "multimodal audit"],
+      "reproducibility": "public_external_harness",
+      "run_status": "external_harness_required",
+      "priority": "primary"
+    },
+    {
+      "name": "skillsbench",
+      "display_name": "SkillsBench",
+      "field": "agent",
+      "problem_domain": "agent skill use",
+      "pipeline": "tool_mcp_agent",
+      "harness_profile": "tool_mcp_external",
+      "capabilities": ["skill package use", "instructions", "scripts", "resource-driven workflows"],
+      "reproducibility": "public_external_harness",
+      "run_status": "external_harness_required",
+      "priority": "primary"
+    },
+    {
+      "name": "hle_with_tools",
+      "display_name": "HLE with tools",
+      "field": "agent",
+      "problem_domain": "expert knowledge with tool use",
+      "pipeline": "stem_tool_agent",
+      "harness_profile": "stem_tool_external",
+      "capabilities": ["tool-augmented expert QA", "STEM reasoning", "research support"],
+      "reproducibility": "public_external_harness",
+      "run_status": "external_harness_required",
+      "priority": "secondary",
+      "notes": "Tool-augmented expert QA, not a full workflow-agent benchmark."
+    },
+    {
+      "name": "hy_backend_2_0",
+      "display_name": "Hy-Backend 2.0",
+      "field": "agent",
+      "problem_domain": "backend engineering agent",
+      "pipeline": "coding_agent",
+      "harness_profile": "internal_external",
+      "capabilities": ["API", "services", "database", "debugging", "deployment"],
+      "reproducibility": "internal_only",
+      "run_status": "not_external_reproducible",
+      "priority": "internal"
+    },
+    {
+      "name": "hy_swe_max",
+      "display_name": "Hy-SWE Max",
+      "field": "agent",
+      "problem_domain": "hard software engineering agent",
+      "pipeline": "coding_agent",
+      "harness_profile": "internal_external",
+      "capabilities": ["high-difficulty software engineering"],
+      "reproducibility": "internal_only",
+      "run_status": "not_external_reproducible",
+      "priority": "internal"
+    },
+    {
+      "name": "hy_companybench",
+      "display_name": "Hy-CompanyBench",
+      "field": "agent",
+      "problem_domain": "enterprise workflow agent",
+      "pipeline": "office_enterprise_workflow_agent",
+      "harness_profile": "internal_external",
+      "capabilities": ["company workflow", "cross-system task execution"],
+      "reproducibility": "internal_only",
+      "run_status": "not_external_reproducible",
+      "priority": "internal"
+    },
+    {
+      "name": "e_bench",
+      "display_name": "e-bench",
+      "field": "agent",
+      "problem_domain": "enterprise or execution environment agent",
+      "pipeline": "office_enterprise_workflow_agent",
+      "harness_profile": "internal_external",
+      "capabilities": ["environment task execution"],
+      "reproducibility": "internal_only",
+      "run_status": "not_external_reproducible",
+      "priority": "internal",
+      "notes": "Public information is insufficient; keep as an internal-name placeholder only."
+    },
+    {
+      "name": "hy_finmodelbench",
+      "display_name": "Hy-FinModelBench",
+      "field": "agent",
+      "problem_domain": "financial modeling agent",
+      "pipeline": "office_enterprise_workflow_agent",
+      "harness_profile": "internal_external",
+      "capabilities": ["spreadsheets", "financial reasoning", "model construction"],
+      "reproducibility": "internal_only",
+      "run_status": "not_external_reproducible",
+      "priority": "internal"
+    },
+    {
+      "name": "prodbench",
+      "display_name": "ProdBench",
+      "field": "agent",
+      "problem_domain": "product and operations workflow agent",
+      "pipeline": "office_enterprise_workflow_agent",
+      "harness_profile": "internal_external",
+      "capabilities": ["product workflow", "operations workflow", "delivery workflow"],
+      "reproducibility": "internal_only",
+      "run_status": "not_external_reproducible",
+      "priority": "internal"
+    },
+    {
+      "name": "hy_skillsworld",
+      "display_name": "Hy-SkillsWorld",
+      "field": "agent",
+      "problem_domain": "skill-based workflow agent",
+      "pipeline": "tool_mcp_agent",
+      "harness_profile": "internal_external",
+      "capabilities": ["skill use", "workflow execution"],
+      "reproducibility": "internal_only",
+      "run_status": "not_external_reproducible",
+      "priority": "internal"
+    },
+    {
+      "name": "hy_euler_pro",
+      "display_name": "Hy-Euler pro",
+      "field": "agent",
+      "problem_domain": "tool-assisted math and programming solving",
+      "pipeline": "stem_tool_agent",
+      "harness_profile": "internal_external",
+      "capabilities": ["tool use", "programming", "Project Euler style solving"],
+      "reproducibility": "internal_only",
+      "run_status": "not_external_reproducible",
+      "priority": "internal"
+    }
+  ],
+  "excluded": [
+    {"name": "gpqa_diamond", "field": "knowledge", "reason": "hard science QA, not an agent workflow"},
+    {"name": "hle_no_tools", "field": "knowledge", "reason": "expert knowledge QA without tools"},
+    {"name": "frontierscience_research", "field": "reasoning", "reason": "science reasoning, not an agent workflow"},
+    {"name": "frontierscience_olympiad", "field": "reasoning", "reason": "olympiad reasoning, not an agent workflow"},
+    {"name": "usamo_2026", "field": "math", "reason": "math proof benchmark"},
+    {"name": "matharena_apex", "field": "math", "reason": "math final-answer or construction benchmark"},
+    {"name": "arxivmath", "field": "math", "reason": "research math benchmark"},
+    {"name": "horizonmath", "field": "math", "reason": "math benchmark"},
+    {"name": "phybench", "field": "physics", "reason": "physics symbolic expression benchmark"},
+    {"name": "cmt_benchmark", "field": "physics", "reason": "condensed matter theory expression benchmark"},
+    {"name": "imoanswerbench", "field": "math", "reason": "olympiad short-answer benchmark"},
+    {"name": "superchem", "field": "chemistry", "reason": "chemistry reasoning benchmark"},
+    {"name": "cl_bench", "field": "context_learning", "reason": "context learning, not external tool-agent behavior"},
+    {"name": "cl_bench_life", "field": "context_learning", "reason": "context learning, not external tool-agent behavior"},
+    {"name": "aa_lcr", "field": "long_context", "reason": "long-context reasoning, not agent behavior"},
+    {"name": "hy_math", "display_name": "Hy-Math", "field": "math", "reason": "internal math reasoning, not a complete agent workflow"}
+  ]
+}
