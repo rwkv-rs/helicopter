@@ -12,6 +12,12 @@ dependencies = []
 helicopter = "helicopter_cli.__main__:main"
 
 [dependency-groups]
+eval = [
+  "lighteval[extended_tasks,litellm,multilingual] @ git+https://github.com/huggingface/lighteval.git@64f4f5ae173626509fad6e477ca4ee56ebb26129",
+  "language-data",
+  "more-itertools",
+]
+
 rwkv = [
   "accelerate",
   "aiohttp>=3.13.3",
@@ -132,3 +138,6 @@ package = true
 [tool.setuptools.packages.find]
 where = ["src/cli"]
 include = ["helicopter_cli*"]
+
+[tool.setuptools.package-data]
+helicopter_cli = ["lighteval_data/*.jsonl"]

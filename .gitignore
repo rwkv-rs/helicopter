@@ -24,14 +24,26 @@ build/
 dist/
 *.egg-info/
 
+node_modules/
+.next/
+playwright-report/
+test-results/
+tsconfig.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+/tmp/scoreboard-screenshots/
+
 configs/local/
 
 /logs/
 /runs/
 /outputs/
+/results/
 /checkpoints/
 /wandb/
 /tensorboard/
+.litellm_cache/
 
 /weights/
 /models/
