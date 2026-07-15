@@ -210,6 +210,13 @@ def validate_strict_on_policy_overrides(overrides: list[str], *, env: dict[str, 
         "actor_rollout_ref.rollout.tensor_model_parallel_size": "1",
         "actor_rollout_ref.rollout.data_parallel_size": "1",
         "actor_rollout_ref.rollout.pipeline_model_parallel_size": "1",
+        "actor_rollout_ref.actor.ppo_max_token_len_per_gpu": "8192",
+        "actor_rollout_ref.ref.log_prob_max_token_len_per_gpu": "8192",
+        "actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu": "8192",
+        "actor_rollout_ref.actor.engine.infctx": "True",
+        "actor_rollout_ref.ref.engine.infctx": "True",
+        "actor_rollout_ref.actor.engine.chunk_ctx": "2048",
+        "actor_rollout_ref.ref.engine.chunk_ctx": "2048",
     }
     for key, expected in required.items():
         actual = resolved.get(key)

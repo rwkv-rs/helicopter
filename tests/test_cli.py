@@ -659,6 +659,13 @@ class CommandPlanTests(unittest.TestCase):
             "actor_rollout_ref.rollout.tensor_model_parallel_size=2",
             "actor_rollout_ref.rollout.data_parallel_size=2",
             "actor_rollout_ref.rollout.pipeline_model_parallel_size=2",
+            "actor_rollout_ref.actor.ppo_max_token_len_per_gpu=16384",
+            "actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=16384",
+            "actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=16384",
+            "actor_rollout_ref.actor.engine.infctx=False",
+            "actor_rollout_ref.ref.engine.infctx=False",
+            "actor_rollout_ref.actor.engine.chunk_ctx=4096",
+            "actor_rollout_ref.ref.engine.chunk_ctx=4096",
             "rollout.n_gpus_per_node=1",
         )
 
@@ -668,6 +675,26 @@ class CommandPlanTests(unittest.TestCase):
                     build_takeoff_plan(
                         loaded_config,
                         args=takeoff_args(override=[override]),
+                    )
+
+    def test_takeoff_rejects_environment_drift_from_state_passing_contract(self) -> None:
+        loaded_config = load_example_config()
+        invalid_environments = (
+            {"PPO_MAX_TOKEN_LEN_PER_GPU": "16384"},
+            {"RWKV_INFCTX": "0"},
+            {"RWKV_CHUNK_CTX": "4096"},
+        )
+
+        for mutation in invalid_environments:
+            with self.subTest(mutation=mutation):
+                with self.assertRaisesRegex(SystemExit, "strict on-policy takeoff"):
+                    build_takeoff_plan(
+                        loaded_config,
+                        loaded_env={
+                            "WEIGHT_PATH": "/weights/RWKV",
+                            "DATASETS_PATH": "/datasets",
+                            **mutation,
+                        },
                     )
 
     def test_takeoff_allows_equal_larger_round_and_ppo_mini_batch(self) -> None:

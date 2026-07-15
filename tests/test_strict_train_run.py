@@ -251,6 +251,9 @@ def test_topology_contract_and_observation_must_match(tmp_path):
                         "node_id": "node-0",
                         "actor_id": f"actor-{index}",
                         "http_port": 30000 + index,
+                        "master_port": 31000 + index,
+                        "dp_rpc_port": 32000 + index,
+                        "dp_master_port": 33000 + index,
                         "cuda_visible_devices": [str(index)],
                     }
                     for index in range(8)
@@ -264,6 +267,14 @@ def test_topology_contract_and_observation_must_match(tmp_path):
     observed["endpoints"][-1] = observed["endpoints"][0]
     observed_path.write_text(json.dumps(observed))
     with pytest.raises(RuntimeError, match="duplicate"):
+        strict_train_run.verify_observed_topology(observed_path, expected)
+
+    observed["endpoints"][-1] = "http://127.0.0.1:39999"
+    observed["deployments"][-1]["master_port"] = observed["deployments"][0][
+        "dp_rpc_port"
+    ]
+    observed_path.write_text(json.dumps(observed))
+    with pytest.raises(RuntimeError, match="duplicate runtime ports"):
         strict_train_run.verify_observed_topology(observed_path, expected)
 
     with pytest.raises(RuntimeError, match="8 independent TP1"):
@@ -281,9 +292,12 @@ def test_declared_contract_must_match_resolved_training_config():
                 "train_batch_size": 8,
                 "ppo_mini_batch_size": 8,
                 "ppo_micro_batch_size": 1,
+                "ppo_max_token_len_per_gpu": 8192,
                 "rollout_n": 2,
                 "max_prompt_length": 256,
                 "max_response_length": 128,
+                "infctx": True,
+                "chunk_ctx": 2048,
                 "trainer_n_gpus_per_node": 8,
                 "rollout_tensor_parallel_size": 1,
                 "rollout_pipeline_parallel_size": 1,
@@ -295,6 +309,7 @@ def test_declared_contract_must_match_resolved_training_config():
         "train_batch_size": 8,
         "ppo_mini_batch_size": 8,
         "ppo_micro_batch_size": 1,
+        "ppo_max_token_len_per_gpu": 8192,
         "rollout_n": 2,
         "max_prompt_length": 256,
         "max_response_length": 128,
@@ -320,6 +335,23 @@ def test_declared_contract_must_match_resolved_training_config():
             config,
             seed="42",
             batch={**batch, "train_batch_size": 56},
+            topology=topology,
+            precision="fp32io16",
+            wkv_mode="fp32io16",
+        )
+
+    with pytest.raises(RuntimeError, match="actor token budget 8192"):
+        strict_train_run.verify_declared_contract(
+            {
+                "takeoff": {
+                    "grpo": {
+                        **config["takeoff"]["grpo"],
+                        "ppo_max_token_len_per_gpu": 16384,
+                    }
+                }
+            },
+            seed="42",
+            batch={**batch, "ppo_max_token_len_per_gpu": 16384},
             topology=topology,
             precision="fp32io16",
             wkv_mode="fp32io16",
@@ -540,6 +572,20 @@ def test_checked_in_quality_configs_share_equal_sample_contract(
     assert takeoff["ppo_max_token_len_per_gpu"] == 8192
     assert takeoff["rollout_max_num_seqs"] == 64
     assert takeoff["rollout_max_num_batched_tokens"] == 8192
+
+
+def test_all_checked_in_strict_configs_fix_state_passing_actor_capacity():
+    config_root = Path(__file__).parents[1] / "configs"
+    strict_configs = sorted(config_root.glob("strict-*.toml"))
+
+    assert strict_configs
+    for config_path in strict_configs:
+        takeoff = tomllib.loads(config_path.read_text(encoding="utf-8"))["takeoff"][
+            "grpo"
+        ]
+        assert takeoff["ppo_max_token_len_per_gpu"] == 8192, config_path.name
+        assert takeoff["infctx"] is True, config_path.name
+        assert takeoff["chunk_ctx"] == 2048, config_path.name
 
 
 def test_checked_in_global_batch_probe_changes_only_algorithm_batch_capacity():

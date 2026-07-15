@@ -635,6 +635,7 @@ def verify_declared_contract(
         "train_batch_size",
         "ppo_mini_batch_size",
         "ppo_micro_batch_size",
+        "ppo_max_token_len_per_gpu",
         "rollout_n",
         "max_prompt_length",
         "max_response_length",
@@ -643,6 +644,22 @@ def verify_declared_contract(
     actual_batch = {field: int(batch[field]) for field in batch_fields}
     if actual_batch != expected_batch:
         raise RuntimeError(f"declared batch does not match resolved config: {actual_batch} != {expected_batch}")
+    fixed_training_capacity = {
+        "ppo_max_token_len_per_gpu": 8192,
+        "infctx": True,
+        "chunk_ctx": 2048,
+    }
+    actual_training_capacity = {
+        "ppo_max_token_len_per_gpu": int(takeoff["ppo_max_token_len_per_gpu"]),
+        "infctx": bool(takeoff["infctx"]),
+        "chunk_ctx": int(takeoff["chunk_ctx"]),
+    }
+    if actual_training_capacity != fixed_training_capacity:
+        raise RuntimeError(
+            "strict training capacity must use actor token budget 8192 with "
+            "infctx state passing and chunk_ctx 2048: "
+            f"{actual_training_capacity} != {fixed_training_capacity}"
+        )
     expected_topology = {
         "trainer_gpus": int(takeoff["trainer_n_gpus_per_node"]),
         "rollout_replicas": 8 // int(takeoff["rollout_tensor_parallel_size"]),
@@ -689,8 +706,31 @@ def verify_observed_topology(path: Path, expected: dict[str, Any]) -> dict[str, 
     ]
     if len(gpu_bindings) != 8 or len(gpu_bindings) != len(set(gpu_bindings)):
         raise RuntimeError(f"observed rollout topology does not uniquely cover 8 GPUs: {gpu_bindings}")
-    if any(deployment.get("http_port") is None or not deployment.get("actor_id") for deployment in deployments):
-        raise RuntimeError("observed rollout topology is missing runtime actor or HTTP port identity")
+    port_fields = ("http_port", "master_port", "dp_rpc_port", "dp_master_port")
+    runtime_ports = []
+    for deployment in deployments:
+        if not deployment.get("actor_id"):
+            raise RuntimeError("observed rollout topology is missing runtime actor identity")
+        node_id = deployment.get("node_id")
+        if not node_id:
+            raise RuntimeError("observed rollout topology is missing node identity")
+        for field in port_fields:
+            port = deployment.get(field)
+            if not isinstance(port, int) or not 0 < port <= 65535:
+                raise RuntimeError(
+                    f"observed rollout topology has invalid {field} for replica "
+                    f"{deployment.get('replica_rank')}: {port!r}"
+                )
+            runtime_ports.append((node_id, port, field, deployment.get("replica_rank")))
+    port_bindings = [(node_id, port) for node_id, port, _, _ in runtime_ports]
+    if len(port_bindings) != len(set(port_bindings)):
+        duplicates = sorted(
+            {binding for binding in port_bindings if port_bindings.count(binding) > 1}
+        )
+        raise RuntimeError(
+            "observed rollout topology contains duplicate runtime ports on the same node: "
+            f"{duplicates}"
+        )
     return observed
 
 
