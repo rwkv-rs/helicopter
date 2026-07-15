@@ -51,6 +51,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--revision", required=True)
     parser.add_argument("--subset", default="sample-10BT")
     parser.add_argument("--split", default="train")
+    parser.add_argument(
+        "--data-file",
+        help=(
+            "Pinned repository-relative parquet path. When set, stream this "
+            "shard directly instead of recursively enumerating the dataset repository."
+        ),
+    )
     parser.add_argument("--tokenizer-path", required=True, type=Path)
     parser.add_argument("--target-tokens", required=True, type=int)
     parser.add_argument("--output", required=True, type=Path)
@@ -73,13 +80,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         local_files_only=True,
         trust_remote_code=False,
     )
-    stream = load_dataset(
-        args.repository,
-        name=args.subset,
-        split=args.split,
-        revision=args.revision,
-        streaming=True,
-    )
+    if args.data_file:
+        endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co").rstrip("/")
+        data_url = (
+            f"{endpoint}/datasets/{args.repository}/resolve/{args.revision}/"
+            f"{args.data_file.lstrip('/')}"
+        )
+        stream = load_dataset(
+            "parquet",
+            data_files={args.split: data_url},
+            split=args.split,
+            streaming=True,
+        )
+    else:
+        data_url = None
+        stream = load_dataset(
+            args.repository,
+            name=args.subset,
+            split=args.split,
+            revision=args.revision,
+            streaming=True,
+        )
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{output.name}.", suffix=".partial", dir=output.parent, text=True
     )
@@ -129,6 +150,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "revision": args.revision,
         "subset": args.subset,
         "split": args.split,
+        "data_file": args.data_file,
+        "data_url": data_url,
         "tokenizer_path": str(tokenizer_path),
         "target_tokens": args.target_tokens,
         "materialized_tokens": tokens,
