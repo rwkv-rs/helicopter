@@ -525,6 +525,27 @@ def test_validation_curve_requires_initial_timing(tmp_path):
         strict_train_run.verify_validation_curve(path, expected_rounds=0)
 
 
+@pytest.mark.parametrize("testing_seconds", [0.0, -1.0, float("nan"), float("inf")])
+def test_validation_curve_rejects_invalid_testing_time(tmp_path, testing_seconds):
+    path = tmp_path / "metrics.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "step": 0,
+                "elapsed_seconds": 1.0,
+                "data": {
+                    "val-core/dapo/reward/acc/mean@1": 0.1,
+                    "timing_s/testing": testing_seconds,
+                },
+            }
+        )
+        + "\n"
+    )
+
+    with pytest.raises(RuntimeError, match="positive finite testing time"):
+        strict_train_run.verify_validation_curve(path, expected_rounds=0)
+
+
 @pytest.mark.parametrize(("batch_size", "rounds", "test_freq"), [(56, 14, 2), (112, 7, 1)])
 def test_global_batch_quality_schedule_is_equal_sampled(batch_size, rounds, test_freq):
     config = {
@@ -586,6 +607,62 @@ def test_all_checked_in_strict_configs_fix_state_passing_actor_capacity():
         assert takeoff["ppo_max_token_len_per_gpu"] == 8192, config_path.name
         assert takeoff["infctx"] is True, config_path.name
         assert takeoff["chunk_ctx"] == 2048, config_path.name
+
+
+@pytest.mark.parametrize("config_name", ["strict-quality-b56.toml", "strict-quality-b112.toml"])
+def test_quality_configs_satisfy_exact_remote_declared_contract(config_name):
+    config_path = Path(__file__).parents[1] / "configs" / config_name
+    config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    takeoff = config["takeoff"]["grpo"]
+    batch_fields = (
+        "train_batch_size",
+        "ppo_mini_batch_size",
+        "ppo_micro_batch_size",
+        "ppo_max_token_len_per_gpu",
+        "rollout_n",
+        "max_prompt_length",
+        "max_response_length",
+    )
+
+    strict_train_run.verify_declared_contract(
+        config,
+        seed="42",
+        batch={field: takeoff[field] for field in batch_fields},
+        topology={
+            "trainer_gpus": 8,
+            "rollout_replicas": 8,
+            "rollout_tp": 1,
+            "rollout_pp": 1,
+            "rollout_internal_dp": 1,
+        },
+        precision="fp32io16",
+        wkv_mode="fp32io16",
+    )
+
+
+def test_quality_configs_differ_only_by_equal_sample_batch_schedule():
+    root = Path(__file__).parents[1]
+    baseline = tomllib.loads((root / "configs" / "strict-quality-b56.toml").read_text())[
+        "takeoff"
+    ]["grpo"]
+    candidate = tomllib.loads(
+        (root / "configs" / "strict-quality-b112.toml").read_text()
+    )["takeoff"]["grpo"]
+
+    allowed_changes = {
+        "experiment_name",
+        "train_batch_size",
+        "ppo_mini_batch_size",
+        "total_training_steps",
+        "test_freq",
+    }
+    assert {
+        key for key in baseline.keys() | candidate.keys() if baseline.get(key) != candidate.get(key)
+    } == allowed_changes
+    assert baseline["train_batch_size"] * baseline["total_training_steps"] == 56 * 14
+    assert candidate["train_batch_size"] * candidate["total_training_steps"] == 112 * 7
+    assert baseline["test_freq"] * baseline["train_batch_size"] == 112
+    assert candidate["test_freq"] * candidate["train_batch_size"] == 112
 
 
 def test_checked_in_global_batch_probe_changes_only_algorithm_batch_capacity():

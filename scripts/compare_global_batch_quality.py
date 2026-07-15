@@ -12,6 +12,7 @@ from typing import Any
 
 
 QUALITY_NONINFERIORITY_MARGIN = 0.03
+QUALITY_GEMM_POLICY = "fp32-state-fp16-io_no-fp16-accumulation"
 
 
 def load_metadata(path: Path, *, expected_batch_size: int) -> dict[str, Any]:
@@ -27,23 +28,105 @@ def load_metadata(path: Path, *, expected_batch_size: int) -> dict[str, Any]:
     validation = metadata.get("validation")
     if not isinstance(validation, dict) or validation.get("final_cumulative_samples") != 6272:
         raise RuntimeError(f"quality artifact lacks the equal-sample validation contract: {path}")
+    expected_config_name = f"strict-quality-b{expected_batch_size}.toml"
+    config_path = Path(str(metadata.get("config", {}).get("path", "")))
+    if config_path.name != expected_config_name:
+        raise RuntimeError(
+            f"quality artifact {path} must use {expected_config_name}, got {config_path.name!r}"
+        )
+    if metadata.get("precision") != "fp32io16" or metadata.get("wkv_mode") != "fp32io16":
+        raise RuntimeError(f"quality artifact must use fp32io16 precision/WKV mode: {path}")
+    if metadata.get("gemm_policy") != QUALITY_GEMM_POLICY:
+        raise RuntimeError(f"quality artifact has the wrong GEMM policy: {path}")
     return metadata
 
 
 def first_time_at_or_above(points: list[dict[str, Any]], metric: str, target: float) -> float | None:
-    for point in points:
+    if not points:
+        return None
+    initial_wall_seconds = float(points[0]["cumulative_wall_seconds"])
+    for point in points[1:]:
+        if int(point["cumulative_samples"]) <= 0:
+            continue
         value = float(point["metrics"][metric])
-        wall_seconds = float(point["cumulative_wall_seconds"])
+        wall_seconds = float(point["cumulative_wall_seconds"]) - initial_wall_seconds
         if not math.isfinite(value) or not math.isfinite(wall_seconds):
             raise RuntimeError("quality comparison encountered a non-finite value")
+        if wall_seconds <= 0:
+            raise RuntimeError("post-training quality wall time must be positive")
         if value >= target:
             return wall_seconds
     return None
 
 
+def _required_path(payload: dict[str, Any], path: str) -> Any:
+    value: Any = payload
+    for key in path.split("."):
+        if not isinstance(value, dict) or key not in value:
+            raise RuntimeError(f"quality artifact is missing comparable field {path}")
+        value = value[key]
+    return value
+
+
+def verify_comparable_contract(baseline: dict[str, Any], candidate: dict[str, Any]) -> None:
+    equal_paths = (
+        "source.commit",
+        "source_revisions",
+        "checkpoint.sha256",
+        "dataset_manifest.sha256",
+        "seed",
+        "precision",
+        "wkv_mode",
+        "gemm_policy",
+        "topology",
+        "rollout_capacity",
+        "measurement_contract",
+        "environment",
+    )
+    for path in equal_paths:
+        baseline_value = _required_path(baseline, path)
+        candidate_value = _required_path(candidate, path)
+        if baseline_value != candidate_value:
+            raise RuntimeError(
+                f"quality artifacts are not comparable for {path}: "
+                f"{baseline_value!r} != {candidate_value!r}"
+            )
+
+    ignored_batch_fields = {"train_batch_size", "ppo_mini_batch_size"}
+    baseline_batch = {
+        key: value
+        for key, value in _required_path(baseline, "batch").items()
+        if key not in ignored_batch_fields
+    }
+    candidate_batch = {
+        key: value
+        for key, value in _required_path(candidate, "batch").items()
+        if key not in ignored_batch_fields
+    }
+    if baseline_batch != candidate_batch:
+        raise RuntimeError(
+            "quality artifacts change non-global-batch fields: "
+            f"{baseline_batch!r} != {candidate_batch!r}"
+        )
+
+    baseline_validation = _required_path(baseline, "validation")
+    candidate_validation = _required_path(candidate, "validation")
+    for field in ("accuracy_metrics", "common_metrics"):
+        if baseline_validation.get(field) != candidate_validation.get(field):
+            raise RuntimeError(f"quality artifacts do not share validation {field}")
+    baseline_axis = [point.get("cumulative_samples") for point in baseline_validation["points"]]
+    candidate_axis = [point.get("cumulative_samples") for point in candidate_validation["points"]]
+    if baseline_axis != candidate_axis or baseline_axis != list(range(0, 6272 + 1, 896)):
+        raise RuntimeError(
+            "quality artifacts must share the fixed 0..6272 validation sample axis: "
+            f"{baseline_axis!r} != {candidate_axis!r}"
+        )
+
+
 def compare_quality(
     baseline: dict[str, Any], candidate: dict[str, Any], *, metric: str | None = None
 ) -> dict[str, Any]:
+    verify_comparable_contract(baseline, candidate)
     baseline_validation = baseline["validation"]
     candidate_validation = candidate["validation"]
     common_accuracy = sorted(
@@ -95,6 +178,10 @@ def compare_quality(
         "target_accuracy": target,
         "quality_gate_passed": quality_passed,
         "wall_clock_gate_passed": wall_clock_passed,
+        "wall_clock_basis": (
+            "first post-training validation at or above target; elapsed from completion "
+            "of initial validation"
+        ),
     }
 
 

@@ -1084,12 +1084,15 @@ def verify_validation_curve(path: Path, *, expected_rounds: int) -> dict[str, An
             raise RuntimeError("validation curve contains a non-finite metric")
         if "timing_s/testing" not in data:
             raise RuntimeError("every validation point must record timing_s/testing")
+        testing_seconds = float(data["timing_s/testing"])
+        if not math.isfinite(testing_seconds) or testing_seconds <= 0:
+            raise RuntimeError("every validation point must record positive finite testing time")
         curve.append(
             {
                 "step": record.get("step"),
                 "cumulative_samples": cumulative_samples,
                 "cumulative_wall_seconds": elapsed_seconds,
-                "testing_seconds": float(data["timing_s/testing"]),
+                "testing_seconds": testing_seconds,
                 "metrics": validation_metrics,
             }
         )
