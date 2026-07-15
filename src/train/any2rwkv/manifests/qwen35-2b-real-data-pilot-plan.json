@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "classification": "real-24-layer-proxy-real-data-quality-pilot-not-p1",
+  "seed": 20260714,
+  "learning_rate": 0.0001,
+  "burn_in_tokens": 128,
+  "supervised_tokens": 512,
+  "accumulation_steps": 1,
+  "activation_checkpointing": true,
+  "execution_mode": "streamed_layer_store",
+  "cache_teacher_layers": true,
+  "max_teacher_cache_bytes": 8000000000,
+  "max_cuda_reserved_bytes": 90000000000,
+  "stage_tokens_per_layer": {
+    "signals": 1024,
+    "block": 4096,
+    "global": 16384
+  },
+  "corrective_min_sweeps": 1,
+  "corrective_max_sweeps": 1,
+  "corrective_min_delta": 0.0,
+  "notes": [
+    "使用冻结 FineWeb-Edu revision 的真实文本，约 0.9M supervised token。",
+    "该轮只判断真实文本相对 synthetic smoke 是否改善 KL、PPL 与生成可读性；不作为 P1。",
+    "若 chat smoke 仍不可读，先调整目标配比或训练稳定性，不直接启动 55M-token P1。"
+  ]
+}
