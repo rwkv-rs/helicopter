@@ -42,6 +42,7 @@ FORMAL_PERFORMANCE_PHASES = {
     "training-capacity",
     "rollout-capacity",
     "global-batch",
+    "global-batch-quality",
     "optimization",
 }
 DIAGNOSTIC_PHASES = {"nsys"}
@@ -984,6 +985,82 @@ def verify_performance_metrics(path: Path, *, expected_rounds: int) -> dict[str,
     }
 
 
+def verify_validation_curve(path: Path, *, expected_rounds: int) -> dict[str, Any]:
+    if not path.is_file():
+        raise RuntimeError(f"training metrics artifact is missing: {path}")
+    records = [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    cumulative_samples = 0
+    cumulative_wall_seconds = 0.0
+    curve = []
+    for record in records:
+        data = record.get("data", {})
+        if "training/actual_samples" in data:
+            samples = data["training/actual_samples"]
+            if not isinstance(samples, int) or isinstance(samples, bool) or samples < 0:
+                raise RuntimeError("validation curve encountered an invalid training sample count")
+            cumulative_samples += samples
+        for timing_key in ("timing_s/step", "timing_s/testing"):
+            if timing_key in data:
+                value = float(data[timing_key])
+                if not math.isfinite(value) or value <= 0:
+                    raise RuntimeError(f"validation curve encountered invalid {timing_key}")
+                cumulative_wall_seconds += value
+        validation_metrics = {
+            key: float(value)
+            for key, value in data.items()
+            if key.startswith("val-core/")
+        }
+        if not validation_metrics:
+            continue
+        if any(not math.isfinite(value) for value in validation_metrics.values()):
+            raise RuntimeError("validation curve contains a non-finite metric")
+        if "timing_s/testing" not in data:
+            raise RuntimeError("every validation point must record timing_s/testing")
+        curve.append(
+            {
+                "step": record.get("step"),
+                "cumulative_samples": cumulative_samples,
+                "cumulative_wall_seconds": cumulative_wall_seconds,
+                "testing_seconds": float(data["timing_s/testing"]),
+                "metrics": validation_metrics,
+            }
+        )
+    if len(curve) < 2:
+        raise RuntimeError("global-batch quality runs require initial and post-training validation points")
+    if curve[0]["cumulative_samples"] != 0:
+        raise RuntimeError("the initial validation point must precede all training samples")
+    expected_samples = sum(
+        int(record.get("data", {}).get("training/actual_samples", 0))
+        for record in records
+    )
+    if curve[-1]["cumulative_samples"] != expected_samples:
+        raise RuntimeError("the final validation point must follow every training sample")
+    training_steps = [
+        record.get("step")
+        for record in records
+        if "training/global_step" in record.get("data", {})
+    ]
+    if len(training_steps) != expected_rounds:
+        raise RuntimeError(
+            f"validation curve expected {expected_rounds} training rounds, found {len(training_steps)}"
+        )
+    common_metrics = sorted(set.intersection(*(set(point["metrics"]) for point in curve)))
+    accuracy_metrics = [key for key in common_metrics if key.endswith("/acc/mean@1")]
+    if not accuracy_metrics:
+        raise RuntimeError("validation curve is missing a common val-core/*/acc/mean@1 metric")
+    return {
+        "points": curve,
+        "common_metrics": common_metrics,
+        "accuracy_metrics": accuracy_metrics,
+        "final_cumulative_samples": expected_samples,
+        "final_cumulative_wall_seconds": curve[-1]["cumulative_wall_seconds"],
+    }
+
+
 def verify_gpu_telemetry(summary: dict[str, Any]) -> None:
     if summary["missing_gpus"]:
         raise RuntimeError(f"GPU telemetry is missing devices: {summary['missing_gpus']}")
@@ -1329,6 +1406,15 @@ def main() -> int:
         elif run_phase in FORMAL_PERFORMANCE_PHASES:
             verify_rollout_capacity_observations(metadata["vllm_capacity_observations"], config)
             metadata["performance"] = verify_performance_metrics(metrics_path, expected_rounds=expected_rounds)
+            if run_phase == "global-batch-quality":
+                takeoff = config["takeoff"]["grpo"]
+                if not takeoff.get("val_before_train") or int(takeoff.get("test_freq", -1)) <= 0:
+                    raise RuntimeError(
+                        "global-batch quality runs require val_before_train=true and test_freq>0"
+                    )
+                metadata["validation"] = verify_validation_curve(
+                    metrics_path, expected_rounds=expected_rounds
+                )
         elif run_phase == "nsys":
             metadata["correctness"] = verify_correctness_metrics(metrics_path, expected_rounds=expected_rounds)
             metadata["nsys"] = verify_nsys_trace(run_dir)

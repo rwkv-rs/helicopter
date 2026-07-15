@@ -434,6 +434,48 @@ def test_performance_metrics_reject_insufficient_timed_steps(tmp_path):
         strict_train_run.verify_performance_metrics(tmp_path / "missing.jsonl", expected_rounds=6)
 
 
+def test_validation_curve_tracks_equal_sample_and_wall_clock_axis(tmp_path):
+    path = tmp_path / "metrics.jsonl"
+    records = [
+        {
+            "step": 0,
+            "data": {
+                "val-core/dapo/reward/acc/mean@1": 0.10,
+                "timing_s/testing": 3.0,
+            },
+        },
+        {
+            "step": 1,
+            "data": {
+                "training/global_step": 1,
+                "training/actual_samples": 8,
+                "timing_s/step": 2.0,
+                "val-core/dapo/reward/acc/mean@1": 0.20,
+                "timing_s/testing": 4.0,
+            },
+        },
+    ]
+    path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+
+    summary = strict_train_run.verify_validation_curve(path, expected_rounds=1)
+
+    assert summary["accuracy_metrics"] == ["val-core/dapo/reward/acc/mean@1"]
+    assert summary["points"][0]["cumulative_samples"] == 0
+    assert summary["points"][0]["cumulative_wall_seconds"] == 3.0
+    assert summary["points"][1]["cumulative_samples"] == 8
+    assert summary["points"][1]["cumulative_wall_seconds"] == 9.0
+
+
+def test_validation_curve_requires_initial_timing(tmp_path):
+    path = tmp_path / "metrics.jsonl"
+    path.write_text(
+        json.dumps({"step": 0, "data": {"val-core/dapo/reward/acc/mean@1": 0.1}}) + "\n"
+    )
+
+    with pytest.raises(RuntimeError, match="timing_s/testing"):
+        strict_train_run.verify_validation_curve(path, expected_rounds=0)
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
