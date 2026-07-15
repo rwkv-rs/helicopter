@@ -12,7 +12,7 @@ from typing import Any
 
 import httpx
 
-from lighteval_runner.results.artifacts import verify_manifest
+from lighteval_runner.results.acceptance import verify_acceptance_runs
 
 
 MODEL = "rwkv7-g1h-7.2b-eval"
@@ -72,7 +72,7 @@ def run_acceptance(config: AcceptanceConfig) -> None:
         _verify_generation_boundaries(probes)
         runs = _run_matrix(config)
         _write_json(config.output / "runs.json", runs)
-        verification = _verify_runs(runs)
+        verification = verify_acceptance_runs(runs)
         _write_json(config.output / "verification.json", verification)
     finally:
         _stop_owned_server(server)
@@ -304,36 +304,6 @@ def _run_eval(
     }
     if completed.returncode != 0 or len(manifests) != 1:
         raise RuntimeError(f"{label} failed: {completed.returncode}")
-
-
-def _verify_runs(runs: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    verification: dict[str, dict[str, Any]] = {}
-    for label, record in runs.items():
-        manifest_path = Path(record["manifests"][0])
-        manifest = verify_manifest(manifest_path)
-        samples = json.loads(
-            (manifest_path.parent / "samples.json").read_text(encoding="utf-8")
-        )
-        summary = json.loads(
-            (manifest_path.parent / "summary.json").read_text(encoding="utf-8")
-        )
-        verification[label] = {
-            "status": manifest.status.value,
-            "accounting": manifest.accounting.to_payload(),
-            "identities": manifest.identities,
-            "sample_statuses": [sample["status"] for sample in samples],
-            "terminal_reasons": [
-                sample.get("generation", {}).get("terminal_reason")
-                for sample in samples
-            ],
-            "repair_actions": [
-                sample.get("scoring", {}).get("repair_action") for sample in samples
-            ],
-            "summary": summary,
-        }
-        if manifest.status.value != "completed":
-            raise AssertionError(f"{label} did not complete")
-    return verification
 
 
 def _stop_owned_server(server: subprocess.Popen[str]) -> None:
