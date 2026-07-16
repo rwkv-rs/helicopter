@@ -210,9 +210,6 @@ def validate_strict_on_policy_overrides(overrides: list[str], *, env: dict[str, 
         "actor_rollout_ref.rollout.tensor_model_parallel_size": "1",
         "actor_rollout_ref.rollout.data_parallel_size": "1",
         "actor_rollout_ref.rollout.pipeline_model_parallel_size": "1",
-        "actor_rollout_ref.actor.ppo_max_token_len_per_gpu": "8192",
-        "actor_rollout_ref.ref.log_prob_max_token_len_per_gpu": "8192",
-        "actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu": "8192",
         "actor_rollout_ref.actor.engine.infctx": "True",
         "actor_rollout_ref.ref.engine.infctx": "True",
         "actor_rollout_ref.actor.engine.chunk_ctx": "2048",
@@ -236,6 +233,34 @@ def validate_strict_on_policy_overrides(overrides: list[str], *, env: dict[str, 
             "strict on-policy takeoff requires "
             "actor_rollout_ref.actor.ppo_mini_batch_size == data.train_batch_size, "
             f"got {ppo_mini_batch_size} != {train_batch_size}"
+        )
+
+    token_budget_keys = (
+        "actor_rollout_ref.actor.ppo_max_token_len_per_gpu",
+        "actor_rollout_ref.ref.log_prob_max_token_len_per_gpu",
+        "actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu",
+    )
+    token_budgets = {
+        key: strict_positive_int(resolved.get(key), name=key) for key in token_budget_keys
+    }
+    if len(set(token_budgets.values())) != 1:
+        raise SystemExit(
+            "strict on-policy takeoff requires equal actor/ref/rollout token budgets, "
+            f"got {token_budgets}"
+        )
+    max_prompt_length = strict_positive_int(
+        resolved.get("data.max_prompt_length"), name="data.max_prompt_length"
+    )
+    max_response_length = strict_positive_int(
+        resolved.get("data.max_response_length"), name="data.max_response_length"
+    )
+    token_budget = next(iter(token_budgets.values()))
+    required_sequence_tokens = max_prompt_length + max_response_length
+    if token_budget < required_sequence_tokens:
+        raise SystemExit(
+            "strict on-policy takeoff requires the dynamic token budget to fit one "
+            "complete prompt+response sequence, got "
+            f"{token_budget} < {max_prompt_length}+{max_response_length}"
         )
 
     forbidden = {

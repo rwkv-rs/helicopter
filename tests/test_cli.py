@@ -645,6 +645,22 @@ class CommandPlanTests(unittest.TestCase):
         ):
             build_takeoff_plan(loaded_config)
 
+    def test_takeoff_accepts_response_8192_with_complete_sequence_budget(self) -> None:
+        loaded_config = load_example_config()
+        takeoff = loaded_config["takeoff"]
+        takeoff["grpo"] = {
+            **takeoff["grpo"],
+            "max_response_length": 8192,
+            "ppo_max_token_len_per_gpu": 10240,
+        }
+
+        overrides = hydra_map(build_takeoff_plan(loaded_config))
+
+        self.assertEqual(overrides["data.max_response_length"], "8192")
+        self.assertEqual(
+            overrides["actor_rollout_ref.actor.ppo_max_token_len_per_gpu"], "10240"
+        )
+
     def test_takeoff_rejects_strict_on_policy_override_regressions(self) -> None:
         loaded_config = load_example_config()
         invalid_overrides = (
@@ -663,9 +679,9 @@ class CommandPlanTests(unittest.TestCase):
             "actor_rollout_ref.rollout.tensor_model_parallel_size=2",
             "actor_rollout_ref.rollout.data_parallel_size=2",
             "actor_rollout_ref.rollout.pipeline_model_parallel_size=2",
-            "actor_rollout_ref.actor.ppo_max_token_len_per_gpu=16384",
-            "actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=16384",
-            "actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=16384",
+            "actor_rollout_ref.actor.ppo_max_token_len_per_gpu=4096",
+            "actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=4096",
+            "actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=4096",
             "actor_rollout_ref.actor.engine.infctx=False",
             "actor_rollout_ref.ref.engine.infctx=False",
             "actor_rollout_ref.actor.engine.chunk_ctx=4096",
@@ -684,7 +700,7 @@ class CommandPlanTests(unittest.TestCase):
     def test_takeoff_rejects_environment_drift_from_state_passing_contract(self) -> None:
         loaded_config = load_example_config()
         invalid_environments = (
-            {"PPO_MAX_TOKEN_LEN_PER_GPU": "16384"},
+            {"PPO_MAX_TOKEN_LEN_PER_GPU": "128"},
             {"RWKV_INFCTX": "0"},
             {"RWKV_CHUNK_CTX": "4096"},
         )
