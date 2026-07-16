@@ -79,6 +79,7 @@ rwkv = [
   "pylatexenc",
   "pynvvideocodec==2.1.0",
   "pytest",
+  "pytest-asyncio",
   "pytorch-lightning==1.9.5",
   "pyyaml",
   "python-json-logger",
