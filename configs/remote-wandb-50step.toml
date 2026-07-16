@@ -6,7 +6,7 @@ rwkv_lm_path = "src/train/rwkv-lm"
 
 [takeoff.grpo]
 project_name = "helicopter-math"
-experiment_name = "strict-on-policy-pro6000-wandb-50step-20260715-01"
+experiment_name = "strict-on-policy-pro6000-wandb-50step-20260715-02"
 wkv_mode = "fp32io16"
 emb_device = "gpu"
 adv_estimator = "maxrl"
