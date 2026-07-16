@@ -6,16 +6,16 @@ rwkv_lm_path = "src/train/rwkv-lm"
 
 [takeoff.grpo]
 project_name = "helicopter-math"
-experiment_name = "strict-on-policy-pro6000-wandb-50step-20260715-02"
+experiment_name = "strict-on-policy-pro6000-wandb-50step-20260715-03"
 wkv_mode = "fp32io16"
 emb_device = "gpu"
 adv_estimator = "maxrl"
 reward_manager = "dapo"
 reward_function = "math_verify"
-train_batch_size = 56
+train_batch_size = 48
 train_max_samples = 17408
 val_max_samples = 1024
-ppo_mini_batch_size = 56
+ppo_mini_batch_size = 48
 seed = 42
 ppo_epochs = 1
 ppo_micro_batch_size = 1
