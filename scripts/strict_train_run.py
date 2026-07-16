@@ -663,6 +663,13 @@ def verify_declared_contract(
             "and an actor token budget that fits one complete prompt+response: "
             f"{actual_training_capacity}, required_sequence_tokens={required_sequence_tokens}"
         )
+    if int(takeoff["max_response_length"]) == 8192 and not bool(
+        takeoff.get("rollout_ignore_eos", False)
+    ):
+        raise RuntimeError(
+            "strict response-8192 training requires rollout_ignore_eos=true so every "
+            "response contains exactly 8192 tokens"
+        )
     expected_topology = {
         "trainer_gpus": int(takeoff["trainer_n_gpus_per_node"]),
         "rollout_replicas": 8 // int(takeoff["rollout_tensor_parallel_size"]),
@@ -828,6 +835,39 @@ def verify_correctness_metrics(path: Path, *, expected_rounds: int) -> dict[str,
         "cross_runtime_diagnostics": cross_runtime_diagnostics,
         "steps": steps,
     }
+
+
+def verify_exact_response_length(
+    path: Path, *, expected_rounds: int, expected_length: int
+) -> dict[str, Any]:
+    records = [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    rounds = [record for record in records if "training/global_step" in record.get("data", {})]
+    if len(rounds) != expected_rounds:
+        raise RuntimeError(
+            f"exact response-length contract expected {expected_rounds} rounds, found {len(rounds)}"
+        )
+    for record in rounds:
+        data = record["data"]
+        step = record.get("step")
+        minimum = int(data.get("response_length/min", -1))
+        maximum = int(data.get("response_length/max", -1))
+        samples = int(data.get("training/actual_samples", -1))
+        response_tokens = int(data.get("training/actual_response_tokens", -1))
+        if minimum != expected_length or maximum != expected_length:
+            raise RuntimeError(
+                f"step {step} did not generate exact {expected_length}-token responses: "
+                f"min={minimum}, max={maximum}"
+            )
+        if response_tokens != samples * expected_length:
+            raise RuntimeError(
+                f"step {step} response-token total does not match exact-length contract: "
+                f"{response_tokens} != {samples}*{expected_length}"
+            )
+    return {"rounds": len(rounds), "tokens_per_response": expected_length}
 
 
 def _percentile(values: list[float], quantile: float) -> float:
@@ -1516,6 +1556,13 @@ def main() -> int:
         metadata["observed_rollout_topology"] = verify_observed_topology(
             run_dir / "rollout_topology.json", topology
         )
+        takeoff = config["takeoff"]["grpo"]
+        if bool(takeoff.get("rollout_ignore_eos", False)):
+            metadata["exact_response_length"] = verify_exact_response_length(
+                metrics_path,
+                expected_rounds=expected_rounds,
+                expected_length=int(takeoff["max_response_length"]),
+            )
         if run_phase == "correctness":
             metadata["correctness"] = verify_correctness_metrics(metrics_path, expected_rounds=expected_rounds)
         elif run_phase in FORMAL_PERFORMANCE_PHASES:

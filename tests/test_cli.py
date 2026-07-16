@@ -652,6 +652,7 @@ class CommandPlanTests(unittest.TestCase):
             **takeoff["grpo"],
             "max_response_length": 8192,
             "ppo_max_token_len_per_gpu": 10240,
+            "rollout_ignore_eos": True,
         }
 
         overrides = hydra_map(build_takeoff_plan(loaded_config))
@@ -660,6 +661,7 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(
             overrides["actor_rollout_ref.actor.ppo_max_token_len_per_gpu"], "10240"
         )
+        self.assertEqual(overrides["actor_rollout_ref.rollout.ignore_eos"], "True")
 
     def test_takeoff_rejects_strict_on_policy_override_regressions(self) -> None:
         loaded_config = load_example_config()

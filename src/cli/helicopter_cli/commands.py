@@ -254,6 +254,13 @@ def validate_strict_on_policy_overrides(overrides: list[str], *, env: dict[str, 
     max_response_length = strict_positive_int(
         resolved.get("data.max_response_length"), name="data.max_response_length"
     )
+    if max_response_length == 8192 and resolved.get(
+        "actor_rollout_ref.rollout.ignore_eos"
+    ) != "True":
+        raise SystemExit(
+            "strict on-policy response-8192 takeoff requires "
+            "actor_rollout_ref.rollout.ignore_eos=True"
+        )
     token_budget = next(iter(token_budgets.values()))
     required_sequence_tokens = max_prompt_length + max_response_length
     if token_budget < required_sequence_tokens:
@@ -345,6 +352,9 @@ def build_grpo_hydra_overrides(
         "ROLLOUT_GPU_MEM_UTIL",
     )
     rollout_n = takeoff_value(takeoff, env, "rollout_n", "ROLLOUT_N", 8)
+    rollout_ignore_eos = takeoff_value(
+        takeoff, env, "rollout_ignore_eos", "ROLLOUT_IGNORE_EOS", False
+    )
     rollout_top_p = takeoff_value(takeoff, env, "rollout_top_p", "ROLLOUT_TOP_P", 0.8)
     rollout_max_num_seqs = takeoff_value(takeoff, env, "rollout_max_num_seqs", "ROLLOUT_MAX_NUM_SEQS")
     rollout_max_num_batched_tokens = takeoff_value(
@@ -509,6 +519,7 @@ def build_grpo_hydra_overrides(
             f"actor_rollout_ref.rollout.n={format_hydra_value(rollout_n)}",
             f"actor_rollout_ref.rollout.seed={format_hydra_value(seed)}",
             f"actor_rollout_ref.rollout.top_p={format_hydra_value(rollout_top_p)}",
+            f"actor_rollout_ref.rollout.ignore_eos={format_hydra_value(rollout_ignore_eos)}",
             "actor_rollout_ref.rollout.enable_prefix_caching=False",
             f"actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu={format_hydra_value(ppo_micro_batch_size)}",
             f"actor_rollout_ref.rollout.log_prob_use_dynamic_bsz={format_hydra_value(dynamic_bsz)}",

@@ -336,6 +336,7 @@ def test_declared_contract_must_match_resolved_training_config():
                 **config["takeoff"]["grpo"],
                 "max_response_length": 8192,
                 "ppo_max_token_len_per_gpu": 10240,
+                "rollout_ignore_eos": True,
             }
         }
     }
@@ -360,7 +361,6 @@ def test_declared_contract_must_match_resolved_training_config():
             precision="fp32io16",
             wkv_mode="fp32io16",
         )
-
     with pytest.raises(RuntimeError, match=r"fits one complete prompt\+response"):
         strict_train_run.verify_declared_contract(
             {
@@ -378,6 +378,30 @@ def test_declared_contract_must_match_resolved_training_config():
             wkv_mode="fp32io16",
         )
 
+
+def test_exact_response_length_contract_rejects_early_eos(tmp_path):
+    metrics = tmp_path / "metrics.jsonl"
+    record = {
+        "step": 1,
+        "data": {
+            "training/global_step": 1,
+            "response_length/min": 8192,
+            "response_length/max": 8192,
+            "training/actual_samples": 64,
+            "training/actual_response_tokens": 64 * 8192,
+        },
+    }
+    metrics.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    assert strict_train_run.verify_exact_response_length(
+        metrics, expected_rounds=1, expected_length=8192
+    ) == {"rounds": 1, "tokens_per_response": 8192}
+
+    record["data"]["response_length/min"] = 4072
+    metrics.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="did not generate exact 8192-token responses"):
+        strict_train_run.verify_exact_response_length(
+            metrics, expected_rounds=1, expected_length=8192
+        )
 
 def test_correctness_metrics_require_on_policy_same_version_correction_and_update(tmp_path):
     metrics = tmp_path / "metrics.jsonl"
