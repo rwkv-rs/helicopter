@@ -330,6 +330,27 @@ def test_declared_contract_must_match_resolved_training_config():
         precision="fp32io16",
         wkv_mode="fp32io16",
     )
+    long_config = {
+        "takeoff": {
+            "grpo": {
+                **config["takeoff"]["grpo"],
+                "max_response_length": 8192,
+                "ppo_max_token_len_per_gpu": 10240,
+            }
+        }
+    }
+    strict_train_run.verify_declared_contract(
+        long_config,
+        seed="42",
+        batch={
+            **batch,
+            "max_response_length": 8192,
+            "ppo_max_token_len_per_gpu": 10240,
+        },
+        topology=topology,
+        precision="fp32io16",
+        wkv_mode="fp32io16",
+    )
     with pytest.raises(RuntimeError, match="declared batch"):
         strict_train_run.verify_declared_contract(
             config,
@@ -340,18 +361,18 @@ def test_declared_contract_must_match_resolved_training_config():
             wkv_mode="fp32io16",
         )
 
-    with pytest.raises(RuntimeError, match="actor token budget 8192"):
+    with pytest.raises(RuntimeError, match=r"fits one complete prompt\+response"):
         strict_train_run.verify_declared_contract(
             {
                 "takeoff": {
                     "grpo": {
                         **config["takeoff"]["grpo"],
-                        "ppo_max_token_len_per_gpu": 16384,
+                        "ppo_max_token_len_per_gpu": 128,
                     }
                 }
             },
             seed="42",
-            batch={**batch, "ppo_max_token_len_per_gpu": 16384},
+            batch={**batch, "ppo_max_token_len_per_gpu": 128},
             topology=topology,
             precision="fp32io16",
             wkv_mode="fp32io16",

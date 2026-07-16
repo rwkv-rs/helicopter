@@ -644,21 +644,24 @@ def verify_declared_contract(
     actual_batch = {field: int(batch[field]) for field in batch_fields}
     if actual_batch != expected_batch:
         raise RuntimeError(f"declared batch does not match resolved config: {actual_batch} != {expected_batch}")
-    fixed_training_capacity = {
-        "ppo_max_token_len_per_gpu": 8192,
-        "infctx": True,
-        "chunk_ctx": 2048,
-    }
     actual_training_capacity = {
         "ppo_max_token_len_per_gpu": int(takeoff["ppo_max_token_len_per_gpu"]),
         "infctx": bool(takeoff["infctx"]),
         "chunk_ctx": int(takeoff["chunk_ctx"]),
     }
-    if actual_training_capacity != fixed_training_capacity:
+    required_sequence_tokens = int(takeoff["max_prompt_length"]) + int(
+        takeoff["max_response_length"]
+    )
+    if (
+        not actual_training_capacity["infctx"]
+        or actual_training_capacity["chunk_ctx"] != 2048
+        or actual_training_capacity["ppo_max_token_len_per_gpu"]
+        < required_sequence_tokens
+    ):
         raise RuntimeError(
-            "strict training capacity must use actor token budget 8192 with "
-            "infctx state passing and chunk_ctx 2048: "
-            f"{actual_training_capacity} != {fixed_training_capacity}"
+            "strict training capacity must use infctx state passing, chunk_ctx 2048, "
+            "and an actor token budget that fits one complete prompt+response: "
+            f"{actual_training_capacity}, required_sequence_tokens={required_sequence_tokens}"
         )
     expected_topology = {
         "trainer_gpus": int(takeoff["trainer_n_gpus_per_node"]),
