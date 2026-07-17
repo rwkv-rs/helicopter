@@ -1,1 +1,0 @@
-{"id":"search-basic","prompt":"Call the search tool for the query rwkv. Return only a JSON object with name and arguments.","tool":{"description":"Search documents by query.","name":"search","parameters":{"properties":{"query":{"type":"string"}},"required":["query"],"type":"object"}},"expected":{"arguments":{"query":"rwkv"},"name":"search"}}

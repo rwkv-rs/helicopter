@@ -157,7 +157,20 @@ export function DashboardPage({ meta, leaderboard, model, view, tab }: Props) {
       ) : (
         <div className="empty">暂无数据。</div>
       )}
-      <EvalRecordsPanel meta={selectedMeta} onClose={() => setSelectedMeta(null)} />
+      <EvalRecordsPanel
+        selection={
+          selectedMeta?.task_id != null
+            ? {
+                taskId: selectedMeta.task_id,
+                benchmarkName: selectedMeta.benchmark_name,
+                evalMethod: selectedMeta.eval_method,
+                model: selectedMeta.model,
+                eligibility: "official",
+              }
+            : null
+        }
+        onClose={() => setSelectedMeta(null)}
+      />
     </>
   );
 }

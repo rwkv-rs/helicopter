@@ -2,102 +2,193 @@ from __future__ import annotations
 
 import pytest
 
-from lighteval_runner.harnesses.coding import (
-    SandboxPolicy,
-    SandboxResult,
-    SandboxUnavailable,
-    run_python_submission,
+from helicopter_lighteval.evaluation import (
+    DEFAULT_GENERATION_LIMIT,
+    _SIGNED_BINARY_METRICS,
+    _SUPPORTED_GENERATIVE_METRICS,
+    _ensure_generation_size,
+    _light_eval_task_configs,
+    _override_generation_size,
+    _primary_metric_name,
+    UnsupportedTaskError,
+    _task_identity,
 )
-from lighteval_runner.tasks.coding import (
-    CodingCase,
-    CodingScoringInput,
-    score_python_submission,
-)
-from lighteval_runner.tasks.function_calling import (
-    InvalidFunctionCall,
-    exact_function_call_match,
-    parse_function_call,
-)
-
-
-def test_function_call_arguments_are_canonical_and_invalid_json_is_not_empty_object():
-    actual = parse_function_call({"name": "search", "arguments": '{"b":2,"a":1}'})
-    expected = parse_function_call({"name": "search", "arguments": {"a": 1, "b": 2}})
-    assert exact_function_call_match(actual, expected)
-    with pytest.raises(InvalidFunctionCall):
-        parse_function_call({"name": "search", "arguments": "not-json"})
-
-
-def test_coding_submission_scoring_consumes_only_sandbox_result(monkeypatch):
-    monkeypatch.setattr(
-        "lighteval_runner.tasks.coding.run_python_submission",
-        lambda *_args, **_kwargs: SandboxResult(
-            revision="landlock-seccomp-python-v3",
-            return_code=0,
-            stdout="42\n",
-            stderr="",
-            timed_out=False,
-            output_limit_exceeded=False,
-        ),
-    )
-    source = "value = int(input())\nprint(value * 2)"
-    score, results = score_python_submission(
-        CodingScoringInput(source, (CodingCase("21\n", "42\n"),)),
-        policy=SandboxPolicy(wall_seconds=2.0),
-    )
-    assert score == 1.0
-    assert results[0].revision == "landlock-seccomp-python-v3"
-
-
-def test_coding_sandbox_blocks_network_access():
-    source = "import socket\nsocket.create_connection(('127.0.0.1', 1), timeout=0.1)"
-    try:
-        result = run_python_submission(
-            source, stdin="", policy=SandboxPolicy(wall_seconds=2.0)
-        )
-    except SandboxUnavailable as error:
-        pytest.skip(str(error))
-    else:
-        assert result.return_code != 0
-        assert result.timed_out is False
-
-
-def test_coding_sandbox_allows_valid_submission():
-    result = _run_in_available_sandbox("print(int(input()) * 2)", stdin="21\n")
-    assert result.return_code == 0
-    assert result.stdout == "42\n"
 
 
 @pytest.mark.parametrize(
-    "source",
-    (
-        "open('/etc/passwd').read()",
-        "open('/tmp/helicopter-sandbox-escape', 'w').write('escape')",
-    ),
+    ("canonical", "upstream"),
+    [
+        ("lighteval/knowledge/mmlu-abstract-algebra@0", "mmlu:abstract_algebra|0"),
+        ("lighteval/knowledge/mmlu-pro@0", "mmlu_pro|0"),
+        ("lighteval/knowledge/gpqa-diamond@1", "gpqa:diamond|0"),
+        ("lighteval/knowledge/gpqa-main@0", "gpqa:main|0"),
+        ("lighteval/knowledge/gpqa-extended@0", "gpqa:extended|0"),
+    ],
 )
-def test_coding_sandbox_blocks_filesystem_escape(source):
-    result = _run_in_available_sandbox(source)
-    assert result.return_code != 0
+def test_generation_only_knowledge_aliases_resolve_to_pinned_upstream(
+    canonical: str, upstream: str
+) -> None:
+    identity = _task_identity(canonical)
+    assert identity.upstream_task == upstream
+    assert identity.family == "knowledge"
 
 
-def test_coding_sandbox_bounds_captured_output():
-    result = _run_in_available_sandbox(
-        "print('x' * 4096)", policy=SandboxPolicy(output_bytes=1024)
+def test_all_pinned_mmlu_subjects_resolve_through_knowledge_family() -> None:
+    configs = _light_eval_task_configs()
+    subjects = sorted(
+        name.removeprefix("mmlu:") for name in configs if name.startswith("mmlu:")
     )
-    assert result.output_limit_exceeded is True
-    assert len(result.stdout.encode()) <= 1024
+    assert len(subjects) == 57
+    for subject in subjects:
+        canonical = f"lighteval/knowledge/mmlu-{subject.replace('_', '-')}@0"
+        identity = _task_identity(canonical)
+        assert identity.upstream_task == f"mmlu:{subject}|0"
 
 
-def test_coding_sandbox_enforces_wall_timeout():
-    result = _run_in_available_sandbox(
-        "while True: pass",
-        policy=SandboxPolicy(wall_seconds=0.1, cpu_seconds=2),
-    )
-    assert result.timed_out is True
+@pytest.mark.parametrize(
+    "canonical",
+    [
+        "lighteval/knowledge/mmlu_redux_2:abstract_algebra@0",
+        "lighteval/knowledge/gpqa-diamond@0",
+        "lighteval/knowledge/not-a-real-task@0",
+    ],
+)
+def test_registered_but_unsupported_or_unknown_knowledge_tasks_fail_closed(
+    canonical: str,
+) -> None:
+    with pytest.raises(UnsupportedTaskError):
+        _task_identity(canonical)
 
 
-def _run_in_available_sandbox(source, *, stdin="", policy=SandboxPolicy()):
-    try:
-        return run_python_submission(source, stdin=stdin, policy=policy)
-    except SandboxUnavailable as error:
-        pytest.skip(str(error))
+@pytest.mark.parametrize(
+    "canonical",
+    [
+        "lighteval/knowledge/hle@0",
+        "lighteval/knowledge/simpleqa@0",
+        "lighteval/knowledge/mt-bench@0",
+        "lighteval/knowledge/long-horizon-execution@0",
+        "lighteval/knowledge/lcb:codegeneration@0",
+        "lighteval/math/lcb:codegeneration@0",
+    ],
+)
+def test_family_aliases_cannot_cross_coding_or_judge_boundaries(canonical: str) -> None:
+    with pytest.raises(UnsupportedTaskError):
+        _task_identity(canonical)
+
+
+def test_supported_knowledge_metrics_are_signed_binary_metrics() -> None:
+    configs = _light_eval_task_configs()
+    for upstream in (
+        "mmlu:abstract_algebra",
+        "mmlu_pro",
+        "gpqa:diamond",
+        "gpqa:main",
+        "gpqa:extended",
+    ):
+        assert {
+            str(metric.metric_name) for metric in configs[upstream].metrics
+        } <= _SIGNED_BINARY_METRICS
+
+
+@pytest.mark.parametrize(
+    ("canonical", "upstream"),
+    [
+        ("lighteval/math/aime24@2", "aime24|0"),
+        ("lighteval/math/aime25@2", "aime25|0"),
+        ("lighteval/math/asdiv@0", "asdiv|0"),
+        ("lighteval/math/gsm-plus@0", "gsm_plus|0"),
+        (
+            "lighteval/math/olympiadbench@1",
+            "olympiad_bench:OE_TO_maths_en_COMP|0",
+        ),
+    ],
+)
+def test_low_cost_math_aliases_resolve_to_pinned_upstream(
+    canonical: str, upstream: str
+) -> None:
+    identity = _task_identity(canonical)
+    assert identity.upstream_task == upstream
+    assert identity.family == "math"
+
+
+@pytest.mark.parametrize(
+    ("canonical", "upstream"),
+    [
+        ("lighteval/instruction-following/ifeval@0.1", "ifeval|0"),
+        ("lighteval/instruction-following/ifbench-test@0.1", "ifbench_test|0"),
+    ],
+)
+def test_single_turn_instruction_aliases_resolve_to_pinned_upstream(
+    canonical: str, upstream: str
+) -> None:
+    identity = _task_identity(canonical)
+    assert identity.upstream_task == upstream
+    assert identity.version == "0.1"
+    assert identity.family == "instruction-following"
+
+
+def test_multiturn_instruction_alias_is_not_fabricated() -> None:
+    with pytest.raises(UnsupportedTaskError):
+        _task_identity("lighteval/instruction-following/ifbench-multiturn@0.1")
+
+
+def test_low_cost_tasks_have_one_signed_primary_metric() -> None:
+    configs = _light_eval_task_configs()
+    for upstream in (
+        "aime24",
+        "aime25",
+        "asdiv",
+        "gsm_plus",
+        "olympiad_bench:OE_TO_maths_en_COMP",
+        "ifeval",
+        "ifbench_test",
+    ):
+        config = configs[upstream]
+        assert _primary_metric_name(config) in _SIGNED_BINARY_METRICS
+        for metric in config.metrics:
+            names = (
+                metric.metric_name
+                if isinstance(metric.metric_name, list)
+                else [metric.metric_name]
+            )
+            assert set(map(str, names)) <= _SUPPORTED_GENERATIVE_METRICS
+
+
+def test_missing_generation_size_gets_a_stable_default() -> None:
+    task = type("Task", (), {})()
+    task.generation_size = None
+    task.config = type("Config", (), {"generation_size": None})()
+    task._docs = [type("Doc", (), {"generation_size": None})()]
+    _ensure_generation_size(task)
+    assert task.generation_size == DEFAULT_GENERATION_LIMIT
+    assert task.config.generation_size == DEFAULT_GENERATION_LIMIT
+    assert task._docs[0].generation_size == DEFAULT_GENERATION_LIMIT
+    _override_generation_size(task, 128)
+    assert task.generation_size == 128
+    assert task.config.generation_size == 128
+    assert task._docs[0].generation_size == 128
+
+
+@pytest.mark.parametrize(
+    ("canonical", "upstream"),
+    [
+        ("lighteval/coding/livecodebench@0", "lcb:codegeneration|0"),
+        ("lighteval/coding/livecodebench-v6@0", "lcb:codegeneration_v6|0"),
+        (
+            "lighteval/coding/livecodebench-release-latest@0",
+            "lcb:codegeneration_release_latest|0",
+        ),
+    ],
+)
+def test_livecodebench_aliases_resolve_without_enabling_execution(
+    canonical: str, upstream: str
+) -> None:
+    identity = _task_identity(canonical)
+    assert identity.upstream_task == upstream
+    assert identity.family == "coding"
+
+
+@pytest.mark.parametrize("family", ["function-calling", "agent"])
+def test_absent_function_and_agent_families_are_not_fabricated(family: str) -> None:
+    with pytest.raises(UnsupportedTaskError, match="has no"):
+        _task_identity(f"lighteval/{family}/default@0")

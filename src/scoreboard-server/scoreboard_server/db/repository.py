@@ -23,7 +23,7 @@ from scoreboard_server.cores.normalize import (
     split_dataset,
 )
 from scoreboard_server.db.connection import init_db
-from scoreboard_server.db.models import Benchmark, Checker, Completion, EvalRecord, Score, ScoreModel, Task
+from scoreboard_server.db.models import Benchmark, Checker, Completion, EvalRecord, EvaluationPublication, Score, ScoreModel, Task
 from scoreboard_server.db.resume import ResumeContext, TaskLookup
 from scoreboard_server.db.settings import DatabaseSettings
 
@@ -440,7 +440,7 @@ class ScoreboardStore:
                 grouped[key] = row
         return [self._score_row_for_space(row) for row in sorted(grouped.values(), key=lambda item: item.created_at)]
 
-    async def list_score_history_pairs(self) -> list[dict[str, Any]]:
+    async def list_score_history_pairs(self, *, is_tmp: bool = False) -> list[dict[str, Any]]:
         scores = await Score.all().select_related("task", "task__model", "task__benchmark")
         pairs = {
             (
@@ -448,17 +448,17 @@ class ScoreboardStore:
                 join_dataset(score.task.benchmark.benchmark_name, score.task.benchmark.benchmark_split),
             )
             for score in scores
-            if not score.task.is_tmp and not score.task.is_param_search
+            if score.task.is_tmp == is_tmp and not score.task.is_param_search
         }
         return [{"model": model, "dataset": dataset} for model, dataset in sorted(pairs)]
 
-    async def list_score_history(self, *, model: str, dataset: str) -> list[dict[str, Any]]:
+    async def list_score_history(self, *, model: str, dataset: str, is_tmp: bool = False) -> list[dict[str, Any]]:
         benchmark_name, benchmark_split = split_dataset(dataset)
         rows = await Score.filter(
             task__model__model_name=normalize_model_name(model),
             task__benchmark__benchmark_name=benchmark_name,
             task__benchmark__benchmark_split=benchmark_split,
-            task__is_tmp=False,
+            task__is_tmp=is_tmp,
             task__is_param_search=False,
         ).select_related("task", "task__model", "task__benchmark").order_by("created_at", "score_id")
         return [self._history_row(row) for row in rows]
@@ -486,10 +486,37 @@ class ScoreboardStore:
         if score is None and task is None:
             return None
         completion = await Completion.filter(task_id=int(task_id)).order_by("sample_index", "avg_repeat_index", "pass_index").first()
+        publication = await EvaluationPublication.filter(task_id=int(task_id)).first()
+        stored_accounting = publication.accounting_payload if publication is not None and isinstance(publication.accounting_payload, Mapping) else {}
+        generated_samples = stored_accounting.get("generated_samples")
+        truncated_samples = stored_accounting.get("truncated_samples")
+        if not isinstance(generated_samples, int) or not isinstance(truncated_samples, int):
+            completions = await Completion.filter(task_id=int(task_id)).only("context")
+            generated_samples = len(completions)
+            truncated_samples = sum(
+                1
+                for row in completions
+                if isinstance(row.context, Mapping)
+                and isinstance(row.context.get("evidence"), Mapping)
+                and isinstance(row.context["evidence"].get("generation"), Mapping)
+                and row.context["evidence"]["generation"].get("truncated") is True
+            )
         return {
             "score": self._history_row(score) if score else None,
             "task": self._task_dict(task) if task else None,
             "context": completion.context if completion else None,
+            "run": (
+                {
+                    "run_id": publication.run_id,
+                    "identity": publication.identity_payload,
+                    "accounting": publication.accounting_payload,
+                    "performance": publication.performance_payload,
+                }
+                if publication is not None
+                else None
+            ),
+            "generated_samples": generated_samples,
+            "truncated_samples": truncated_samples,
         }
 
     async def get_score_payload(self, *, task_id: str) -> dict[str, Any] | None:
@@ -762,8 +789,18 @@ class ScoreboardStore:
     @staticmethod
     def _history_row(score: Score) -> dict[str, Any]:
         row = ScoreboardStore._score_row_for_space(score)
-        row["evaluator"] = score.task.evaluator
-        row["num_samples"] = score.task.benchmark.num_samples
+        task = score.task
+        sampling_config = task.sampling_config if isinstance(task.sampling_config, Mapping) else {}
+        identity = sampling_config.get("lighteval_identity")
+        if not isinstance(identity, Mapping):
+            identity = {}
+        row["evaluator"] = task.evaluator
+        row["num_samples"] = task.benchmark.num_samples
+        row["visibility"] = "non_official" if task.is_tmp else "official"
+        row["eligibility"] = identity.get("eligibility", "temporary" if task.is_tmp else "official")
+        row["comparable"] = identity.get("comparable")
+        evaluator = identity.get("evaluator")
+        row["dirty"] = evaluator.get("dirty") if isinstance(evaluator, Mapping) else None
         return row
 
     @staticmethod

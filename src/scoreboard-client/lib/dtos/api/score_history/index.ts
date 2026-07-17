@@ -1,3 +1,5 @@
+import type { ScoreHistoryScope } from "./options";
+
 export interface ScoreHistoryPoint {
   score_id: number;
   task_id: number;
@@ -10,6 +12,11 @@ export interface ScoreHistoryPoint {
   sampling_summary: string;
   model: string | null;
   benchmark: string | null;
+  visibility: ScoreHistoryScope;
+  eligibility: "official" | "sanity" | "proxy" | "temporary";
+  comparable: boolean | null;
+  dirty: boolean | null;
+  samples: number | null;
 }
 
 export interface ScoreHistoryGroup {
@@ -18,6 +25,7 @@ export interface ScoreHistoryGroup {
 }
 
 export interface ScoreHistoryResponse {
+  scope: ScoreHistoryScope;
   model: string;
   benchmark: string;
   total: number;

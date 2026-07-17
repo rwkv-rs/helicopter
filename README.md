@@ -1,187 +1,184 @@
 # Helicopter
 
-Helicopter 提供 RWKV serving、训练与可审计评估工作流。评估实现只有一个 owner：
-`src/eval/lighteval`。它是独立 distribution `lighteval-runner`，import package 为
-`lighteval_runner`；`src/eval` 只是未来容纳 `lm-eval-harness` 等框架的物理容器。
+Helicopter 的评测组件位于 `src/eval/lighteval`，distribution 名称为
+`helicopter-lighteval`，Python import package 为 `helicopter_lighteval`。`src/eval` 只
+是评估框架的物理容器，未来的 `lm-eval-harness` 使用同级独立组件，不共享本地
+评测框架代码。
 
-## 目录职责
-
-```text
-src/cli/helicopter_cli/       # 薄 CLI；eval 子命令 lazy import application
-src/eval/lighteval/           # snapshot、task family、provider、score、artifact、HTTP publication
-src/infer/vllm-rwkv/          # OpenAI endpoint 与 provider attestation
-src/scoreboard-server/        # 既有 read/admin API、增量 publication API、PostgreSQL persistence
-src/scoreboard-client/        # 使用既有 /api/* 查询契约的 Next.js UI
-src/train/                    # rwkv-lm 与 verl-rwkv
-```
-
-禁止从 CLI、评估端、前端或维护脚本连接数据库。唯一链路是：
+## 目录边界
 
 ```text
-browser -> scoreboard 既有 /api/* -> service/repository -> PostgreSQL
-evaluator -> PUT /api/v1/evaluation-publications/{run_id} -> service/repository -> PostgreSQL
+src/eval/lighteval/
+├── pyproject.toml
+├── src/helicopter_lighteval/
+│   ├── evaluation.py       # 组合 LightEval Pipeline/Tracker
+│   ├── vllm_rwkv.py        # OpenAI-compatible terminal evidence adapter
+│   ├── scoreboard.py       # HTTP publication/retry
+│   └── datasets/
+│       ├── math.py          # 数学 A/B/C 与 math identity
+│       ├── knowledge.py     # knowledge identity；不复制 task
+│       ├── coding.py        # LiveCodeBench identity 与安全边界
+│       └── instruction_following.py # 单轮 IFEval/IFBench identity
+├── tests/
+└── results/                # generated, Git ignored
 ```
 
-后端不可用时，评估 artifact 保留，显式 publication 返回失败且 CLI 非零退出；没有
-DB fallback 或双写。scoreboard-client 不调用 publication endpoint，evaluator 也不调用
-scoreboard 的 repository。
+LightEval 是 dataset、prompt、chat messages、task registry、metric、样本生命周期和
+标准 results/details 的唯一 owner。Helicopter 不复制 snapshot、context、prompt
+template、generic model client、records/artifacts framework 或 synthetic benchmark。
+`results/<run-id>` 与 `src/` 并列，不是 Python package。
+
+Scoreboard 的写入链路始终是：
+
+```text
+browser/CLI/evaluator -> scoreboard HTTP API -> backend service/repository -> database
+```
+
+评测端、前端和 CLI 不导入数据库驱动、ORM、repository 或数据库凭据；Scoreboard server
+和 client 不属于本次收缩重构范围。
 
 ## 安装
 
-环境只能由 `helicopter-dev` 建立。控制仓库中运行：
+环境由控制仓库的 `helicopter-dev` 管理：
 
 ```bash
 ./bin/helicopter-dev env sync feat-lighteval --target local --components lighteval
 ```
 
-该 component 只同步根 CLI/eval 环境。scoreboard 后端与前端是独立组件，需要时显式
-选择，避免评测安装隐式携带数据库或 UI 依赖：
+评测依赖只由 eval extra 安装。基础 `helicopter --help` 不加载 LightEval 或 OpenAI
+client；vLLM native 安装默认且显式使用 `VLLM_BUILD_PROFILE=rwkv`，不回退到 `full`。
 
-```bash
-./bin/helicopter-dev env sync feat-lighteval --target local \
-  --components scoreboard-server,scoreboard-client
-```
+## 运行评测
 
-GPU/native 环境使用同一命令的 remote target，并按 workload 同时选择
-`vllm-rwkv,lighteval`；不要手工 `pip install`。
+当前可解析固定 LightEval revision `64f4f5ae173626509fad6e477ca4ee56ebb26129` 的真实
+task identity：
 
-## Provider attestation
+- `lighteval/math/gsm8k@0`
+- `lighteval/math/math-500@2`
+- `lighteval/math/aime24@2`
+- `lighteval/math/aime25@2`
+- `lighteval/math/asdiv@0`
+- `lighteval/math/gsm-plus@0`
+- `lighteval/math/olympiadbench@1`
+- `lighteval/knowledge/mmlu-<subject>@0`（固定 registry 中的 MMLU subject）
+- `lighteval/knowledge/mmlu-pro@0`
+- `lighteval/knowledge/gpqa-diamond@1`
+- `lighteval/knowledge/gpqa-main@0`
+- `lighteval/knowledge/gpqa-extended@0`
+- `lighteval/instruction-following/ifeval@0.1`
+- `lighteval/instruction-following/ifbench-test@0.1`
+- `lighteval/coding/livecodebench[-vN|-release-vN|-release-latest]@0`
 
-正式评估只接受提供完整 attestation 的 endpoint。server lifecycle 由
-`helicopter infer --serve-evaluation` 所属进程管理；evaluator 只连接既有 endpoint，
-不会启动、复用判定或停止不属于它的进程。启动 vLLM 时传入
-`--helicopter-attestation-json`，JSON 必须包含：
+这些 alias 是按 family 划分的显式 allowlist；任意未列入的 registry 名称都会被拒绝，
+因此不能把 LiveCodeBench 伪装成 knowledge/math 来绕过 coding 隔离边界。alias 必须在
+pinned LightEval `Registry` 中存在并匹配 config version；dataset、
+PromptManager、task-native metric 和 `EvaluationTracker` 均由 LightEval 加载。不再传入
+本地 snapshot 或 snapshot manifest。示例：
 
-- model served name、checkpoint SHA-256、tokenizer revision、chat-template revision；
-- server revision、WKV mode、precision、GEMM policy、launch contract；
-- `openai-chat`、`output-token-ids`、`terminal-reason`、`prompt-evidence` 四项 capability。
-
-合同通过 `GET /v1/helicopter/attestation` 暴露。official run 任一字段缺失或不匹配
-都会在生成前失败；只有显式 `--allow-non-comparable` 才会降级为 proxy。
-
-## 运行评估
-
-正式 runner 只消费已固定 revision、校验 SHA-256 的本地只读 JSONL/Parquet snapshot，
-并要求同时提供由 `helicopter-dev datasets fetch` 产生的 manifest。canonical registry
-当前直接复用固定 LightEval commit 的 GSM8K、MATH-500 与 MMLU task-native
-prompt/scorer；另外提供显式 opt-in、永不进入 official leaderboard 的
-`helicopter-proxy/function-calling/exact-json@1` 与
-`helicopter-proxy/coding/python-stdio@1`，二者使用 wheel 内不可变资源。示例：
+`aime24`/`aime25` 使用 LightEval 的两个 native metric，但只把 signed `pass@k:*`
+作为 scoreboard primary；`avg@n:n=1` 保留在 LightEval native results/details。
+`ifeval`/`ifbench-test` 使用 grouped metric，scoreboard primary 固定为
+`prompt_level_strict_acc`。pinned config 没有正数 `generation_size` 时，评测端使用
+`32768`；显式 `--generation-limit` 优先。
+支持判断以当前 Pipeline 使用的 native GENERATIVE metric 为准；上游 config 中仅供
+Inspect 入口使用的可选 `scorer` 字段不会被本 adapter 当作 judge backend。
 
 ```bash
 helicopter eval run rwkv-test lighteval/math/gsm8k@0 \
-  --snapshot /datasets/gsm8k-test.jsonl \
-  --snapshot-manifest /datasets/gsm8k-test.jsonl.manifest.json \
-  --snapshot-sha256 "$SNAPSHOT_SHA256" \
   --endpoint-url http://127.0.0.1:8000/v1 \
   --checkpoint-sha256 "$CHECKPOINT_SHA256" \
-  --tokenizer-revision rwkv-tokenizer-v1 \
-  --chat-template-revision rwkv-chat-v1 \
-  --server-revision "$SERVER_REVISION" \
+  --tokenizer-revision "$TOKENIZER_REVISION" \
+  --chat-template-revision "$CHAT_TEMPLATE_REVISION" \
   --wkv-mode fp32io16 \
   --precision fp16-io-fp32-state \
   --gemm-policy fp32-accumulation \
-  --launch-contract helicopter-eval-v1 \
+  --launch-contract helicopter-eval-eager-v1 \
   --cot-mode cot \
-  --math-repair-strategy A \
-  --max-samples 2
+  --math-repair-strategy A
 ```
 
-`--generation-limit` 是显式 override，并记录 `cli` provenance；未传时使用 task-native
-上限，不存在统一 512 的静默覆盖。`--max-samples` 或 generation override 会把本次
-资格降为 `sanity`，不能冒充完整 official run。当前生成 cache 明确禁用，manifest
-记录 `cache-disabled-v1`、完整 namespace/key provenance 与禁用原因，不读取或迁移旧弱
-cache key。endpoint API key 只从
-`--endpoint-api-key-env` 指定的环境变量读取，不出现在 argv 或 artifact。
+本机 GB10 上对 `rwkv7-g1h-7.2b-20260710-ctx10240.pth` 的 eager-mode 容量扫描
+选择 `max_num_seqs=512` 与 `max_concurrent_requests=1000`。固定 1024 题 workload
+下，B512 的有效吞吐约为 3063 token/s，B1024 下降到约 2969 token/s；因此默认值
+按吞吐平台选择，不继续为占用 unified memory 增大容量。GB10 驱动不提供独立 FB
+memory 数字，不能把 system unified-memory 使用量表述为显存占用率。
 
-### 停止、截断与数学 A/B/C
+CLI 只在 eval 子命令内 lazy import `helicopter_lighteval.evaluation`。服务端的
+`/v1/helicopter/attestation` 必须证明 served model、checkpoint、tokenizer/chat-template、
+server revision、WKV/precision/GEMM/launch contract 以及
+`openai-chat`、`output-token-ids`、`terminal-reason`、`prompt-evidence` capability；
+server revision 由当前 `src/infer/vllm-rwkv` submodule HEAD 派生，CLI/config 中的
+`server_revision` 只作为可选一致性断言，不能替代真实 source revision；
+official run 在生成前拒绝缺失或不匹配的 attestation。`--allow-non-comparable` 只能用于
+明确的 sanity 检查，不能产生 official leaderboard 成绩。
 
-每个样本持续生成，直到出现 token `0`、文本 `"\nUser:"`，或达到最终 generation
-limit。前两者记为 `stop`，达到上限记为 `length/truncated`。raw completion 永久不改；
-截断率分母只包含具有 generation evidence 的样本。
+### 停止、截断和数学 A/B/C
 
-- A：所有结果直接交给 task-native scorer。
-- B：仅当 `<think>` 未闭合时补 `</think>\nTherefore...`。
-- C：先执行 B；否则若 answer 被截断，再补 `\nTherefore...`。
+每个 completion 持续生成，直到 vLLM-RWKV 返回以下两种终止证据之一，或达到 task 的
+`generation_size`：
 
-CoT 正常闭合时不会强插 `Therefore...`，也不会进行第二次生成。repair strategy 属于
-完整 run identity，不同策略不会聚合成同一 leaderboard row。
+1. token `0`，或文本包含 `\nUser:`；记录为 `stop`；
+2. 生成 token 数达到上限；记录为 `length`，并计入整体 `truncation_rate`。
 
-## Artifact 与状态
+`vllm_rwkv.py` 只保留并校验这些证据、prompt/output token IDs、usage 和 request ID，
+不重新拼接上下文，也不发送第二次生成请求。LightEval 的 prompt function 和
+`PromptManager` 产生 messages，chat template 由 vLLM-RWKV server 应用。
 
-每次运行排他创建 `results/lighteval/<run-id>`。sample evidence 区分 raw/derived text，
-保存 output token ids/count、terminal reason、attempt、cache/config/provider provenance 与
-typed error。文件以 temp + fsync + rename 提交，最后写 `manifest.json`；manifest 包含完整
-identity、accounting、checksum 和 terminal status，禁止 mtime discovery 或跨 run 合并。
+数学结果使用同一 LightEval task-native metric：
 
-run 状态为 `completed | partial | failed | invalid | cancelled`。只有 provider、accounting、
-aggregation 和 manifest gate 全部闭合，且存在真实 scored sample 时，才能成为 completed。
+- A：raw completion 直接交给 scorer；
+- B：有未闭合 `<think>` 时补 `</think>\nTherefore...`；
+- C：先执行 B，否则仅在截断 answer 时补 `\nTherefore...`。
 
-## Scoreboard
+CoT 正常闭合时不会强插 `Therefore...`。raw/scored completion 和 repair action 都写入
+terminal evidence。
 
-后端配置：
+固定 LightEval 的 LiveCodeBench scorer 会在 evaluator 权限下执行 `exec`，不满足 coding
+隔离合同；因此 coding identity 虽然来自真实 upstream registry，当前仍在 provider import
+前返回 `unsupported`，不会运行 synthetic proxy、近似 scorer 或本地 sandbox。固定 revision
+没有 function-calling benchmark，也没有可由当前 generation-only Pipeline 运行的 agent/tool
+benchmark；`ifbench_multiturn` 需要多轮上下文，因此同样不接入。这些情况返回 `unsupported`，不创建空模块。后续必须另提带真实 upstream task、
+Inspect/tool backend 和隔离合同的 change。
+
+## 结果与发布
+
+每次成功运行排他创建：
 
 ```text
-SCOREBOARD_DB_HOST=/var/run/postgresql
-SCOREBOARD_DB_PORT=5432
-SCOREBOARD_DB_USER=scoreboard
-SCOREBOARD_DB_PASSWORD=...
-SCOREBOARD_DB_NAME=helicopter_scoreboard
-SCOREBOARD_AUTH_TOKENS={"publisher-token":{"subject":"eval-prod","roles":["publisher"]}}
+src/eval/lighteval/results/<run-id>/
+├── results/                  # LightEval native result files
+├── details/                  # LightEval native detail files
+├── terminal_evidence.json   # stop/truncation/raw/scored evidence
+└── manifest.json             # identity/accounting/checksums/completed_at
 ```
 
-这些数据库配置只由 scoreboard backend 读取。应用沿用既有启动流程安全创建缺失 schema；
-既有 `/api/health`、`/api/leaderboard`、`/api/eval-records`、`/api/eval-context`、
-score history、admin、scheduler、capture 与 refresh 契约保持不变。不存在
-`/api/v1/run` 或 `/api/v1/runs`。
+失败运行只保留诊断文件，不生成可发布 manifest。`manifest.json` 由成功保存 native
+results/details 后直接写入；它不是第二套 artifact/lifecycle/cache framework。
 
-发布时添加 `--scoreboard-url`，token 从 `SCOREBOARD_TOKEN`（或
-`--scoreboard-token-env` 指定变量）读取：
-
-```bash
-helicopter eval run ... --scoreboard-url http://127.0.0.1:7860
-```
-
-evaluator 校验 committed manifest 后，把 completed artifact 通过一次
-`PUT /api/v1/evaluation-publications/{run_id}` 发布。请求包含稳定 sample ordinal、
-reference answer、raw/scored evidence、accounting、identity、evaluator Git revision、
-完成时间和 performance。完整 output/prompt token IDs 仍由本地 artifact 持有，不重复进入
-scoreboard projection；HTTP client 使用 gzip，传输体上限 16 MiB、解压后的结构化请求上限
-64 MiB，且 publication 从收包到事务完成始终只允许单并发。认证与两层大小限制均在
-Pydantic 解析前执行。scoreboard 完整预校验后在一个 transaction 中写
-publication receipt、全新的 `Task`、`Completion`、适用时的 `EvalRecord` 与 `Score`，最后
-才把 `Task` 置为 Completed。非二元 metric 不伪造 `EvalRecord.is_passed`，proxy/sanity
-结果不进入 official leaderboard。
-
-publication receipt 与评测 manifest 分离并原子写入；网络失败后只从已校验的 committed
-manifest 重试，不重新发现或合并结果：
+Scoreboard 发布只读取已校验的 manifest 和 terminal evidence，并投影现有严格 DTO 的六个
+manifest 字段：`digest`、`identity_digest`、`accounting_digest`、
+`terminal_status="completed"`、`checksums_verified=true`、带时区的 `completed_at`。
+run id 位于 publication URL，不作为 ManifestEvidence 额外字段。发布请求为 gzip + Bearer
+token，幂等键固定为 `publish:<manifest digest>`；网络失败后使用同一 manifest 重试：
 
 ```bash
-helicopter eval publish results/lighteval/<run-id>/manifest.json \
+helicopter eval publish \
+  src/eval/lighteval/results/<run-id>/manifest.json \
   --scoreboard-url http://127.0.0.1:7860
 ```
 
-`run_id` 与 `(publisher_subject, idempotency_key)` 都有唯一约束：同一 artifact 重放返回原
-`task_id` 与 `unchanged`，相同 run 或 key 携带不同 payload 返回 409；中途任何数据库
-错误整体回滚。成功投影沿用既有 leaderboard、eval records、eval context 与 score history
-查询，无需修改 scoreboard-client。
+当前后端 publication endpoint 是 `PUT /api/v1/evaluation-publications/{run_id}`；本组件
+不调用已移除的 `/api/v1/run` 或 `/api/v1/runs`，也不直连数据库。
 
 ## 验证
 
-所有命令须经 `helicopter-dev lock run`。核心验收覆盖：
+评测组件测试覆盖固定 LightEval API smoke、OpenAI terminal evidence、stop/length 决策、
+数学 A/B/C、结果目录和 manifest checksum、严格 DTO projection、HTTP auth/idempotency、
+CLI lazy import 与 coding fail-closed。安装产物使用：
 
-- stop/truncation 与 A/B/C 决策表；
-- immutable snapshot、identity/cache invalidation、task-native parity；
-- provider attestation、sandbox、atomic artifact、typed failure；
-- publication bearer auth、schema/digest/accounting、并发 idempotency、conflict 与 transaction rollback；
-- 既有 scoreboard 查询回归、frontend typecheck/build 与调用方 DB boundary scan。
+```bash
+scripts/verify_installed_wheels.sh
+```
 
-安装产物还必须通过 `scripts/verify_installed_wheels.sh`：base wheel 不得导入 eval，
-eval/full wheel 必须能导入固定 LightEval adapter 与 bundled proxy assets。PostgreSQL
-契约由 `src/scoreboard-server/scripts/test_postgres.sh` 在临时数据库中验证并自动清理。
-
-coding proxy 使用 Linux Landlock 限制可见文件树，以 seccomp 拒绝网络及宿主控制
-syscall，并叠加 CPU、内存、进程、输出和 wall-time 上限；任一内核能力不可用时评测
-显式失败，不降级为主进程执行。签约远端的完整小样本矩阵由
-`scripts/verify_eval_acceptance.py` 执行，输出目录和 vLLM-RWKV server revision 必须显式
-传入，结果包含原始 stop 探针、attestation、各 family manifest 与聚合核验记录。
+Scoreboard server/client 与 vLLM-RWKV 产品代码保持原样；跨边界检查必须确认其路径没有
+被本组件 diff 修改。

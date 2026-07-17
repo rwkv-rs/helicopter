@@ -14,6 +14,7 @@ UV_SYNC_INEXACT="${UV_SYNC_INEXACT:-1}"
 CLEAN_SUBMODULE_VENVS="${CLEAN_SUBMODULE_VENVS:-1}"
 CLEAN_VLLM_CMAKE_CACHE="${CLEAN_VLLM_CMAKE_CACHE:-1}"
 VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE:-cuda}"
+VLLM_BUILD_PROFILE="${VLLM_BUILD_PROFILE:-rwkv}"
 VLLM_VERSION_OVERRIDE="${VLLM_VERSION_OVERRIDE:-}"
 VLLM_REBUILD="${VLLM_REBUILD:-auto}"
 VERL_REINSTALL="${VERL_REINSTALL:-auto}"
@@ -27,7 +28,7 @@ CARGO_REGISTRY_MIRROR_NAME="${CARGO_REGISTRY_MIRROR_NAME:-rsproxy-sparse}"
 VLLM="$ROOT/src/infer/vllm-rwkv"
 RWKV_LM="$ROOT/src/train/rwkv-lm"
 VERL="$ROOT/src/train/verl-rwkv"
-LIGHTEVAL_RUNNER="$ROOT/src/eval/lighteval"
+LIGHTEVAL_COMPONENT="$ROOT/src/eval/lighteval"
 SCOREBOARD_SERVER="$ROOT/src/scoreboard-server"
 SCOREBOARD_CLIENT="$ROOT/src/scoreboard-client"
 STAMP_DIR="$VENV/.helicopter-stamps"
@@ -131,34 +132,6 @@ install_system_deps() {
   run sudo apt-get update
   run sudo apt-get install -y --no-install-recommends \
     build-essential curl git ninja-build pkg-config python3-minimal
-}
-
-check_eval_sandbox_env() {
-  profile_has_eval || return 0
-
-  local missing=()
-  [[ -x /usr/bin/python3 ]] || missing+=("/usr/bin/python3")
-  if ((${#missing[@]})); then
-    install_system_deps
-    missing=()
-    [[ -x /usr/bin/python3 ]] || missing+=("/usr/bin/python3")
-  fi
-  ((${#missing[@]} == 0)) ||
-    die "missing coding sandbox prerequisites: ${missing[*]}; rerun with INSTALL_SYSTEM_DEPS=1"
-
-  local landlock_abi
-  landlock_abi="$(/usr/bin/python3 - <<'PY'
-import ctypes
-
-libc = ctypes.CDLL(None, use_errno=True)
-print(libc.syscall(444, None, 0, 1))
-PY
-)"
-  [[ "$landlock_abi" =~ ^[1-9][0-9]*$ ]] ||
-    die "Landlock is unavailable; coding evaluation requires kernel filesystem isolation"
-  [[ -r /proc/sys/kernel/seccomp/actions_avail ]] &&
-    grep -qw errno /proc/sys/kernel/seccomp/actions_avail ||
-    die "seccomp errno filters are unavailable; coding evaluation requires syscall isolation"
 }
 
 check_compiler_env() {
@@ -314,7 +287,7 @@ sync_scoreboard_server_env() {
 
 sync_lighteval_dev_dependencies() {
   profile_has_eval || return 0
-  local sync_args=(sync --project "$LIGHTEVAL_RUNNER" --python "$PYTHON_VERSION" --group dev --locked --inexact)
+  local sync_args=(sync --project "$LIGHTEVAL_COMPONENT" --python "$PYTHON_VERSION" --group dev --locked --inexact)
   [[ -n "$UV_INDEX_URL" ]] && sync_args+=(--index-url "$UV_INDEX_URL")
   run "$UV" "${sync_args[@]}"
 }
@@ -337,6 +310,7 @@ sync_scoreboard_client_env() {
 vllm_native_fingerprint() {
   {
     printf 'VLLM_TARGET_DEVICE=%s\n' "$VLLM_TARGET_DEVICE"
+    printf 'VLLM_BUILD_PROFILE=%s\n' "$VLLM_BUILD_PROFILE"
     printf 'VLLM_VERSION_OVERRIDE=%s\n' "$VLLM_VERSION_OVERRIDE"
     printf 'CMAKE_BUILD_TYPE=%s\n' "$CMAKE_BUILD_TYPE"
     printf 'TORCH_CUDA_ARCH_LIST=%s\n' "${TORCH_CUDA_ARCH_LIST:-}"
@@ -359,7 +333,7 @@ PY
 }
 
 vllm_native_ready() {
-  VLLM_BUILD_PROFILE="${VLLM_BUILD_PROFILE:-full}" "$VENV/bin/python" - <<'PY' >/dev/null
+  VLLM_BUILD_PROFILE="$VLLM_BUILD_PROFILE" "$VENV/bin/python" - <<'PY' >/dev/null
 import importlib
 import os
 
@@ -397,6 +371,7 @@ install_vllm_package() {
 
   run env \
     VLLM_TARGET_DEVICE="$VLLM_TARGET_DEVICE" \
+    VLLM_BUILD_PROFILE="$VLLM_BUILD_PROFILE" \
     VLLM_VERSION_OVERRIDE="$VLLM_VERSION_OVERRIDE" \
     VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED:-0}" \
     CMAKE_BUILD_TYPE="$CMAKE_BUILD_TYPE" \
@@ -463,7 +438,6 @@ clean_submodule_venvs
 ensure_uv
 validate_components
 profile_has_rwkv && check_compiler_env
-check_eval_sandbox_env
 sync_uv_env
 sync_lighteval_dev_dependencies
 sync_scoreboard_server_env

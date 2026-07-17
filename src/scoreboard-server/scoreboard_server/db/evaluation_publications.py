@@ -199,7 +199,7 @@ class EvaluationPublicationRepository:
                 using_db=connection,
                 task=task,
                 cot_mode="CoT" if task_identity["cot_mode"] == "cot" else "NoCoT",
-                metrics=sanitize_json(payload["metrics"]),
+                metrics=sanitize_json(payload["native_metrics"]),
                 created_at=completed_at,
             )
             await EvaluationPublication.create(
@@ -213,7 +213,13 @@ class EvaluationPublicationRepository:
                 manifest_digest=str(manifest["digest"]),
                 terminal_status="completed",
                 identity_payload=identity,
-                accounting_payload=accounting,
+                accounting_payload=sanitize_json(
+                    {
+                        **accounting,
+                        "generated_samples": int(payload["generated_samples"]),
+                        "truncated_samples": int(payload["truncated_samples"]),
+                    }
+                ),
                 rejections_payload=payload["rejections"],
                 performance_payload=payload["performance"],
                 created_at=completed_at,

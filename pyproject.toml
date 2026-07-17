@@ -10,12 +10,10 @@ dependencies = []
 
 [project.optional-dependencies]
 eval = [
-  "lighteval-runner",
-  "lighteval @ git+https://github.com/huggingface/lighteval.git@64f4f5ae173626509fad6e477ca4ee56ebb26129",
+  "helicopter-lighteval",
 ]
 full = [
-  "lighteval-runner",
-  "lighteval @ git+https://github.com/huggingface/lighteval.git@64f4f5ae173626509fad6e477ca4ee56ebb26129",
+  "helicopter-lighteval",
 ]
 
 [project.scripts]
@@ -23,7 +21,7 @@ helicopter = "helicopter_cli.__main__:main"
 
 [dependency-groups]
 eval = [
-  "lighteval-runner",
+  "helicopter-lighteval",
 ]
 
 rwkv = [
@@ -134,7 +132,7 @@ rwkv = [
 ]
 
 full = [
-  "lighteval-runner",
+  "helicopter-lighteval",
   "liger-kernel",
   "pre-commit",
 ]
@@ -146,7 +144,7 @@ package = true
 members = ["src/eval/lighteval"]
 
 [tool.uv.sources]
-lighteval-runner = { workspace = true }
+helicopter-lighteval = { workspace = true }
 
 [tool.setuptools.packages.find]
 where = ["src/cli"]

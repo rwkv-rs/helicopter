@@ -183,6 +183,7 @@ class EvaluationPublicationRequest(StrictModel):
     accounting: SampleAccounting
     rejections: list[dict[str, str]]
     metrics: dict[str, float]
+    native_metrics: dict[str, float]
     primary_metric: str = Field(min_length=1)
     truncated_samples: int = Field(ge=0)
     generated_samples: int = Field(gt=0)
@@ -243,6 +244,11 @@ class EvaluationPublicationRequest(StrictModel):
             raise ValueError(
                 "publication must contain exactly the primary aggregate metric"
             )
+        if (
+            self.native_metrics.get(self.primary_metric)
+            != self.metrics[self.primary_metric]
+        ):
+            raise ValueError("native metrics do not preserve the primary aggregate")
         metric_identity = [
             metric
             for metric in self.identity.task.metrics
