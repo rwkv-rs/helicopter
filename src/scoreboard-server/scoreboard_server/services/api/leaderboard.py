@@ -10,6 +10,14 @@ async def leaderboard_response(
     *,
     model: str | None,
     view: str,
+    scope: str = "official",
 ) -> LeaderboardResponse:
-    entries = await store.list_latest_scores_for_space()
-    return build_leaderboard_payload(entries, selected_model=model, view=view)
+    entries = await store.list_latest_scores_for_space(
+        is_tmp=scope == "non_official"
+    )
+    return build_leaderboard_payload(
+        entries,
+        selected_model=model,
+        view=view,
+        scope=scope,
+    )

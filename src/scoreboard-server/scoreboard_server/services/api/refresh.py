@@ -4,6 +4,10 @@ from scoreboard_server.db.repository import ScoreboardStore
 from scoreboard_server.dtos.api.refresh import RefreshResponse
 
 
-async def refresh_response(store: ScoreboardStore) -> RefreshResponse:
-    entries = await store.list_latest_scores_for_space()
-    return {"entry_count": len(entries), "errors": []}
+async def refresh_response(
+    store: ScoreboardStore, *, scope: str = "official"
+) -> RefreshResponse:
+    entries = await store.list_latest_scores_for_space(
+        is_tmp=scope == "non_official"
+    )
+    return {"scope": scope, "entry_count": len(entries), "errors": []}
