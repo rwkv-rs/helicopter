@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Any
 
 try:
@@ -14,6 +15,10 @@ from .paths import resolve_path
 
 DEFAULT_LOCAL_CONFIG_DIR = Path("configs/local")
 DEFAULT_EXAMPLE_CONFIG = Path("configs/example.toml")
+_CHECKPOINT_CONTEXT_RE = re.compile(
+    r"^(?P<prefix>.+)-ctx(?P<context>[1-9][0-9]*)\.pth$"
+)
+_EMBEDDED_CONTEXT_RE = re.compile(r"(?:^|[-_.])ctx[0-9]+(?:[-_.]|$)", re.IGNORECASE)
 
 
 def default_config_path(root: Path) -> Path:
@@ -58,6 +63,11 @@ def resolve_model_entry(config: dict[str, Any], model_name: str) -> dict[str, An
             chain = " -> ".join([*seen, current_name])
             raise SystemExit(f"cyclic model alias in config: {chain}")
         seen.append(current_name)
+        if "max_model_len" in entry:
+            raise SystemExit(
+                "max_model_len is derived from the checkpoint filename; "
+                f"remove it from model {current_name}"
+            )
         alias = entry.get("alias")
         if not alias:
             resolved = dict(entry)
@@ -65,6 +75,19 @@ def resolve_model_entry(config: dict[str, Any], model_name: str) -> dict[str, An
             resolved.setdefault("requested_name", model_name)
             return resolved
         current_name = str(alias)
+
+
+def checkpoint_context_length(model_path: Path) -> int:
+    """Return the one context length declared by the checkpoint basename."""
+
+    filename = model_path.name
+    match = _CHECKPOINT_CONTEXT_RE.fullmatch(filename)
+    if match is None or _EMBEDDED_CONTEXT_RE.search(match.group("prefix")):
+        raise SystemExit(
+            "RWKV checkpoint filename must contain exactly one trailing "
+            f"-ctx<N>.pth field without leading zeros: {filename}"
+        )
+    return int(match.group("context"))
 
 
 def resolve_model_path(

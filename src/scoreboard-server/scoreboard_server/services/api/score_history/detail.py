@@ -2,18 +2,27 @@ from __future__ import annotations
 
 from typing import Any
 
-from scoreboard_server.cores.normalize import metric_from_context, score_to_percent, stop_token_display
+from scoreboard_server.cores.normalize import (
+    metric_from_context,
+    score_to_percent,
+    stop_token_display,
+)
 from scoreboard_server.db.repository import ScoreboardStore
 from scoreboard_server.dtos.api.score_history.detail import ScoreHistoryDetailResponse
 
 
-async def score_history_detail_response(store: ScoreboardStore, *, task_id: int) -> ScoreHistoryDetailResponse:
+async def score_history_detail_response(
+    store: ScoreboardStore, *, task_id: int
+) -> ScoreHistoryDetailResponse:
     detail = await store.get_score_history_detail(task_id=str(task_id))
     if detail is None:
         return {"found": False, "task_id": task_id}
     score = detail.get("score") or {}
     task = detail.get("task") or {}
-    metric, value = metric_from_context(score.get("metrics") or {}, task.get("sampling_config"))
+    run = detail.get("run") if isinstance(detail.get("run"), dict) else {}
+    metric, value = metric_from_context(
+        score.get("metrics") or {}, task.get("sampling_config")
+    )
     context = detail.get("context") if isinstance(detail.get("context"), dict) else {}
     return {
         "found": True,
@@ -22,11 +31,31 @@ async def score_history_detail_response(store: ScoreboardStore, *, task_id: int)
         "benchmark": score.get("dataset"),
         "cot_mode": score.get("cot_mode"),
         "evaluator": task.get("evaluator"),
-        "board": "naive" if str(task.get("evaluator") or "").endswith("_naive") else "normal",
+        "board": "naive"
+        if str(task.get("evaluator") or "").endswith("_naive")
+        else "normal",
+        "visibility": score.get(
+            "visibility", "non_official" if task.get("is_tmp") else "official"
+        ),
+        "eligibility": score.get(
+            "eligibility", "temporary" if task.get("is_tmp") else "official"
+        ),
+        "comparable": score.get("comparable"),
+        "dirty": score.get("dirty"),
+        "run_id": run.get("run_id"),
         "metric": metric,
         "percent": score_to_percent(value),
         "metrics": score.get("metrics") or {},
         "sampling": _sampling_detail(task.get("sampling_config")),
+        "accounting": run.get("accounting") or {},
+        "performance": run.get("performance") or {},
+        "generated_samples": detail.get("generated_samples", 0),
+        "truncated_samples": detail.get("truncated_samples", 0),
+        "truncation_rate": (
+            detail.get("truncated_samples", 0) / detail.get("generated_samples", 1)
+            if detail.get("generated_samples", 0)
+            else 0.0
+        ),
         "stages": [
             {
                 "prompt": str(stage.get("prompt") or ""),
@@ -41,7 +70,11 @@ async def score_history_detail_response(store: ScoreboardStore, *, task_id: int)
 
 def _sampling_detail(sampling_config: Any) -> dict[str, Any]:
     config = sampling_config if isinstance(sampling_config, dict) else {}
-    nested = config.get("sampling_config") if isinstance(config.get("sampling_config"), dict) else {}
+    nested = (
+        config.get("sampling_config")
+        if isinstance(config.get("sampling_config"), dict)
+        else {}
+    )
     stages = {}
     for stage_name, stage_cfg in nested.items():
         cfg = stage_cfg if isinstance(stage_cfg, dict) else {}

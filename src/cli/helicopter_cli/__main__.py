@@ -11,6 +11,7 @@ from .commands import (
     build_infer_plan,
     build_takeoff_plan,
     prepend_venv_path,
+    vllm_rwkv_revision,
 )
 from .config import load_config
 from .env import DEFAULT_ENV_FILE, load_env
@@ -38,7 +39,6 @@ def _add_infer(subparsers: Any) -> None:
     infer.add_argument("--served-model-name")
     infer.add_argument("--tensor-parallel-size", type=int)
     infer.add_argument("--gpu-memory-utilization", type=float)
-    infer.add_argument("--max-model-len", type=int)
     infer.add_argument("--max-num-seqs", type=int)
     infer.add_argument("--max-num-batched-tokens", type=int)
     infer.add_argument("--enable-auto-tool-choice", action="store_true", default=None)
@@ -72,17 +72,18 @@ def _add_takeoff(subparsers: Any) -> None:
 def _add_eval(subparsers: Any) -> None:
     evaluation = subparsers.add_parser("eval", help="run a signed LightEval task")
     eval_commands = evaluation.add_subparsers(dest="eval_command", required=True)
-    run = eval_commands.add_parser(
-        "run", help="evaluate one canonical task against one snapshot"
-    )
+    run = eval_commands.add_parser("run", help="evaluate one canonical LightEval task")
     add_common_options(run)
     run.add_argument("model", help="served model name")
     run.add_argument(
-        "task", help="canonical registry identity, e.g. lighteval/math/gsm8k@0"
+        "task",
+        help=(
+            "canonical LightEval identity, e.g. "
+            "lighteval/math/gsm8k@0, lighteval/math/aime24@2, "
+            "lighteval/knowledge/mmlu-pro@0, or "
+            "lighteval/instruction-following/ifeval@0.1"
+        ),
     )
-    run.add_argument("--snapshot", type=Path)
-    run.add_argument("--snapshot-manifest", type=Path)
-    run.add_argument("--snapshot-sha256")
     run.add_argument("--endpoint-url", help="OpenAI base URL including /v1")
     run.add_argument("--checkpoint-sha256")
     run.add_argument("--tokenizer-revision")
@@ -95,6 +96,8 @@ def _add_eval(subparsers: Any) -> None:
     run.add_argument("--output-root", type=Path)
     run.add_argument("--cot-mode", choices=("none", "cot"))
     run.add_argument("--math-repair-strategy", choices=("A", "B", "C"))
+    run.add_argument("--max-concurrent-requests", type=int)
+    run.add_argument("--request-timeout-seconds", type=float)
     run.add_argument("--max-samples", type=int)
     run.add_argument("--generation-limit", type=int)
     run.add_argument("--allow-non-comparable", action="store_true", default=None)
@@ -125,11 +128,10 @@ def _run_evaluation(
     root: Path,
     env: dict[str, str],
     config: dict[str, Any],
-    config_path: Path,
 ) -> int:
-    from lighteval_runner.application import run_evaluation
-    from lighteval_runner.config import resolve_evaluation_config
-    from lighteval_runner.contracts import EvaluationRequest
+    # Keep the base CLI independent from LightEval and its optional
+    # dependencies.  This import is intentionally inside the eval command.
+    from helicopter_lighteval.evaluation import EvaluationRequest, run_evaluation
 
     scoreboard_token = env.get(args.scoreboard_token_env) or os.environ.get(
         args.scoreboard_token_env
@@ -137,11 +139,42 @@ def _run_evaluation(
     endpoint_api_key = env.get(args.endpoint_api_key_env) or os.environ.get(
         args.endpoint_api_key_env
     )
-    allowed = frozenset(
-        {
-            "snapshot",
-            "snapshot_manifest",
-            "snapshot_sha256",
+    file_values = config.get("eval", {})
+    if not isinstance(file_values, dict):
+        raise ValueError("[eval] config must be a TOML table")
+
+    def resolved(name: str, default: Any = None) -> Any:
+        cli_value = getattr(args, name, None)
+        if cli_value is not None:
+            return cli_value
+        return file_values.get(name, default)
+
+    def required(name: str) -> Any:
+        value = resolved(name)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            raise ValueError(f"evaluation config field is required: {name}")
+        return value
+
+    output_root_value = Path(resolved("output_root", "src/eval/lighteval/results"))
+    output_root = (
+        output_root_value
+        if output_root_value.is_absolute()
+        else root / output_root_value
+    )
+    scoreboard_url = resolved("scoreboard_url")
+    server_revision = vllm_rwkv_revision(config, root=root, env=env)
+    configured_server_revision = resolved("server_revision")
+    if (
+        configured_server_revision is not None
+        and str(configured_server_revision) != server_revision
+    ):
+        raise ValueError(
+            "evaluation server revision does not match the vllm-rwkv submodule: "
+            f"configured {configured_server_revision}, actual {server_revision}"
+        )
+    config_values = {
+        name: resolved(name)
+        for name in (
             "endpoint_url",
             "checkpoint_sha256",
             "tokenizer_revision",
@@ -154,99 +187,46 @@ def _run_evaluation(
             "output_root",
             "cot_mode",
             "math_repair_strategy",
+            "max_concurrent_requests",
+            "request_timeout_seconds",
             "max_samples",
             "generation_limit",
             "allow_non_comparable",
             "scoreboard_url",
-            "scoreboard_token",
-            "endpoint_api_key",
-        }
-    )
-    file_values = config.get("eval", {})
-    if not isinstance(file_values, dict):
-        raise ValueError("[eval] config must be a TOML table")
-    cli_values = {
-        name: getattr(args, name)
-        for name in allowed - {"scoreboard_token", "endpoint_api_key"}
-        if hasattr(args, name)
+        )
     }
-    resolved = resolve_evaluation_config(
-        allowed_fields=allowed,
-        secret_fields=frozenset({"scoreboard_token", "endpoint_api_key"}),
-        defaults={
-            "output_root": Path("results/lighteval"),
-            "cot_mode": "none",
-            "math_repair_strategy": "A",
-            "allow_non_comparable": False,
-        },
-        file_values=file_values,
-        environment_values={
-            "scoreboard_token": scoreboard_token,
-            "endpoint_api_key": endpoint_api_key,
-        },
-        cli_values=cli_values,
-        config_path=config_path,
-    )
-
-    def required(name: str) -> Any:
-        value = resolved.get(name)
-        if value is None or (isinstance(value, str) and not value.strip()):
-            raise ValueError(f"evaluation config field is required: {name}")
-        return value
-
-    def optional_path_value(name: str) -> Path | None:
-        value = resolved.get(name)
-        if value is None:
-            return None
-        path = Path(value)
-        return path if path.is_absolute() else root / path
-
-    output_root_value = Path(resolved.get("output_root"))
-    output_root = (
-        output_root_value
-        if output_root_value.is_absolute()
-        else root / output_root_value
-    )
-    scoreboard_url = resolved.get("scoreboard_url")
+    config_values["server_revision"] = server_revision
     product_revision, product_dirty = _git_identity(root)
     request = EvaluationRequest(
         model=args.model,
         task=args.task,
         output_root=output_root,
-        snapshot_path=optional_path_value("snapshot"),
-        snapshot_manifest_path=optional_path_value("snapshot_manifest"),
-        snapshot_sha256=(
-            str(resolved.get("snapshot_sha256"))
-            if resolved.get("snapshot_sha256") is not None
-            else None
-        ),
         endpoint_url=str(required("endpoint_url")),
         checkpoint_sha256=str(required("checkpoint_sha256")),
         tokenizer_revision=str(required("tokenizer_revision")),
         chat_template_revision=str(required("chat_template_revision")),
-        expected_server_revision=str(required("server_revision")),
+        server_revision=server_revision,
         wkv_mode=str(required("wkv_mode")),
         precision=str(required("precision")),
         gemm_policy=str(required("gemm_policy")),
         launch_contract=str(required("launch_contract")),
-        cot_mode=str(resolved.get("cot_mode")),
-        math_repair_strategy=str(resolved.get("math_repair_strategy")),
-        generation_limit_override=resolved.get("generation_limit"),
-        generation_limit_override_source=resolved.provenance("generation_limit"),
-        max_samples=resolved.get("max_samples"),
-        publish_to_scoreboard=scoreboard_url is not None,
+        cot_mode=str(resolved("cot_mode", "none")),
+        math_repair_strategy=str(resolved("math_repair_strategy", "A")),
+        max_concurrent_requests=int(resolved("max_concurrent_requests", 16)),
+        request_timeout_seconds=float(resolved("request_timeout_seconds", 3600.0)),
+        generation_limit=resolved("generation_limit"),
+        max_samples=resolved("max_samples"),
         scoreboard_url=scoreboard_url,
-        scoreboard_token=resolved.get("scoreboard_token"),
-        endpoint_api_key=resolved.get("endpoint_api_key"),
-        allow_non_comparable=bool(resolved.get("allow_non_comparable")),
-        config_digest=resolved.identity_digest(),
-        config_evidence=resolved.redacted_payload(),
+        scoreboard_token=scoreboard_token,
+        endpoint_api_key=endpoint_api_key,
+        allow_non_comparable=bool(resolved("allow_non_comparable", False)),
+        config_digest=_evaluation_config_digest(config_values),
         product_revision=product_revision,
         product_dirty=product_dirty,
     )
     if args.dry_run:
         print(
-            f"eval task={request.task} model={request.model} snapshot={request.snapshot_path}"
+            f"eval task={request.task} model={request.model} output_root={request.output_root}"
         )
         return 0
     outcome = run_evaluation(request)
@@ -297,7 +277,7 @@ def _git_identity(root: Path) -> tuple[str, bool]:
 def _retry_evaluation_publication(
     args: argparse.Namespace, *, root: Path, env: dict[str, str]
 ) -> int:
-    from lighteval_runner.application import retry_scoreboard_publication
+    from helicopter_lighteval.scoreboard import retry_publication
 
     token = env.get(args.scoreboard_token_env) or os.environ.get(
         args.scoreboard_token_env
@@ -310,32 +290,40 @@ def _retry_evaluation_publication(
     if args.dry_run:
         print(f"eval publish manifest={manifest} scoreboard={args.scoreboard_url}")
         return 0
-    outcome = retry_scoreboard_publication(
+    outcome = retry_publication(
         manifest_path=manifest,
         scoreboard_url=args.scoreboard_url,
-        scoreboard_token=token,
+        bearer_token=token,
     )
     print(
-        f"eval publish run={outcome.run_id} status={outcome.publication_status} "
-        f"task={outcome.publication_task_id} retry={outcome.publication_retry_identity}"
+        f"eval publish run={manifest.parent.name} status={outcome.status} "
+        f"task={outcome.task_id} retry={outcome.retry_identity}"
     )
-    if outcome.publication_error:
-        print(f"scoreboard publication failed: {outcome.publication_error}")
-    return 0 if outcome.is_success else 1
+    if outcome.error:
+        print(f"scoreboard publication failed: {outcome.error}")
+    return 0 if outcome.status == "published" else 1
+
+
+def _evaluation_config_digest(values: dict[str, Any]) -> str:
+    import hashlib
+    import json
+
+    encoded = json.dumps(
+        values, sort_keys=True, separators=(",", ":"), default=str
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     root = find_root()
     env, _ = load_env(root, args.env_file)
-    config, config_path = load_config(root, args.config)
+    config, _ = load_config(root, args.config)
     prepend_venv_path(env, root, config)
     if args.command == "eval":
         if args.eval_command == "publish":
             return _retry_evaluation_publication(args, root=root, env=env)
-        return _run_evaluation(
-            args, root=root, env=env, config=config, config_path=config_path
-        )
+        return _run_evaluation(args, root=root, env=env, config=config)
     plan = args.plan_builder(args, root=root, env=env, config=config)
     return run_command(
         plan.command,

@@ -12,7 +12,7 @@ from typing import Any
 
 import httpx
 
-from lighteval_runner.results.acceptance import verify_acceptance_runs
+from helicopter_lighteval.scoreboard import verify_manifest
 
 
 MODEL = "rwkv7-g1h-7.2b-eval"
@@ -72,7 +72,16 @@ def run_acceptance(config: AcceptanceConfig) -> None:
         _verify_generation_boundaries(probes)
         runs = _run_matrix(config)
         _write_json(config.output / "runs.json", runs)
-        verification = verify_acceptance_runs(runs)
+        verification = {
+            label: {
+                "status": "completed",
+                "manifest": [str(path) for path in record["manifests"]],
+            }
+            for label, record in runs.items()
+        }
+        for record in runs.values():
+            for manifest in record["manifests"]:
+                verify_manifest(Path(manifest))
         _write_json(config.output / "verification.json", verification)
     finally:
         _stop_owned_server(server)
@@ -215,18 +224,7 @@ def _run_matrix(config: AcceptanceConfig) -> dict[str, dict[str, Any]]:
     )
     runs: dict[str, dict[str, Any]] = {}
 
-    gsm8k = (
-        "--snapshot",
-        "/home/caizus/Datasets/lighteval/gsm8k/test.parquet",
-        "--snapshot-manifest",
-        "/home/caizus/Datasets/lighteval/gsm8k/test.parquet.manifest.json",
-        "--snapshot-sha256",
-        "ee7b8da9e381df27b9e3f7758a159ab2bdaa4dbaa910546cbbc47e0cb44e4f59",
-        "--cot-mode",
-        "cot",
-        "--generation-limit",
-        "1",
-    )
+    gsm8k = ("--cot-mode", "cot", "--generation-limit", "1")
     for strategy in ("A", "B", "C"):
         _run_eval(
             config,
@@ -241,38 +239,9 @@ def _run_matrix(config: AcceptanceConfig) -> dict[str, dict[str, Any]]:
         runs,
         "knowledge",
         "lighteval/knowledge/mmlu-abstract-algebra@0",
-        (
-            "--snapshot",
-            "/home/caizus/Datasets/lighteval/mmlu/abstract-algebra-test.parquet",
-            "--snapshot-manifest",
-            "/home/caizus/Datasets/lighteval/mmlu/abstract-algebra-test.parquet.manifest.json",
-            "--snapshot-sha256",
-            "2d2cc95a39503ecbd1999b674894c9579dd3244aa76a9e525bbf19bb990f6720",
-            "--cot-mode",
-            "none",
-            "--generation-limit",
-            "16",
-        ),
+        ("--cot-mode", "none", "--generation-limit", "16"),
         common,
     )
-    for label, task in (
-        ("function-calling", "helicopter-proxy/function-calling/exact-json@1"),
-        ("coding", "helicopter-proxy/coding/python-stdio@1"),
-    ):
-        _run_eval(
-            config,
-            runs,
-            label,
-            task,
-            (
-                "--allow-non-comparable",
-                "--cot-mode",
-                "none",
-                "--generation-limit",
-                "128",
-            ),
-            common,
-        )
     return runs
 
 

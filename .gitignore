@@ -40,6 +40,7 @@ configs/local/
 /runs/
 /outputs/
 /results/
+/src/eval/lighteval/results/
 /checkpoints/
 /wandb/
 /tensorboard/

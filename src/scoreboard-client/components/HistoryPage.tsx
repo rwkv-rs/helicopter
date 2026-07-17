@@ -10,10 +10,15 @@ import type {
   ScoreHistoryPoint,
   ScoreHistoryResponse,
 } from "../lib/dtos/api/score_history";
-import type { ScoreHistoryOptionsResponse } from "../lib/dtos/api/score_history/options";
+import type {
+  ScoreHistoryOptionsResponse,
+  ScoreHistoryScope,
+} from "../lib/dtos/api/score_history/options";
+import { EvalRecordsPanel } from "./EvalRecordsPanel";
 
 const NORMAL_COLOR = "#5b8cff";
 const NAIVE_COLOR = "#f5b14c";
+const NON_OFFICIAL_COLOR = "#c084fc";
 const PER_BAR = 140;
 
 function fmtTime(iso: string | null): string {
@@ -35,17 +40,22 @@ export function HistoryPage() {
   const [model, setModel] = useState("");
   const [benchmark, setBenchmark] = useState("");
   const [selectedTask, setSelectedTask] = useState<number | null>(null);
+  const [scope, setScope] = useState<ScoreHistoryScope>("official");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
+    setOptions(null);
+    setHistory(null);
+    setSelectedTask(null);
+    setDetail(null);
     api
-      .scoreHistoryOptions()
+      .scoreHistoryOptions(scope)
       .then((payload) => {
         if (cancelled) return;
         setOptions(payload);
-        setModel((current) => current || payload.models[0] || "");
+        setModel((current) => payload.models.includes(current) ? current : payload.models[0] || "");
       })
       .catch((err: unknown) => {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err));
@@ -53,7 +63,7 @@ export function HistoryPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [scope]);
 
   const benchmarks = useMemo(() => {
     if (!options) return [];
@@ -75,7 +85,7 @@ export function HistoryPage() {
     setSelectedTask(null);
     setDetail(null);
     api
-      .scoreHistory(model, benchmark)
+      .scoreHistory(model, benchmark, scope)
       .then((payload) => {
         if (!cancelled) setHistory(payload);
       })
@@ -88,7 +98,7 @@ export function HistoryPage() {
     return () => {
       cancelled = true;
     };
-  }, [benchmark, model]);
+  }, [benchmark, model, scope]);
 
   useEffect(() => {
     if (selectedTask === null) return;
@@ -112,16 +122,31 @@ export function HistoryPage() {
     setLoading(true);
     setError(null);
     api
-      .scoreHistory(model, benchmark)
+      .scoreHistory(model, benchmark, scope)
       .then(setHistory)
       .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
       .finally(() => setLoading(false));
   };
 
+  const selectedPoint = useMemo(
+    () => history?.groups.flatMap((group) => group.points).find((point) => point.task_id === selectedTask) ?? null,
+    [history, selectedTask],
+  );
+
   return (
     <div>
       <section className="card">
         <div className="controls">
+          <div className="control-group">
+            <label>分数范围</label>
+            <select
+              value={scope}
+              onChange={(event) => setScope(event.target.value as ScoreHistoryScope)}
+            >
+              <option value="official">正式评估</option>
+              <option value="non_official">本地 / 非正式评估</option>
+            </select>
+          </div>
           <div className="control-group">
             <label>模型权重</label>
             <select value={model} onChange={(event) => setModel(event.target.value)}>
@@ -152,7 +177,11 @@ export function HistoryPage() {
       {error ? <div className="error-bar">加载失败：{error}</div> : null}
       <div className="sh-layout">
         <div>
-          {history && history.groups.length === 0 ? <div className="empty">该组合下暂无正式分数。</div> : null}
+          {history && history.groups.length === 0 ? (
+            <div className="empty">
+              {scope === "official" ? "该组合下暂无正式分数。" : "该组合下暂无本地或非正式分数。"}
+            </div>
+          ) : null}
           {history?.groups.map((group) => (
             <HistoryChart key={group.cot_mode} group={group} selectedTask={selectedTask} onSelect={(point) => setSelectedTask(point.task_id)} />
           ))}
@@ -162,6 +191,20 @@ export function HistoryPage() {
           <DetailPanel taskId={selectedTask} detail={detail} />
         </aside>
       </div>
+      <EvalRecordsPanel
+        selection={
+          selectedPoint
+            ? {
+                taskId: selectedPoint.task_id,
+                benchmarkName: selectedPoint.benchmark ?? benchmark,
+                evalMethod: selectedPoint.cot_mode,
+                model: selectedPoint.model,
+                eligibility: selectedPoint.eligibility,
+              }
+            : null
+        }
+        onClose={() => setSelectedTask(null)}
+      />
     </div>
   );
 }
@@ -198,7 +241,13 @@ function HistoryChart({
               <Cell
                 key={point.score_id}
                 cursor="pointer"
-                fill={point.board === "naive" ? NAIVE_COLOR : NORMAL_COLOR}
+                fill={
+                  point.visibility === "non_official"
+                    ? NON_OFFICIAL_COLOR
+                    : point.board === "naive"
+                      ? NAIVE_COLOR
+                      : NORMAL_COLOR
+                }
                 opacity={selectedTask === null || selectedTask === point.task_id ? 1 : 0.45}
               />
             ))}
@@ -208,7 +257,7 @@ function HistoryChart({
       <div className="history-point-list">
         {group.points.map((point) => (
           <button className="score-button" type="button" key={point.score_id} onClick={() => onSelect(point)}>
-            task #{point.task_id} · {pctText(point.percent)}
+            task #{point.task_id} · {point.eligibility.toUpperCase()} · {pctText(point.percent)}
           </button>
         ))}
       </div>
@@ -225,7 +274,9 @@ function HistoryTooltip({ active, payload }: { active?: boolean; payload?: { pay
 score: ${pctText(point.percent)}
 metric: ${point.metric ?? "—"}
 evaluator: ${point.evaluator ?? "—"}
-board: ${point.board === "naive" ? "朴素榜" : "正式榜"}
+visibility: ${point.visibility === "official" ? "正式评估" : "本地 / 非正式评估"}
+eligibility: ${point.eligibility.toUpperCase()}
+samples: ${point.samples ?? "—"}
 task_id: ${point.task_id}`}
     </div>
   );
@@ -244,14 +295,21 @@ function DetailBody({ detail }: { detail: ScoreHistoryDetailResponse }) {
     <div>
       <div className="sh-detail-head">
         <span className="stat-pill stat-good">{pctText(detail.percent)}</span>
-        <span className={`badge ${detail.board === "naive" ? "fail" : "pass"}`}>
-          {detail.board === "naive" ? "朴素榜" : "正式榜"}
+        <span className={`badge ${detail.visibility === "official" ? "pass" : "fail"}`}>
+          {detail.eligibility.toUpperCase()}
         </span>
         <span className="muted">task #{detail.task_id}</span>
       </div>
       <div className="muted detail-summary">
-        {detail.model} · {detail.benchmark} · metric={detail.metric ?? "—"} · {detail.evaluator ?? "—"}
+        {detail.model} · {detail.benchmark} · metric={detail.metric ?? "—"} · {detail.evaluator ?? "—"} · {detail.visibility === "official" ? "正式评估" : "本地 / 非正式评估"}
       </div>
+      <div className="card-title">运行与分数</div>
+      <pre className="kv modal-text">
+        {`run_id: ${detail.run_id ?? "—"}
+comparable: ${String(detail.comparable ?? "—")}   dirty: ${String(detail.dirty ?? "—")}
+generated: ${detail.generated_samples}   truncated: ${detail.truncated_samples}   truncation_rate: ${(detail.truncation_rate * 100).toFixed(2)}%
+aggregate_metrics: ${JSON.stringify(detail.metrics, null, 2)}`}
+      </pre>
       <div className="card-title">采样参数</div>
       <pre className="kv modal-text">
         {`effective_sample_count: ${detail.sampling.effective_sample_count ?? "—"}

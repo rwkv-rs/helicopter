@@ -5,20 +5,27 @@ import { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import type { EvalContextResponse } from "../lib/dtos/api/eval_context";
 import type { EvalRecord, EvalRecordsResponse } from "../lib/dtos/api/eval_records";
-import type { CellMeta } from "../lib/dtos/api/leaderboard";
+
+export interface EvalTaskSelection {
+  taskId: number;
+  benchmarkName: string;
+  evalMethod: string;
+  model: string | null;
+  eligibility?: string | null;
+}
 
 interface Props {
-  meta: CellMeta | null;
+  selection: EvalTaskSelection | null;
   onClose: () => void;
 }
 
-export function EvalRecordsPanel({ meta, onClose }: Props) {
+export function EvalRecordsPanel({ selection, onClose }: Props) {
   const [onlyWrong, setOnlyWrong] = useState(false);
   const [page, setPage] = useState(0);
   const [data, setData] = useState<EvalRecordsResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const taskId = meta?.task_id ?? null;
+  const taskId = selection?.taskId ?? null;
   const limit = 15;
 
   useEffect(() => {
@@ -46,7 +53,7 @@ export function EvalRecordsPanel({ meta, onClose }: Props) {
     };
   }, [limit, onlyWrong, page, taskId]);
 
-  if (!meta || taskId === null) {
+  if (!selection || taskId === null) {
     return null;
   }
 
@@ -56,7 +63,7 @@ export function EvalRecordsPanel({ meta, onClose }: Props) {
         <div>
           <div className="card-title">评测明细</div>
           <div className="muted">
-            {meta.benchmark_name} · {meta.eval_method} · {meta.model ?? "—"} · {onlyWrong ? "仅错题" : "全部"}
+            {selection.benchmarkName} · {selection.evalMethod} · {selection.model ?? "—"} · {selection.eligibility?.toUpperCase() ?? "OFFICIAL"} · {onlyWrong ? "仅错题" : "全部"}
           </div>
         </div>
         <button className="btn" type="button" onClick={onClose}>
@@ -101,7 +108,7 @@ function EvalTable({ records, taskId }: { records: EvalRecord[]; taskId: number 
               <th>sample</th>
               <th>repeat</th>
               <th>pass_idx</th>
-              <th>model_output</th>
+              <th>scored_completion</th>
               <th>ref_answer</th>
               <th>is_passed</th>
               <th>fail_reason</th>
@@ -230,13 +237,25 @@ function StructuredContext({
   errors: string[];
 }) {
   const stages = Array.isArray(context.stages) ? context.stages : [];
+  const evidence = asRecord(context.evidence);
+  const generation = asRecord(evidence.generation);
+  const scoring = asRecord(evidence.scoring);
+  const metrics = asRecord(evidence.metrics);
+  const provenance = asRecord(evidence.provenance);
+  const hasEvidence = Object.keys(evidence).length > 0;
   const samplingConfig = typeof context.sampling_config === "object" && context.sampling_config !== null
     ? context.sampling_config
     : {};
   return (
     <div className="modal-body">
       <div className="modal-col">
-        {stages.length > 0 ? (
+        {hasEvidence ? (
+          <>
+            <EvidenceText label="Assembled prompt" value={evidence.prompt} />
+            <EvidenceText label="Raw completion" value={evidence.raw_completion} />
+            <EvidenceText label="Scored completion" value={evidence.scored_completion} />
+          </>
+        ) : stages.length > 0 ? (
           stages.map((stageValue, index) => {
             const stage = typeof stageValue === "object" && stageValue !== null
               ? (stageValue as Record<string, unknown>)
@@ -252,9 +271,27 @@ function StructuredContext({
         ) : (
           <pre className="kv">{JSON.stringify(context, null, 2)}</pre>
         )}
+        {hasEvidence ? (
+          <>
+            <div className="card-title token-title">Per-sample metrics</div>
+            <pre className="kv">{JSON.stringify(metrics, null, 2)}</pre>
+          </>
+        ) : null}
         {errors.length > 0 ? <div className="error-bar">{errors.join("; ")}</div> : null}
       </div>
       <div className="modal-col right">
+        {hasEvidence ? (
+          <>
+            <div className="card-title">Generation result</div>
+            <pre className="kv">{JSON.stringify(generation, null, 2)}</pre>
+            <div className="card-title token-title">Scoring result</div>
+            <pre className="kv">{JSON.stringify(scoring, null, 2)}</pre>
+            <div className="card-title token-title">Reference answer</div>
+            <pre className="kv">{String(evidence.reference_answer ?? "—")}</pre>
+            <div className="card-title token-title">Provenance</div>
+            <pre className="kv">{JSON.stringify(provenance, null, 2)}</pre>
+          </>
+        ) : null}
         <div className="card-title">sampling config</div>
         <pre className="kv">{JSON.stringify(samplingConfig, null, 2)}</pre>
         {Object.keys(stopTokens).length > 0 ? (
@@ -268,7 +305,26 @@ function StructuredContext({
             ))}
           </>
         ) : null}
+        <details>
+          <summary className="muted">Raw context JSON</summary>
+          <pre className="kv">{JSON.stringify(context, null, 2)}</pre>
+        </details>
       </div>
     </div>
   );
+}
+
+function EvidenceText({ label, value }: { label: string; value: unknown }) {
+  return (
+    <div className="stage">
+      <div className="stage-label">{label}</div>
+      <pre>{String(value ?? "")}</pre>
+    </div>
+  );
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null
+    ? (value as Record<string, unknown>)
+    : {};
 }

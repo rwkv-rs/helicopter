@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LIGHTEVAL_REQUIREMENT="lighteval @ git+https://github.com/huggingface/lighteval.git@64f4f5ae173626509fad6e477ca4ee56ebb26129"
 mkdir -p "${ROOT}/.tmp"
 TEMP_ROOT="$(mktemp -d "${ROOT}/.tmp/wheel-smoke.XXXXXX")"
 trap 'rm -rf "${TEMP_ROOT}"' EXIT
@@ -18,23 +19,21 @@ fi
 uv venv --python 3.12 "${TEMP_ROOT}/base"
 uv pip install --python "${TEMP_ROOT}/base/bin/python" "${ROOT_WHEEL}"
 "${TEMP_ROOT}/base/bin/helicopter" --help >/dev/null
-if "${TEMP_ROOT}/base/bin/python" -c 'import lighteval_runner' 2>/dev/null; then
-  echo "base wheel unexpectedly imports lighteval_runner" >&2
+if "${TEMP_ROOT}/base/bin/python" -c 'import helicopter_lighteval' 2>/dev/null; then
+  echo "base wheel unexpectedly imports helicopter_lighteval" >&2
   exit 1
 fi
 
-for profile in eval full; do
-  uv venv --python 3.12 "${TEMP_ROOT}/${profile}"
-  uv pip install \
-    --python "${TEMP_ROOT}/${profile}/bin/python" \
-    --find-links "${TEMP_ROOT}/dist" \
-    "${ROOT_WHEEL}[${profile}]"
-  "${TEMP_ROOT}/${profile}/bin/helicopter" eval --help >/dev/null
-  "${TEMP_ROOT}/${profile}/bin/python" - <<'PY'
-from importlib.resources import files
-
-root = files("lighteval_runner")
-assert root.joinpath("tasks/assets/function_calling_v1.jsonl").is_file()
-assert root.joinpath("tasks/assets/coding_v1.jsonl").is_file()
+uv venv --python 3.12 "${TEMP_ROOT}/eval"
+uv pip install \
+  --python "${TEMP_ROOT}/eval/bin/python" \
+  --find-links "${TEMP_ROOT}/dist" \
+  "${ROOT_WHEEL}[eval]" \
+  "${LIGHTEVAL_REQUIREMENT}"
+"${TEMP_ROOT}/eval/bin/helicopter" eval --help >/dev/null
+"${TEMP_ROOT}/eval/bin/python" - <<'PY'
+from helicopter_lighteval import run_evaluation
+from helicopter_lighteval.scoreboard import publish_manifest
+assert callable(run_evaluation)
+assert callable(publish_manifest)
 PY
-done

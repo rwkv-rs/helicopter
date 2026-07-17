@@ -24,9 +24,19 @@ export interface ScoreHistoryDetailResponse {
   cot_mode: string | null;
   evaluator: string | null;
   board: string;
+  visibility: "official" | "non_official";
+  eligibility: "official" | "sanity" | "proxy" | "temporary";
+  comparable: boolean | null;
+  dirty: boolean | null;
+  run_id: string | null;
   metric: string | null;
   percent: number | null;
   metrics: Record<string, unknown>;
+  accounting: Record<string, unknown>;
+  performance: Record<string, unknown>;
+  generated_samples: number;
+  truncated_samples: number;
+  truncation_rate: number;
   sampling: {
     stages: Record<string, StageSampling>;
     effective_sample_count: number | null;

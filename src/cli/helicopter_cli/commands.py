@@ -4,11 +4,12 @@ import os
 import sys
 import hashlib
 import json
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .config import dataset_root, resolve_model_path, table
+from .config import checkpoint_context_length, dataset_root, resolve_model_path, table
 from .env import env_value, pick
 from .paths import resolve_path
 
@@ -534,6 +535,12 @@ def build_infer_plan(
 ) -> CommandPlan:
     model_path, model = resolve_model_path(config, args.model, root=root, env=env)
     infer = infer_settings(config, model)
+    if "max_model_len" in infer:
+        raise SystemExit(
+            "max_model_len is derived from the checkpoint filename; "
+            "remove it from infer settings"
+        )
+    max_model_len = checkpoint_context_length(model_path)
     runtime = table(config, "runtime")
     gpu = table(config, "gpu")
 
@@ -579,6 +586,19 @@ def build_infer_plan(
     ]
 
     if args.serve_evaluation:
+        server_revision = vllm_rwkv_revision(config, root=root, env=env)
+        configured_server_revision = pick(
+            args.server_revision, infer.get("server_revision")
+        )
+        if (
+            configured_server_revision is not None
+            and str(configured_server_revision) != server_revision
+        ):
+            raise SystemExit(
+                "evaluation server revision does not match the vllm-rwkv "
+                f"submodule: configured {configured_server_revision}, actual "
+                f"{server_revision}"
+            )
         attestation_values = {
             "wkv_mode": wkv_mode,
             "checkpoint_sha256": pick(args.checkpoint_sha256, model.get("sha256")),
@@ -588,7 +608,7 @@ def build_infer_plan(
             "chat_template_revision": pick(
                 args.chat_template_revision, infer.get("chat_template_revision")
             ),
-            "server_revision": pick(args.server_revision, infer.get("server_revision")),
+            "server_revision": server_revision,
             "precision": pick(args.precision, infer.get("precision")),
             "gemm_policy": pick(args.gemm_policy, infer.get("gemm_policy")),
             "launch_contract": pick(args.launch_contract, infer.get("launch_contract")),
@@ -645,6 +665,11 @@ def build_infer_plan(
                 json.dumps(contract, sort_keys=True, separators=(",", ":")),
             ]
         )
+        # RWKV recurrent state may occupy non-contiguous request rows after
+        # continuous-batch turnover.  The current decode CUDA Graph capture
+        # binds contiguous dummy rows, so evaluation must use live inputs until
+        # the provider has a slot-aware graph contract.
+        command.append("--enforce-eager")
 
     option_values = {
         "--tensor-parallel-size": pick(
@@ -657,11 +682,7 @@ def build_infer_plan(
             args.gpu_memory_utilization,
             infer.get("gpu_memory_utilization"),
         ),
-        "--max-model-len": pick(
-            args.max_model_len,
-            model.get("max_model_len"),
-            infer.get("max_model_len"),
-        ),
+        "--max-model-len": max_model_len,
         "--max-num-seqs": pick(
             args.max_num_seqs,
             infer.get("max_num_seqs"),
@@ -704,6 +725,38 @@ def _sha256_file(path: Path) -> str:
         while chunk := stream.read(8 * 1024 * 1024):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def vllm_rwkv_revision(
+    config: dict[str, Any], *, root: Path, env: dict[str, str]
+) -> str:
+    paths = table(config, "paths")
+    source = resolve_path(
+        str(
+            pick(
+                paths.get("vllm_rwkv_path"),
+                env_value(env, "HELICOPTER_VLLM_RWKV_PATH", "VLLM_RWKV_PATH"),
+                "src/infer/vllm-rwkv",
+            )
+        ),
+        root=root,
+        env=env,
+    )
+    result = subprocess.run(
+        ["git", "-C", str(source), "rev-parse", "HEAD"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    revision = result.stdout.strip()
+    if (
+        result.returncode != 0
+        or len(revision) != 40
+        or any(character not in "0123456789abcdef" for character in revision)
+    ):
+        detail = result.stderr.strip() or "not a Git checkout"
+        raise SystemExit(f"cannot derive vllm-rwkv revision from {source}: {detail}")
+    return revision
 
 
 def build_takeoff_plan(

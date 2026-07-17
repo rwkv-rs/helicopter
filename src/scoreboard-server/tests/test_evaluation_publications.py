@@ -177,6 +177,10 @@ def _publication_payload(*, binary: bool = True, official: bool = True) -> dict:
         "accounting": accounting,
         "rejections": [],
         "metrics": {"exact_match": sample["metrics"]["exact_match"]},
+        "native_metrics": {
+            "exact_match": sample["metrics"]["exact_match"],
+            "secondary_metric": 0.5,
+        },
         "primary_metric": "exact_match",
         "truncated_samples": 0,
         "generated_samples": 1,
@@ -298,7 +302,7 @@ async def test_publication_auth_projection_retry_conflict_and_old_queries(
     assert await Score.all().count() == 1
     assert await EvaluationPublication.all().count() == 1
     score = await Score.get(task_id=task_id)
-    assert score.metrics == {"exact_match": 1.0}
+    assert score.metrics == {"exact_match": 1.0, "secondary_metric": 0.5}
 
 
 async def test_publication_rejects_inconsistent_artifact_evidence(
@@ -319,6 +323,10 @@ async def test_publication_rejects_inconsistent_artifact_evidence(
     wrong_aggregate = json.loads(json.dumps(payload))
     wrong_aggregate["metrics"]["exact_match"] = 0.0
     cases.append(wrong_aggregate)
+
+    wrong_native_aggregate = json.loads(json.dumps(payload))
+    wrong_native_aggregate["native_metrics"]["exact_match"] = 0.0
+    cases.append(wrong_native_aggregate)
 
     wrong_accounting = json.loads(json.dumps(payload))
     wrong_accounting["accounting"]["selected"] = 2
@@ -364,6 +372,7 @@ async def test_publication_rejects_inconsistent_artifact_evidence(
         422,
         422,
         422,
+        422,
     ]
     assert oversized_response.status_code == 413
     assert await Task.all().count() == 0
@@ -375,6 +384,25 @@ async def test_nonbinary_proxy_does_not_fabricate_eval_or_enter_leaderboard(
 ) -> None:
     app = _app(database_settings)
     payload = _publication_payload(binary=False, official=False)
+    sample = payload["samples"][0]
+    sample["raw_completion"] = "unfinished reasoning"
+    sample["scored_completion"] = "unfinished reasoning\nTherefore..."
+    sample["generation"].update(
+        {
+            "output_token_count": 256,
+            "finish_reason": "length",
+            "stop_reason": None,
+            "terminal_reason": "length",
+            "truncated": True,
+            "usage": {
+                "prompt_tokens": 2,
+                "completion_tokens": 256,
+                "total_tokens": 258,
+            },
+        }
+    )
+    sample["scoring"]["repair_action"] = "append-think-and-therefore"
+    payload["truncated_samples"] = 1
     headers = {
         "Authorization": "Bearer publisher-token",
         "Idempotency-Key": f"publish:{payload['manifest']['digest']}",
@@ -407,11 +435,68 @@ async def test_nonbinary_proxy_does_not_fabricate_eval_or_enter_leaderboard(
         records = (
             await client.get("/api/eval-records", params={"task_id": task_id})
         ).json()
+        official_options = (await client.get("/api/score-history/options")).json()
+        non_official_options = (
+            await client.get(
+                "/api/score-history/options", params={"scope": "non_official"}
+            )
+        ).json()
+        official_history = (
+            await client.get(
+                "/api/score-history",
+                params={
+                    "model": "rwkv7-g1g-1.5b",
+                    "benchmark": "lighteval/math/gsm8k@0_test",
+                },
+            )
+        ).json()
+        non_official_history = (
+            await client.get(
+                "/api/score-history",
+                params={
+                    "model": "rwkv7-g1g-1.5b",
+                    "benchmark": "lighteval/math/gsm8k@0_test",
+                    "scope": "non_official",
+                },
+            )
+        ).json()
+        detail = (
+            await client.get("/api/score-history/detail", params={"task_id": task_id})
+        ).json()
+        invalid_scope = await client.get(
+            "/api/score-history/options", params={"scope": "everything"}
+        )
     assert await EvalRecord.all().count() == 0
     assert records["records"][0]["is_passed"] is None
-    assert records["records"][0]["answer"] == "2"
+    assert records["records"][0]["answer"] == "unfinished reasoning\nTherefore..."
     assert context["context"]["evidence"]["metrics"] == {"exact_match": 0.75}
+    assert context["context"]["evidence"]["generation"]["truncated"] is True
+    assert (
+        context["context"]["evidence"]["scoring"]["repair_action"]
+        == "append-think-and-therefore"
+    )
     assert all(not domain["rows"] for domain in leaderboard["domains"])
+    assert official_options["pairs"] == []
+    assert non_official_options["scope"] == "non_official"
+    assert non_official_options["pairs"] == [
+        {
+            "model": "rwkv7-g1g-1.5b",
+            "dataset": "lighteval/math/gsm8k@0_test",
+        }
+    ]
+    assert official_history["total"] == 0
+    point = non_official_history["groups"][0]["points"][0]
+    assert point["visibility"] == "non_official"
+    assert point["eligibility"] == "proxy"
+    assert detail["visibility"] == "non_official"
+    assert detail["eligibility"] == "proxy"
+    assert detail["generated_samples"] == 1
+    assert detail["truncated_samples"] == 1
+    assert detail["truncation_rate"] == 1.0
+    assert detail["accounting"]["generated_samples"] == 1
+    assert detail["accounting"]["truncated_samples"] == 1
+    assert detail["metrics"] == {"exact_match": 0.75, "secondary_metric": 0.5}
+    assert invalid_scope.status_code == 422
 
 
 async def test_concurrent_replay_creates_one_projection(
