@@ -6,6 +6,7 @@ import { api } from "../lib/api";
 import type { CapturePageResponse } from "../lib/dtos/api/capture_page";
 import type { CellMeta, ChartPayload, LeaderboardResponse } from "../lib/dtos/api/leaderboard";
 import type { MetaResponse } from "../lib/dtos/api/meta";
+import type { ScoreScope } from "../lib/score_scope";
 import { DomainCharts } from "./DomainCharts";
 import { EvalRecordsPanel } from "./EvalRecordsPanel";
 import { LeaderboardTable } from "./LeaderboardTable";
@@ -17,6 +18,7 @@ interface Props {
   model: string;
   view: string;
   tab: string;
+  scope: ScoreScope;
 }
 const PAGE_BASE = (process.env.NEXT_PUBLIC_BASE_PATH || "/new-eval").replace(/\/$/, "");
 
@@ -24,7 +26,7 @@ function pageHref(path: string): string {
   return PAGE_BASE ? `${PAGE_BASE}${path}` : path;
 }
 
-export function DashboardPage({ meta, leaderboard, model, view, tab }: Props) {
+export function DashboardPage({ meta, leaderboard, model, view, tab, scope }: Props) {
   const [selectedMeta, setSelectedMeta] = useState<CellMeta | null>(null);
   const [capture, setCapture] = useState<
     | { status: "idle" }
@@ -45,7 +47,7 @@ export function DashboardPage({ meta, leaderboard, model, view, tab }: Props) {
   const refresh = async () => {
     setRefreshError(null);
     try {
-      await api.refresh();
+      await api.refresh(scope);
       window.location.reload();
     } catch (err) {
       setRefreshError(err instanceof Error ? err.message : String(err));
@@ -58,6 +60,7 @@ export function DashboardPage({ meta, leaderboard, model, view, tab }: Props) {
     target.searchParams.set("model", model);
     target.searchParams.set("view", view);
     target.searchParams.set("tab", activeTab);
+    target.searchParams.set("scope", scope);
     setCapture({ status: "saving" });
     try {
       const payload = await api.capturePage({
@@ -79,6 +82,13 @@ export function DashboardPage({ meta, leaderboard, model, view, tab }: Props) {
       <section className="card">
         <form className="controls" action={pageHref("/")} method="get">
           <input type="hidden" name="page" value="dashboard" />
+          <div className="control-group">
+            <label>分数范围</label>
+            <select name="scope" defaultValue={scope}>
+              <option value="official">正式评估</option>
+              <option value="non_official">本地 / 非正式评估</option>
+            </select>
+          </div>
           <div className="control-group">
             <label>模型选择</label>
             <select name="model" defaultValue={model}>
@@ -115,7 +125,7 @@ export function DashboardPage({ meta, leaderboard, model, view, tab }: Props) {
           <a
             key={group.key}
             className={`tab${activeTab === group.key ? " active" : ""}`}
-            href={pageHref(`/?page=dashboard&model=${encodeURIComponent(model)}&view=${view}&tab=${group.key}`)}
+            href={pageHref(`/?page=dashboard&scope=${scope}&model=${encodeURIComponent(model)}&view=${view}&tab=${group.key}`)}
           >
             {group.label}
           </a>
@@ -165,7 +175,7 @@ export function DashboardPage({ meta, leaderboard, model, view, tab }: Props) {
                 benchmarkName: selectedMeta.benchmark_name,
                 evalMethod: selectedMeta.eval_method,
                 model: selectedMeta.model,
-                eligibility: "official",
+                eligibility: selectedMeta.eligibility,
               }
             : null
         }

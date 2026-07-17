@@ -425,15 +425,19 @@ class ScoreboardStore:
             payloads.append(payload)
         return payloads
 
-    async def list_latest_scores_for_space(self, *, include_param_search: bool = False) -> list[dict[str, Any]]:
-        rows = await Score.all().select_related("task", "task__model", "task__benchmark")
+    async def list_latest_scores_for_space(
+        self,
+        *,
+        is_tmp: bool = False,
+        include_param_search: bool = False,
+    ) -> list[dict[str, Any]]:
+        query = Score.filter(task__is_tmp=is_tmp)
+        if not include_param_search:
+            query = query.filter(task__is_param_search=False)
+        rows = await query.select_related("task", "task__model", "task__benchmark")
         grouped: dict[tuple[int, int, str, str], Score] = {}
         for row in rows:
             task = row.task
-            if task.is_tmp:
-                continue
-            if task.is_param_search and not include_param_search:
-                continue
             key = (task.model_id, task.benchmark_id, task.evaluator, json_key(task.sampling_config))
             prev = grouped.get(key)
             if prev is None or (row.created_at, row.score_id) > (prev.created_at, prev.score_id):
@@ -441,14 +445,16 @@ class ScoreboardStore:
         return [self._score_row_for_space(row) for row in sorted(grouped.values(), key=lambda item: item.created_at)]
 
     async def list_score_history_pairs(self, *, is_tmp: bool = False) -> list[dict[str, Any]]:
-        scores = await Score.all().select_related("task", "task__model", "task__benchmark")
+        scores = await Score.filter(
+            task__is_tmp=is_tmp,
+            task__is_param_search=False,
+        ).select_related("task", "task__model", "task__benchmark")
         pairs = {
             (
                 score.task.model.model_name,
                 join_dataset(score.task.benchmark.benchmark_name, score.task.benchmark.benchmark_split),
             )
             for score in scores
-            if score.task.is_tmp == is_tmp and not score.task.is_param_search
         }
         return [{"model": model, "dataset": dataset} for model, dataset in sorted(pairs)]
 
@@ -768,6 +774,13 @@ class ScoreboardStore:
         benchmark = task.benchmark
         model = task.model
         dataset = join_dataset(benchmark.benchmark_name, benchmark.benchmark_split)
+        sampling_config = (
+            task.sampling_config if isinstance(task.sampling_config, Mapping) else {}
+        )
+        identity = sampling_config.get("lighteval_identity")
+        if not isinstance(identity, Mapping):
+            identity = {}
+        evaluator_identity = identity.get("evaluator")
         return {
             "score_id": score.score_id,
             "task_id": task.task_id,
@@ -784,23 +797,24 @@ class ScoreboardStore:
             "task_details": None,
             "sampling_config": task.sampling_config,
             "log_path": task.log_path,
+            "visibility": "non_official" if task.is_tmp else "official",
+            "eligibility": identity.get(
+                "eligibility", "temporary" if task.is_tmp else "official"
+            ),
+            "comparable": identity.get("comparable"),
+            "dirty": (
+                evaluator_identity.get("dirty")
+                if isinstance(evaluator_identity, Mapping)
+                else None
+            ),
         }
 
     @staticmethod
     def _history_row(score: Score) -> dict[str, Any]:
         row = ScoreboardStore._score_row_for_space(score)
         task = score.task
-        sampling_config = task.sampling_config if isinstance(task.sampling_config, Mapping) else {}
-        identity = sampling_config.get("lighteval_identity")
-        if not isinstance(identity, Mapping):
-            identity = {}
         row["evaluator"] = task.evaluator
         row["num_samples"] = task.benchmark.num_samples
-        row["visibility"] = "non_official" if task.is_tmp else "official"
-        row["eligibility"] = identity.get("eligibility", "temporary" if task.is_tmp else "official")
-        row["comparable"] = identity.get("comparable")
-        evaluator = identity.get("evaluator")
-        row["dirty"] = evaluator.get("dirty") if isinstance(evaluator, Mapping) else None
         return row
 
     @staticmethod

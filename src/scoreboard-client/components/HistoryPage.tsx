@@ -10,10 +10,8 @@ import type {
   ScoreHistoryPoint,
   ScoreHistoryResponse,
 } from "../lib/dtos/api/score_history";
-import type {
-  ScoreHistoryOptionsResponse,
-  ScoreHistoryScope,
-} from "../lib/dtos/api/score_history/options";
+import type { ScoreHistoryOptionsResponse } from "../lib/dtos/api/score_history/options";
+import type { ScoreScope } from "../lib/score_scope";
 import { EvalRecordsPanel } from "./EvalRecordsPanel";
 
 const NORMAL_COLOR = "#5b8cff";
@@ -33,16 +31,16 @@ function pctText(value: number | null): string {
   return value == null ? "—" : `${value.toFixed(1)}%`;
 }
 
-export function HistoryPage() {
+export function HistoryPage({ initialScope }: { initialScope: ScoreScope }) {
   const [options, setOptions] = useState<ScoreHistoryOptionsResponse | null>(null);
   const [history, setHistory] = useState<ScoreHistoryResponse | null>(null);
   const [detail, setDetail] = useState<ScoreHistoryDetailResponse | null>(null);
   const [model, setModel] = useState("");
   const [benchmark, setBenchmark] = useState("");
   const [selectedTask, setSelectedTask] = useState<number | null>(null);
-  const [scope, setScope] = useState<ScoreHistoryScope>("official");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const scope = initialScope;
 
   useEffect(() => {
     let cancelled = false;
@@ -141,7 +139,11 @@ export function HistoryPage() {
             <label>分数范围</label>
             <select
               value={scope}
-              onChange={(event) => setScope(event.target.value as ScoreHistoryScope)}
+              onChange={(event) => {
+                const url = new URL(window.location.href);
+                url.searchParams.set("scope", event.target.value as ScoreScope);
+                window.location.assign(url);
+              }}
             >
               <option value="official">正式评估</option>
               <option value="non_official">本地 / 非正式评估</option>

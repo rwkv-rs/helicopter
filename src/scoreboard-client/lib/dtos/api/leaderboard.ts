@@ -1,3 +1,5 @@
+import type { ScoreScope } from "../../score_scope";
+
 export interface CellMeta {
   cell_id: string;
   task_id: number | null;
@@ -6,6 +8,10 @@ export interface CellMeta {
   k_metric: string;
   column_label: string;
   model: string | null;
+  visibility: ScoreScope;
+  eligibility: "official" | "sanity" | "proxy" | "temporary";
+  comparable: boolean | null;
+  dirty: boolean | null;
   tooltip: string | null;
   clickable: boolean;
 }
@@ -106,6 +112,7 @@ export interface ChartPayload {
 }
 
 export interface LeaderboardResponse {
+  scope: ScoreScope;
   view: string;
   view_label: string;
   is_delta: boolean;

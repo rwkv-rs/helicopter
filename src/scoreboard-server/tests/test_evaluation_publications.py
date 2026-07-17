@@ -379,7 +379,7 @@ async def test_publication_rejects_inconsistent_artifact_evidence(
     assert await EvaluationPublication.all().count() == 0
 
 
-async def test_nonbinary_proxy_does_not_fabricate_eval_or_enter_leaderboard(
+async def test_nonbinary_proxy_stays_out_of_official_and_enters_non_official_scope(
     database_settings: DatabaseSettings,
 ) -> None:
     app = _app(database_settings)
@@ -414,11 +414,28 @@ async def test_nonbinary_proxy_does_not_fabricate_eval_or_enter_leaderboard(
             "/api/v1/evaluation-publications/proxy-run", headers=headers, json=payload
         )
         assert response.status_code == 201
-        leaderboard = (
+        official_meta = (await client.get("/api/meta")).json()
+        official_leaderboard = (
             await client.get(
                 "/api/leaderboard",
                 params={"model": "rwkv7-g1g-1.5b", "view": "benchmark_detail_latest"},
             )
+        ).json()
+        non_official_meta = (
+            await client.get("/api/meta", params={"scope": "non_official"})
+        ).json()
+        non_official_leaderboard = (
+            await client.get(
+                "/api/leaderboard",
+                params={
+                    "model": "rwkv7-g1g-1.5b",
+                    "view": "benchmark_detail_latest",
+                    "scope": "non_official",
+                },
+            )
+        ).json()
+        non_official_refresh = (
+            await client.post("/api/refresh", params={"scope": "non_official"})
         ).json()
         task_id = response.json()["task_id"]
         context = (
@@ -466,6 +483,15 @@ async def test_nonbinary_proxy_does_not_fabricate_eval_or_enter_leaderboard(
         invalid_scope = await client.get(
             "/api/score-history/options", params={"scope": "everything"}
         )
+        invalid_meta_scope = await client.get(
+            "/api/meta", params={"scope": "everything"}
+        )
+        invalid_leaderboard_scope = await client.get(
+            "/api/leaderboard", params={"scope": "everything"}
+        )
+        invalid_refresh_scope = await client.post(
+            "/api/refresh", params={"scope": "everything"}
+        )
     assert await EvalRecord.all().count() == 0
     assert records["records"][0]["is_passed"] is None
     assert records["records"][0]["answer"] == "unfinished reasoning\nTherefore..."
@@ -475,7 +501,31 @@ async def test_nonbinary_proxy_does_not_fabricate_eval_or_enter_leaderboard(
         context["context"]["evidence"]["scoring"]["repair_action"]
         == "append-think-and-therefore"
     )
-    assert all(not domain["rows"] for domain in leaderboard["domains"])
+    assert official_meta["scope"] == "official"
+    assert official_meta["entry_count"] == 0
+    assert official_leaderboard["scope"] == "official"
+    assert all(not domain["rows"] for domain in official_leaderboard["domains"])
+    assert non_official_meta["scope"] == "non_official"
+    assert non_official_meta["entry_count"] == 1
+    assert non_official_meta["models"] == ["rwkv7-g1g-1.5b"]
+    assert non_official_leaderboard["scope"] == "non_official"
+    math_domain = next(
+        domain
+        for domain in non_official_leaderboard["domains"]
+        if domain["key"] == "math"
+    )
+    cell = math_domain["rows"][0]["cells"][0]
+    assert cell["percent"] == 75.0
+    assert cell["meta"]["task_id"] == response.json()["task_id"]
+    assert cell["meta"]["visibility"] == "non_official"
+    assert cell["meta"]["eligibility"] == "proxy"
+    assert cell["meta"]["comparable"] is False
+    assert cell["meta"]["dirty"] is False
+    assert non_official_refresh == {
+        "scope": "non_official",
+        "entry_count": 1,
+        "errors": [],
+    }
     assert official_options["pairs"] == []
     assert non_official_options["scope"] == "non_official"
     assert non_official_options["pairs"] == [
@@ -497,6 +547,9 @@ async def test_nonbinary_proxy_does_not_fabricate_eval_or_enter_leaderboard(
     assert detail["accounting"]["truncated_samples"] == 1
     assert detail["metrics"] == {"exact_match": 0.75, "secondary_metric": 0.5}
     assert invalid_scope.status_code == 422
+    assert invalid_meta_scope.status_code == 422
+    assert invalid_leaderboard_scope.status_code == 422
+    assert invalid_refresh_scope.status_code == 422
 
 
 async def test_concurrent_replay_creates_one_projection(

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import FastAPI, Query
 
 from scoreboard_server.cores.normalize import DEFAULT_TABLE_VIEW
@@ -13,5 +15,11 @@ def register(app: FastAPI, store: ScoreboardStore) -> None:
     async def leaderboard(
         model: str | None = Query(default=None),
         view: str = Query(default=DEFAULT_TABLE_VIEW),
+        scope: Literal["official", "non_official"] = "official",
     ) -> LeaderboardResponse:
-        return await leaderboard_response(store, model=model, view=view)
+        return await leaderboard_response(
+            store,
+            model=model,
+            view=view,
+            scope=scope,
+        )

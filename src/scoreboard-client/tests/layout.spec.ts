@@ -27,9 +27,10 @@ function leafFiles(root: string, extension: string, ignoreRootIndex = false): st
   return leaves.sort();
 }
 
-test("client API and DTO trees mirror backend API routes", () => {
+test("client API and DTO trees mirror frontend-consumed backend API routes", () => {
   const backendLeaves = leafFiles(BACKEND_API_ROUTES, ".py")
     .filter((leaf) => !leaf.endsWith("/__init__") && leaf !== "__init__")
+    .filter((leaf) => leaf !== "evaluation_publications")
     .map((leaf) => leaf.replaceAll("__init__", "index"))
     .sort();
   const apiLeaves = leafFiles(CLIENT_API, ".ts", true);

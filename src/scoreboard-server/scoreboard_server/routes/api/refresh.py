@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import FastAPI
 
 from scoreboard_server.db.repository import ScoreboardStore
@@ -9,5 +11,7 @@ from scoreboard_server.services.api.refresh import refresh_response
 
 def register(app: FastAPI, store: ScoreboardStore) -> None:
     @app.post("/api/refresh")
-    async def refresh() -> RefreshResponse:
-        return await refresh_response(store)
+    async def refresh(
+        scope: Literal["official", "non_official"] = "official",
+    ) -> RefreshResponse:
+        return await refresh_response(store, scope=scope)

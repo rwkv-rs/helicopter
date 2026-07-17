@@ -13,7 +13,13 @@ from .normalize import (
 )
 
 
-def build_leaderboard_payload(entries: list[dict[str, Any]], *, selected_model: str | None, view: str) -> dict[str, Any]:
+def build_leaderboard_payload(
+    entries: list[dict[str, Any]],
+    *,
+    selected_model: str | None,
+    view: str,
+    scope: str = "official",
+) -> dict[str, Any]:
     is_delta = view.endswith("_delta")
     is_field_avg = view.startswith("field_avg")
     visible = _select_entries(entries, selected_model)
@@ -27,6 +33,7 @@ def build_leaderboard_payload(entries: list[dict[str, Any]], *, selected_model: 
     naive_entries = [entry for entry in entries if is_naive(entry.get("task"), entry.get("sampling_config"))]
     naive_columns = _param_columns(naive_entries, is_delta=is_delta)
     payload = {
+        "scope": scope,
         "view": view,
         "view_label": _table_view_label(view),
         "is_delta": is_delta,
@@ -57,9 +64,15 @@ def build_leaderboard_payload(entries: list[dict[str, Any]], *, selected_model: 
     return payload
 
 
-def build_meta_payload(entries: list[dict[str, Any]], errors: list[str] | None = None) -> dict[str, Any]:
+def build_meta_payload(
+    entries: list[dict[str, Any]],
+    errors: list[str] | None = None,
+    *,
+    scope: str = "official",
+) -> dict[str, Any]:
     models = sorted({str(entry["model"]) for entry in entries})
     return {
+        "scope": scope,
         "auto_label": "每档最新（调度策略）",
         "default_view": "benchmark_detail_delta",
         "table_views": [
@@ -217,6 +230,10 @@ def _cell_meta(
         "k_metric": metric,
         "column_label": str(label or ""),
         "model": entry.get("model"),
+        "visibility": entry.get("visibility"),
+        "eligibility": entry.get("eligibility"),
+        "comparable": entry.get("comparable"),
+        "dirty": entry.get("dirty"),
         "tooltip": None,
         "clickable": task_id is not None,
     }

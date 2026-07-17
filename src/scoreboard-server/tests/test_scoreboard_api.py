@@ -146,6 +146,7 @@ async def test_scoreboard_api_serves_leaderboard_records_context_and_history(
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as client:
         meta = (await client.get("/api/meta")).json()
+        assert meta["scope"] == "official"
         assert meta["entry_count"] == 1
         assert "rwkv7-g1g-1.5b" in meta["models"]
         assert any(group["key"] == "math" for group in meta["domain_groups"])
@@ -153,10 +154,16 @@ async def test_scoreboard_api_serves_leaderboard_records_context_and_history(
         leaderboard = (
             await client.get("/api/leaderboard", params={"model": "rwkv7-g1g-1.5b", "view": "benchmark_detail_latest"})
         ).json()
+        assert leaderboard["scope"] == "official"
         math_domain = next(domain for domain in leaderboard["domains"] if domain["key"] == "math")
         assert math_domain["rows"][0]["benchmark_name"] == "gsm8k_test"
         assert math_domain["rows"][0]["cells"][0]["percent"] == 50.0
         assert math_domain["rows"][0]["cells"][0]["meta"]["task_id"] == task_id
+        assert math_domain["rows"][0]["cells"][0]["meta"]["visibility"] == "official"
+        assert math_domain["rows"][0]["cells"][0]["meta"]["eligibility"] == "official"
+
+        refresh = (await client.post("/api/refresh")).json()
+        assert refresh == {"scope": "official", "entry_count": 1, "errors": []}
 
         records = (await client.get("/api/eval-records", params={"task_id": task_id, "limit": 10})).json()
         assert len(records["records"]) == 2
