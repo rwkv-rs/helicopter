@@ -100,6 +100,17 @@ def strip_vllm_env(env: dict[str, str]) -> dict[str, str]:
     return {key: value for key, value in env.items() if not key.startswith("VLLM_")}
 
 
+def prepend_pythonpath(env: dict[str, str], path: Path) -> None:
+    current = env.get("PYTHONPATH")
+    text = str(path)
+    if current:
+        paths = current.split(os.pathsep)
+        if text not in paths:
+            env["PYTHONPATH"] = os.pathsep.join([text, *paths])
+    else:
+        env["PYTHONPATH"] = text
+
+
 def parse_vllm_env_overrides(values: list[str] | None) -> dict[str, str]:
     parsed: dict[str, str] = {}
     for value in values or []:
@@ -370,6 +381,8 @@ def build_lighteval_plan(
 
     shown_env = {"PYTHON": python}
     plan_env = strip_vllm_env(env)
+    prepend_pythonpath(plan_env, root / "src/cli")
+    plan_env["HELICOPTER_PATCH_LIGHTEVAL_LITELLM_LOGPROBS"] = "1"
     if api_key:
         plan_env["OPENAI_API_KEY"] = api_key
     return CommandPlan(command=command, cwd=root, shown_env=shown_env, env=plan_env)

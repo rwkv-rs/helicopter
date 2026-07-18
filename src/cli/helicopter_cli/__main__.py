@@ -18,6 +18,7 @@ from .commands import (
 )
 from .config import load_config
 from .env import DEFAULT_ENV_FILE, load_env
+from .eval_batch import run_batch
 from .eval_run import DEFAULT_SERVER_TIMEOUT_S, run_eval
 from .function_calling import FC_TASKS, run_function_calling_eval
 from .paths import find_root
@@ -25,6 +26,7 @@ from .performance import (
     base_url_from_lighteval_command,
     derive_metrics_url,
     output_dir_from_command,
+    run_completions_performance,
     run_lighteval_with_performance,
 )
 from .runner import run_command
@@ -146,6 +148,68 @@ def build_parser() -> argparse.ArgumentParser:
         help="record per-task scores into the scoreboard database after the run",
     )
     eval_run.set_defaults(plan_builder=None)
+
+    eval_perf = eval_subparsers.add_parser(
+        "perf",
+        help="raw OpenAI completions performance probe",
+    )
+    add_common_options(eval_perf)
+    eval_perf.add_argument("model", help="model alias from configs")
+    eval_perf.add_argument("--base-url", help="OpenAI-compatible endpoint base URL")
+    eval_perf.add_argument("--api-key", help="API key passed to the endpoint")
+    eval_perf.add_argument("--served-model-name", help="model name sent in the OpenAI request")
+    eval_perf.add_argument("--profile", choices=("prefill", "decode"), default="decode")
+    eval_perf.add_argument("--prompt-tokens", type=int, help="synthetic prompt token target")
+    eval_perf.add_argument("--output-tokens", type=int, help="max generated tokens per request")
+    eval_perf.add_argument("--requests", type=int, help="number of requests to issue")
+    eval_perf.add_argument("--concurrency", type=int, help="maximum in-flight requests")
+    eval_perf.add_argument("--request-rate", type=float, help="optional request launch rate in requests/second")
+    eval_perf.add_argument("--timeout", type=float, help="per-request timeout in seconds")
+    eval_perf.add_argument("--ignore-eos", action="store_true", default=None, help="ask vLLM to continue until max_tokens")
+    eval_perf.add_argument("--output", help="write performance report JSON here")
+    eval_perf.set_defaults(plan_builder=None)
+
+    eval_batch = eval_subparsers.add_parser(
+        "batch",
+        help="batch scheduler: sweep models x benchmarks across idle GPUs",
+    )
+    add_common_options(eval_batch)
+    add_lighteval_run_options(eval_batch)
+    eval_batch.add_argument("--models", action="append", help="model alias (repeat or comma-separate); defaults to [eval.batch].models")
+    eval_batch.add_argument("--tasks", action="append", help="LightEval task string (repeat or comma-separate); defaults to [eval.batch].tasks")
+    eval_batch.add_argument("--tasks-from-db", action="store_true", help="load LightEval tasks from the scoreboard benchmark_catalog table")
+    eval_batch.add_argument("--benchmark-scope", help="benchmark_catalog scope used with --tasks-from-db")
+    eval_batch.add_argument("--benchmark-fields", action="append", help="benchmark_catalog field filter used with --tasks-from-db")
+    eval_batch.add_argument("--benchmark-limit", type=int, help="maximum number of DB benchmark tasks to load")
+    eval_batch.add_argument("--fc-tasks", action="append", help="native function-calling task id (repeat or comma-separate); defaults to [eval.batch].fc_tasks")
+    eval_batch.add_argument("--gpus", help="comma-separated GPU indexes; defaults to idle-GPU auto-detection")
+    eval_batch.add_argument("--gpu-idle-max-mem", type=float, help="MiB of used memory below which a GPU counts as idle")
+    eval_batch.add_argument("--parallel", type=int, default=1, help="number of units to run concurrently (capped by available GPU slots)")
+    eval_batch.add_argument("--max-retries", type=int, default=0, help="retries per failed unit")
+    eval_batch.add_argument("--port-base", type=int, help="first port for managed vLLM servers; slot i uses port-base + i")
+    eval_batch.add_argument("--batch-output", help="write the batch run report JSON here; defaults to results/eval_batch for real runs")
+    eval_batch.add_argument("--rerun", action="store_true", help="run benchmarks even when the scoreboard already has a score")
+    eval_batch.add_argument("--wkv-mode", choices=WKV_MODES)
+    eval_batch.add_argument("--emb-device", choices=EMB_DEVICES)
+    eval_batch.add_argument("--tensor-parallel-size", type=int)
+    eval_batch.add_argument("--gpu-memory-utilization", type=float)
+    eval_batch.add_argument("--max-num-seqs", type=int)
+    eval_batch.add_argument("--max-num-batched-tokens", type=int)
+    eval_batch.add_argument("--enable-auto-tool-choice", action="store_true", default=None)
+    eval_batch.add_argument("--vllm-env", action="append", help="explicit VLLM_* environment override for managed servers")
+    eval_batch.add_argument("--no-server", action="store_true", help="never start vLLM; assume the endpoint is already serving")
+    eval_batch.add_argument(
+        "--server-timeout",
+        type=float,
+        default=DEFAULT_SERVER_TIMEOUT_S,
+        help="seconds to wait for each managed vLLM server to become healthy",
+    )
+    eval_batch.add_argument(
+        "--scoreboard",
+        action="store_true",
+        help="record scores into the scoreboard database and skip already-scored benchmarks",
+    )
+    eval_batch.set_defaults(plan_builder=None)
 
     fc = eval_subparsers.add_parser(
         "function-calling",
@@ -272,6 +336,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if getattr(args, "eval_command", None) == "run":
         return run_eval(args, root=root, env=env, config=config)
+    if getattr(args, "eval_command", None) == "perf":
+        return run_completions_performance(args, root=root, env=env, config=config)
+    if getattr(args, "eval_command", None) == "batch":
+        return run_batch(args, root=root, env=env, config=config)
     if getattr(args, "eval_command", None) in {"function-calling", "fc"}:
         return run_function_calling_eval(args, root=root, env=env, config=config)
     if getattr(args, "eval_command", None) in {"agent-harness", "agent"}:

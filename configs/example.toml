@@ -23,6 +23,20 @@ concurrent_requests = 1
 request_timeout = 120
 server_timeout = 600
 
+[performance]
+# profile = "decode"
+# prompt_tokens = 128
+# output_tokens = 256
+# requests = 8
+# concurrency = 1
+# output = "results/performance/latest.json"
+
+[eval.batch]
+# models = ["g1d-0.4b"]
+# tasks = ["gsm8k|0"]
+# fc_tasks = ["bfcl_v3"]
+# output = "results/eval_batch/latest.json"
+
 [agent_harness]
 output_dir = "results/agent_harness"
 n_concurrent = 1

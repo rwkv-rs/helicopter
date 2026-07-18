@@ -97,6 +97,10 @@ class FunctionCallingRunResult:
     actual_calls: list[dict[str, Any]]
     raw_response: dict[str, Any] | None
     error: str | None = None
+    elapsed_seconds: float | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
 
 
 def _read_text_source(source: str) -> str:
@@ -535,6 +539,18 @@ def _post_json(url: str, payload: Mapping[str, Any], *, api_key: str | None, tim
         return json.loads(response.read().decode("utf-8"))
 
 
+def _usage_int(response: Mapping[str, Any] | None, key: str) -> int | None:
+    if not isinstance(response, Mapping):
+        return None
+    usage = response.get("usage")
+    if not isinstance(usage, Mapping):
+        return None
+    value = usage.get(key)
+    if not isinstance(value, int):
+        return None
+    return value if value >= 0 else None
+
+
 def evaluate_sample(
     sample: FunctionCallingSample,
     *,
@@ -553,13 +569,39 @@ def evaluate_sample(
         "temperature": 0,
         "max_tokens": max_new_tokens,
     }
+    started = time.monotonic()
     try:
         response = _post_json(_chat_completions_url(base_url), payload, api_key=api_key, timeout_s=timeout_s)
+        elapsed_seconds = time.monotonic() - started
         calls = tool_calls_from_response(response)
         score = score_calls(sample, calls)
-        return FunctionCallingRunResult(sample.task_name, sample.sample_id, score, calls, response)
+        prompt_tokens = _usage_int(response, "prompt_tokens")
+        completion_tokens = _usage_int(response, "completion_tokens")
+        total_tokens = _usage_int(response, "total_tokens")
+        if total_tokens is None and (prompt_tokens is not None or completion_tokens is not None):
+            total_tokens = (prompt_tokens or 0) + (completion_tokens or 0)
+        return FunctionCallingRunResult(
+            sample.task_name,
+            sample.sample_id,
+            score,
+            calls,
+            response,
+            elapsed_seconds=elapsed_seconds,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+        )
     except Exception as error:  # noqa: BLE001 - failures are recorded per sample.
-        return FunctionCallingRunResult(sample.task_name, sample.sample_id, 0.0, [], None, str(error))
+        elapsed_seconds = time.monotonic() - started
+        return FunctionCallingRunResult(
+            sample.task_name,
+            sample.sample_id,
+            0.0,
+            [],
+            None,
+            str(error),
+            elapsed_seconds=elapsed_seconds,
+        )
 
 
 def run_samples(
@@ -620,19 +662,63 @@ def infer_args_namespace(args: Any, *, port: str | None) -> Any:
     return argparse.Namespace(
         model=args.model,
         dry_run=getattr(args, "dry_run", False),
-        wkv_mode=None,
-        emb_device=None,
+        wkv_mode=getattr(args, "wkv_mode", None),
+        emb_device=getattr(args, "emb_device", None),
         host=None,
         port=port,
         served_model_name=model_name_for_fc(args, getattr(args, "_config", {})),
         tensor_parallel_size=getattr(args, "tensor_parallel_size", None),
         gpu_memory_utilization=getattr(args, "gpu_memory_utilization", None),
         max_model_len=None,
-        max_num_seqs=None,
-        max_num_batched_tokens=None,
-        enable_auto_tool_choice=True,
-        vllm_env=None,
+        max_num_seqs=getattr(args, "max_num_seqs", None),
+        max_num_batched_tokens=getattr(args, "max_num_batched_tokens", None),
+        enable_auto_tool_choice=pick(getattr(args, "enable_auto_tool_choice", None), True),
+        vllm_env=getattr(args, "vllm_env", None),
     )
+
+
+def _percentile(values: list[float], quantile: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, int((len(ordered) - 1) * quantile)))
+    return ordered[index]
+
+
+def _latency_summary(results: list[FunctionCallingRunResult]) -> dict[str, float | None]:
+    latencies = [result.elapsed_seconds for result in results if result.elapsed_seconds is not None]
+    return {
+        "mean": (sum(latencies) / len(latencies)) if latencies else None,
+        "p50": _percentile(latencies, 0.50),
+        "p90": _percentile(latencies, 0.90),
+        "p95": _percentile(latencies, 0.95),
+        "p99": _percentile(latencies, 0.99),
+    }
+
+
+def _sum_optional(values: list[int | None]) -> int | None:
+    present = [value for value in values if value is not None]
+    return sum(present) if present else None
+
+
+def _aggregate_performance(results: list[FunctionCallingRunResult], *, elapsed_seconds: float) -> dict[str, Any]:
+    prompt_tokens = _sum_optional([result.prompt_tokens for result in results])
+    completion_tokens = _sum_optional([result.completion_tokens for result in results])
+    total_tokens = _sum_optional([result.total_tokens for result in results])
+    if total_tokens is None and (prompt_tokens is not None or completion_tokens is not None):
+        total_tokens = (prompt_tokens or 0) + (completion_tokens or 0)
+    return {
+        "elapsed_seconds": elapsed_seconds,
+        "requests": len(results),
+        "successful_requests": sum(1 for result in results if result.error is None),
+        "failed_requests": sum(1 for result in results if result.error is not None),
+        "requests_per_second": (len(results) / elapsed_seconds) if elapsed_seconds > 0 else None,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+        "tokens_per_second": (total_tokens / elapsed_seconds) if total_tokens is not None and elapsed_seconds > 0 else None,
+        "e2e_latency_seconds": _latency_summary(results),
+    }
 
 
 def _aggregate_results(results: list[FunctionCallingRunResult]) -> dict[str, dict[str, Any]]:
@@ -649,6 +735,10 @@ def _aggregate_results(results: list[FunctionCallingRunResult]) -> dict[str, dic
             "samples": count,
             "tool_call_missing_rate": tool_call_missing / count if count else 0.0,
             "error_rate": errors / count if count else 0.0,
+            "e2e_latency_seconds": _latency_summary(rows),
+            "prompt_tokens": _sum_optional([row.prompt_tokens for row in rows]),
+            "completion_tokens": _sum_optional([row.completion_tokens for row in rows]),
+            "total_tokens": _sum_optional([row.total_tokens for row in rows]),
         }
     return aggregated
 
@@ -689,6 +779,7 @@ def _write_results(
     task_names: list[str],
     samples: list[FunctionCallingSample],
     results: list[FunctionCallingRunResult],
+    elapsed_seconds: float,
 ) -> Path:
     run_dir = output_dir / stamp
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -704,6 +795,10 @@ def _write_results(
                         "actual_calls": result.actual_calls,
                         "response_message": _compact_response_message(result.raw_response),
                         "error": result.error,
+                        "elapsed_seconds": result.elapsed_seconds,
+                        "prompt_tokens": result.prompt_tokens,
+                        "completion_tokens": result.completion_tokens,
+                        "total_tokens": result.total_tokens,
                     },
                     ensure_ascii=False,
                     sort_keys=True,
@@ -719,6 +814,7 @@ def _write_results(
                 "tasks": task_names,
                 "sample_count": len(samples),
                 "details": str(details_path),
+                "performance": _aggregate_performance(results, elapsed_seconds=elapsed_seconds),
                 "results": _aggregate_results(results),
             },
             ensure_ascii=False,
@@ -847,6 +943,7 @@ def run_function_calling_eval(args: Any, *, root: Path, env: dict[str, str], con
             concurrent_requests=concurrent_requests,
         )
     finally:
+        elapsed = time.monotonic() - started
         if server_process is not None and not getattr(args, "keep_server", False):
             print("function-calling: stopping vLLM server")
             stop_server(server_process)
@@ -860,6 +957,7 @@ def run_function_calling_eval(args: Any, *, root: Path, env: dict[str, str], con
         task_names=task_names,
         samples=samples,
         results=results,
+        elapsed_seconds=elapsed,
     )
     if getattr(args, "scoreboard", False):
         ingest_scoreboard_results(
@@ -869,7 +967,6 @@ def run_function_calling_eval(args: Any, *, root: Path, env: dict[str, str], con
             env=env,
             job_name="function_calling",
         )
-    elapsed = time.monotonic() - started
     aggregate = _aggregate_results(results)
     for task_name in task_names:
         if task_name in aggregate:

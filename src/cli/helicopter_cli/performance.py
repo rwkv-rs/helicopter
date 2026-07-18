@@ -1,18 +1,25 @@
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import json
 import math
 import re
 import subprocess
 import sys
 import time
-import asyncio
+import urllib.request
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from urllib.error import URLError
 from urllib.parse import urlparse, urlunparse
 from urllib.request import urlopen
+
+from .commands import bool_value, local_openai_base_url
+from .config import resolve_model_entry, table
+from .env import env_value, pick
 
 
 PROMETHEUS_LINE_RE = re.compile(
@@ -28,6 +35,47 @@ GENERATION_TOKEN_METRIC_SUFFIXES = (
     ("request_generation_tokens_sum",),
 )
 
+COMPLETIONS_PROFILE_DEFAULTS = {
+    "prefill": {
+        "prompt_tokens": 2048,
+        "output_tokens": 8,
+        "requests": 8,
+        "concurrency": 1,
+    },
+    "decode": {
+        "prompt_tokens": 128,
+        "output_tokens": 256,
+        "requests": 8,
+        "concurrency": 1,
+    },
+}
+
+
+@dataclass(frozen=True)
+class CompletionRequestResult:
+    ok: bool
+    elapsed_seconds: float
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class CompletionsPerformanceConfig:
+    profile: str
+    model_name: str
+    base_url: str
+    api_key: str | None
+    prompt_tokens: int
+    output_tokens: int
+    requests: int
+    concurrency: int
+    request_rate: float | None
+    timeout_s: float
+    ignore_eos: bool
+    output_path: Path
+
 
 def derive_metrics_url(base_url: str | None) -> str | None:
     if not base_url:
@@ -40,6 +88,431 @@ def derive_metrics_url(base_url: str | None) -> str | None:
         path = path[:-3]
     path = f"{path}/metrics" if path else "/metrics"
     return urlunparse((parsed.scheme, parsed.netloc, path, "", "", ""))
+
+
+def completions_url(base_url: str) -> str:
+    return f"{base_url.rstrip('/')}/completions"
+
+
+def synthetic_prompt(target_tokens: int) -> str:
+    count = max(1, int(target_tokens))
+    return " ".join(["rwkv"] * count)
+
+
+def _usage_int(response: Mapping[str, Any] | None, key: str) -> int | None:
+    if not isinstance(response, Mapping):
+        return None
+    usage = response.get("usage")
+    if not isinstance(usage, Mapping):
+        return None
+    value = usage.get(key)
+    if not isinstance(value, int):
+        return None
+    return value if value >= 0 else None
+
+
+def post_completion(
+    *,
+    base_url: str,
+    api_key: str | None,
+    model_name: str,
+    prompt: str,
+    output_tokens: int,
+    timeout_s: float,
+    ignore_eos: bool,
+) -> CompletionRequestResult:
+    payload: dict[str, Any] = {
+        "model": model_name,
+        "prompt": prompt,
+        "max_tokens": output_tokens,
+        "temperature": 0,
+        "stream": False,
+    }
+    if ignore_eos:
+        payload["ignore_eos"] = True
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    request = urllib.request.Request(completions_url(base_url), data=data, headers=headers, method="POST")
+    started = time.monotonic()
+    try:
+        with urlopen(request, timeout=timeout_s) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except Exception as error:  # noqa: BLE001 - performance probes report per-request errors.
+        return CompletionRequestResult(False, time.monotonic() - started, error=f"{type(error).__name__}: {error}")
+
+    elapsed = time.monotonic() - started
+    prompt_tokens = _usage_int(body, "prompt_tokens")
+    completion_tokens = _usage_int(body, "completion_tokens")
+    total_tokens = _usage_int(body, "total_tokens")
+    if total_tokens is None and (prompt_tokens is not None or completion_tokens is not None):
+        total_tokens = (prompt_tokens or 0) + (completion_tokens or 0)
+    return CompletionRequestResult(
+        True,
+        elapsed,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+    )
+
+
+def _percentile(values: list[float], quantile: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, int((len(ordered) - 1) * quantile)))
+    return ordered[index]
+
+
+def latency_summary(results: list[CompletionRequestResult]) -> dict[str, float | None]:
+    values = [result.elapsed_seconds for result in results if result.ok]
+    return {
+        "mean": (sum(values) / len(values)) if values else None,
+        "p50": _percentile(values, 0.50),
+        "p90": _percentile(values, 0.90),
+        "p95": _percentile(values, 0.95),
+        "p99": _percentile(values, 0.99),
+    }
+
+
+def _sum_optional(values: list[int | None]) -> int | None:
+    present = [value for value in values if value is not None]
+    return sum(present) if present else None
+
+
+def run_completion_requests(
+    *,
+    base_url: str,
+    api_key: str | None,
+    model_name: str,
+    prompt: str,
+    output_tokens: int,
+    requests: int,
+    concurrency: int,
+    request_rate: float | None,
+    timeout_s: float,
+    ignore_eos: bool,
+) -> list[CompletionRequestResult]:
+    request_count = max(1, int(requests))
+    worker_count = max(1, min(int(concurrency), request_count))
+    if worker_count == 1:
+        results = []
+        started_submit = time.monotonic()
+        for index in range(request_count):
+            if request_rate and index > 0:
+                target = started_submit + index / request_rate
+                delay = target - time.monotonic()
+                if delay > 0:
+                    time.sleep(delay)
+            results.append(
+                post_completion(
+                    base_url=base_url,
+                    api_key=api_key,
+                    model_name=model_name,
+                    prompt=prompt,
+                    output_tokens=output_tokens,
+                    timeout_s=timeout_s,
+                    ignore_eos=ignore_eos,
+                )
+            )
+        return results
+
+    results: list[CompletionRequestResult] = []
+    submitted = 0
+    started_submit = time.monotonic()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+        pending: set[concurrent.futures.Future[CompletionRequestResult]] = set()
+        while submitted < request_count or pending:
+            while submitted < request_count and len(pending) < worker_count:
+                if request_rate and submitted > 0:
+                    target = started_submit + submitted / request_rate
+                    delay = target - time.monotonic()
+                    if delay > 0:
+                        break
+                pending.add(
+                    executor.submit(
+                        post_completion,
+                        base_url=base_url,
+                        api_key=api_key,
+                        model_name=model_name,
+                        prompt=prompt,
+                        output_tokens=output_tokens,
+                        timeout_s=timeout_s,
+                        ignore_eos=ignore_eos,
+                    )
+                )
+                submitted += 1
+            if not pending:
+                time.sleep(0.01)
+                continue
+            done, pending = concurrent.futures.wait(
+                pending,
+                timeout=0.05,
+                return_when=concurrent.futures.FIRST_COMPLETED,
+            )
+            for future in done:
+                results.append(future.result())
+    return results
+
+
+def build_completions_performance_report(
+    *,
+    model_name: str,
+    base_url: str,
+    profile: str,
+    prompt_tokens_target: int,
+    output_tokens: int,
+    requests: int,
+    concurrency: int,
+    request_rate: float | None,
+    timeout_s: float,
+    ignore_eos: bool,
+    started_at_epoch: float,
+    ended_at_epoch: float,
+    results: list[CompletionRequestResult],
+) -> dict[str, Any]:
+    elapsed_seconds = max(0.0, ended_at_epoch - started_at_epoch)
+    successful = [result for result in results if result.ok]
+    prompt_tokens = _sum_optional([result.prompt_tokens for result in successful])
+    completion_tokens = _sum_optional([result.completion_tokens for result in successful])
+    total_tokens = _sum_optional([result.total_tokens for result in successful])
+    if total_tokens is None and (prompt_tokens is not None or completion_tokens is not None):
+        total_tokens = (prompt_tokens or 0) + (completion_tokens or 0)
+    error_counts: dict[str, int] = {}
+    for result in results:
+        if result.error:
+            error_counts[result.error] = error_counts.get(result.error, 0) + 1
+    return {
+        "schema_version": 1,
+        "kind": "openai_completions",
+        "profile": profile,
+        "started_at": datetime.fromtimestamp(started_at_epoch, UTC).isoformat(),
+        "ended_at": datetime.fromtimestamp(ended_at_epoch, UTC).isoformat(),
+        "elapsed_seconds": elapsed_seconds,
+        "model": model_name,
+        "base_url": base_url,
+        "prompt_tokens_target": prompt_tokens_target,
+        "output_tokens_target": output_tokens,
+        "requests": requests,
+        "concurrency": concurrency,
+        "request_rate": request_rate,
+        "timeout_s": timeout_s,
+        "ignore_eos": ignore_eos,
+        "successful_requests": len(successful),
+        "failed_requests": len(results) - len(successful),
+        "error_rate": ((len(results) - len(successful)) / len(results)) if results else None,
+        "request_throughput": (len(successful) / elapsed_seconds) if elapsed_seconds > 0 else None,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+        "prompt_tokens_per_second": (prompt_tokens / elapsed_seconds) if prompt_tokens is not None and elapsed_seconds > 0 else None,
+        "completion_tokens_per_second": (
+            completion_tokens / elapsed_seconds
+            if completion_tokens is not None and elapsed_seconds > 0
+            else None
+        ),
+        "total_tokens_per_second": (total_tokens / elapsed_seconds) if total_tokens is not None and elapsed_seconds > 0 else None,
+        "e2e_latency_seconds": latency_summary(results),
+        "errors": error_counts,
+    }
+
+
+def _profile_default(profile: str, key: str) -> int:
+    return int(COMPLETIONS_PROFILE_DEFAULTS[profile][key])
+
+
+def _performance_config(config: dict[str, Any]) -> dict[str, Any]:
+    value = table(config, "performance")
+    return value if isinstance(value, dict) else {}
+
+
+def _positive_int(value: Any, *, name: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise SystemExit(f"{name} must be positive")
+    return parsed
+
+
+def _positive_float_or_none(value: Any, *, name: str) -> float | None:
+    if value is None:
+        return None
+    parsed = float(value)
+    if parsed <= 0:
+        raise SystemExit(f"{name} must be positive")
+    return parsed
+
+
+def _performance_output_path(*, root: Path, profile: str, output: Any) -> Path:
+    if output is None:
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        return root / "results/performance" / f"completions_{profile}_{stamp}.json"
+    output_path = Path(str(output))
+    return output_path if output_path.is_absolute() else root / output_path
+
+
+def resolve_completions_performance_config(
+    args: Any,
+    *,
+    root: Path,
+    env: dict[str, str],
+    config: dict[str, Any],
+) -> CompletionsPerformanceConfig:
+    perf_config = _performance_config(config)
+    profile = str(getattr(args, "profile", None) or perf_config.get("profile") or "decode")
+    if profile not in COMPLETIONS_PROFILE_DEFAULTS:
+        raise SystemExit(f"unsupported performance profile: {profile}")
+
+    model = resolve_model_entry(config, args.model)
+    model_name = str(
+        pick(
+            getattr(args, "served_model_name", None),
+            model.get("served_model_name"),
+            model.get("requested_name"),
+            args.model,
+        )
+    )
+    raw_api_key = str(
+        pick(
+            getattr(args, "api_key", None),
+            env_value(env, "HELICOPTER_EVAL_API_KEY", "OPENAI_API_KEY"),
+            perf_config.get("api_key"),
+            "EMPTY",
+        )
+    )
+    request_rate = _positive_float_or_none(
+        pick(getattr(args, "request_rate", None), perf_config.get("request_rate")),
+        name="request_rate",
+    )
+    timeout_s = _positive_float_or_none(
+        pick(getattr(args, "timeout", None), perf_config.get("timeout"), 120.0),
+        name="timeout",
+    )
+    assert timeout_s is not None
+
+    return CompletionsPerformanceConfig(
+        profile=profile,
+        model_name=model_name,
+        base_url=local_openai_base_url(config, env, args),
+        api_key=None if raw_api_key == "EMPTY" else raw_api_key or None,
+        prompt_tokens=_positive_int(
+            pick(
+                getattr(args, "prompt_tokens", None),
+                perf_config.get("prompt_tokens"),
+                _profile_default(profile, "prompt_tokens"),
+            ),
+            name="prompt_tokens",
+        ),
+        output_tokens=_positive_int(
+            pick(
+                getattr(args, "output_tokens", None),
+                perf_config.get("output_tokens"),
+                _profile_default(profile, "output_tokens"),
+            ),
+            name="output_tokens",
+        ),
+        requests=_positive_int(
+            pick(
+                getattr(args, "requests", None),
+                perf_config.get("requests"),
+                _profile_default(profile, "requests"),
+            ),
+            name="requests",
+        ),
+        concurrency=_positive_int(
+            pick(
+                getattr(args, "concurrency", None),
+                perf_config.get("concurrency"),
+                _profile_default(profile, "concurrency"),
+            ),
+            name="concurrency",
+        ),
+        request_rate=request_rate,
+        timeout_s=timeout_s,
+        ignore_eos=bool_value(pick(getattr(args, "ignore_eos", None), perf_config.get("ignore_eos"), False)),
+        output_path=_performance_output_path(
+            root=root,
+            profile=profile,
+            output=pick(getattr(args, "output", None), perf_config.get("output")),
+        ),
+    )
+
+
+def build_completions_performance_report_from_config(
+    profile_config: CompletionsPerformanceConfig,
+    *,
+    started_at_epoch: float,
+    ended_at_epoch: float,
+    results: list[CompletionRequestResult],
+) -> dict[str, Any]:
+    return build_completions_performance_report(
+        model_name=profile_config.model_name,
+        base_url=profile_config.base_url,
+        profile=profile_config.profile,
+        prompt_tokens_target=profile_config.prompt_tokens,
+        output_tokens=profile_config.output_tokens,
+        requests=profile_config.requests,
+        concurrency=profile_config.concurrency,
+        request_rate=profile_config.request_rate,
+        timeout_s=profile_config.timeout_s,
+        ignore_eos=profile_config.ignore_eos,
+        started_at_epoch=started_at_epoch,
+        ended_at_epoch=ended_at_epoch,
+        results=results,
+    )
+
+
+def run_completions_performance(
+    args: Any,
+    *,
+    root: Path,
+    env: dict[str, str],
+    config: dict[str, Any],
+) -> int:
+    profile_config = resolve_completions_performance_config(args, root=root, env=env, config=config)
+
+    if getattr(args, "dry_run", False):
+        print(
+            "eval perf: "
+            f"model={profile_config.model_name} base_url={profile_config.base_url} profile={profile_config.profile} "
+            f"requests={profile_config.requests} concurrency={profile_config.concurrency} "
+            f"prompt_tokens={profile_config.prompt_tokens} output_tokens={profile_config.output_tokens} "
+            f"output={profile_config.output_path}"
+        )
+        return 0
+
+    prompt = synthetic_prompt(profile_config.prompt_tokens)
+    started_at_epoch = time.time()
+    results = run_completion_requests(
+        base_url=profile_config.base_url,
+        api_key=profile_config.api_key,
+        model_name=profile_config.model_name,
+        prompt=prompt,
+        output_tokens=profile_config.output_tokens,
+        requests=profile_config.requests,
+        concurrency=profile_config.concurrency,
+        request_rate=profile_config.request_rate,
+        timeout_s=profile_config.timeout_s,
+        ignore_eos=profile_config.ignore_eos,
+    )
+    ended_at_epoch = time.time()
+    report = build_completions_performance_report_from_config(
+        profile_config,
+        started_at_epoch=started_at_epoch,
+        ended_at_epoch=ended_at_epoch,
+        results=results,
+    )
+    profile_config.output_path.parent.mkdir(parents=True, exist_ok=True)
+    profile_config.output_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    print(
+        "eval perf: "
+        f"successful={report['successful_requests']} failed={report['failed_requests']} "
+        f"completion_tps={report['completion_tokens_per_second']} report={profile_config.output_path}"
+    )
+    return 1 if report["failed_requests"] else 0
 
 
 def base_url_from_lighteval_command(command: list[str]) -> str | None:

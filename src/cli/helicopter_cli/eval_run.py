@@ -7,6 +7,7 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
 import time
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -218,6 +219,10 @@ async def _ingest_scoreboard_results(
 
 SCOREBOARD_ENV_PREFIXES = ("SCOREBOARD_DB_", "PG")
 
+# Serializes scoreboard database access (Tortoise keeps global connection
+# state, so concurrent batch workers must not init/close it simultaneously).
+SCOREBOARD_LOCK = threading.Lock()
+
 
 @contextmanager
 def _scoreboard_env(env: dict[str, str]):
@@ -249,7 +254,7 @@ def ingest_scoreboard_results(
         print("eval run: no result files found; nothing to ingest into the scoreboard")
         return
     try:
-        with _scoreboard_env(env):
+        with SCOREBOARD_LOCK, _scoreboard_env(env):
             recorded = asyncio.run(
                 _ingest_scoreboard_results(
                     result_files=result_files,
