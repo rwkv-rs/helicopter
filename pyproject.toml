@@ -10,6 +10,7 @@ dependencies = []
 
 [project.scripts]
 helicopter = "helicopter_cli.__main__:main"
+rwkv-web-harness = "rwkv_web_harness.cli:main"
 
 [dependency-groups]
 eval = [
@@ -134,7 +135,7 @@ package = true
 
 [tool.setuptools.packages.find]
 where = ["src/cli"]
-include = ["helicopter_cli*"]
+include = ["helicopter_cli*", "rwkv_web_harness*"]
 
 [tool.setuptools.package-data]
 helicopter_cli = ["lighteval_data/*.jsonl"]

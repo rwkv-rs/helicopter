@@ -139,6 +139,72 @@ During development, the package can also be run directly:
 PYTHONPATH=src/cli python3 -m helicopter_cli --help
 ```
 
+### Run the local RWKV web research harness
+
+The first web harness version is packaged as `rwkv_web_harness`. It uses a
+local RWKV OpenAI-compatible completion endpoint and read-only web tools. No
+remote LLM or paid search API is required. The default `html` search backend
+opens DuckDuckGo Lite as a normal search webpage; a self-hosted SearXNG endpoint
+can be selected with environment variables.
+
+After installing the project, check both local endpoints:
+
+```bash
+uv run rwkv-web-harness preflight \
+  --model-url http://127.0.0.1:8000/v1
+```
+
+Run one research question and save an append-only JSONL trace:
+
+```bash
+uv run rwkv-web-harness run \
+  --model-url http://127.0.0.1:8000/v1 \
+  --model rwkv7-g1d-0.4b \
+  --task "What is RWKV and who introduced it?"
+```
+
+For a local SearXNG instance:
+
+```bash
+RWKV_WEB_SEARCH_BACKEND=searxng \
+RWKV_WEB_SEARCH_URL=http://127.0.0.1:8080/search \
+uv run rwkv-web-harness run \
+  --model-url http://127.0.0.1:8000/v1 \
+  --model rwkv7-g1d-0.4b \
+  --task "Compare two recent RWKV releases and cite the sources."
+```
+
+The model must emit one of these protocol forms per turn:
+
+```text
+<tool_call>{"name":"web_search","arguments":{"query":"..."}}</tool_call>
+<final_answer>{"answer":"...","citations":["source_001"]}</final_answer>
+```
+
+Traces default to `results/web_harness/<task_id>.jsonl` and include prompts,
+model outputs, tool calls, tool results, context truncation, and the final
+status.
+
+The same package can be embedded from Python:
+
+```python
+from rwkv_web_harness import AgentConfig, AgentRunner, RWKVLocalBackend, TraceWriter, WebToolkit
+
+backend = RWKVLocalBackend(
+    base_url="http://127.0.0.1:8000/v1",
+    model="rwkv7-g1d-0.4b",
+)
+toolkit = WebToolkit(search_backend="html")
+with TraceWriter("results/web_harness/python_example.jsonl") as trace:
+    result = AgentRunner(
+        backend=backend,
+        toolkit=toolkit,
+        config=AgentConfig(max_steps=8),
+        trace=trace,
+    ).run(task_id="python_example", question="What is RWKV?")
+print(result.answer, result.citations)
+```
+
 ### Start RWKV vLLM serving
 
 Dry-run first to inspect the exact command and environment:
