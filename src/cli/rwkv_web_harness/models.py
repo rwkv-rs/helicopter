@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
@@ -10,14 +11,32 @@ from urllib.request import Request, urlopen
 
 @dataclass(frozen=True)
 class GenerationRequest:
-    prompt: str
+    prompt: str = ""
     max_new_tokens: int = 256
     temperature: float = 0.0
+    messages: list[dict[str, Any]] | None = None
+    tools: list[dict[str, Any]] | None = None
+    stop: list[str] | None = None
+    stop_token_ids: list[int] | None = None
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    call_id: str
+    name: str
+    arguments: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class GenerationResponse:
+    content: str
+    tool_calls: tuple[ToolCall, ...] = ()
+    finish_reason: str | None = None
 
 
 class GenerationBackend(Protocol):
-    def generate(self, request: GenerationRequest) -> str:
-        """Generate one model turn from a fully rendered prompt."""
+    def generate(self, request: GenerationRequest) -> GenerationResponse | str:
+        """Generate one model turn from a rendered prompt or chat messages."""
 
 
 class ModelBackendError(RuntimeError):
@@ -39,25 +58,41 @@ class RWKVLocalBackend:
         model: str,
         timeout: float = 120.0,
         api_key: str | None = None,
-        endpoint: str = "/completions",
+        interface: str = "chat",
+        endpoint: str | None = None,
     ) -> None:
+        if interface not in {"chat", "completion", "rwkv-json", "g1h"}:
+            raise ValueError("interface must be 'chat', 'completion', 'rwkv-json', or 'g1h'")
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
         self.api_key = api_key or os.environ.get("RWKV_MODEL_API_KEY")
-        self.endpoint = endpoint if endpoint.startswith("/") else f"/{endpoint}"
+        self.interface = interface
+        default_endpoint = "/chat/completions" if interface == "chat" else "/completions"
+        selected_endpoint = endpoint or default_endpoint
+        self.endpoint = selected_endpoint if selected_endpoint.startswith("/") else f"/{selected_endpoint}"
 
     @property
     def url(self) -> str:
         return f"{self.base_url}{self.endpoint}"
 
-    def generate(self, request: GenerationRequest) -> str:
-        payload = {
+    def generate(self, request: GenerationRequest) -> GenerationResponse:
+        payload: dict[str, Any] = {
             "model": self.model,
-            "prompt": request.prompt,
             "max_tokens": request.max_new_tokens,
             "temperature": request.temperature,
         }
+        if self.interface == "chat":
+            payload["messages"] = request.messages or [{"role": "user", "content": request.prompt}]
+            if request.tools:
+                payload["tools"] = request.tools
+                payload["tool_choice"] = "auto"
+        else:
+            payload["prompt"] = request.prompt
+        if request.stop:
+            payload["stop"] = request.stop
+        if request.stop_token_ids:
+            payload["stop_token_ids"] = request.stop_token_ids
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
@@ -82,23 +117,166 @@ class RWKVLocalBackend:
             data: Any = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise ModelBackendError(f"model backend returned invalid JSON: {raw[:500]}") from exc
-        text = _extract_text(data)
-        if not text:
-            raise ModelBackendError("model backend response did not contain completion text")
-        return text
+        response = _extract_response(data)
+        if not response.content and not response.tool_calls:
+            raise ModelBackendError("model backend response did not contain text or tool calls")
+        return response
 
 
-def _extract_text(data: Any) -> str:
+def _extract_response(data: Any) -> GenerationResponse:
     choices = data.get("choices") if isinstance(data, dict) else None
     if not isinstance(choices, list) or not choices:
-        return ""
+        return GenerationResponse(content="")
     first = choices[0]
     if not isinstance(first, dict):
-        return ""
+        return GenerationResponse(content="")
     text = first.get("text")
     if isinstance(text, str):
-        return text.strip()
+        content_text = text.strip()
+        tool_calls = _extract_text_tool_calls(content_text)
+        return GenerationResponse(
+            content="" if tool_calls else content_text,
+            tool_calls=tuple(tool_calls),
+            finish_reason=_finish_reason(first),
+        )
     message = first.get("message")
-    if isinstance(message, dict) and isinstance(message.get("content"), str):
-        return str(message["content"]).strip()
-    return ""
+    if not isinstance(message, dict):
+        return GenerationResponse(content="")
+    content = message.get("content")
+    content_text = content.strip() if isinstance(content, str) else ""
+    tool_calls: list[ToolCall] = []
+    raw_tool_calls = message.get("tool_calls")
+    if isinstance(raw_tool_calls, list):
+        for index, raw_call in enumerate(raw_tool_calls):
+            if not isinstance(raw_call, dict):
+                continue
+            function = raw_call.get("function")
+            if not isinstance(function, dict):
+                continue
+            name = function.get("name")
+            raw_arguments = function.get("arguments", {})
+            if not isinstance(name, str) or not name.strip():
+                continue
+            if isinstance(raw_arguments, str):
+                try:
+                    arguments = json.loads(raw_arguments)
+                except json.JSONDecodeError:
+                    continue
+            else:
+                arguments = raw_arguments
+            if not isinstance(arguments, dict):
+                continue
+            call_id = str(raw_call.get("id") or f"call_{index + 1}")
+            tool_calls.append(ToolCall(call_id=call_id, name=name.strip(), arguments=dict(arguments)))
+    if not tool_calls:
+        tool_calls = _extract_text_tool_calls(content_text)
+        if tool_calls:
+            content_text = ""
+    return GenerationResponse(
+        content=content_text,
+        tool_calls=tuple(tool_calls),
+        finish_reason=_finish_reason(first),
+    )
+
+
+def _finish_reason(choice: dict[str, Any]) -> str | None:
+    value = choice.get("finish_reason")
+    return value if isinstance(value, str) else None
+
+
+def _extract_text_tool_calls(text: str) -> list[ToolCall]:
+    """Adapt RWKV JSON/agentic text when the model skips vLLM's parser marker.
+
+    Some g1h checkpoints emit a JSON plan with ``commands[].keystrokes`` rather
+    than the ``**Tool Call:**`` marker understood by vLLM's ``rwkv`` parser.
+    This deliberately supports only the local web tools and only the first
+    command, so an arbitrary model string cannot become an arbitrary action.
+    """
+
+    payload = _leading_json_value(text)
+    if not isinstance(payload, (dict, list)):
+        return []
+    candidates: list[Any] = []
+    if isinstance(payload, list):
+        candidates.extend(payload)
+    elif isinstance(payload.get("tool_calls"), list):
+        candidates.extend(payload["tool_calls"])
+    elif isinstance(payload.get("commands"), list):
+        candidates.extend(payload["commands"])
+    elif "final_answer" in payload:
+        final_answer = payload["final_answer"]
+        if isinstance(final_answer, dict):
+            final_arguments = final_answer
+        else:
+            final_arguments = {"answer": final_answer}
+            if "citations" in payload:
+                final_arguments["citations"] = payload["citations"]
+        candidates.append(
+            {
+                "name": "final_answer",
+                "arguments": final_arguments,
+            }
+        )
+    elif "answer" in payload:
+        candidates.append({"name": "final_answer", "arguments": payload})
+    elif "name" in payload or "function" in payload:
+        candidates.append(payload)
+    for index, candidate in enumerate(candidates):
+        parsed = _coerce_text_tool_call(candidate, index=index)
+        if parsed is not None:
+            return [parsed]
+    return []
+
+
+def _leading_json_value(text: str) -> Any:
+    normalized = text.strip()
+    if "</think>" in normalized:
+        normalized = normalized.rsplit("</think>", 1)[1].strip()
+    if "```" in normalized:
+        normalized = normalized.replace("```json", "").replace("```", "").strip()
+    prefilled = normalized.lstrip()
+    if prefilled.startswith(('"name"', '"tool"', '"action"', '"function"')):
+        normalized = "{" + prefilled
+        start = 0
+    else:
+        start = min((index for index in (normalized.find("{"), normalized.find("[")) if index >= 0), default=-1)
+        if start < 0:
+            return None
+    try:
+        value, _ = json.JSONDecoder().raw_decode(normalized[start:])
+    except json.JSONDecodeError:
+        return None
+    return value
+
+
+def _coerce_text_tool_call(candidate: Any, *, index: int) -> ToolCall | None:
+    if not isinstance(candidate, dict):
+        return None
+    function = candidate.get("function") if isinstance(candidate.get("function"), dict) else candidate
+    name = function.get("name") or function.get("tool") or function.get("tool_name")
+    arguments = function.get("arguments", function.get("input", function.get("parameters", {})))
+    if not isinstance(name, str) or name.strip() not in {"web_search", "open_url", "find_in_page", "final_answer"}:
+        keystrokes = candidate.get("keystrokes")
+        if not isinstance(keystrokes, str):
+            return None
+        try:
+            tokens = shlex.split(keystrokes.strip().splitlines()[0])
+        except ValueError:
+            return None
+        if not tokens or tokens[0] not in {"web_search", "open_url", "find_in_page"}:
+            return None
+        name = tokens[0]
+        if name == "web_search":
+            arguments = {"query": " ".join(tokens[1:])}
+        elif name == "open_url":
+            arguments = {"url": tokens[1]} if len(tokens) > 1 else {}
+        else:
+            arguments = {"source_id": tokens[1], "pattern": " ".join(tokens[2:])} if len(tokens) > 2 else {}
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(arguments, dict):
+        return None
+    return ToolCall(call_id=str(candidate.get("id") or f"text_call_{index + 1}"), name=name.strip(), arguments=arguments)

@@ -80,6 +80,92 @@ class WebToolkit:
             "Only use these read-only tools. Cite source ids in the final answer."
         )
 
+    @property
+    def tool_schemas(self) -> list[dict[str, Any]]:
+        """OpenAI tool schemas consumed by vLLM-RWKV's native tool parser."""
+
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "web_search",
+                    "description": "Search the public web and return source ids, titles, URLs, and snippets.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "The search query."},
+                            "top_k": {"type": "integer", "minimum": 1, "maximum": 10},
+                        },
+                        "required": ["query"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "open_url",
+                    "description": "Open a public search result or URL and extract readable page text.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "source_id": {"type": "string"},
+                            "url": {"type": "string"},
+                        },
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "find_in_page",
+                    "description": "Find a phrase in a page that was already opened.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "source_id": {"type": "string"},
+                            "pattern": {"type": "string"},
+                        },
+                        "required": ["source_id", "pattern"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+        ]
+
+    @property
+    def g1h_tool_catalog(self) -> str:
+        """Flat JSON catalog used in the g1h prompt instead of native chat tools."""
+
+        catalog: list[dict[str, Any]] = []
+        for schema in self.tool_schemas:
+            function = schema.get("function", {})
+            if isinstance(function, dict):
+                catalog.append(
+                    {
+                        "name": function.get("name", ""),
+                        "description": function.get("description", ""),
+                        "parameters": function.get("parameters", {}),
+                    }
+                )
+        catalog.append(
+            {
+                "name": "final_answer",
+                "description": "Finish the task using the gathered evidence.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "answer": {"type": "string"},
+                        "citations": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["answer"],
+                    "additionalProperties": False,
+                },
+            }
+        )
+        return "Tools:\n" + json.dumps(catalog, ensure_ascii=False, separators=(",", ":"))
+
     def execute(self, action: Action) -> ToolResult:
         try:
             if action.name == "web_search":

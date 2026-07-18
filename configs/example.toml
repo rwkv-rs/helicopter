@@ -93,6 +93,25 @@ VLLM_WSL2_ENABLE_PIN_MEMORY = "1"
 VLLM_USE_RAPID_SAMPLER = "0"
 VLLM_USE_FLASHINFER_SAMPLER = "0"
 
+[models."g1h-1.5b"]
+path = "/home/chase/GitHub/rwkv-rs/pth/rwkv7-g1h-1.5b-20260710-ctx10240.pth"
+served_model_name = "g1h-1.5b"
+max_model_len = 10240
+
+[models."g1h-1.5b".infer]
+vllm_bin = "/home/chase/GitHub/vllm-rwkv/.venv/bin/vllm"
+wkv_mode = "fp16"
+emb_device = "gpu"
+gpu_memory_utilization = 0.80
+max_num_seqs = 1
+enable_auto_tool_choice = true
+
+[models."g1h-1.5b".infer.vllm_env]
+VLLM_USE_V2_MODEL_RUNNER = "1"
+VLLM_WSL2_ENABLE_PIN_MEMORY = "1"
+VLLM_USE_RAPID_SAMPLER = "0"
+VLLM_USE_FLASHINFER_SAMPLER = "0"
+
 [models."g1g-7.2b"]
 file = "rwkv7-g1g-7.2b-20260523-ctx8192.pth"
 served_model_name = "g1g-7.2b"

@@ -1,10 +1,20 @@
 import json
 import unittest
 
-from rwkv_web_harness.tools import _parse_html_results, _parse_searxng_results
+from rwkv_web_harness.tools import WebToolkit, _parse_html_results, _parse_searxng_results
 
 
 class ToolParsingTests(unittest.TestCase):
+    def test_exposes_native_tool_schemas(self) -> None:
+        toolkit = WebToolkit()
+        names = [item["function"]["name"] for item in toolkit.tool_schemas]
+        self.assertEqual(names, ["web_search", "open_url", "find_in_page"])
+
+    def test_exposes_g1h_flat_tool_catalog(self) -> None:
+        toolkit = WebToolkit()
+        self.assertTrue(toolkit.g1h_tool_catalog.startswith("Tools:\n"))
+        self.assertIn('"name":"final_answer"', toolkit.g1h_tool_catalog)
+
     def test_parses_searxng_json_results(self) -> None:
         raw = json.dumps(
             {"results": [{"title": "RWKV", "url": "https://example.com/rwkv", "content": "A result"}]}

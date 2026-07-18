@@ -154,12 +154,15 @@ uv run rwkv-web-harness preflight \
   --model-url http://127.0.0.1:8000/v1
 ```
 
-Run one research question and save an append-only JSONL trace:
+Run one research question and save an append-only JSONL trace. The default
+`chat` interface sends OpenAI-compatible native tool schemas; for the g1h
+checkpoint use the dedicated `g1h` interface:
 
 ```bash
 uv run rwkv-web-harness run \
   --model-url http://127.0.0.1:8000/v1 \
-  --model rwkv7-g1d-0.4b \
+  --model g1h-1.5b \
+  --interface g1h \
   --task "What is RWKV and who introduced it?"
 ```
 
@@ -174,7 +177,26 @@ uv run rwkv-web-harness run \
   --task "Compare two recent RWKV releases and cite the sources."
 ```
 
-The model must emit one of these protocol forms per turn:
+The g1h mode uses the local /v1/completions endpoint and the checkpoint's
+diamond-delimited recurrent format. Each turn is rendered as:
+
+    User✿{user_or_tool_observation}✿
+    Bot✿<think></think>{json_function_call}✿
+
+The harness sends both stop=["✿"] and stop_token_ids=[10060], then feeds the
+tool observation back as the next User✿...✿ turn. The model should emit one
+JSON function call per turn. For example:
+
+    {"name":"web_search","arguments":{"query":"RWKV"}}
+    {"name":"final_answer","arguments":{"answer":"...","citations":["source_001"]}}
+
+The generic completion-compatible protocol remains available with
+--interface completion or --interface rwkv-json; its JSON prefill starts with:
+
+    Assistant: <think></think>
+    {
+
+The model must emit one of these legacy protocol forms per turn:
 
 ```text
 <tool_call>{"name":"web_search","arguments":{"query":"..."}}</tool_call>
@@ -192,7 +214,8 @@ from rwkv_web_harness import AgentConfig, AgentRunner, RWKVLocalBackend, TraceWr
 
 backend = RWKVLocalBackend(
     base_url="http://127.0.0.1:8000/v1",
-    model="rwkv7-g1d-0.4b",
+    model="g1h-1.5b",
+    interface="g1h",
 )
 toolkit = WebToolkit(search_backend="html")
 with TraceWriter("results/web_harness/python_example.jsonl") as trace:

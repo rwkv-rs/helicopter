@@ -29,6 +29,16 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--model-url", default=os.environ.get("RWKV_MODEL_URL", "http://127.0.0.1:8000/v1"))
     run.add_argument("--model", default=os.environ.get("RWKV_MODEL_NAME", "RWKV"))
     run.add_argument("--api-key", default=os.environ.get("RWKV_MODEL_API_KEY"))
+    run.add_argument(
+        "--interface",
+        choices=("chat", "completion", "rwkv-json", "g1h"),
+        default=os.environ.get("RWKV_MODEL_INTERFACE", "chat"),
+        help="chat uses native tools; g1h uses User✿/Bot✿ JSON calls; rwkv-json uses generic JSON; completion uses legacy tags",
+    )
+    run.add_argument(
+        "--endpoint",
+        help="optional endpoint path override, e.g. /v1/chat/completions or /v1/completions",
+    )
     run.add_argument("--search-url", default=os.environ.get("RWKV_WEB_SEARCH_URL"))
     run.add_argument(
         "--search-backend",
@@ -39,7 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--trace", type=Path, help="JSONL trace path")
     run.add_argument("--max-steps", type=int, default=8)
     run.add_argument("--max-context-chars", type=int, default=24000)
-    run.add_argument("--max-new-tokens", type=int, default=256)
+    run.add_argument("--max-new-tokens", type=int, default=768)
     run.add_argument("--max-page-chars", type=int, default=6000)
     run.add_argument("--temperature", type=float, default=0.0)
     run.add_argument("--timeout", type=float, default=120.0)
@@ -79,6 +89,8 @@ def _run(args: argparse.Namespace) -> int:
         model=args.model,
         timeout=args.timeout,
         api_key=args.api_key,
+        interface=args.interface,
+        endpoint=args.endpoint,
     )
     toolkit = WebToolkit(
         search_url=search_url,
