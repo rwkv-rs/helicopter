@@ -24,10 +24,11 @@ the source ids you actually used, for example [source_001].
 @dataclass(frozen=True)
 class AgentConfig:
     max_steps: int = 8
-    max_context_chars: int = 24000
+    max_context_chars: int = 12000
     max_new_tokens: int = 768
     temperature: float = 0.0
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
+    tool_sequence: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,13 @@ class AgentRunner:
                 'Use {"name":"final_answer","arguments":{"answer":"...","citations":[...]}} when complete. '
                 "Do not output prose outside the JSON object."
             )
+        if self.config.tool_sequence:
+            system_prompt += (
+                "\n\nTool sequence policy: call only these network tools, exactly once and in this order: "
+                + " -> ".join(self.config.tool_sequence)
+                + ". After the last tool succeeds, call final_answer immediately. "
+                "Do not call any other network tool or repeat a completed tool."
+            )
         context = ChatContext(
             system_prompt=system_prompt,
             task=question.strip(),
@@ -86,6 +94,9 @@ class AgentRunner:
         prompt_chars = 0
         context_truncated = False
         last_error: str | None = None
+        completed_tools: list[str] = []
+        last_tool_result: ToolResult | None = None
+        deferred_final: tuple[str, tuple[str, ...]] | None = None
 
         for step in range(1, self.config.max_steps + 1):
             if interface == "chat":
@@ -136,6 +147,20 @@ class AgentRunner:
             except ModelBackendError as exc:
                 last_error = str(exc)
                 self._write("model_error", task_id=task_id, step=step, error=last_error)
+                if (
+                    self.config.tool_sequence
+                    and len(completed_tools) == len(self.config.tool_sequence)
+                    and last_tool_result is not None
+                    and last_tool_result.ok
+                    and last_error == "model backend response did not contain text or tool calls"
+                ):
+                    return self._finish_with_evidence_fallback(
+                        task_id=task_id,
+                        step=step,
+                        prompt_chars=prompt_chars,
+                        context_truncated=context_truncated,
+                        last_tool_result=last_tool_result,
+                    )
                 return self._finish(
                     task_id=task_id,
                     status="failed",
@@ -164,18 +189,104 @@ class AgentRunner:
                 )
                 for call in generation.tool_calls:
                     if call.name == "final_answer":
+                        if self.config.tool_sequence and len(completed_tools) < len(self.config.tool_sequence):
+                            final = _final_from_tool_call(call)
+                            if final is not None:
+                                deferred_final = final
+                            expected = self.config.tool_sequence[len(completed_tools)]
+                            recovery_call = self._recovery_call(
+                                expected=expected,
+                                question=question,
+                                citations=final[1] if final is not None else (),
+                                step=step,
+                            )
+                            if recovery_call is not None:
+                                self._write(
+                                    "tool_policy_recovery",
+                                    task_id=task_id,
+                                    step=step,
+                                    original_tool=call.name,
+                                    recovered_tool=recovery_call.name,
+                                )
+                                result = self._execute_tool(
+                                    task_id=task_id,
+                                    step=step,
+                                    call=recovery_call,
+                                )
+                                last_tool_result = result
+                                if result.ok:
+                                    completed_tools.append(recovery_call.name)
+                                    context.add_tool(
+                                        call_id=recovery_call.call_id,
+                                        content=result.observation(),
+                                    )
+                                    if (
+                                        deferred_final is not None
+                                        and len(completed_tools) == len(self.config.tool_sequence)
+                                    ):
+                                        answer, citations = deferred_final
+                                        grounded = self._ground_citations(citations)
+                                        self._write(
+                                            "deferred_final_completed",
+                                            task_id=task_id,
+                                            step=step,
+                                            citations=list(grounded),
+                                        )
+                                        return self._finish(
+                                            task_id=task_id,
+                                            status="completed",
+                                            answer=answer,
+                                            citations=grounded,
+                                            steps=step,
+                                            prompt_chars=prompt_chars,
+                                            context_truncated=context_truncated,
+                                        )
+                                    continue
+                            result = self._reject_tool(
+                                task_id=task_id,
+                                step=step,
+                                call=call,
+                                expected=expected,
+                            )
+                            context.add_tool(call_id=call.call_id, content=result.observation())
+                            continue
                         final = _final_from_tool_call(call)
                         if final is not None:
+                            citations = self._ground_citations(final[1])
+                            if citations != final[1]:
+                                self._write(
+                                    "citation_fallback",
+                                    task_id=task_id,
+                                    step=step,
+                                    citations=list(citations),
+                                )
                             return self._finish(
                                 task_id=task_id,
                                 status="completed",
                                 answer=final[0],
-                                citations=final[1],
+                                citations=citations,
                                 steps=step,
                                 prompt_chars=prompt_chars,
                                 context_truncated=context_truncated,
                             )
+                    if not self._tool_allowed(call.name, completed_tools):
+                        expected = (
+                            self.config.tool_sequence[len(completed_tools)]
+                            if self.config.tool_sequence and len(completed_tools) < len(self.config.tool_sequence)
+                            else "final_answer"
+                        )
+                        result = self._reject_tool(
+                            task_id=task_id,
+                            step=step,
+                            call=call,
+                            expected=expected,
+                        )
+                        context.add_tool(call_id=call.call_id, content=result.observation())
+                        continue
                     result = self._execute_tool(task_id=task_id, step=step, call=call)
+                    last_tool_result = result
+                    if result.ok and self.config.tool_sequence:
+                        completed_tools.append(call.name)
                     context.add_tool(call_id=call.call_id, content=result.observation())
                 continue
 
@@ -185,6 +296,25 @@ class AgentRunner:
                 if parsed.error:
                     raise ValueError(parsed.error)
             except ValueError as exc:
+                if (
+                    self.config.tool_sequence
+                    and len(completed_tools) == len(self.config.tool_sequence)
+                    and last_tool_result is not None
+                    and last_tool_result.ok
+                ):
+                    self._write(
+                        "protocol_fallback",
+                        task_id=task_id,
+                        step=step,
+                        error=str(exc),
+                    )
+                    return self._finish_with_evidence_fallback(
+                        task_id=task_id,
+                        step=step,
+                        prompt_chars=prompt_chars,
+                        context_truncated=context_truncated,
+                        last_tool_result=last_tool_result,
+                    )
                 if interface == "chat" and generation.content.strip() and not _needs_more_tool_work(generation):
                     return self._finish(
                         task_id=task_id,
@@ -222,6 +352,7 @@ class AgentRunner:
                 step=step,
                 call=ToolCall(call_id=f"legacy_{step}", name=parsed.action.name, arguments=parsed.action.arguments),
             )
+            last_tool_result = result
             context.add_tool(call_id=f"legacy_{step}", content=result.observation())
 
         last_error = last_error or f"agent did not finish within {self.config.max_steps} steps"
@@ -258,6 +389,108 @@ class AgentRunner:
         )
         return result
 
+    def _reject_tool(self, *, task_id: str, step: int, call: ToolCall, expected: str) -> ToolResult:
+        message = f"tool policy rejected {call.name}; next required action is {expected}"
+        self._write(
+            "tool_policy_violation",
+            task_id=task_id,
+            step=step,
+            call_id=call.call_id,
+            tool=call.name,
+            expected=expected,
+        )
+        return ToolResult(False, call.name, message)
+
+    def _tool_allowed(self, name: str, completed_tools: list[str]) -> bool:
+        if not self.config.tool_sequence:
+            return True
+        if name == "final_answer":
+            return len(completed_tools) == len(self.config.tool_sequence)
+        if len(completed_tools) >= len(self.config.tool_sequence):
+            return False
+        return name == self.config.tool_sequence[len(completed_tools)]
+
+    def _recovery_call(
+        self,
+        *,
+        expected: str,
+        question: str,
+        citations: tuple[str, ...],
+        step: int,
+    ) -> ToolCall | None:
+        """Infer one missing network action from already collected evidence."""
+
+        sources = getattr(self.toolkit, "sources", {})
+        pages = getattr(self.toolkit, "pages", {})
+        if not isinstance(sources, dict):
+            sources = {}
+        if not isinstance(pages, dict):
+            pages = {}
+        cited_source = next((item for item in citations if item in sources), None)
+        if expected == "web_search":
+            match = re.search(r'\bquery\s+["“](.+?)["”]', question, flags=re.IGNORECASE)
+            if match is None:
+                return None
+            top_k_match = re.search(r"\btop_k\s*=\s*(\d+)", question, flags=re.IGNORECASE)
+            arguments: dict[str, Any] = {"query": match.group(1)}
+            if top_k_match:
+                arguments["top_k"] = int(top_k_match.group(1))
+            return ToolCall(f"recovery_{step}_search", expected, arguments)
+        if expected == "open_url":
+            source_id = cited_source or next(iter(sources), None)
+            if source_id is None:
+                return None
+            return ToolCall(f"recovery_{step}_open", expected, {"source_id": source_id})
+        if expected == "find_in_page":
+            source_id = cited_source or next(reversed(pages), None)
+            pattern_match = re.search(r'\bpattern\s+["“](.+?)["”]', question, flags=re.IGNORECASE)
+            if source_id is None or pattern_match is None:
+                return None
+            return ToolCall(
+                f"recovery_{step}_find",
+                expected,
+                {"source_id": source_id, "pattern": pattern_match.group(1)},
+            )
+        return None
+
+    def _finish_with_evidence_fallback(
+        self,
+        *,
+        task_id: str,
+        step: int,
+        prompt_chars: int,
+        context_truncated: bool,
+        last_tool_result: ToolResult,
+    ) -> RunResult:
+        data = last_tool_result.data or {}
+        source_id = data.get("source_id") if isinstance(data.get("source_id"), str) else None
+        if last_tool_result.tool == "find_in_page":
+            found = bool(data.get("matches"))
+            state = "found" if found else "not found"
+            answer = f"The requested pattern was {state} in {source_id or 'the opened source'}."
+        elif last_tool_result.tool == "open_url":
+            title = data.get("title") if isinstance(data.get("title"), str) else "the opened page"
+            answer = f"Evidence was collected from {title}."
+        else:
+            answer = last_tool_result.message
+        citations = self._ground_citations((source_id,) if source_id else ())
+        self._write(
+            "evidence_fallback",
+            task_id=task_id,
+            step=step,
+            tool=last_tool_result.tool,
+            citations=list(citations),
+        )
+        return self._finish(
+            task_id=task_id,
+            status="completed",
+            answer=answer,
+            citations=citations,
+            steps=step,
+            prompt_chars=prompt_chars,
+            context_truncated=context_truncated,
+        )
+
     def _finish(
         self,
         *,
@@ -287,6 +520,27 @@ class AgentRunner:
     def _write(self, event: str, **payload: Any) -> None:
         if self.trace is not None:
             self.trace.write(event, **payload)
+
+    def _ground_citations(self, citations: tuple[str, ...]) -> tuple[str, ...]:
+        known_sources = getattr(self.toolkit, "sources", {})
+        if not isinstance(known_sources, dict):
+            return citations
+        if not known_sources:
+            return citations
+        known_ids = set(known_sources)
+        by_url = {source.url.split("#", 1)[0]: source_id for source_id, source in known_sources.items()}
+        grounded: list[str] = []
+        for citation in citations:
+            if citation in known_ids:
+                grounded.append(citation)
+                continue
+            normalized = citation.split("#", 1)[0] if isinstance(citation, str) else ""
+            source_id = by_url.get(normalized)
+            if source_id is not None:
+                grounded.append(source_id)
+        if grounded:
+            return tuple(dict.fromkeys(grounded))
+        return tuple(known_sources)
 
 
 def _tool_call_dict(call: ToolCall) -> dict[str, Any]:

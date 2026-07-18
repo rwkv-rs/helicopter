@@ -2,9 +2,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from rwkv_web_harness.models import GenerationRequest, GenerationResponse, ToolCall
+from rwkv_web_harness.models import GenerationRequest, GenerationResponse, ModelBackendError, ToolCall
 from rwkv_web_harness.runner import AgentConfig, AgentRunner
-from rwkv_web_harness.tools import ToolResult
+from rwkv_web_harness.tools import Page, Source, ToolResult
 from rwkv_web_harness.trace import TraceWriter
 
 
@@ -136,6 +136,127 @@ class RunnerTests(unittest.TestCase):
         ).run(task_id="test", question="What is RWKV?")
         self.assertEqual(result.status, "failed")
         self.assertIn("within 2 steps", result.error)
+
+    def test_tool_sequence_blocks_unexpected_network_tools(self) -> None:
+        class PolicyBackend:
+            interface = "g1h"
+
+            def __init__(self) -> None:
+                self.outputs = iter(
+                    [
+                        GenerationResponse(
+                            content="",
+                            tool_calls=(ToolCall("search", "web_search", {"query": "RWKV"}),),
+                        ),
+                        GenerationResponse(
+                            content="",
+                            tool_calls=(ToolCall("unexpected", "find_in_page", {"source_id": "source_001", "pattern": "RWKV"}),),
+                        ),
+                        GenerationResponse(
+                            content="",
+                            tool_calls=(
+                                ToolCall(
+                                    "final",
+                                    "final_answer",
+                                    {"answer": "done", "citations": ["source_001"]},
+                                ),
+                            ),
+                        ),
+                    ]
+                )
+
+            def generate(self, request: GenerationRequest) -> GenerationResponse:
+                return next(self.outputs)
+
+        result = AgentRunner(
+            backend=PolicyBackend(),
+            toolkit=FakeToolkit(),
+            config=AgentConfig(max_steps=3, tool_sequence=("web_search",)),
+        ).run(task_id="policy", question="What is RWKV?")
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.answer, "done")
+
+    def test_tool_sequence_recovers_a_premature_final_answer(self) -> None:
+        class RecoveryToolkit:
+            tool_descriptions = "Available tools: web_search, open_url, find_in_page"
+            tool_schemas = []
+            sources = {"source_001": Source("source_001", "Example", "https://example.com")}
+            pages = {"source_001": Page("source_001", "Example", "https://example.com", "Python evidence")}
+
+            def execute(self, action):
+                return ToolResult(
+                    True,
+                    action.name,
+                    "ok",
+                    {"source_id": "source_001", "matches": ["Python evidence"]},
+                )
+
+        class RecoveryBackend:
+            interface = "g1h"
+
+            def __init__(self) -> None:
+                self.outputs = iter(
+                    [
+                        GenerationResponse(
+                            content="",
+                            tool_calls=(ToolCall("search", "web_search", {"query": "Python"}),),
+                        ),
+                        GenerationResponse(
+                            content="",
+                            tool_calls=(ToolCall("open", "open_url", {"source_id": "source_001"}),),
+                        ),
+                        GenerationResponse(
+                            content="",
+                            tool_calls=(
+                                ToolCall(
+                                    "final",
+                                    "final_answer",
+                                    {"answer": "Python evidence", "citations": ["source_001"]},
+                                ),
+                            ),
+                        ),
+                    ]
+                )
+
+            def generate(self, request: GenerationRequest) -> GenerationResponse:
+                return next(self.outputs)
+
+        result = AgentRunner(
+            backend=RecoveryBackend(),
+            toolkit=RecoveryToolkit(),
+            config=AgentConfig(max_steps=3, tool_sequence=("web_search", "open_url", "find_in_page")),
+        ).run(
+            task_id="recovery",
+            question='Use web_search, then open_url, then find_in_page using the pattern "Python".',
+        )
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.citations, ("source_001",))
+
+    def test_tool_sequence_uses_evidence_fallback_after_empty_model_response(self) -> None:
+        class FallbackBackend:
+            interface = "g1h"
+
+            def __init__(self) -> None:
+                self.outputs = iter(
+                    [
+                        GenerationResponse(content="", tool_calls=(ToolCall("search", "web_search", {}),)),
+                        GenerationResponse(content="", tool_calls=(ToolCall("open", "open_url", {}),)),
+                        GenerationResponse(content="", tool_calls=(ToolCall("find", "find_in_page", {}),)),
+                    ]
+                )
+
+            def generate(self, request: GenerationRequest) -> GenerationResponse:
+                try:
+                    return next(self.outputs)
+                except StopIteration as exc:
+                    raise ModelBackendError("model backend response did not contain text or tool calls") from exc
+
+        result = AgentRunner(
+            backend=FallbackBackend(),
+            toolkit=FakeToolkit(),
+            config=AgentConfig(max_steps=4, tool_sequence=("web_search", "open_url", "find_in_page")),
+        ).run(task_id="fallback", question="What is RWKV?")
+        self.assertEqual(result.status, "completed")
 
 
 if __name__ == "__main__":

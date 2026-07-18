@@ -193,9 +193,23 @@ def _extract_text_tool_calls(text: str) -> list[ToolCall]:
     command, so an arbitrary model string cannot become an arbitrary action.
     """
 
-    payload = _leading_json_value(text)
+    normalized = text.replace("\x60\x60\x60json", "").replace("\x60\x60", "")
+    if normalized.lstrip().startswith(('"name"', '"tool"', '"action"', '"function"')):
+        payload = _decode_json_candidate("{" + normalized.lstrip())
+        parsed = _coerce_payload_tool_call(payload, index=0)
+        if parsed is not None:
+            return [parsed]
+    for start in (index for index, char in enumerate(normalized) if char in "{["):
+        payload = _decode_json_candidate(normalized[start:])
+        parsed = _coerce_payload_tool_call(payload, index=start)
+        if parsed is not None:
+            return [parsed]
+    return []
+
+
+def _coerce_payload_tool_call(payload: Any, *, index: int) -> ToolCall | None:
     if not isinstance(payload, (dict, list)):
-        return []
+        return None
     candidates: list[Any] = []
     if isinstance(payload, list):
         candidates.extend(payload)
@@ -211,27 +225,23 @@ def _extract_text_tool_calls(text: str) -> list[ToolCall]:
             final_arguments = {"answer": final_answer}
             if "citations" in payload:
                 final_arguments["citations"] = payload["citations"]
-        candidates.append(
-            {
-                "name": "final_answer",
-                "arguments": final_arguments,
-            }
-        )
+        candidates.append({"name": "final_answer", "arguments": final_arguments})
     elif "answer" in payload:
         candidates.append({"name": "final_answer", "arguments": payload})
     elif "name" in payload or "function" in payload:
         candidates.append(payload)
-    for index, candidate in enumerate(candidates):
-        parsed = _coerce_text_tool_call(candidate, index=index)
+    for offset, candidate in enumerate(candidates):
+        parsed = _coerce_text_tool_call(candidate, index=index + offset)
         if parsed is not None:
-            return [parsed]
-    return []
+            return parsed
+    return None
 
 
 def _leading_json_value(text: str) -> Any:
     normalized = text.strip()
     if "</think>" in normalized:
-        normalized = normalized.rsplit("</think>", 1)[1].strip()
+        after_think = normalized.rsplit("</think>", 1)[1].strip()
+        normalized = after_think or normalized.rsplit("</think>", 1)[0].strip()
     if "```" in normalized:
         normalized = normalized.replace("```json", "").replace("```", "").strip()
     prefilled = normalized.lstrip()
@@ -242,15 +252,74 @@ def _leading_json_value(text: str) -> Any:
         start = min((index for index in (normalized.find("{"), normalized.find("[")) if index >= 0), default=-1)
         if start < 0:
             return None
+    return _decode_json_candidate(normalized[start:])
+
+
+def _decode_json_candidate(text: str) -> Any:
     try:
-        value, _ = json.JSONDecoder().raw_decode(normalized[start:])
+        value, _ = json.JSONDecoder().raw_decode(text)
+        return value
     except json.JSONDecodeError:
+        repaired = _repair_json(text)
+        if repaired is None:
+            return None
+        try:
+            value, _ = json.JSONDecoder().raw_decode(repaired)
+        except json.JSONDecodeError:
+            return None
+        return value
+
+
+def _repair_json(text: str) -> str | None:
+    """Repair only unmatched JSON brackets in a model-generated call."""
+
+    output: list[str] = []
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            output.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            output.append(char)
+        elif char in "{[":
+            stack.append(char)
+            output.append(char)
+        elif char in "}]":
+            expected = "{" if char == "}" else "["
+            if stack and stack[-1] == expected:
+                stack.pop()
+                output.append(char)
+        else:
+            output.append(char)
+    if in_string:
         return None
-    return value
+    output.extend("}" if opener == "{" else "]" for opener in reversed(stack))
+    return "".join(output)
 
 
 def _coerce_text_tool_call(candidate: Any, *, index: int) -> ToolCall | None:
     if not isinstance(candidate, dict):
+        return None
+    # A g1h checkpoint sometimes echoes the JSON observation returned by the
+    # harness.  It is not a new function call; treating it as one can create a
+    # policy loop after the final network tool has already succeeded.
+    if (
+        candidate.get("ok") in {True, False}
+        and isinstance(candidate.get("message"), str)
+        and isinstance(candidate.get("tool"), str)
+        and "arguments" not in candidate
+        and "input" not in candidate
+        and "parameters" not in candidate
+    ):
         return None
     function = candidate.get("function") if isinstance(candidate.get("function"), dict) else candidate
     name = function.get("name") or function.get("tool") or function.get("tool_name")

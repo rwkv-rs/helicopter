@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import gzip
 import html
 import ipaddress
 import json
@@ -189,14 +191,30 @@ class WebToolkit:
         params = {"q": query.strip()}
         if self.search_backend == "searxng":
             params["format"] = "json"
-        raw = _http_get(self.search_url, params=params, timeout=self.timeout, user_agent=self.user_agent)
-        if self.search_backend == "searxng":
-            results = _parse_searxng_results(raw, top_k)
-            if not results:
-                results = _parse_html_results(raw, top_k)
-        else:
-            results = _parse_html_results(raw, top_k)
+        errors: list[str] = []
+        results: list[Source] = []
+        provider = self.search_url
+        for provider_url in self._search_candidates():
+            try:
+                raw = _http_get(provider_url, params=params, timeout=self.timeout, user_agent=self.user_agent)
+                if self.search_backend == "searxng" and provider_url == self.search_url:
+                    results = _parse_searxng_results(raw, top_k)
+                    if not results:
+                        results = _parse_html_results(raw, top_k)
+                else:
+                    results = _parse_html_results(raw, top_k)
+            except WebToolError as exc:
+                errors.append(str(exc))
+                continue
+            if results:
+                provider = provider_url
+                break
         if not results:
+            if errors:
+                raise WebToolError(
+                    "all search providers failed: "
+                    + " | ".join(errors[:3])
+                )
             return ToolResult(True, "web_search", "no search results", {"query": query, "results": []})
         normalized_results: list[Source] = []
         for result in results:
@@ -216,8 +234,19 @@ class WebToolkit:
             True,
             "web_search",
             f"found {len(normalized_results)} results",
-            {"query": query, "results": formatted},
+            {"query": query, "provider": provider, "results": formatted},
         )
+
+    def _search_candidates(self) -> list[str]:
+        if self.search_backend == "searxng":
+            return [self.search_url]
+        candidates = [
+            self.search_url,
+            "https://html.duckduckgo.com/html/",
+            "https://www.google.com/search",
+            "https://www.bing.com/search",
+        ]
+        return list(dict.fromkeys(candidates))
 
     def _open_url(self, arguments: dict[str, Any]) -> ToolResult:
         source_id = arguments.get("source_id")
@@ -291,16 +320,29 @@ def _http_get(
     if params:
         separator = "&" if "?" in url else "?"
         url = f"{url}{separator}{urlencode(params)}"
-    request = Request(url, headers={"User-Agent": user_agent, "Accept": "text/html,application/json,text/plain"})
+    request = Request(
+        url,
+        headers={
+            "User-Agent": user_agent,
+            "Accept": "text/html,application/json,text/plain",
+            "Accept-Encoding": "gzip",
+        },
+    )
     try:
         with urlopen(request, timeout=timeout) as response:
             content = response.read(max_bytes + 1)
+            content_encoding = response.headers.get("Content-Encoding", "").lower()
     except HTTPError as exc:
         raise WebToolError(f"HTTP {exc.code} while fetching {url}") from exc
     except URLError as exc:
         raise WebToolError(f"network error while fetching {url}: {exc.reason}") from exc
     except TimeoutError as exc:
         raise WebToolError(f"request timed out while fetching {url}") from exc
+    if "gzip" in content_encoding:
+        try:
+            content = gzip.decompress(content)
+        except OSError as exc:
+            raise WebToolError(f"invalid gzip response while fetching {url}") from exc
     if len(content) > max_bytes:
         raise WebToolError(f"response exceeded {max_bytes} bytes: {url}")
     return content
@@ -423,7 +465,65 @@ def _parse_html_results(raw: bytes, top_k: int) -> list[Source]:
         results.append(Source(f"source_{len(results) + 1:03d}", _clean_text(title), url, _clean_text(snippet)))
         if len(results) >= top_k:
             break
+    if results:
+        return results
+    generic_parser = _GenericSearchResultParser()
+    generic_parser.feed(decoded)
+    for title, raw_url in generic_parser.results:
+        url = _normalize_search_url(raw_url)
+        if not url.startswith(("http://", "https://")):
+            continue
+        if _is_navigation_result(title, url):
+            continue
+        results.append(Source(f"source_{len(results) + 1:03d}", _clean_text(title), url))
+        if len(results) >= top_k:
+            break
     return results
+
+
+def _is_navigation_result(title: str, url: str) -> bool:
+    normalized_title = _clean_text(title).lower()
+    host = (urlparse(url).hostname or "").lower()
+    return normalized_title in {"google", "bing", "images", "videos", "maps", "news"} or host in {
+        "google.com",
+        "www.google.com",
+        "bing.com",
+        "www.bing.com",
+    }
+
+
+class _GenericSearchResultParser(HTMLParser):
+    """Small parser for public Google/Bing result pages, without an API."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.results: list[tuple[str, str]] = []
+        self._active_href: str | None = None
+        self._active_text: list[str] = []
+        self._heading_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "a" and self._active_href is None:
+            href = dict(attrs).get("href") or ""
+            if href:
+                self._active_href = href
+                self._active_text = []
+        if tag in {"h2", "h3", "h4"}:
+            self._heading_depth += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"h2", "h3", "h4"} and self._heading_depth:
+            self._heading_depth -= 1
+        if tag == "a" and self._active_href is not None:
+            title = _clean_text(" ".join(self._active_text))
+            if title and len(title) >= 3:
+                self.results.append((title, self._active_href))
+            self._active_href = None
+            self._active_text = []
+
+    def handle_data(self, data: str) -> None:
+        if self._active_href is not None and self._heading_depth:
+            self._active_text.append(data)
 
 
 def _normalize_search_url(raw_url: str) -> str:
@@ -433,6 +533,17 @@ def _normalize_search_url(raw_url: str) -> str:
     query = parse_qs(parsed.query)
     if "uddg" in query and query["uddg"]:
         return unquote(query["uddg"][0])
+    if "q" in query and query["q"] and parsed.path.rstrip("/") in {"/url", "/link"}:
+        return unquote(query["q"][0])
+    if "u" in query and query["u"]:
+        encoded = query["u"][0]
+        if encoded.startswith("a1"):
+            try:
+                decoded = base64.urlsafe_b64decode(encoded[2:] + "=" * (-len(encoded[2:]) % 4)).decode("utf-8")
+            except (ValueError, UnicodeDecodeError):
+                decoded = ""
+            if decoded.startswith(("http://", "https://")):
+                return decoded
     return raw_url
 
 

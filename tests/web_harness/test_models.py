@@ -77,6 +77,68 @@ class ModelResponseTests(unittest.TestCase):
         self.assertEqual(response.tool_calls[0].name, "final_answer")
         self.assertEqual(response.tool_calls[0].arguments["citations"][0]["source_id"], "source_001")
 
+    def test_extracts_first_call_before_closing_think(self) -> None:
+        response = _extract_response(
+            {
+                "choices": [
+                    {
+                        "text": (
+                            '{"name":"web_search","arguments":{"query":"RWKV"}}\n'
+                            '{"name":"final_answer","arguments":{"answer":"later"}}'
+                            '</think>'
+                        )
+                    }
+                ]
+            }
+        )
+        self.assertEqual(response.tool_calls[0].name, "web_search")
+
+    def test_repairs_stray_bracket_in_g1h_final_call(self) -> None:
+        response = _extract_response(
+            {
+                "choices": [
+                    {
+                        "text": (
+                            '{"name":"final_answer","arguments":{"answer":"done",'
+                            '"citations":[{"source_id":"source_001"}]}}]}'
+                        )
+                    }
+                ]
+            }
+        )
+        self.assertEqual(response.tool_calls[0].name, "final_answer")
+
+    def test_finds_first_call_in_repeated_g1h_history(self) -> None:
+        response = _extract_response(
+            {
+                "choices": [
+                    {
+                        "text": (
+                            '{"name":"final_answer","arguments":{"answer":"done",'
+                            '"citations":[{"source_id":"source_001"}]}}'
+                            "\n\nUser: repeated history\nAssistant: <think>old</think>\n"
+                            '{"name":"final_answer","arguments":{"answer":"truncated"'
+                        )
+                    }
+                ]
+            }
+        )
+        self.assertEqual(response.tool_calls[0].name, "final_answer")
+        self.assertEqual(response.tool_calls[0].arguments["answer"], "done")
+
+    def test_does_not_turn_tool_observation_into_a_new_call(self) -> None:
+        response = _extract_response(
+            {
+                "choices": [
+                    {
+                        "text": '{"ok":true,"tool":"find_in_page","message":"pattern found"}',
+                    }
+                ]
+            }
+        )
+        self.assertEqual(response.tool_calls, ())
+        self.assertIn('"pattern found"', response.content)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,6 @@
 """A small, local-first web research harness for RWKV models."""
 
+from .batch import TaskSpec, load_task_specs, summarize_cases, validate_case
 from .models import (
     GenerationBackend,
     GenerationRequest,
@@ -16,6 +17,7 @@ from .trace import TraceWriter
 __all__ = [
     "AgentConfig",
     "AgentRunner",
+    "TaskSpec",
     "GenerationBackend",
     "GenerationRequest",
     "GenerationResponse",
@@ -28,6 +30,9 @@ __all__ = [
     "ToolResult",
     "TraceWriter",
     "WebToolkit",
+    "load_task_specs",
+    "summarize_cases",
+    "validate_case",
 ]
 
 __version__ = "0.1.0"

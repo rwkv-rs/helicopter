@@ -228,6 +228,37 @@ with TraceWriter("results/web_harness/python_example.jsonl") as trace:
 print(result.answer, result.citations)
 ```
 
+For repeatable retrieval checks, the repository includes a 100-case JSONL
+suite at `configs/web_harness_tasks_100.jsonl`: 40 search-only cases, 40
+`web_search -> open_url` cases, and 20
+`web_search -> open_url -> find_in_page` cases. Batch mode validates successful
+network payloads, tool order, grounded citations, and writes a checkpoint after
+every case:
+
+```bash
+uv run rwkv-web-harness batch \
+  --tasks-file configs/web_harness_tasks_100.jsonl \
+  --summary results/web_harness/g1h_batch_summary.json \
+  --trace-dir results/web_harness/g1h_batch \
+  --model-url http://127.0.0.1:8000/v1 \
+  --model g1h-1.5b \
+  --interface g1h \
+  --search-url https://www.bing.com/search \
+  --search-backend html \
+  --max-context-chars 12000 \
+  --retries 1
+```
+
+Resume passed cases in place with `--resume`, or write a new report and trace
+directory from an existing checkpoint with
+`--resume --resume-from results/web_harness/g1h_batch_summary.json`. The HTML
+search backend uses normal public search pages and falls back across providers;
+it does not require a search SDK or vendor API key. g1h requests use the local
+`/v1/completions` endpoint, `User✿...✿` / `Bot✿<think></think>...✿`, and the
+`✿` stop token (`10060`). The g1h example checkpoint has a 10240-token model
+context, so the harness default keeps rendered history bounded to 12000
+characters.
+
 ### Start RWKV vLLM serving
 
 Dry-run first to inspect the exact command and environment:
