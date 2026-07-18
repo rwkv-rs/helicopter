@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from collections import Counter
 import copy
 import hashlib
 import io
@@ -23,6 +24,7 @@ from helicopter_cli import (
     commands,
     config,
     env,
+    eval_batch,
     eval_run,
     function_calling,
     lighteval_export,
@@ -106,6 +108,27 @@ def lighteval_args(**overrides: object) -> Namespace:
         "performance_output": None,
         "metrics_url": None,
         "scoreboard_task_id": None,
+    }
+    values.update(overrides)
+    return Namespace(**values)
+
+
+def perf_args(**overrides: object) -> Namespace:
+    values = {
+        "model": "g1d-0.4b",
+        "dry_run": True,
+        "base_url": None,
+        "api_key": None,
+        "served_model_name": None,
+        "profile": "decode",
+        "prompt_tokens": None,
+        "output_tokens": None,
+        "requests": None,
+        "concurrency": None,
+        "request_rate": None,
+        "timeout": None,
+        "ignore_eos": None,
+        "output": None,
     }
     values.update(overrides)
     return Namespace(**values)
@@ -296,6 +319,36 @@ class ParserTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             parser.parse_args(["eval", "function-calling", "g1d-0.4b", "bfcl_v3", "--wkv-mode", "fp16"])
 
+    def test_eval_perf_parser_accepts_raw_completions_surface(self) -> None:
+        parser = helicopter_main.build_parser()
+        args = parser.parse_args(
+            [
+                "eval",
+                "perf",
+                "g1d-0.4b",
+                "--profile",
+                "prefill",
+                "--prompt-tokens",
+                "2048",
+                "--output-tokens",
+                "8",
+                "--requests",
+                "4",
+                "--concurrency",
+                "2",
+                "--ignore-eos",
+            ]
+        )
+
+        self.assertEqual(args.eval_command, "perf")
+        self.assertEqual(args.model, "g1d-0.4b")
+        self.assertEqual(args.profile, "prefill")
+        self.assertEqual(args.prompt_tokens, 2048)
+        self.assertEqual(args.output_tokens, 8)
+        self.assertEqual(args.requests, 4)
+        self.assertEqual(args.concurrency, 2)
+        self.assertTrue(args.ignore_eos)
+
 
 class FunctionCallingTests(unittest.TestCase):
     def test_openai_tool_calls_are_normalized_and_scored(self) -> None:
@@ -367,6 +420,72 @@ class FunctionCallingTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         load_samples.assert_not_called()
+
+    def test_function_calling_infer_namespace_forwards_batch_server_overrides(self) -> None:
+        args = Namespace(
+            model="g1d-0.4b",
+            dry_run=False,
+            wkv_mode="fp32io16",
+            emb_device="gpu",
+            tensor_parallel_size=2,
+            gpu_memory_utilization=0.72,
+            max_num_seqs=128,
+            max_num_batched_tokens=32768,
+            enable_auto_tool_choice=None,
+            vllm_env=["VLLM_USE_RAPID_SAMPLER=1"],
+            _config=load_example_config(),
+        )
+
+        namespace = function_calling.infer_args_namespace(args, port="8012")
+
+        self.assertEqual(namespace.port, "8012")
+        self.assertEqual(namespace.served_model_name, "g1d-0.4b")
+        self.assertEqual(namespace.wkv_mode, "fp32io16")
+        self.assertEqual(namespace.emb_device, "gpu")
+        self.assertEqual(namespace.tensor_parallel_size, 2)
+        self.assertEqual(namespace.gpu_memory_utilization, 0.72)
+        self.assertEqual(namespace.max_num_seqs, 128)
+        self.assertEqual(namespace.max_num_batched_tokens, 32768)
+        self.assertTrue(namespace.enable_auto_tool_choice)
+        self.assertEqual(namespace.vllm_env, ["VLLM_USE_RAPID_SAMPLER=1"])
+
+    def test_function_calling_aggregates_latency_and_usage(self) -> None:
+        results = [
+            function_calling.FunctionCallingRunResult(
+                "bfcl_v3",
+                "1",
+                1.0,
+                [{"name": "lookup", "arguments": {}}],
+                None,
+                elapsed_seconds=0.10,
+                prompt_tokens=10,
+                completion_tokens=2,
+                total_tokens=12,
+            ),
+            function_calling.FunctionCallingRunResult(
+                "bfcl_v3",
+                "2",
+                0.0,
+                [],
+                None,
+                error="timeout",
+                elapsed_seconds=0.30,
+                prompt_tokens=20,
+                completion_tokens=4,
+                total_tokens=24,
+            ),
+        ]
+
+        aggregate = function_calling._aggregate_results(results)
+        performance = function_calling._aggregate_performance(results, elapsed_seconds=0.5)
+
+        self.assertEqual(aggregate["bfcl_v3"]["prompt_tokens"], 30)
+        self.assertEqual(aggregate["bfcl_v3"]["completion_tokens"], 6)
+        self.assertEqual(aggregate["bfcl_v3"]["total_tokens"], 36)
+        self.assertEqual(aggregate["bfcl_v3"]["e2e_latency_seconds"]["p50"], 0.10)
+        self.assertEqual(performance["requests"], 2)
+        self.assertEqual(performance["failed_requests"], 1)
+        self.assertEqual(performance["tokens_per_second"], 72.0)
 
     def test_function_calling_loads_local_intermediate_dataset_before_url(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -620,6 +739,8 @@ class CommandPlanTests(unittest.TestCase):
         self.assertTrue(options["--load-tasks-multilingual"])
         self.assertTrue(options["--save-details"])
         self.assertEqual(plan.env["OPENAI_API_KEY"], "EMPTY")
+        self.assertEqual(plan.env["HELICOPTER_PATCH_LIGHTEVAL_LITELLM_LOGPROBS"], "1")
+        self.assertEqual(plan.env["PYTHONPATH"].split(os.pathsep)[0], str(ROOT / "src/cli"))
 
     def test_lighteval_plan_cli_max_new_tokens_overrides_config(self) -> None:
         loaded_config = load_example_config()
@@ -737,6 +858,75 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(embedded["samples_per_hour"], 720.0)
         self.assertEqual(embedded["tokens_per_second"], None)
         self.assertNotIn("command", embedded)
+
+    def test_completions_performance_report_derives_profile_rates(self) -> None:
+        results = [
+            performance.CompletionRequestResult(
+                True,
+                0.10,
+                prompt_tokens=100,
+                completion_tokens=10,
+                total_tokens=110,
+            ),
+            performance.CompletionRequestResult(
+                True,
+                0.30,
+                prompt_tokens=120,
+                completion_tokens=20,
+                total_tokens=140,
+            ),
+            performance.CompletionRequestResult(
+                False,
+                0.20,
+                error="TimeoutError: slow",
+            ),
+        ]
+
+        report = performance.build_completions_performance_report(
+            model_name="g1d-0.4b",
+            base_url="http://127.0.0.1:8000/v1",
+            profile="decode",
+            prompt_tokens_target=128,
+            output_tokens=256,
+            requests=3,
+            concurrency=2,
+            request_rate=None,
+            timeout_s=120.0,
+            ignore_eos=True,
+            started_at_epoch=1.0,
+            ended_at_epoch=3.0,
+            results=results,
+        )
+
+        self.assertEqual(report["kind"], "openai_completions")
+        self.assertEqual(report["successful_requests"], 2)
+        self.assertEqual(report["failed_requests"], 1)
+        self.assertEqual(report["error_rate"], 1 / 3)
+        self.assertEqual(report["prompt_tokens"], 220)
+        self.assertEqual(report["completion_tokens"], 30)
+        self.assertEqual(report["total_tokens"], 250)
+        self.assertEqual(report["request_throughput"], 1.0)
+        self.assertEqual(report["completion_tokens_per_second"], 15.0)
+        self.assertEqual(report["e2e_latency_seconds"]["p50"], 0.10)
+        self.assertEqual(report["errors"], {"TimeoutError: slow": 1})
+
+    def test_completions_performance_dry_run_uses_profile_defaults(self) -> None:
+        loaded = load_example_config()
+        stdout = io.StringIO()
+        with mock.patch("sys.stdout", stdout):
+            exit_code = performance.run_completions_performance(
+                perf_args(profile="prefill", output="tmp/perf.json"),
+                root=ROOT,
+                env={},
+                config=loaded,
+            )
+
+        self.assertEqual(exit_code, 0)
+        output = stdout.getvalue()
+        self.assertIn("profile=prefill", output)
+        self.assertIn("prompt_tokens=2048", output)
+        self.assertIn("output_tokens=8", output)
+        self.assertIn(str(ROOT / "tmp/perf.json"), output)
 
     def test_lighteval_tasks_plan_lists_registry(self) -> None:
         loaded_config = load_example_config()
@@ -1124,6 +1314,49 @@ class CommandPlanTests(unittest.TestCase):
         )
         self.assertEqual(pipelines["stem_tool_agent"], {"hle_with_tools", "hy_euler_pro"})
 
+    def test_non_fc_lighteval_catalog_builder_has_100_recognized_tasks_per_domain(self) -> None:
+        from helicopter_cli.non_fc_lighteval_catalog import build_manifest
+
+        raw_source = build_manifest(root=ROOT)
+        rows = raw_source["benchmarks"]
+        names = {row["name"] for row in rows}
+        counts = Counter(row["field"] for row in rows)
+        disallowed = (
+            "bfcl",
+            "api_bank",
+            "complexfuncbench",
+            "toolalpaca",
+            "function_call",
+            "tool_call",
+            "mcp_bench",
+            "tau_bench",
+            "agentbench",
+            "browsecomp",
+            "swe_bench",
+        )
+
+        self.assertEqual(raw_source["target_per_domain"], 100)
+        self.assertEqual(raw_source["scope"], "direct_hf_lighteval_non_function_calling")
+        self.assertEqual(raw_source["scoreboard_domain_scope"]["included"], ["math", "coding", "instruction_following", "knowledge"])
+        self.assertEqual({row["field"] for row in raw_source["scoreboard_domain_scope"]["excluded"]}, {"agent", "function_call"})
+        self.assertEqual(
+            counts,
+            Counter({"math": 100, "coding": 100, "instruction_following": 100, "knowledge": 100}),
+        )
+        self.assertEqual(len(names), len(rows))
+        self.assertNotIn("agent", counts)
+        self.assertNotIn("function_call", counts)
+        self.assertIn("natural_questions", names)
+        self.assertIn("squad_v2", names)
+        self.assertIn("gpqa:diamond", names)
+        self.assertIn("truthfulqa:mc", names)
+        self.assertNotIn("mathqa", names)
+        self.assertNotIn("ifeval-fr", names)
+        self.assertNotIn("qasper", names)
+        self.assertNotIn("the_pile:arxiv", names)
+        self.assertTrue(all(row["source_family"] for row in rows))
+        self.assertFalse(any(any(token in row["name"].lower() for token in disallowed) for row in rows))
+
     def test_agent_harness_source_binds_every_benchmark_to_profile(self) -> None:
         source = agent_harness.load_agent_harness_source(ROOT, None)
         names = {row.name for row in source.benchmarks}
@@ -1425,6 +1658,41 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(domain_for("gpqa_diamond"), "knowledge")
         self.assertEqual(domain_for("cl_bench"), "knowledge")
         self.assertEqual(domain_for("matharena_apex"), "math")
+
+    def test_scoreboard_leaderboard_uses_db_catalog_field_before_heuristics(self) -> None:
+        scoreboard_path = ROOT / "src/scoreboard-server"
+        if str(scoreboard_path) not in sys.path:
+            sys.path.insert(0, str(scoreboard_path))
+        from scoreboard_server.cores.leaderboard import build_leaderboard_payload
+
+        payload = build_leaderboard_payload(
+            [
+                {
+                    "score_id": 1,
+                    "task_id": 1,
+                    "cot": False,
+                    "cot_mode": "NoCoT",
+                    "metrics": {"accuracy": 0.5},
+                    "created_at": "2026-07-17T00:00:00",
+                    "is_param_search": False,
+                    "model": "rwkv7-g1g-1.5b",
+                    "dataset": "mmlu:machine_learning",
+                    "samples": 1,
+                    "problems": 1,
+                    "task": "lighteval",
+                    "task_details": None,
+                    "sampling_config": None,
+                    "log_path": "",
+                    "field": "coding",
+                }
+            ],
+            selected_model=None,
+            view="benchmark_detail_latest",
+        )
+
+        rows_by_domain = {domain["key"]: domain["rows"] for domain in payload["domains"]}
+        self.assertEqual(rows_by_domain["coding"][0]["benchmark_name"], "mmlu:machine_learning")
+        self.assertEqual(rows_by_domain["knowledge"], [])
 
     def test_lighteval_tasks_judges_classifies_builtin_and_custom_metrics(self) -> None:
         class UpstreamAvgAtN:
@@ -3137,6 +3405,243 @@ class EvalRunTests(unittest.TestCase):
             ),
             "custom-name",
         )
+
+
+def batch_args(**overrides: object) -> Namespace:
+    values = {
+        **vars(eval_run_args()),
+        "models": None,
+        "tasks": None,
+        "tasks_from_db": False,
+        "benchmark_scope": None,
+        "benchmark_fields": None,
+        "benchmark_limit": None,
+        "fc_tasks": None,
+        "gpus": None,
+        "gpu_idle_max_mem": None,
+        "parallel": 1,
+        "max_retries": 0,
+        "port_base": None,
+        "batch_output": None,
+        "rerun": False,
+    }
+    values.update(overrides)
+    return Namespace(**values)
+
+
+class EvalBatchTests(unittest.TestCase):
+    def test_resolve_batch_plan_from_args_and_config(self) -> None:
+        loaded = load_example_config()
+        loaded["eval"] = {"batch": {"models": ["g1d-0.4b"], "tasks": ["gsm8k|0"], "fc_tasks": ["bfcl_v3"]}}
+        units = eval_batch.resolve_batch_plan(batch_args(), loaded)
+        self.assertEqual(
+            [(unit.model, unit.kind, unit.tasks) for unit in units],
+            [("g1d-0.4b", "lighteval", ["gsm8k|0"]), ("g1d-0.4b", "fc", ["bfcl_v3"])],
+        )
+
+        units = eval_batch.resolve_batch_plan(
+            batch_args(models=["a,b"], tasks=["gsm8k|0,mmlu|0"], fc_tasks=None),
+            loaded,
+        )
+        self.assertEqual(
+            [(unit.model, unit.kind) for unit in units],
+            [("a", "lighteval"), ("b", "lighteval")],
+        )
+        self.assertEqual(units[0].tasks, ["gsm8k|0", "mmlu|0"])
+
+    def test_resolve_batch_plan_requires_models_and_benchmarks(self) -> None:
+        loaded = load_example_config()
+        with self.assertRaises(SystemExit):
+            eval_batch.resolve_batch_plan(batch_args(), loaded)
+        with self.assertRaises(SystemExit):
+            eval_batch.resolve_batch_plan(batch_args(models=["a"]), loaded)
+
+    def test_resolve_slots_explicit_gpus_and_port_base(self) -> None:
+        loaded = load_example_config()
+        slots = eval_batch.resolve_slots(batch_args(gpus="1,3", port_base=9000), loaded, {})
+        self.assertEqual([(slot.gpu, slot.port) for slot in slots], [(1, 9000), (3, 9001)])
+
+    def test_resolve_slots_external_endpoint_is_single_generic_slot(self) -> None:
+        loaded = load_example_config()
+        for kwargs in ({"no_server": True}, {"base_url": "http://farm:9000/v1"}):
+            slots = eval_batch.resolve_slots(batch_args(**kwargs), loaded, {})
+            self.assertEqual(len(slots), 1)
+            self.assertIsNone(slots[0].gpu)
+
+    def test_unit_args_assigns_slot_base_url_and_joined_tasks(self) -> None:
+        unit = eval_batch.BatchUnit(model="m", kind="lighteval", tasks=["gsm8k|0", "mmlu|0"])
+        slot = eval_batch.GpuSlot(index=1, gpu=3, port=8001)
+        args = batch_args()
+        args._batch_run_dir = "tmp/batch-run"
+        unit_args = eval_batch._unit_args(args, unit, slot)
+        self.assertEqual(unit_args.model, "m")
+        self.assertEqual(unit_args.tasks, "gsm8k|0,mmlu|0")
+        self.assertEqual(unit_args.base_url, "http://127.0.0.1:8001/v1")
+        self.assertIn("tmp/batch-run", unit_args.output_dir)
+        self.assertIn("/lighteval", unit_args.output_dir)
+        self.assertFalse(unit_args.keep_server)
+        env = eval_batch._unit_env({"PATH": "/bin"}, slot)
+        self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "3")
+
+    def test_filter_completed_units_drops_scored_tasks(self) -> None:
+        loaded = load_example_config()
+        units = [
+            eval_batch.BatchUnit(model="g1d-0.4b", kind="lighteval", tasks=["gsm8k|0", "mmlu|0"]),
+            eval_batch.BatchUnit(model="g1d-0.4b", kind="fc", tasks=["bfcl_v3"]),
+        ]
+
+        async def fake_query(*, model_name, datasets, root):
+            return {"gsm8k", "bfcl_v3"} & set(datasets)
+
+        with mock.patch.object(eval_batch, "_query_completed_datasets", fake_query):
+            eval_batch.filter_completed_units(
+                units, args=batch_args(), config=loaded, env={}, root=ROOT
+            )
+        self.assertEqual(units[0].tasks, ["mmlu|0"])
+        self.assertEqual(units[0].skipped_tasks, ["gsm8k|0"])
+        self.assertEqual(units[0].status, "pending")
+        self.assertEqual(units[1].tasks, [])
+        self.assertEqual(units[1].status, "skipped")
+
+    def test_run_unit_retries_and_records_failure(self) -> None:
+        loaded = load_example_config()
+        unit = eval_batch.BatchUnit(model="g1d-0.4b", kind="lighteval", tasks=["gsm8k|0"])
+        slot = eval_batch.GpuSlot(index=0, gpu=None, port=8000)
+        calls = []
+
+        def failing_runner(args, *, root, env, config):
+            calls.append(args.tasks)
+            raise SystemExit("server never became healthy")
+
+        with mock.patch.object(eval_batch, "run_eval", failing_runner):
+            eval_batch.run_unit(
+                unit,
+                args=batch_args(),
+                slot=slot,
+                root=ROOT,
+                env={},
+                config=loaded,
+                max_retries=1,
+            )
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(unit.status, "failed")
+        self.assertEqual(unit.attempts, 2)
+        self.assertIn("healthy", unit.message)
+
+    def test_run_batch_dry_run_prints_plan(self) -> None:
+        loaded = load_example_config()
+        loaded["eval"] = {"batch": {"models": ["g1d-0.4b"], "tasks": ["gsm8k|0"]}}
+        stdout = io.StringIO()
+        with mock.patch("sys.stdout", stdout):
+            exit_code = eval_batch.run_batch(
+                batch_args(), root=ROOT, env={"WEIGHT_PATH": "/weights/RWKV"}, config=loaded
+            )
+        self.assertEqual(exit_code, 0)
+        output = stdout.getvalue()
+        self.assertIn("1 unit(s)", output)
+        self.assertIn("vllm serve", output)
+        self.assertIn("-m lighteval endpoint litellm", output)
+
+    def test_run_batch_dry_run_returns_failed_exit_for_bad_child_plan(self) -> None:
+        loaded = load_example_config()
+        stdout = io.StringIO()
+        with mock.patch("sys.stdout", stdout):
+            exit_code = eval_batch.run_batch(
+                batch_args(models=["missing-model"], tasks=["gsm8k|0"]),
+                root=ROOT,
+                env={"WEIGHT_PATH": "/weights/RWKV"},
+                config=loaded,
+            )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("missing-model", stdout.getvalue())
+
+    def test_run_batch_loads_lighteval_tasks_from_db_catalog(self) -> None:
+        loaded = load_example_config()
+        loaded["eval"] = {"batch": {"models": ["g1d-0.4b"]}}
+        calls = []
+
+        def successful_runner(args, *, root, env, config):
+            calls.append(args.tasks)
+            return 0
+
+        with mock.patch.object(eval_batch, "query_catalog_lighteval_tasks", return_value=["gsm8k", "mmlu:abstract_algebra"]):
+            with mock.patch.object(eval_batch, "run_eval", successful_runner):
+                exit_code = eval_batch.run_batch(
+                    batch_args(tasks_from_db=True, no_server=True, dry_run=False),
+                    root=ROOT,
+                    env={"WEIGHT_PATH": "/weights/RWKV"},
+                    config=loaded,
+                )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(calls, ["gsm8k,mmlu:abstract_algebra"])
+
+    def test_run_batch_isolates_parallel_unit_output_dirs(self) -> None:
+        loaded = load_example_config()
+        output_dirs = []
+        with tempfile.TemporaryDirectory() as tmp:
+            report_path = Path(tmp) / "batch.json"
+
+            def successful_runner(args, *, root, env, config):
+                output_dirs.append(args.output_dir)
+                return 0
+
+            with mock.patch.object(eval_batch, "run_eval", successful_runner):
+                exit_code = eval_batch.run_batch(
+                    batch_args(
+                        models=["g1d-0.4b,g1g-1.5b"],
+                        tasks=["gsm8k|0"],
+                        gpus="1,3",
+                        parallel=2,
+                        dry_run=False,
+                        batch_output=str(report_path),
+                    ),
+                    root=ROOT,
+                    env={"WEIGHT_PATH": "/weights/RWKV"},
+                    config=loaded,
+                )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(output_dirs), 2)
+        self.assertEqual(len(set(output_dirs)), 2)
+        self.assertTrue(all(str(report_path.with_suffix("")) in path for path in output_dirs))
+
+    def test_run_batch_writes_report_for_real_run(self) -> None:
+        loaded = load_example_config()
+        loaded["eval"] = {"batch": {"models": ["g1d-0.4b"], "tasks": ["gsm8k|0"]}}
+        with tempfile.TemporaryDirectory() as tmp:
+            report_path = Path(tmp) / "batch.json"
+
+            def successful_runner(args, *, root, env, config):
+                return 0
+
+            with mock.patch.object(eval_batch, "run_eval", successful_runner):
+                exit_code = eval_batch.run_batch(
+                    batch_args(
+                        dry_run=False,
+                        no_server=True,
+                        batch_output=str(report_path),
+                        max_retries=1,
+                        wkv_mode="fp16",
+                        max_num_seqs=16,
+                    ),
+                    root=ROOT,
+                    env={"WEIGHT_PATH": "/weights/RWKV"},
+                    config=loaded,
+                )
+
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["exit_code"], 0)
+        self.assertEqual(payload["summary"]["status_counts"], {"completed": 1})
+        self.assertEqual(payload["runtime"]["wkv_mode"], "fp16")
+        self.assertEqual(payload["runtime"]["max_num_seqs"], 16)
+        self.assertEqual(payload["slots"], [{"gpu": None, "index": 0, "port": None}])
+        self.assertEqual(payload["units"][0]["status"], "completed")
+        self.assertEqual(payload["units"][0]["slot_index"], 0)
+        self.assertEqual(payload["units"][0]["tasks"], ["gsm8k|0"])
 
 
 def _postgres_connection() -> dict[str, object] | None:

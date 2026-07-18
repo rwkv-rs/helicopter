@@ -213,6 +213,61 @@ overrides such as `--wkv-mode`, `--emb-device`,
 `--max-num-batched-tokens`. The task argument can be omitted when
 `[lighteval].tasks` is set in the selected config.
 
+### Run Raw Performance Profiles
+
+Use `eval perf` when you want a service-level throughput probe without running a
+formal benchmark. It sends raw OpenAI `/v1/completions` requests so prefill and
+decode behavior can be measured separately from LightEval or function-calling
+score logic:
+
+```bash
+helicopter eval perf \
+  --config configs/example.toml \
+  g1d-0.4b \
+  --base-url http://127.0.0.1:8000/v1 \
+  --profile decode \
+  --prompt-tokens 128 \
+  --output-tokens 256 \
+  --requests 64 \
+  --concurrency 8 \
+  --ignore-eos \
+  --output results/performance/g1d_decode.json
+```
+
+`--profile prefill` defaults to a longer prompt and short generation;
+`--profile decode` defaults to a shorter prompt and longer generation. The JSON
+report includes request throughput, prompt/completion/total token throughput,
+E2E latency percentiles, and per-error counts. Start the vLLM server separately
+with `helicopter infer` or point `--base-url` at an existing service.
+
+### Run Batched Evaluations
+
+Use `eval batch` to sweep multiple models across LightEval and native
+function-calling benchmarks. Managed runs assign one vLLM server per GPU slot,
+using `--port-base + slot_index`, and write a JSON report with slots, retries,
+exit codes, elapsed time, and skipped/completed units:
+
+```bash
+helicopter eval batch \
+  --config configs/example.toml \
+  --models g1d-0.4b,g1g-1.5b \
+  --tasks "gsm8k|0,mmlu|0" \
+  --fc-tasks bfcl_v3 \
+  --gpus 0,1 \
+  --parallel 2 \
+  --scoreboard \
+  --wkv-mode fp16 \
+  --emb-device gpu \
+  --max-num-seqs 128 \
+  --max-num-batched-tokens 32768
+```
+
+When `--scoreboard` is set, batch mode skips benchmarks that already have a
+score unless `--rerun` is passed. Use `--batch-output path/to/report.json` to
+choose a stable report path; otherwise real runs write under
+`results/eval_batch/`. Dry-runs print the child `eval run` or function-calling
+plans without writing a report unless `--batch-output` is explicitly provided.
+
 ### Run Function Calling
 
 Function-calling benchmarks use the native OpenAI-compatible `tools` request and
@@ -232,7 +287,8 @@ ids are BFCL, APIBank, ComplexFuncBench, and ToolAlpaca variants. Runtime knobs
 such as token cap, request timeout, concurrency, and managed-server timeout live
 under `[function_calling]` or `HELICOPTER_FC_*` environment variables; the CLI
 surface intentionally stays small. Managed local runs automatically start vLLM
-with `--enable-auto-tool-choice`.
+with `--enable-auto-tool-choice`; when launched by `eval batch`, the batch
+serving overrides are forwarded to the managed FC server as well.
 
 Inspect the available custom tasks and metric status before treating results as
 formal scores:
@@ -246,6 +302,22 @@ Some custom tasks intentionally use proxy or sanity metrics rather than the
 official benchmark harness. Examples include Arena-Hard baseline token F1,
 SWE-Bench patch token F1 or nonempty checks, and TAU static-plan token F1.
 `lighteval-tasks judges` marks these cases explicitly.
+
+The curated directly runnable non-function-calling LightEval catalog is stored
+in the scoreboard database table `benchmark_catalog`. It keeps 100 recognized
+public benchmark rows each for math, coding/CS, instruction/task following, and
+knowledge. The allowlist is generated from common LightEval task families such
+as MATH, GSM8K/MGSM, AIME, OlympiadBench, HumanEval/MBPP/LiveCodeBench,
+IFEval/IFBench/BBH/BIG-Bench, MMLU/GPQA/ARC, TruthfulQA/OpenBookQA, and
+Natural Questions/TriviaQA/SQuAD-style QA; agent, tool-use, function
+calling, and endpoint-incompatible perplexity suites stay out of this direct
+HF/LightEval catalog.
+
+```bash
+uv run --group eval python scripts/seed_non_fc_lighteval_benchmarks_db.py
+uv run --group eval python scripts/verify_non_fc_lighteval_benchmarks_db.py
+helicopter eval batch --tasks-from-db --scoreboard --models g1g-1.5b
+```
 
 The agent benchmark scope is tracked separately from the runnable LightEval task
 registry:
