@@ -5,7 +5,7 @@ from typing import Any
 
 from .normalize import (
     display_param,
-    domain_for,
+    entry_domain,
     metric_from_context,
     numeric_value,
     parse_model_tags,
@@ -25,7 +25,7 @@ def serialize_charts(entries: list[dict[str, Any]]) -> dict[str, Any]:
 def _knowledge_chart(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
     subject_scores: dict[str, dict[str, float]] = {}
     for entry in entries:
-        if domain_for(str(entry.get("dataset") or ""), entry.get("task")) != "knowledge":
+        if entry_domain(entry) != "knowledge":
             continue
         details = _task_details(entry)
         acc_map = details.get("accuracy_by_subject")
@@ -87,7 +87,7 @@ def _instruction_chart(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
     data: list[dict[str, Any]] = []
     domains: set[str] = set()
     for entry in entries:
-        if domain_for(str(entry.get("dataset") or ""), entry.get("task")) != "instruction_following":
+        if entry_domain(entry) != "instruction_following":
             continue
         details = _task_details(entry)
         buckets: dict[str, list[float]] = {}
@@ -124,7 +124,7 @@ def _benchmark_score_chart(entries: list[dict[str, Any]], *, domain: str, chart_
     datasets: set[str] = set()
     for entry in entries:
         dataset = str(entry.get("dataset") or "")
-        if domain_for(dataset, entry.get("task")) != domain:
+        if entry_domain(entry) != domain:
             continue
         metric, value = metric_from_context(entry.get("metrics") or {}, entry.get("sampling_config"))
         if value is None:

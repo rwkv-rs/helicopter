@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .benchmark import Benchmark
+from .benchmark_catalog import BenchmarkCatalog
 from .checker import Checker
 from .completion import Completion
 from .eval_record import EvalRecord
@@ -11,6 +12,7 @@ from .task import Task
 
 __all__ = [
     "Benchmark",
+    "BenchmarkCatalog",
     "Checker",
     "Completion",
     "EvalRecord",

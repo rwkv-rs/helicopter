@@ -5,7 +5,7 @@ from typing import Any
 from .charts import serialize_charts
 from .normalize import (
     display_param,
-    domain_for,
+    entry_domain,
     is_naive,
     metric_from_context,
     parse_model_tags,
@@ -140,7 +140,7 @@ def _rows_for_domain(
     grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for entry in entries:
         dataset = str(entry["dataset"])
-        if domain is not None and domain_for(dataset, entry.get("task")) != domain:
+        if domain is not None and entry_domain(entry) != domain:
             continue
         metric, _ = metric_from_context(entry.get("metrics") or {}, entry.get("sampling_config"))
         if metric is None:

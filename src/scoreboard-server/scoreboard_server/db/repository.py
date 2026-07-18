@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 import os
 from typing import Any
 
@@ -23,7 +24,7 @@ from scoreboard_server.cores.normalize import (
     split_dataset,
 )
 from scoreboard_server.db.connection import init_db
-from scoreboard_server.db.models import Benchmark, Checker, Completion, EvalRecord, Score, ScoreModel, Task
+from scoreboard_server.db.models import Benchmark, BenchmarkCatalog, Checker, Completion, EvalRecord, Score, ScoreModel, Task
 from scoreboard_server.db.resume import ResumeContext, TaskLookup
 from scoreboard_server.db.settings import DatabaseSettings
 
@@ -54,6 +55,24 @@ _RAW_RECORD_REF_KEYS = (
     "gold",
     "test_cases",
 )
+
+_DEFAULT_CATALOG_SOURCE = "lighteval"
+_DEFAULT_CATALOG_TARGET_KIND = "task"
+_DEFAULT_CATALOG_RUN_STATUS = "direct_lighteval_task"
+_DEFAULT_CATALOG_SCOPE = "direct_hf_lighteval_non_function_calling"
+
+
+@dataclass(frozen=True, slots=True)
+class BenchmarkCatalogInput:
+    name: str
+    split: str
+    field: str
+    source: str
+    source_family: str
+    target_kind: str
+    run_status: str
+    scope: str
+    metadata: Any | None
 
 
 class ScoreboardStore:
@@ -94,6 +113,87 @@ class ScoreboardStore:
         if int(num_samples) <= 0:
             return
         await self._benchmark(dataset, num_samples=int(num_samples))
+
+    async def upsert_benchmark_catalog(self, *, rows: Sequence[Mapping[str, Any]]) -> int:
+        await self._ensure_db()
+        count = 0
+        async with in_transaction():
+            for row in rows:
+                entry = self._benchmark_catalog_input(row)
+                if entry is None:
+                    continue
+                await BenchmarkCatalog.update_or_create(
+                    benchmark_name=entry.name,
+                    benchmark_split=entry.split,
+                    scope=entry.scope,
+                    defaults={
+                        "field": entry.field,
+                        "source": entry.source,
+                        "source_family": entry.source_family,
+                        "target_kind": entry.target_kind,
+                        "run_status": entry.run_status,
+                        "metadata": entry.metadata,
+                    },
+                )
+                await Benchmark.get_or_create(
+                    benchmark_name=entry.name,
+                    benchmark_split=entry.split,
+                    defaults={"url": None, "status": "Todo", "num_samples": 0},
+                )
+                count += 1
+        return count
+
+    async def prune_benchmark_catalog(
+        self,
+        *,
+        scope: str,
+        rows: Sequence[Mapping[str, Any]],
+        source: str = _DEFAULT_CATALOG_SOURCE,
+        target_kind: str = _DEFAULT_CATALOG_TARGET_KIND,
+        run_status: str = _DEFAULT_CATALOG_RUN_STATUS,
+    ) -> int:
+        await self._ensure_db()
+        keep = {key for row in rows if (key := self._benchmark_catalog_key(row)) is not None}
+
+        removed = 0
+        catalog_rows = await BenchmarkCatalog.filter(
+            scope=scope,
+            source=source,
+            target_kind=target_kind,
+            run_status=run_status,
+        )
+        async with in_transaction():
+            for row in catalog_rows:
+                if (row.benchmark_name, row.benchmark_split) in keep:
+                    continue
+                await row.delete()
+                removed += 1
+        return removed
+
+    async def list_benchmark_catalog(
+        self,
+        *,
+        scope: str,
+        fields: Sequence[str] | None = None,
+        source: str = _DEFAULT_CATALOG_SOURCE,
+        target_kind: str = _DEFAULT_CATALOG_TARGET_KIND,
+        run_status: str = _DEFAULT_CATALOG_RUN_STATUS,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        await self._ensure_db()
+        query = BenchmarkCatalog.filter(
+            scope=scope,
+            source=source,
+            target_kind=target_kind,
+            run_status=run_status,
+        )
+        if fields:
+            query = query.filter(field__in=[str(item) for item in fields])
+        query = query.order_by("field", "catalog_id")
+        if limit is not None and int(limit) > 0:
+            query = query.limit(int(limit))
+        rows = await query
+        return [self._benchmark_catalog_dict(row) for row in rows]
 
     async def get_resume_context(
         self,
@@ -438,7 +538,9 @@ class ScoreboardStore:
             prev = grouped.get(key)
             if prev is None or (row.created_at, row.score_id) > (prev.created_at, prev.score_id):
                 grouped[key] = row
-        return [self._score_row_for_space(row) for row in sorted(grouped.values(), key=lambda item: item.created_at)]
+        result = [self._score_row_for_space(row) for row in sorted(grouped.values(), key=lambda item: item.created_at)]
+        await self._attach_catalog_fields(result)
+        return result
 
     async def list_score_history_pairs(self) -> list[dict[str, Any]]:
         scores = await Score.all().select_related("task", "task__model", "task__benchmark")
@@ -478,7 +580,9 @@ class ScoreboardStore:
             task__is_param_search=bool(is_param_search),
             task__is_tmp=False,
         ).select_related("task", "task__model", "task__benchmark").order_by("-created_at", "-score_id")
-        return [self._score_row_for_space(row) for row in rows]
+        result = [self._score_row_for_space(row) for row in rows]
+        await self._attach_catalog_fields(result)
+        return result
 
     async def get_score_history_detail(self, *, task_id: str) -> dict[str, Any] | None:
         score = await Score.filter(task_id=int(task_id)).select_related("task", "task__model", "task__benchmark").first()
@@ -494,7 +598,11 @@ class ScoreboardStore:
 
     async def get_score_payload(self, *, task_id: str) -> dict[str, Any] | None:
         score = await Score.filter(task_id=int(task_id)).select_related("task", "task__model", "task__benchmark").first()
-        return self._score_row_for_space(score) if score else None
+        if score is None:
+            return None
+        result = self._score_row_for_space(score)
+        await self._attach_catalog_fields([result])
+        return result
 
     async def get_latest_task_generation_progress(
         self,
@@ -610,6 +718,25 @@ class ScoreboardStore:
     async def list_scores_rows(self, *, task_id: str) -> list[dict[str, Any]]:
         rows = await Score.filter(task_id=int(task_id)).order_by("-created_at", "-score_id")
         return [self._score_dict(row) for row in rows]
+
+    async def _attach_catalog_fields(self, rows: list[dict[str, Any]]) -> None:
+        datasets = sorted({str(row.get("dataset") or "") for row in rows if row.get("dataset")})
+        if not datasets:
+            return
+        parsed = [split_dataset(dataset) for dataset in datasets]
+        names = sorted({name for name, _split in parsed})
+        try:
+            catalog_rows = await BenchmarkCatalog.filter(benchmark_name__in=names)
+        except Exception:  # noqa: BLE001 - old DBs may not have the catalog table until seeded.
+            return
+        lookup = {
+            join_dataset(row.benchmark_name, row.benchmark_split): row.field
+            for row in catalog_rows
+        }
+        for row in rows:
+            field = lookup.get(str(row.get("dataset") or ""))
+            if field:
+                row["field"] = field
 
     async def update_task_status(self, *, task_id: str, status: str) -> None:
         await Task.filter(task_id=int(task_id)).update(status=canonical_task_status(status))
@@ -819,4 +946,49 @@ class ScoreboardStore:
             "url": benchmark.url,
             "status": benchmark.status,
             "num_samples": benchmark.num_samples,
+        }
+
+    @staticmethod
+    def _benchmark_catalog_key(row: Mapping[str, Any]) -> tuple[str, str] | None:
+        name = str(row.get("name") or row.get("benchmark_name") or "").strip()
+        if not name:
+            return None
+        return name, str(row.get("benchmark_split") or "").strip()
+
+    @staticmethod
+    def _benchmark_catalog_input(row: Mapping[str, Any]) -> BenchmarkCatalogInput | None:
+        key = ScoreboardStore._benchmark_catalog_key(row)
+        if key is None:
+            return None
+        field = str(row.get("field") or "").strip()
+        source_family = str(row.get("source_family") or "").strip()
+        if not field or not source_family:
+            return None
+        metadata = sanitize_json(row.get("metadata")) if row.get("metadata") is not None else None
+        return BenchmarkCatalogInput(
+            name=key[0],
+            split=key[1],
+            field=field,
+            source=str(row.get("source") or _DEFAULT_CATALOG_SOURCE).strip(),
+            source_family=source_family,
+            target_kind=str(row.get("target_kind") or _DEFAULT_CATALOG_TARGET_KIND).strip(),
+            run_status=str(row.get("run_status") or _DEFAULT_CATALOG_RUN_STATUS).strip(),
+            scope=str(row.get("scope") or _DEFAULT_CATALOG_SCOPE).strip(),
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _benchmark_catalog_dict(row: BenchmarkCatalog) -> dict[str, Any]:
+        return {
+            "catalog_id": row.catalog_id,
+            "name": join_dataset(row.benchmark_name, row.benchmark_split),
+            "benchmark_name": row.benchmark_name,
+            "benchmark_split": row.benchmark_split,
+            "field": row.field,
+            "source": row.source,
+            "source_family": row.source_family,
+            "target_kind": row.target_kind,
+            "run_status": row.run_status,
+            "scope": row.scope,
+            "metadata": row.metadata,
         }

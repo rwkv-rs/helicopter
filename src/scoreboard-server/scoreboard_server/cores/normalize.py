@@ -296,6 +296,11 @@ def domain_for(dataset: str, evaluator: Any = None) -> str:
     return "knowledge"
 
 
+def entry_domain(entry: Mapping[str, Any]) -> str:
+    field = str(entry.get("field") or "").strip()
+    return field or domain_for(str(entry.get("dataset") or ""), entry.get("task"))
+
+
 def is_naive(evaluator: Any, sampling_config: Any) -> bool:
     if str(evaluator or "").endswith("_naive"):
         return True
