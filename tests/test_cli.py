@@ -13,7 +13,7 @@ from helicopter_cli import commands, config, env
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_CONFIG = ROOT / "configs/example.toml"
-STRICT_SMOKE_CONFIG = ROOT / "configs/strict-smoke.toml"
+DAPO_CONFIG = ROOT / "configs/local/202606300831.toml"
 
 
 def load_example_config() -> dict[str, object]:
@@ -305,7 +305,7 @@ class CommandPlanTests(unittest.TestCase):
                 "actor_rollout_ref.model.path": "/weights/RWKV/rwkv7-g1g-1.5b-20260526-ctx8192.pth",
                 "actor_rollout_ref.rollout.name": "vllm",
                 "actor_rollout_ref.rollout.checkpoint_engine.backend": "naive",
-                "actor_rollout_ref.rollout.top_p": "0.8",
+                "actor_rollout_ref.rollout.top_p": "1.0",
                 "actor_rollout_ref.rollout.seed": "42",
                 "actor_rollout_ref.hybrid_engine": "True",
                 "trainer.v1.trainer_mode": "sync",
@@ -375,11 +375,11 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(forbidden_env_keys & plan.env.keys(), set())
         self.assertEqual(forbidden_override_keys & overrides.keys(), set())
 
-    def test_strict_smoke_limits_dataset_before_filtering_and_pins_seed(self) -> None:
-        loaded_config, _ = config.load_config(ROOT, str(STRICT_SMOKE_CONFIG))
+    def test_dapo_config_limits_dataset_before_filtering_and_pins_seed(self) -> None:
+        loaded_config, _ = config.load_config(ROOT, str(DAPO_CONFIG))
         plan = build_takeoff_plan(
             loaded_config,
-            args=takeoff_args(model="g1h-7.2b", dataset="dapo_smoke"),
+            args=takeoff_args(model="g1h-7.2b", dataset="dapo_math_17k"),
             loaded_env={
                 "WEIGHT_PATH": "/weights/RWKV",
                 "DATASETS_PATH": "/datasets",
@@ -388,11 +388,19 @@ class CommandPlanTests(unittest.TestCase):
         )
         overrides = hydra_map(plan)
 
-        self.assertEqual(overrides["data.train_max_samples"], "4096")
+        self.assertEqual(overrides["data.train_max_samples"], "17408")
         self.assertEqual(overrides["data.val_max_samples"], "1024")
         self.assertEqual(overrides["data.seed"], "42")
         self.assertEqual(overrides["actor_rollout_ref.actor.data_loader_seed"], "42")
         self.assertEqual(overrides["actor_rollout_ref.rollout.seed"], "42")
+        self.assertEqual(overrides["actor_rollout_ref.rollout.n"], "16")
+        self.assertEqual(overrides["actor_rollout_ref.rollout.temperature"], "1.0")
+        self.assertEqual(overrides["actor_rollout_ref.rollout.top_k"], "-1")
+        self.assertEqual(overrides["actor_rollout_ref.rollout.top_p"], "1.0")
+        self.assertEqual(overrides["actor_rollout_ref.rollout.ignore_eos"], "False")
+        self.assertEqual(overrides["trainer.logger"], '["console","file","wandb"]')
+        self.assertEqual(overrides["trainer.test_freq"], "50")
+        self.assertEqual(overrides["trainer.val_before_train"], "True")
 
     def test_infer_runtime_env_strips_dotenv_vllm_knobs(self) -> None:
         loaded_config = load_example_config()
@@ -645,23 +653,23 @@ class CommandPlanTests(unittest.TestCase):
         ):
             build_takeoff_plan(loaded_config)
 
-    def test_takeoff_accepts_response_8192_with_complete_sequence_budget(self) -> None:
+    def test_takeoff_accepts_response_8192_with_state_passing_budget(self) -> None:
         loaded_config = load_example_config()
         takeoff = loaded_config["takeoff"]
         takeoff["grpo"] = {
             **takeoff["grpo"],
             "max_response_length": 8192,
-            "ppo_max_token_len_per_gpu": 10240,
-            "rollout_ignore_eos": True,
+            "ppo_max_token_len_per_gpu": 8192,
+            "rollout_ignore_eos": False,
         }
 
         overrides = hydra_map(build_takeoff_plan(loaded_config))
 
         self.assertEqual(overrides["data.max_response_length"], "8192")
         self.assertEqual(
-            overrides["actor_rollout_ref.actor.ppo_max_token_len_per_gpu"], "10240"
+            overrides["actor_rollout_ref.actor.ppo_max_token_len_per_gpu"], "8192"
         )
-        self.assertEqual(overrides["actor_rollout_ref.rollout.ignore_eos"], "True")
+        self.assertEqual(overrides["actor_rollout_ref.rollout.ignore_eos"], "False")
 
     def test_takeoff_rejects_strict_on_policy_override_regressions(self) -> None:
         loaded_config = load_example_config()

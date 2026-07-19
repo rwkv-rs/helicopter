@@ -335,8 +335,8 @@ def test_declared_contract_must_match_resolved_training_config():
             "grpo": {
                 **config["takeoff"]["grpo"],
                 "max_response_length": 8192,
-                "ppo_max_token_len_per_gpu": 10240,
-                "rollout_ignore_eos": True,
+                "ppo_max_token_len_per_gpu": 8192,
+                "rollout_ignore_eos": False,
             }
         }
     }
@@ -346,7 +346,7 @@ def test_declared_contract_must_match_resolved_training_config():
         batch={
             **batch,
             "max_response_length": 8192,
-            "ppo_max_token_len_per_gpu": 10240,
+            "ppo_max_token_len_per_gpu": 8192,
         },
         topology=topology,
         precision="fp32io16",
@@ -361,18 +361,22 @@ def test_declared_contract_must_match_resolved_training_config():
             precision="fp32io16",
             wkv_mode="fp32io16",
         )
-    with pytest.raises(RuntimeError, match=r"fits one complete prompt\+response"):
+    with pytest.raises(RuntimeError, match="covers the maximum response length"):
         strict_train_run.verify_declared_contract(
             {
                 "takeoff": {
                     "grpo": {
-                        **config["takeoff"]["grpo"],
-                        "ppo_max_token_len_per_gpu": 128,
+                        **long_config["takeoff"]["grpo"],
+                        "ppo_max_token_len_per_gpu": 4096,
                     }
                 }
             },
             seed="42",
-            batch={**batch, "ppo_max_token_len_per_gpu": 128},
+            batch={
+                **batch,
+                "max_response_length": 8192,
+                "ppo_max_token_len_per_gpu": 4096,
+            },
             topology=topology,
             precision="fp32io16",
             wkv_mode="fp32io16",
@@ -615,50 +619,51 @@ def test_global_batch_quality_schedule_is_equal_sampled(batch_size, rounds, test
     )
 
 
-@pytest.mark.parametrize(
-    ("config_name", "batch_size", "rounds", "test_freq"),
-    [
-        ("strict-quality-b56.toml", 56, 14, 2),
-        ("strict-quality-b112.toml", 112, 7, 1),
-    ],
-)
-def test_checked_in_quality_configs_share_equal_sample_contract(
-    config_name, batch_size, rounds, test_freq
-):
-    config_path = Path(__file__).parents[1] / "configs" / config_name
-    config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+def test_configs_keep_only_canonical_layout():
+    root = Path(__file__).parents[1] / "configs"
+
+    assert {path.name for path in root.glob("*.toml")} == {"example.toml"}
+    assert {path.name for path in (root / "local").glob("*.toml")} == {
+        "202606290720.toml",
+        "202606300831.toml",
+    }
+    assert (root / "remote").is_dir()
+
+
+def test_dapo_maxrl_config_matches_paper_and_remote_contract():
+    root = Path(__file__).parents[1]
+    config = tomllib.loads(
+        (root / "configs" / "local" / "202606300831.toml").read_text(encoding="utf-8")
+    )
     takeoff = config["takeoff"]["grpo"]
 
-    assert takeoff["train_batch_size"] == batch_size
-    assert takeoff["ppo_mini_batch_size"] == batch_size
-    assert takeoff["total_training_steps"] == rounds
-    assert takeoff["test_freq"] == test_freq
-    assert takeoff["val_before_train"] is True
-    assert takeoff["rollout_n"] == 8
-    assert takeoff["ppo_max_token_len_per_gpu"] == 8192
-    assert takeoff["rollout_max_num_seqs"] == 64
-    assert takeoff["rollout_max_num_batched_tokens"] == 8192
+    expected = {
+        "train_batch_size": 32,
+        "ppo_mini_batch_size": 32,
+        "rollout_n": 16,
+        "ppo_epochs": 1,
+        "actor_lr": "1e-6",
+        "actor_grad_clip": 0.3,
+        "actor_use_kl_loss": False,
+        "actor_entropy_coeff": 0,
+        "clip_ratio_low": 0.2,
+        "clip_ratio_high": 0.2,
+        "rollout_ignore_eos": False,
+        "max_response_length": 8192,
+        "ppo_max_token_len_per_gpu": 8192,
+        "test_freq": 50,
+        "save_freq": 50,
+        "val_before_train": True,
+        "val_n": 8,
+    }
+    assert {key: takeoff[key] for key in expected} == expected
+    assert takeoff["rollout_temperature"] == 1.0
+    assert takeoff["rollout_top_p"] == 1.0
+    assert takeoff["rollout_top_k"] == -1
+    assert takeoff["val_temperature"] == 0.6
+    assert takeoff["val_top_p"] == 0.95
+    assert takeoff["val_top_k"] == -1
 
-
-def test_all_checked_in_strict_configs_fix_state_passing_actor_capacity():
-    config_root = Path(__file__).parents[1] / "configs"
-    strict_configs = sorted(config_root.glob("strict-*.toml"))
-
-    assert strict_configs
-    for config_path in strict_configs:
-        takeoff = tomllib.loads(config_path.read_text(encoding="utf-8"))["takeoff"][
-            "grpo"
-        ]
-        assert takeoff["ppo_max_token_len_per_gpu"] == 8192, config_path.name
-        assert takeoff["infctx"] is True, config_path.name
-        assert takeoff["chunk_ctx"] == 2048, config_path.name
-
-
-@pytest.mark.parametrize("config_name", ["strict-quality-b56.toml", "strict-quality-b112.toml"])
-def test_quality_configs_satisfy_exact_remote_declared_contract(config_name):
-    config_path = Path(__file__).parents[1] / "configs" / config_name
-    config = tomllib.loads(config_path.read_text(encoding="utf-8"))
-    takeoff = config["takeoff"]["grpo"]
     batch_fields = (
         "train_batch_size",
         "ppo_mini_batch_size",
@@ -668,7 +673,6 @@ def test_quality_configs_satisfy_exact_remote_declared_contract(config_name):
         "max_prompt_length",
         "max_response_length",
     )
-
     strict_train_run.verify_declared_contract(
         config,
         seed="42",
@@ -685,66 +689,17 @@ def test_quality_configs_satisfy_exact_remote_declared_contract(config_name):
     )
 
 
-def test_quality_configs_differ_only_by_equal_sample_batch_schedule():
+def test_gsm8k_grpo_config_keeps_distinct_algorithm_identity():
     root = Path(__file__).parents[1]
-    baseline = tomllib.loads((root / "configs" / "strict-quality-b56.toml").read_text())[
-        "takeoff"
-    ]["grpo"]
-    candidate = tomllib.loads(
-        (root / "configs" / "strict-quality-b112.toml").read_text()
-    )["takeoff"]["grpo"]
+    config = tomllib.loads(
+        (root / "configs" / "local" / "202606290720.toml").read_text(encoding="utf-8")
+    )
+    takeoff = config["takeoff"]["grpo"]
 
-    allowed_changes = {
-        "experiment_name",
-        "train_batch_size",
-        "ppo_mini_batch_size",
-        "total_training_steps",
-        "test_freq",
-    }
-    assert {
-        key for key in baseline.keys() | candidate.keys() if baseline.get(key) != candidate.get(key)
-    } == allowed_changes
-    assert baseline["train_batch_size"] * baseline["total_training_steps"] == 56 * 14
-    assert candidate["train_batch_size"] * candidate["total_training_steps"] == 112 * 7
-    assert baseline["test_freq"] * baseline["train_batch_size"] == 112
-    assert candidate["test_freq"] * candidate["train_batch_size"] == 112
-
-
-def test_checked_in_global_batch_probe_changes_only_algorithm_batch_capacity():
-    root = Path(__file__).parents[1]
-    baseline = tomllib.loads((root / "configs" / "strict-baseline.toml").read_text())[
-        "takeoff"
-    ]["grpo"]
-    candidate = tomllib.loads(
-        (root / "configs" / "strict-global-batch-112.toml").read_text()
-    )["takeoff"]["grpo"]
-
-    allowed_changes = {"experiment_name", "train_batch_size", "ppo_mini_batch_size"}
-    assert {
-        key for key in baseline.keys() | candidate.keys() if baseline.get(key) != candidate.get(key)
-    } == allowed_changes
-    assert candidate["train_batch_size"] == candidate["ppo_mini_batch_size"] == 112
-
-
-def test_batch_112_is_scoped_to_explicit_experiment_configs():
-    root = Path(__file__).parents[1]
-    configs_with_batch_112 = set()
-
-    for config_path in (root / "configs").glob("*.toml"):
-        takeoff = tomllib.loads(config_path.read_text(encoding="utf-8"))["takeoff"][
-            "grpo"
-        ]
-        if 112 in {
-            takeoff["train_batch_size"],
-            takeoff["ppo_mini_batch_size"],
-        }:
-            assert takeoff["train_batch_size"] == takeoff["ppo_mini_batch_size"] == 112
-            configs_with_batch_112.add(config_path.name)
-
-    assert configs_with_batch_112 == {
-        "strict-global-batch-112.toml",
-        "strict-quality-b112.toml",
-    }
+    assert takeoff["experiment_name"] == "gsm8k-grpo"
+    assert "adv_estimator" not in takeoff
+    assert "reward_manager" not in takeoff
+    assert config["datasets"] == {"gsm8k": {}}
 
 
 def test_global_batch_quality_schedule_rejects_sparse_validation():

@@ -1,0 +1,68 @@
+[infer]
+enable_auto_tool_choice = false
+
+[paths]
+rwkv_lm_path = "src/train/rwkv-lm"
+
+[takeoff.grpo]
+project_name = "helicopter-math"  # Never change this
+experiment_name = "gsm8k-grpo"  # f"{datasets_name}-{optimization_name}"
+wkv_mode = "fp32io16"
+emb_device = "gpu"
+train_batch_size = 56
+ppo_mini_batch_size = 56
+seed = 42
+ppo_epochs = 1
+ppo_micro_batch_size = 8
+max_prompt_length = 512
+max_response_length = 7680
+ppo_max_token_len_per_gpu = 8192
+rwkv_use_dynamic_bsz = true
+ctx_len = 8192
+infctx = true
+chunk_ctx = 2048
+actor_lr = "1e-6"
+actor_lr_warmup_steps = 0
+actor_weight_decay = 0.01
+actor_entropy_coeff = 0
+actor_grad_clip = 0.3
+actor_use_kl_loss = false
+actor_kl_loss_coef = 0.0
+clip_ratio_low = 0.2
+clip_ratio_high = 0.2
+clip_ratio_c = 3.0
+rollout_n = 8
+rollout_ignore_eos = false
+rollout_temperature = 1.0
+rollout_top_k = -1
+rollout_top_p = 1.0
+trainer_loggers = ["console", "file", "wandb"]
+trainer_n_gpus_per_node = 8
+rollout_tensor_parallel_size = 1
+rollout_data_parallel_size = 1
+rollout_pipeline_parallel_size = 1
+rollout_gpu_memory_utilization = 0.5
+rollout_max_num_seqs = 64
+rollout_max_num_batched_tokens = 8192
+rollout_update_weights_bucket_megabytes = 64
+total_epochs = 2
+save_freq = 50
+test_freq = 50
+val_before_train = true
+val_do_sample = true
+val_temperature = 0.6
+val_top_k = -1
+val_top_p = 0.95
+val_n = 8
+
+[datasets.gsm8k]
+
+[models."g1g-1.5b"]
+file = "rwkv7-g1g-1.5b-20260526-ctx8192.pth"
+served_model_name = "g1g-1.5b"
+max_model_len = 8192
+
+[models."g1g-7.2b"]
+file = "rwkv7-g1g-7.2b-20260523-ctx8192.pth"
+served_model_name = "g1g-7.2b"
+max_model_len = 8192

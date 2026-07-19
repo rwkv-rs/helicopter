@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 from dataclasses import dataclass
@@ -33,6 +34,8 @@ def format_hydra_file_list(value: Any, *, root: Path, env: dict[str, str]) -> st
 def format_hydra_value(value: Any) -> str:
     if isinstance(value, bool):
         return "True" if value else "False"
+    if isinstance(value, list):
+        return json.dumps(value, separators=(",", ":"))
     return str(value)
 
 
@@ -248,26 +251,16 @@ def validate_strict_on_policy_overrides(overrides: list[str], *, env: dict[str, 
             "strict on-policy takeoff requires equal actor/ref/rollout token budgets, "
             f"got {token_budgets}"
         )
-    max_prompt_length = strict_positive_int(
-        resolved.get("data.max_prompt_length"), name="data.max_prompt_length"
-    )
     max_response_length = strict_positive_int(
         resolved.get("data.max_response_length"), name="data.max_response_length"
     )
-    if max_response_length == 8192 and resolved.get(
-        "actor_rollout_ref.rollout.ignore_eos"
-    ) != "True":
-        raise SystemExit(
-            "strict on-policy response-8192 takeoff requires "
-            "actor_rollout_ref.rollout.ignore_eos=True"
-        )
     token_budget = next(iter(token_budgets.values()))
-    required_sequence_tokens = max_prompt_length + max_response_length
-    if token_budget < required_sequence_tokens:
+    if token_budget < max_response_length:
         raise SystemExit(
-            "strict on-policy takeoff requires the dynamic token budget to fit one "
-            "complete prompt+response sequence, got "
-            f"{token_budget} < {max_prompt_length}+{max_response_length}"
+            "strict on-policy takeoff requires the dynamic token budget to cover the "
+            "maximum response length; oversized prompt+response sequences are isolated "
+            "by the RWKV state-passing engine, got "
+            f"{token_budget} < {max_response_length}"
         )
 
     forbidden = {
@@ -355,7 +348,11 @@ def build_grpo_hydra_overrides(
     rollout_ignore_eos = takeoff_value(
         takeoff, env, "rollout_ignore_eos", "ROLLOUT_IGNORE_EOS", False
     )
-    rollout_top_p = takeoff_value(takeoff, env, "rollout_top_p", "ROLLOUT_TOP_P", 0.8)
+    rollout_temperature = takeoff_value(
+        takeoff, env, "rollout_temperature", "ROLLOUT_TEMPERATURE", 1.0
+    )
+    rollout_top_k = takeoff_value(takeoff, env, "rollout_top_k", "ROLLOUT_TOP_K", -1)
+    rollout_top_p = takeoff_value(takeoff, env, "rollout_top_p", "ROLLOUT_TOP_P", 1.0)
     rollout_max_num_seqs = takeoff_value(takeoff, env, "rollout_max_num_seqs", "ROLLOUT_MAX_NUM_SEQS")
     rollout_max_num_batched_tokens = takeoff_value(
         takeoff,
@@ -403,6 +400,9 @@ def build_grpo_hydra_overrides(
     val_top_k = takeoff_value(takeoff, env, "val_top_k", "VAL_TOP_K", 32)
     val_top_p = takeoff_value(takeoff, env, "val_top_p", "VAL_TOP_P", 0.28)
     val_n = takeoff_value(takeoff, env, "val_n", "VAL_N", 4)
+    trainer_loggers = takeoff_value(
+        takeoff, env, "trainer_loggers", "TRAINER_LOGGERS", ["console", "file"]
+    )
     rwkv_generation_prompt = takeoff_value(
         takeoff,
         env,
@@ -518,6 +518,8 @@ def build_grpo_hydra_overrides(
             f"actor_rollout_ref.rollout.tensor_model_parallel_size={format_hydra_value(rollout_tensor_parallel_size)}",
             f"actor_rollout_ref.rollout.n={format_hydra_value(rollout_n)}",
             f"actor_rollout_ref.rollout.seed={format_hydra_value(seed)}",
+            f"actor_rollout_ref.rollout.temperature={format_hydra_value(rollout_temperature)}",
+            f"actor_rollout_ref.rollout.top_k={format_hydra_value(rollout_top_k)}",
             f"actor_rollout_ref.rollout.top_p={format_hydra_value(rollout_top_p)}",
             f"actor_rollout_ref.rollout.ignore_eos={format_hydra_value(rollout_ignore_eos)}",
             "actor_rollout_ref.rollout.enable_prefix_caching=False",
@@ -622,7 +624,7 @@ def build_grpo_hydra_overrides(
     overrides.extend(
         [
             "critic.enable=False",
-            'trainer.logger=["console","file"]',
+            f"trainer.logger={format_hydra_value(trainer_loggers)}",
             f"trainer.project_name={format_hydra_value(takeoff_value(takeoff, env, 'project_name', 'PROJECT_NAME', 'verl_rwkv_grpo'))}",
             f"trainer.experiment_name={format_hydra_value(takeoff_value(takeoff, env, 'experiment_name', 'EXPERIMENT_NAME', 'rwkv7_grpo_vllm'))}",
             f"trainer.nnodes={format_hydra_value(num_nodes)}",

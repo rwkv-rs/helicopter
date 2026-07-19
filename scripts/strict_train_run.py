@@ -649,26 +649,16 @@ def verify_declared_contract(
         "infctx": bool(takeoff["infctx"]),
         "chunk_ctx": int(takeoff["chunk_ctx"]),
     }
-    required_sequence_tokens = int(takeoff["max_prompt_length"]) + int(
-        takeoff["max_response_length"]
-    )
+    max_response_length = int(takeoff["max_response_length"])
     if (
         not actual_training_capacity["infctx"]
         or actual_training_capacity["chunk_ctx"] != 2048
-        or actual_training_capacity["ppo_max_token_len_per_gpu"]
-        < required_sequence_tokens
+        or actual_training_capacity["ppo_max_token_len_per_gpu"] < max_response_length
     ):
         raise RuntimeError(
             "strict training capacity must use infctx state passing, chunk_ctx 2048, "
-            "and an actor token budget that fits one complete prompt+response: "
-            f"{actual_training_capacity}, required_sequence_tokens={required_sequence_tokens}"
-        )
-    if int(takeoff["max_response_length"]) == 8192 and not bool(
-        takeoff.get("rollout_ignore_eos", False)
-    ):
-        raise RuntimeError(
-            "strict response-8192 training requires rollout_ignore_eos=true so every "
-            "response contains exactly 8192 tokens"
+            "and an actor token budget that covers the maximum response length: "
+            f"{actual_training_capacity}, max_response_length={max_response_length}"
         )
     expected_topology = {
         "trainer_gpus": int(takeoff["trainer_n_gpus_per_node"]),
