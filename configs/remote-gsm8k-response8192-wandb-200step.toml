@@ -31,6 +31,7 @@ actor_lr_warmup_steps = 0
 actor_weight_decay = 0.1
 actor_entropy_coeff = 0
 actor_grad_clip = 1.0
+actor_optimizer_offload = true
 actor_use_kl_loss = true
 actor_kl_loss_coef = 0.0
 actor_kl_loss_type = "low_var_kl"
