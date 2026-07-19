@@ -58,9 +58,7 @@ def python_executable(
     require_configured: bool = False,
 ) -> str:
     paths = table(config, "paths")
-    python_value = pick(
-        paths.get("python"), env_value(env, "HELICOPTER_PYTHON", "PYTHON")
-    )
+    python_value = pick(paths.get("python"), env_value(env, "HELICOPTER_PYTHON", "PYTHON"))
     if python_value:
         python = resolve_path(str(python_value), root=root, env=env)
         if require_configured and not os.access(python, os.X_OK):
@@ -136,9 +134,7 @@ def takeoff_value(
     return pick(env_value(env, env_key), takeoff.get(config_key), default)
 
 
-def append_hydra_override(
-    overrides: list[str], key: str, value: Any, *, optional: bool = False
-) -> None:
+def append_hydra_override(overrides: list[str], key: str, value: Any, *, optional: bool = False) -> None:
     if optional and (value is None or str(value) == ""):
         return
     overrides.append(f"{key}={format_hydra_value(value)}")
@@ -192,9 +188,7 @@ def hydra_override_map(overrides: list[str]) -> dict[str, str]:
     return resolved
 
 
-def validate_strict_on_policy_overrides(
-    overrides: list[str], *, env: dict[str, str]
-) -> None:
+def validate_strict_on_policy_overrides(overrides: list[str], *, env: dict[str, str]) -> None:
     resolved = hydra_override_map(overrides)
     required = {
         "trainer.v1.trainer_mode": "sync",
@@ -247,8 +241,7 @@ def validate_strict_on_policy_overrides(
         "actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu",
     )
     token_budgets = {
-        key: strict_positive_int(resolved.get(key), name=key)
-        for key in token_budget_keys
+        key: strict_positive_int(resolved.get(key), name=key) for key in token_budget_keys
     }
     if len(set(token_budgets.values())) != 1:
         raise SystemExit(
@@ -261,10 +254,9 @@ def validate_strict_on_policy_overrides(
     max_response_length = strict_positive_int(
         resolved.get("data.max_response_length"), name="data.max_response_length"
     )
-    if (
-        max_response_length == 8192
-        and resolved.get("actor_rollout_ref.rollout.ignore_eos") != "True"
-    ):
+    if max_response_length == 8192 and resolved.get(
+        "actor_rollout_ref.rollout.ignore_eos"
+    ) != "True":
         raise SystemExit(
             "strict on-policy response-8192 takeoff requires "
             "actor_rollout_ref.rollout.ignore_eos=True"
@@ -290,12 +282,8 @@ def validate_strict_on_policy_overrides(
         )
 
 
-def reward_function_path(
-    takeoff: dict[str, Any], env: dict[str, str], verl_path: Path
-) -> Path:
-    configured_path = takeoff_value(
-        takeoff, env, "reward_function_path", "REWARD_FUNCTION_PATH"
-    )
+def reward_function_path(takeoff: dict[str, Any], env: dict[str, str], verl_path: Path) -> Path:
+    configured_path = takeoff_value(takeoff, env, "reward_function_path", "REWARD_FUNCTION_PATH")
     if configured_path:
         return Path(str(configured_path))
 
@@ -330,9 +318,7 @@ def build_grpo_hydra_overrides(
     train_files = env_value(env, "TRAIN_FILES")
     if train_files is None:
         if "train_files" in dataset:
-            train_files = format_hydra_file_list(
-                dataset["train_files"], root=root, env=env
-            )
+            train_files = format_hydra_file_list(dataset["train_files"], root=root, env=env)
         else:
             train_files = f"['{data_root}/train.parquet']"
 
@@ -343,12 +329,8 @@ def build_grpo_hydra_overrides(
         else:
             val_files = f"['{data_root}/test.parquet']"
 
-    dynamic_bsz = takeoff_value(
-        takeoff, env, "rwkv_use_dynamic_bsz", "RWKV_USE_DYNAMIC_BSZ", False
-    )
-    ppo_micro_batch_size = takeoff_value(
-        takeoff, env, "ppo_micro_batch_size", "PPO_MICRO_BATCH_SIZE", 8
-    )
+    dynamic_bsz = takeoff_value(takeoff, env, "rwkv_use_dynamic_bsz", "RWKV_USE_DYNAMIC_BSZ", False)
+    ppo_micro_batch_size = takeoff_value(takeoff, env, "ppo_micro_batch_size", "PPO_MICRO_BATCH_SIZE", 8)
     ppo_max_token_len_per_gpu = takeoff_value(
         takeoff,
         env,
@@ -374,9 +356,7 @@ def build_grpo_hydra_overrides(
         takeoff, env, "rollout_ignore_eos", "ROLLOUT_IGNORE_EOS", False
     )
     rollout_top_p = takeoff_value(takeoff, env, "rollout_top_p", "ROLLOUT_TOP_P", 0.8)
-    rollout_max_num_seqs = takeoff_value(
-        takeoff, env, "rollout_max_num_seqs", "ROLLOUT_MAX_NUM_SEQS"
-    )
+    rollout_max_num_seqs = takeoff_value(takeoff, env, "rollout_max_num_seqs", "ROLLOUT_MAX_NUM_SEQS")
     rollout_max_num_batched_tokens = takeoff_value(
         takeoff,
         env,
@@ -414,20 +394,12 @@ def build_grpo_hydra_overrides(
     ppo_epochs = takeoff_value(takeoff, env, "ppo_epochs", "PPO_EPOCHS", 1)
     seed = takeoff_value(takeoff, env, "seed", "HELICOPTER_SEED", 42)
     rwkv_ctx_len = takeoff_value(takeoff, env, "ctx_len", "RWKV_CTX_LEN")
-    wkv_mode = str(
-        takeoff_value(
-            takeoff, env, "wkv_mode", "HELICOPTER_TAKEOFF_WKV_MODE", "fp32io16"
-        )
-    )
+    wkv_mode = str(takeoff_value(takeoff, env, "wkv_mode", "HELICOPTER_TAKEOFF_WKV_MODE", "fp32io16"))
     rollout_io_dtype = "float16" if wkv_mode in {"fp32io16", "fp16"} else None
-    rwkv_infctx = hydra_bool(
-        takeoff_value(takeoff, env, "infctx", "RWKV_INFCTX", False)
-    )
+    rwkv_infctx = hydra_bool(takeoff_value(takeoff, env, "infctx", "RWKV_INFCTX", False))
     rwkv_chunk_ctx = takeoff_value(takeoff, env, "chunk_ctx", "RWKV_CHUNK_CTX")
     val_do_sample = takeoff_value(takeoff, env, "val_do_sample", "VAL_DO_SAMPLE", True)
-    val_temperature = takeoff_value(
-        takeoff, env, "val_temperature", "VAL_TEMPERATURE", 1
-    )
+    val_temperature = takeoff_value(takeoff, env, "val_temperature", "VAL_TEMPERATURE", 1)
     val_top_k = takeoff_value(takeoff, env, "val_top_k", "VAL_TOP_K", 32)
     val_top_p = takeoff_value(takeoff, env, "val_top_p", "VAL_TOP_P", 0.28)
     val_n = takeoff_value(takeoff, env, "val_n", "VAL_N", 4)
@@ -451,9 +423,7 @@ def build_grpo_hydra_overrides(
         if rwkv_chunk_ctx <= 0:
             raise SystemExit("infctx requires chunk_ctx > 0")
         if rwkv_chunk_ctx % 16 != 0:
-            raise SystemExit(
-                "infctx chunk_ctx must be divisible by RWKV CUDA chunk length 16"
-            )
+            raise SystemExit("infctx chunk_ctx must be divisible by RWKV CUDA chunk length 16")
         if rwkv_ctx_len is not None and str(rwkv_ctx_len).strip():
             try:
                 rwkv_ctx_len = int(rwkv_ctx_len)
@@ -482,7 +452,6 @@ def build_grpo_hydra_overrides(
         f"actor_rollout_ref.model.rwkv_lm_path={rwkv_lm_path}",
         "actor@actor_rollout_ref.actor=rwkv_lm",
         f"actor_rollout_ref.actor.engine.rwkv_lm_path={rwkv_lm_path}",
-        f"actor_rollout_ref.actor.engine.optimizer_offload={format_hydra_value(takeoff_value(takeoff, env, 'actor_optimizer_offload', 'ACTOR_OPTIMIZER_OFFLOAD', False))}",
         f"actor_rollout_ref.actor.optim.lr={format_hydra_value(takeoff_value(takeoff, env, 'actor_lr', 'ACTOR_LR', '1e-5'))}",
         f"actor_rollout_ref.actor.ppo_mini_batch_size={format_hydra_value(ppo_mini_batch_size)}",
         f"actor_rollout_ref.actor.ppo_epochs={format_hydra_value(ppo_epochs)}",
@@ -630,11 +599,7 @@ def build_grpo_hydra_overrides(
     )
     for config_key, env_key, hydra_key in (
         ("rollout_mode", "ROLLOUT_MODE", "actor_rollout_ref.rollout.mode"),
-        (
-            "rollout_data_parallel_size",
-            "ROLLOUT_DP",
-            "actor_rollout_ref.rollout.data_parallel_size",
-        ),
+        ("rollout_data_parallel_size", "ROLLOUT_DP", "actor_rollout_ref.rollout.data_parallel_size"),
         (
             "rollout_pipeline_parallel_size",
             "ROLLOUT_PP",
@@ -649,10 +614,7 @@ def build_grpo_hydra_overrides(
                 env,
                 config_key,
                 env_key,
-                1
-                if config_key
-                in {"rollout_data_parallel_size", "rollout_pipeline_parallel_size"}
-                else None,
+                1 if config_key in {"rollout_data_parallel_size", "rollout_pipeline_parallel_size"} else None,
             ),
             optional=True,
         )
@@ -686,14 +648,8 @@ def build_grpo_hydra_overrides(
     profiler_tool = takeoff_value(takeoff, env, "profiler_tool", "PROFILER_TOOL")
     profiler_steps = takeoff_value(takeoff, env, "profiler_steps", "PROFILER_STEPS")
     if profiler_tool is not None or profiler_steps is not None:
-        if (
-            profiler_tool != "nsys"
-            or not isinstance(profiler_steps, list)
-            or not profiler_steps
-        ):
-            raise SystemExit(
-                "strict profiling requires profiler_tool='nsys' and a non-empty profiler_steps list"
-            )
+        if profiler_tool != "nsys" or not isinstance(profiler_steps, list) or not profiler_steps:
+            raise SystemExit("strict profiling requires profiler_tool='nsys' and a non-empty profiler_steps list")
         overrides.extend(
             [
                 "global_profiler.tool=nsys",
@@ -751,12 +707,7 @@ def build_infer_plan(
     host = str(pick(args.host, runtime.get("host"), default="0.0.0.0"))
     port = str(pick(args.port, runtime.get("port"), default="8000"))
     served_model_name = str(
-        pick(
-            args.served_model_name,
-            model.get("served_model_name"),
-            model.get("requested_name"),
-            args.model,
-        )
+        pick(args.served_model_name, model.get("served_model_name"), model.get("requested_name"), args.model)
     )
 
     if not args.dry_run and not model_path.is_file():
@@ -813,11 +764,7 @@ def build_infer_plan(
         infer.get("enable_auto_tool_choice"),
         default=False,
     )
-    if (
-        auto_tool_choice
-        if isinstance(auto_tool_choice, bool)
-        else str(auto_tool_choice).strip().lower() in {"1", "true", "yes", "on"}
-    ):
+    if auto_tool_choice if isinstance(auto_tool_choice, bool) else str(auto_tool_choice).strip().lower() in {"1", "true", "yes", "on"}:
         command.append("--enable-auto-tool-choice")
 
     shown_env: dict[str, str] = {}
@@ -856,42 +803,22 @@ def build_takeoff_plan(
     takeoff = {**takeoff_common, **takeoff_algo}
 
     verl_path = resolve_path(
-        str(
-            pick(
-                paths.get("verl_path"),
-                env_value(env, "HELICOPTER_VERL_PATH", "VERL_PATH"),
-                "src/train/verl-rwkv",
-            )
-        ),
+        str(pick(paths.get("verl_path"), env_value(env, "HELICOPTER_VERL_PATH", "VERL_PATH"), "src/train/verl-rwkv")),
         root=root,
         env=env,
     )
     rwkv_lm_path = resolve_path(
-        str(
-            pick(
-                paths.get("rwkv_lm_path"),
-                env_value(env, "RWKV_LM_PATH", "HELICOPTER_RWKV_LM_PATH"),
-                "src/train/rwkv-lm",
-            )
-        ),
+        str(pick(paths.get("rwkv_lm_path"), env_value(env, "RWKV_LM_PATH", "HELICOPTER_RWKV_LM_PATH"), "src/train/rwkv-lm")),
         root=root,
         env=env,
     )
     vllm_rwkv_path = resolve_path(
-        str(
-            pick(
-                paths.get("vllm_rwkv_path"),
-                env_value(env, "HELICOPTER_VLLM_RWKV_PATH", "VLLM_RWKV_PATH"),
-                "src/infer/vllm-rwkv",
-            )
-        ),
+        str(pick(paths.get("vllm_rwkv_path"), env_value(env, "HELICOPTER_VLLM_RWKV_PATH", "VLLM_RWKV_PATH"), "src/infer/vllm-rwkv")),
         root=root,
         env=env,
     )
 
-    has_train_files = (
-        "train_files" in dataset or env_value(env, "TRAIN_FILES") is not None
-    )
+    has_train_files = "train_files" in dataset or env_value(env, "TRAIN_FILES") is not None
     has_val_files = "val_files" in dataset or env_value(env, "VAL_FILES") is not None
     dataset_uses_explicit_files = has_train_files and has_val_files
     if not args.dry_run:
@@ -900,11 +827,7 @@ def build_takeoff_plan(
             (rwkv_lm_path, "rwkv-lm repository not found"),
             (vllm_rwkv_path, "vllm-rwkv repository not found"),
         ):
-            exists = (
-                path.is_dir()
-                if "repository" in message or "root" in message
-                else path.is_file()
-            )
+            exists = path.is_dir() if "repository" in message or "root" in message else path.is_file()
             if not exists:
                 raise SystemExit(f"{message}: {path}")
         if not dataset_uses_explicit_files and not data_root.is_dir():
@@ -969,9 +892,7 @@ def build_takeoff_plan(
     plan_env.update(shown_env)
     current_pythonpath = plan_env.get("PYTHONPATH")
     plan_env["PYTHONPATH"] = (
-        f"{vllm_rwkv_path}{os.pathsep}{current_pythonpath}"
-        if current_pythonpath
-        else str(vllm_rwkv_path)
+        f"{vllm_rwkv_path}{os.pathsep}{current_pythonpath}" if current_pythonpath else str(vllm_rwkv_path)
     )
     shown_env["PYTHONPATH"] = plan_env["PYTHONPATH"]
 
@@ -996,6 +917,4 @@ def build_takeoff_plan(
         "verl.trainer.main_ppo",
         *overrides,
     ]
-    return CommandPlan(
-        command=command, cwd=verl_path, shown_env=shown_env, env=plan_env
-    )
+    return CommandPlan(command=command, cwd=verl_path, shown_env=shown_env, env=plan_env)
