@@ -29,6 +29,7 @@ rwkv-lm = [
 vllm = [
   { include-group = "common" },
   "aiohttp>=3.13.3",
+  "anthropic>=0.71.0",
   "blake3",
   "cachetools",
   "cbor2",

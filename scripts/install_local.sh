@@ -305,17 +305,15 @@ PY
 vllm_native_ready() {
   "$VENV/bin/python" - <<'PY' >/dev/null
 import vllm
-import vllm.cumem_allocator
+import vllm._rapid_sampling
 import vllm.rwkv7_ops
 from vllm.build_profile import get_build_profile_metadata
-from vllm.device_allocator.cumem import cumem_available
 
 metadata = get_build_profile_metadata()
 assert metadata.profile == "rwkv", metadata
-assert set(metadata.configured_targets) == {"cumem_allocator", "rwkv7_ops"}, metadata
+assert set(metadata.configured_targets) == {"_rapid_sampling", "rwkv7_ops"}, metadata
 assert "_C_stable_libtorch" not in metadata.configured_targets, metadata
 assert not metadata.external_projects, metadata
-assert cumem_available, "vLLM CuMem allocator extension is not loadable"
 PY
 }
 
