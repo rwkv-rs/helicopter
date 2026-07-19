@@ -56,7 +56,7 @@ class WebToolkit:
         self,
         *,
         search_url: str | None = None,
-        search_backend: str = "searxng",
+        search_backend: str = "html",
         timeout: float = 20.0,
         max_page_chars: int = 6000,
         user_agent: str = USER_AGENT,

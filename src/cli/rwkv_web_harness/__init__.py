@@ -1,6 +1,7 @@
 """A small, local-first web research harness for RWKV models."""
 
 from .batch import TaskSpec, load_task_specs, summarize_cases, validate_case
+from .config import HarnessSettings, resolve_search_url
 from .models import (
     GenerationBackend,
     GenerationRequest,
@@ -9,6 +10,7 @@ from .models import (
     RWKVLocalBackend,
     ToolCall,
 )
+from .preflight import ProbeResult, probe_model, probe_search, run_preflight
 from .context import G1H_TURN_DELIMITER, G1H_TURN_DELIMITER_TOKEN_ID
 from .runner import AgentConfig, AgentRunner, RunResult
 from .tools import ToolResult, WebToolkit
@@ -21,9 +23,11 @@ __all__ = [
     "GenerationBackend",
     "GenerationRequest",
     "GenerationResponse",
+    "HarnessSettings",
     "G1H_TURN_DELIMITER",
     "G1H_TURN_DELIMITER_TOKEN_ID",
     "ModelBackendError",
+    "ProbeResult",
     "RWKVLocalBackend",
     "RunResult",
     "ToolCall",
@@ -31,6 +35,10 @@ __all__ = [
     "TraceWriter",
     "WebToolkit",
     "load_task_specs",
+    "probe_model",
+    "probe_search",
+    "resolve_search_url",
+    "run_preflight",
     "summarize_cases",
     "validate_case",
 ]

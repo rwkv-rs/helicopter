@@ -8,6 +8,8 @@ from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from .config import INTERFACE_CHOICES
+
 
 @dataclass(frozen=True)
 class GenerationRequest:
@@ -61,11 +63,18 @@ class RWKVLocalBackend:
         interface: str = "chat",
         endpoint: str | None = None,
     ) -> None:
-        if interface not in {"chat", "completion", "rwkv-json", "g1h"}:
-            raise ValueError("interface must be 'chat', 'completion', 'rwkv-json', or 'g1h'")
+        if interface not in INTERFACE_CHOICES:
+            choices = ", ".join(INTERFACE_CHOICES)
+            raise ValueError(f"interface must be one of: {choices}")
+        if not base_url.strip():
+            raise ValueError("base_url must not be empty")
+        if not model.strip():
+            raise ValueError("model must not be empty")
+        if timeout <= 0:
+            raise ValueError("timeout must be positive")
         self.base_url = base_url.rstrip("/")
-        self.model = model
-        self.timeout = timeout
+        self.model = model.strip()
+        self.timeout = float(timeout)
         self.api_key = api_key or os.environ.get("RWKV_MODEL_API_KEY")
         self.interface = interface
         default_endpoint = "/chat/completions" if interface == "chat" else "/completions"

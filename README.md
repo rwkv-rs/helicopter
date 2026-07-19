@@ -154,6 +154,11 @@ uv run rwkv-web-harness preflight \
   --model-url http://127.0.0.1:8000/v1
 ```
 
+If the model server requires authentication, set `RWKV_MODEL_API_KEY` or pass
+`--api-key`; preflight uses the same bearer token and model name as a real run
+and reports authentication, model-advertisement, and search failures
+separately. The deployment checklist is in `WEB_HARNESS_DEPLOY.md`.
+
 Run one research question and save an append-only JSONL trace. The default
 `chat` interface sends OpenAI-compatible native tool schemas; for the g1h
 checkpoint use the dedicated `g1h` interface:

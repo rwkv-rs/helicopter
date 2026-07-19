@@ -8,11 +8,24 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
 
 from .batch import TaskSpec, load_task_specs, summarize_cases, validate_case
+from .config import (
+    DEFAULT_MAX_CONTEXT_CHARS,
+    DEFAULT_MAX_NEW_TOKENS,
+    DEFAULT_MAX_PAGE_CHARS,
+    DEFAULT_MAX_STEPS,
+    DEFAULT_MODEL_INTERFACE,
+    DEFAULT_MODEL_NAME,
+    DEFAULT_MODEL_URL,
+    DEFAULT_SEARCH_BACKEND,
+    DEFAULT_TIMEOUT,
+    INTERFACE_CHOICES,
+    SEARCH_BACKEND_CHOICES,
+    HarnessSettings,
+)
 from .models import RWKVLocalBackend
+from .preflight import run_preflight
 from .runner import AgentConfig, AgentRunner
 from .tools import WebToolkit
 from .trace import TraceWriter
@@ -29,33 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--task", help="research question")
     run.add_argument("--tasks-file", type=Path, help="JSONL file containing task_id/question records")
     run.add_argument("--task-id", help="task id when --tasks-file is used")
-    run.add_argument("--model-url", default=os.environ.get("RWKV_MODEL_URL", "http://127.0.0.1:8000/v1"))
-    run.add_argument("--model", default=os.environ.get("RWKV_MODEL_NAME", "RWKV"))
-    run.add_argument("--api-key", default=os.environ.get("RWKV_MODEL_API_KEY"))
-    run.add_argument(
-        "--interface",
-        choices=("chat", "completion", "rwkv-json", "g1h"),
-        default=os.environ.get("RWKV_MODEL_INTERFACE", "chat"),
-        help="chat uses native tools; g1h uses User✿/Bot✿ JSON calls; rwkv-json uses generic JSON; completion uses legacy tags",
-    )
-    run.add_argument(
-        "--endpoint",
-        help="optional endpoint path override, e.g. /v1/chat/completions or /v1/completions",
-    )
-    run.add_argument("--search-url", default=os.environ.get("RWKV_WEB_SEARCH_URL"))
-    run.add_argument(
-        "--search-backend",
-        choices=("html", "searxng"),
-        default=os.environ.get("RWKV_WEB_SEARCH_BACKEND", "html"),
-        help="html uses a normal search webpage; searxng expects a self-hosted SearXNG endpoint",
-    )
-    run.add_argument("--trace", type=Path, help="JSONL trace path")
-    run.add_argument("--max-steps", type=int, default=8)
-    run.add_argument("--max-context-chars", type=int, default=12000)
-    run.add_argument("--max-new-tokens", type=int, default=768)
-    run.add_argument("--max-page-chars", type=int, default=6000)
-    run.add_argument("--temperature", type=float, default=0.0)
-    run.add_argument("--timeout", type=float, default=120.0)
+    _add_backend_arguments(run, include_trace=True)
     run.set_defaults(handler=_run)
 
     batch = subparsers.add_parser("batch", help="run a JSONL research suite")
@@ -74,14 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
     batch.set_defaults(handler=_batch)
 
     preflight = subparsers.add_parser("preflight", help="check the local model and web search endpoints")
-    preflight.add_argument("--model-url", default=os.environ.get("RWKV_MODEL_URL", "http://127.0.0.1:8000/v1"))
-    preflight.add_argument("--search-url", default=os.environ.get("RWKV_WEB_SEARCH_URL"))
-    preflight.add_argument(
-        "--search-backend",
-        choices=("html", "searxng"),
-        default=os.environ.get("RWKV_WEB_SEARCH_BACKEND", "html"),
-    )
-    preflight.add_argument("--timeout", type=float, default=10.0)
+    _add_backend_arguments(preflight, include_execution=False, probe_timeout=10.0)
     preflight.set_defaults(handler=_preflight)
     return parser
 
@@ -104,29 +84,38 @@ def _run(args: argparse.Namespace) -> int:
     return 0 if result.status == "completed" else 1
 
 
-def _add_backend_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--model-url", default=os.environ.get("RWKV_MODEL_URL", "http://127.0.0.1:8000/v1"))
-    parser.add_argument("--model", default=os.environ.get("RWKV_MODEL_NAME", "RWKV"))
+def _add_backend_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    include_execution: bool = True,
+    include_trace: bool = False,
+    probe_timeout: float | None = None,
+) -> None:
+    parser.add_argument("--model-url", default=os.environ.get("RWKV_MODEL_URL", DEFAULT_MODEL_URL))
+    parser.add_argument("--model", default=os.environ.get("RWKV_MODEL_NAME", DEFAULT_MODEL_NAME))
     parser.add_argument("--api-key", default=os.environ.get("RWKV_MODEL_API_KEY"))
     parser.add_argument(
         "--interface",
-        choices=("chat", "completion", "rwkv-json", "g1h"),
-        default=os.environ.get("RWKV_MODEL_INTERFACE", "chat"),
+        choices=INTERFACE_CHOICES,
+        default=os.environ.get("RWKV_MODEL_INTERFACE", DEFAULT_MODEL_INTERFACE),
         help="chat uses native tools; g1h uses User✿/Bot✿ JSON calls; rwkv-json uses generic JSON; completion uses legacy tags",
     )
     parser.add_argument("--endpoint", help="optional endpoint path override")
     parser.add_argument("--search-url", default=os.environ.get("RWKV_WEB_SEARCH_URL"))
     parser.add_argument(
         "--search-backend",
-        choices=("html", "searxng"),
-        default=os.environ.get("RWKV_WEB_SEARCH_BACKEND", "html"),
+        choices=SEARCH_BACKEND_CHOICES,
+        default=os.environ.get("RWKV_WEB_SEARCH_BACKEND", DEFAULT_SEARCH_BACKEND),
     )
-    parser.add_argument("--max-steps", type=int, default=8)
-    parser.add_argument("--max-context-chars", type=int, default=12000)
-    parser.add_argument("--max-new-tokens", type=int, default=768)
-    parser.add_argument("--max-page-chars", type=int, default=6000)
-    parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--timeout", type=float, default=120.0)
+    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT if probe_timeout is None else probe_timeout)
+    if include_execution:
+        if include_trace:
+            parser.add_argument("--trace", type=Path, help="JSONL trace path")
+        parser.add_argument("--max-steps", type=int, default=DEFAULT_MAX_STEPS)
+        parser.add_argument("--max-context-chars", type=int, default=DEFAULT_MAX_CONTEXT_CHARS)
+        parser.add_argument("--max-new-tokens", type=int, default=DEFAULT_MAX_NEW_TOKENS)
+        parser.add_argument("--max-page-chars", type=int, default=DEFAULT_MAX_PAGE_CHARS)
+        parser.add_argument("--temperature", type=float, default=0.0)
 
 
 def _run_task(
@@ -137,32 +126,26 @@ def _run_task(
     trace_path: Path,
     tool_sequence: tuple[str, ...] | None = None,
 ):
-    search_url = args.search_url
-    if search_url is None:
-        search_url = (
-            "https://lite.duckduckgo.com/lite/"
-            if args.search_backend == "html"
-            else "http://127.0.0.1:8080/search"
-        )
+    settings = HarnessSettings.from_namespace(args)
     backend = RWKVLocalBackend(
-        base_url=args.model_url,
-        model=args.model,
-        timeout=args.timeout,
-        api_key=args.api_key,
-        interface=args.interface,
-        endpoint=args.endpoint,
+        base_url=settings.model_url,
+        model=settings.model,
+        timeout=settings.timeout,
+        api_key=settings.api_key,
+        interface=settings.interface,
+        endpoint=settings.endpoint,
     )
     toolkit = WebToolkit(
-        search_url=search_url,
-        search_backend=args.search_backend,
-        timeout=min(args.timeout, 30.0),
-        max_page_chars=args.max_page_chars,
+        search_url=settings.resolved_search_url,
+        search_backend=settings.search_backend,
+        timeout=min(settings.timeout, 30.0),
+        max_page_chars=settings.max_page_chars,
     )
     config = AgentConfig(
-        max_steps=args.max_steps,
-        max_context_chars=args.max_context_chars,
-        max_new_tokens=args.max_new_tokens,
-        temperature=args.temperature,
+        max_steps=settings.max_steps,
+        max_context_chars=settings.max_context_chars,
+        max_new_tokens=settings.max_new_tokens,
+        temperature=settings.temperature,
         tool_sequence=tool_sequence,
     )
     with TraceWriter(trace_path) as trace:
@@ -307,25 +290,10 @@ def _load_task(args: argparse.Namespace) -> tuple[str, str]:
 
 
 def _preflight(args: argparse.Namespace) -> int:
-    search_url = args.search_url
-    if search_url is None:
-        search_url = "https://lite.duckduckgo.com/lite/" if args.search_backend == "html" else "http://127.0.0.1:8080/search"
-    checks = {
-        "model": _probe(f"{args.model_url.rstrip('/')}/models", args.timeout),
-        "search": _probe(f"{search_url}{'&' if '?' in search_url else '?'}{urlencode({'q': 'RWKV'})}", args.timeout),
-    }
-    print(json.dumps(checks, ensure_ascii=False, indent=2))
-    return 0 if all(checks.values()) else 1
-
-
-def _probe(url: str, timeout: float) -> bool:
-    try:
-        request = Request(url, headers={"User-Agent": "rwkv-web-harness/0.1"})
-        with urlopen(request, timeout=timeout) as response:
-            response.read(64)
-        return True
-    except OSError:
-        return False
+    settings = HarnessSettings.from_namespace(args)
+    results = run_preflight(settings, timeout=args.timeout)
+    print(json.dumps({result.name: result.as_dict() for result in results}, ensure_ascii=False, indent=2))
+    return 0 if all(result.ok for result in results) else 1
 
 
 if __name__ == "__main__":
