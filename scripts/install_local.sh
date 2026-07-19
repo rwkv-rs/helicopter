@@ -311,7 +311,11 @@ from vllm.build_profile import get_build_profile_metadata
 
 metadata = get_build_profile_metadata()
 assert metadata.profile == "rwkv", metadata
-assert set(metadata.configured_targets) == {"_rapid_sampling", "rwkv7_ops"}, metadata
+assert set(metadata.configured_targets) == {
+    "_rapid_sampling",
+    "cumem_allocator",
+    "rwkv7_ops",
+}, metadata
 assert "_C_stable_libtorch" not in metadata.configured_targets, metadata
 assert not metadata.external_projects, metadata
 PY
