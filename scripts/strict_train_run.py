@@ -167,6 +167,28 @@ def command_output(*command: str) -> str:
     return subprocess.run(command, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT).stdout.strip()
 
 
+def resolve_expected_rounds(config: dict[str, Any], command: list[str]) -> int:
+    """Resolve the effective training-step contract after Hydra overrides."""
+
+    expected_rounds = int(config["takeoff"]["grpo"]["total_training_steps"])
+    prefix = "trainer.total_training_steps="
+    for argument in command:
+        if not argument.startswith(prefix):
+            continue
+        value = argument.removeprefix(prefix)
+        try:
+            expected_rounds = int(value)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"trainer.total_training_steps must be a positive integer, got {value!r}"
+            ) from exc
+    if expected_rounds <= 0:
+        raise RuntimeError(
+            f"trainer.total_training_steps must be a positive integer, got {expected_rounds}"
+        )
+    return expected_rounds
+
+
 def source_metadata(root: Path, source_revisions: dict[str, Any] | None) -> dict[str, Any]:
     if not (root / ".git").exists():
         if not isinstance(source_revisions, dict) or not source_revisions.get("product_commit"):
@@ -1328,7 +1350,7 @@ def main() -> int:
     if not config_path.is_file():
         raise RuntimeError(f"resolved training config source is missing: {config_path}")
     config = tomllib.loads(config_path.read_text(encoding="utf-8"))
-    expected_rounds = int(config["takeoff"]["grpo"]["total_training_steps"])
+    expected_rounds = resolve_expected_rounds(config, command)
     topology = verify_topology_contract(json.loads(required_env("HELICOPTER_TOPOLOGY_JSON")))
     batch = json.loads(required_env("HELICOPTER_BATCH_JSON"))
     seed = required_env("HELICOPTER_SEED")

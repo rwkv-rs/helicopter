@@ -22,6 +22,29 @@ def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def test_effective_training_steps_follow_the_last_hydra_override():
+    config = {"takeoff": {"grpo": {"total_training_steps": 200}}}
+
+    assert strict_train_run.resolve_expected_rounds(config, ["helicopter", "takeoff"]) == 200
+    assert (
+        strict_train_run.resolve_expected_rounds(
+            config,
+            [
+                "helicopter",
+                "takeoff",
+                "trainer.total_training_steps=3",
+                "trainer.total_training_steps=2",
+            ],
+        )
+        == 2
+    )
+    for invalid in ("0", "-1", "not-an-integer"):
+        with pytest.raises(RuntimeError, match="must be a positive integer"):
+            strict_train_run.resolve_expected_rounds(
+                config, [f"trainer.total_training_steps={invalid}"]
+            )
+
+
 def test_source_metadata_uses_remote_revision_manifest_without_git(tmp_path):
     revisions = {
         "product_commit": "a" * 40,
