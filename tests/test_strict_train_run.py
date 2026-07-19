@@ -180,6 +180,22 @@ def test_tee_keeps_persisting_after_live_stdout_breaks(monkeypatch):
     assert output_errors == []
 
 
+def test_child_failure_is_not_mislabeled_as_a_post_run_contract_failure(tmp_path):
+    command_log = tmp_path / "command.log"
+    command_log.write_text("FileNotFoundError: validation dataset is missing\n")
+
+    assert (
+        strict_train_run.classify_failure(
+            1,
+            "policy identity log is missing",
+            command_log,
+        )
+        == "child_failure"
+    )
+    command_log.write_text("CUDA out of memory\n")
+    assert strict_train_run.classify_failure(1, "metrics are missing", command_log) == "cuda_oom"
+
+
 def test_verify_dataset_manifest_checks_every_file(tmp_path):
     first = tmp_path / "first.parquet"
     second = tmp_path / "second.parquet"

@@ -545,9 +545,11 @@ def classify_failure(child_exit_code: int, contract_error: str | None, command_l
         return "cuda_oom"
     if "out of memory" in lowered or "oom-kill" in lowered or "killed process" in lowered:
         return "host_oom"
+    if child_exit_code != 0:
+        return "child_failure"
     if contract_error is not None:
         return "contract_failure"
-    return "child_failure"
+    raise RuntimeError("failure classification received no failure")
 
 
 def extract_vllm_capacity(command_log: Path, topology_path: Path | None = None) -> dict[str, Any]:
@@ -1548,6 +1550,10 @@ def main() -> int:
     )
     contract_error = None
     try:
+        if child_exit_code != 0:
+            raise RuntimeError(
+                f"training command failed with exit code {child_exit_code}; see command.log"
+            )
         if sampler_error:
             raise RuntimeError(sampler_error)
         if sampler_exit_code != 0:
