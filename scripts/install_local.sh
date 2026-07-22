@@ -5,18 +5,19 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
 VENV="${VENV:-$ROOT/.venv}"
 UV="${UV:-uv}"
-INSTALL_PROFILE="${INSTALL_PROFILE:-rwkv}"
+UV_VERSION="${UV_VERSION:-0.11.14}"
+INSTALL_COMPONENTS="${INSTALL_COMPONENTS:-rwkv-hf,rwkv-lm,dev}"
 INSTALL_SYSTEM_DEPS="${INSTALL_SYSTEM_DEPS:-0}"
-UPDATE_UV="${UPDATE_UV:-1}"
+UPDATE_UV="${UPDATE_UV:-0}"
 UV_UPGRADE="${UV_UPGRADE:-1}"
 RUN_PIP_CHECK="${RUN_PIP_CHECK:-1}"
 UV_SYNC_INEXACT="${UV_SYNC_INEXACT:-1}"
 CLEAN_SUBMODULE_VENVS="${CLEAN_SUBMODULE_VENVS:-1}"
 CLEAN_VLLM_CMAKE_CACHE="${CLEAN_VLLM_CMAKE_CACHE:-1}"
 VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE:-cuda}"
-# BF16 conversion/distillation only needs the native RWKV7 operators. The full
-# vLLM/NVFP4 profile is an explicit post-BF16 acceptance step.
-VLLM_BUILD_PROFILE="${HELICOPTER_VLLM_BUILD_PROFILE:-rwkv}"
+# Any2RWKV BF16 conversion/distillation only needs rwkv-hf + rwkv-lm. This
+# vLLM build setting belongs solely to the independently selected vllm-rwkv group.
+VLLM_BUILD_PROFILE="${VLLM_BUILD_PROFILE:-rwkv}"
 VLLM_VERSION_OVERRIDE="${VLLM_VERSION_OVERRIDE:-}"
 VLLM_REBUILD="${VLLM_REBUILD:-auto}"
 VERL_REINSTALL="${VERL_REINSTALL:-auto}"
@@ -59,6 +60,54 @@ die() {
 
 warn() {
   echo "warning: $*" >&2
+}
+
+component_enabled() {
+  local expected="$1" component
+  local -a components=()
+  IFS=, read -r -a components <<<"$INSTALL_COMPONENTS"
+  for component in "${components[@]}"; do
+    [[ "$component" == "$expected" ]] && return 0
+  done
+  return 1
+}
+
+validate_install_components() {
+  local component
+  local -a components=()
+  IFS=, read -r -a components <<<"$INSTALL_COMPONENTS"
+  ((${#components[@]} > 0)) || die "INSTALL_COMPONENTS must select at least one dependency group"
+  for component in "${components[@]}"; do
+    case "$component" in
+      dev | vllm-rwkv | verl-rwkv | rwkv-lm | rwkv-hf | lighteval | verl-liger) ;;
+      full)
+        die "INSTALL_COMPONENTS=full is disabled; select explicit dependency groups"
+        ;;
+      *)
+        die "unknown INSTALL_COMPONENTS entry '$component'; use a comma-separated subset of dev,vllm-rwkv,verl-rwkv,rwkv-lm,rwkv-hf,lighteval,verl-liger"
+        ;;
+    esac
+  done
+  if component_enabled verl-rwkv && component_enabled lighteval; then
+    die "verl-rwkv and lighteval are separate environments because their latex2sympy2-extended requirements conflict"
+  fi
+
+  case "${INSTALL_PROFILE:-}" in
+    "" | rwkv) ;;
+    full) die "INSTALL_PROFILE=full is disabled; use INSTALL_COMPONENTS" ;;
+    *) die "INSTALL_PROFILE=${INSTALL_PROFILE} is disabled; use INSTALL_COMPONENTS" ;;
+  esac
+  case "${HELICOPTER_VLLM_BUILD_PROFILE:-}" in
+    "") ;;
+    full) die "HELICOPTER_VLLM_BUILD_PROFILE=full is disabled; use VLLM_BUILD_PROFILE=rwkv" ;;
+    *) die "HELICOPTER_VLLM_BUILD_PROFILE is unsupported; use VLLM_BUILD_PROFILE=rwkv" ;;
+  esac
+  [[ "$VLLM_BUILD_PROFILE" == "rwkv" ]] ||
+    die "VLLM_BUILD_PROFILE=$VLLM_BUILD_PROFILE is disabled; only rwkv is supported"
+}
+
+native_component_enabled() {
+  component_enabled vllm-rwkv || component_enabled rwkv-lm || component_enabled rwkv-hf
 }
 
 version_at_least() {
@@ -114,16 +163,46 @@ clean_vllm_cmake_cache() {
 }
 
 ensure_uv() {
-  if ! have "$UV"; then
-    have curl || die "uv is missing and curl is not available to install it"
-    run sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
-    export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
-    have "$UV" || UV="$(command -v uv || true)"
-    [[ "${DRY_RUN:-0}" == "1" || -n "$UV" ]] || die "uv installation finished but uv is still not on PATH"
-  fi
+  [[ "$UV_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+    die "UV_VERSION must be an exact release such as 0.11.14"
 
-  if [[ "$UPDATE_UV" == "1" ]]; then
-    run "$UV" self update || warn "uv self update failed; continuing with installed uv"
+  local actual_version="" install_uv=0
+  if have "$UV"; then
+    actual_version="$("$UV" --version | awk '{print $2}')"
+  fi
+  if [[ "$actual_version" != "$UV_VERSION" || "$UPDATE_UV" == "1" ]]; then
+    install_uv=1
+    if [[ "${DRY_RUN:-0}" == "1" ]]; then
+      print_cmd bash -o pipefail -c "curl -LsSf https://astral.sh/uv/$UV_VERSION/install.sh | env UV_NO_MODIFY_PATH=1 sh"
+    else
+      local standalone_installed=0
+      if have curl; then
+        print_cmd bash -o pipefail -c "curl -LsSf https://astral.sh/uv/$UV_VERSION/install.sh | env UV_NO_MODIFY_PATH=1 sh"
+        if bash -o pipefail -c "curl -LsSf https://astral.sh/uv/$UV_VERSION/install.sh | env UV_NO_MODIFY_PATH=1 sh"; then
+          standalone_installed=1
+        fi
+      fi
+      if [[ "$standalone_installed" == "0" ]]; then
+        have "$UV" ||
+          die "the pinned uv installer is unavailable and no existing uv can use the configured Python index"
+        warn "the pinned uv standalone installer is unreachable; using the configured Python index"
+        local tool_install=("$UV" tool install --force)
+        [[ -n "$UV_INDEX_URL" ]] && tool_install+=(--index-url "$UV_INDEX_URL")
+        tool_install+=("uv@$UV_VERSION")
+        run "${tool_install[@]}"
+      fi
+    fi
+    export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+    [[ "${DRY_RUN:-0}" == "1" ]] || hash -r
+    [[ ! -x "$HOME/.local/bin/uv" ]] || UV="$HOME/.local/bin/uv"
+  fi
+  if [[ "${DRY_RUN:-0}" != "1" ]]; then
+    have "$UV" || UV="$(command -v uv || true)"
+    [[ -n "$UV" ]] || die "uv installation finished but uv is still not on PATH"
+    actual_version="$("$UV" --version | awk '{print $2}')"
+    [[ "$actual_version" == "$UV_VERSION" ]] ||
+      die "uv version mismatch: expected $UV_VERSION, found $actual_version"
+    [[ "$install_uv" == "0" ]] || printf 'Pinned uv ready: %s\n' "$actual_version"
   fi
 }
 
@@ -136,6 +215,7 @@ install_system_deps() {
 }
 
 check_compiler_env() {
+  native_component_enabled || return 0
   local missing=()
   have cc || missing+=("cc")
   have c++ || missing+=("c++")
@@ -151,14 +231,17 @@ check_compiler_env() {
 }
 
 check_native_env() {
+  native_component_enabled || return 0
   local missing=()
-  have cmake || missing+=("cmake")
+  component_enabled vllm-rwkv && ! have cmake && missing+=("cmake")
   have ninja || missing+=("ninja")
   ((${#missing[@]} == 0)) || die "missing native build tools after uv sync: ${missing[*]}"
 
-  local cmake_version
-  cmake_version="$(cmake --version | awk 'NR == 1 {print $3}')"
-  version_at_least "$cmake_version" "3.26" || die "cmake >= 3.26 is required; found $cmake_version"
+  if component_enabled vllm-rwkv; then
+    local cmake_version
+    cmake_version="$(cmake --version | awk 'NR == 1 {print $3}')"
+    version_at_least "$cmake_version" "3.26" || die "cmake >= 3.26 is required; found $cmake_version"
+  fi
 
   if have g++; then
     local gcc_version
@@ -173,6 +256,7 @@ check_native_env() {
 }
 
 check_cuda_env() {
+  native_component_enabled || return 0
   [[ "$VLLM_TARGET_DEVICE" == "cuda" ]] || return 0
 
   if ! have nvcc && [[ -n "${CUDA_HOME:-}" && -x "$CUDA_HOME/bin/nvcc" ]]; then
@@ -190,12 +274,13 @@ check_cuda_env() {
 }
 
 configure_cuda_arch_list() {
+  native_component_enabled || return 0
   [[ "$VLLM_TARGET_DEVICE" == "cuda" ]] || return 0
   [[ -z "${TORCH_CUDA_ARCH_LIST:-}" ]] || return 0
-  [[ -x "$VENV/bin/python" ]] || return 0
 
-  local arch_list
-  arch_list="$("$VENV/bin/python" - <<'PY'
+  local arch_list=""
+  if [[ -x "$VENV/bin/python" ]]; then
+    arch_list="$("$VENV/bin/python" - <<'PY'
 import torch
 
 if not torch.cuda.is_available() or torch.cuda.device_count() == 0:
@@ -209,12 +294,19 @@ supported_arches = set(torch.cuda.get_arch_list())
 
 if capabilities == {(12, 1)} and "sm_121" not in supported_arches and "sm_120" in supported_arches:
     print("12.0+PTX")
+elif len(capabilities) == 1:
+    major, minor = next(iter(capabilities))
+    print(f"{major}.{minor}")
 PY
 )"
+  elif have nvidia-smi; then
+    arch_list="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null |
+      awk 'NF { seen[$1] = 1 } END { if (length(seen) == 1) for (arch in seen) print arch }')"
+  fi
 
   if [[ -n "$arch_list" ]]; then
     export TORCH_CUDA_ARCH_LIST="$arch_list"
-    echo "Using TORCH_CUDA_ARCH_LIST=$TORCH_CUDA_ARCH_LIST for CUDA 12.1 devices supported by sm_120"
+    echo "Using TORCH_CUDA_ARCH_LIST=$TORCH_CUDA_ARCH_LIST for native dependency builds"
   fi
 }
 
@@ -222,14 +314,15 @@ sync_uv_env() {
   local sync_args=(sync)
   [[ -n "$UV_INDEX_URL" ]] && sync_args+=(--index-url "$UV_INDEX_URL")
   [[ "$UV_SYNC_INEXACT" == "1" ]] && sync_args+=(--inexact)
-  sync_args+=(--project "$ROOT" --python "$PYTHON_VERSION" --no-default-groups --group rwkv)
+  sync_args+=(--project "$ROOT" --python "$PYTHON_VERSION" --no-default-groups)
   [[ "$UV_UPGRADE" == "1" ]] && sync_args+=(--upgrade)
 
-  case "$INSTALL_PROFILE" in
-    rwkv) ;;
-    full) sync_args+=(--group full) ;;
-    *) die "unknown INSTALL_PROFILE=$INSTALL_PROFILE; use rwkv or full" ;;
-  esac
+  local component
+  local -a components=()
+  IFS=, read -r -a components <<<"$INSTALL_COMPONENTS"
+  for component in "${components[@]}"; do
+    sync_args+=(--group "$component")
+  done
 
   run "$UV" "${sync_args[@]}"
 }
@@ -260,29 +353,15 @@ PY
 }
 
 vllm_native_ready() {
-  "$VENV/bin/python" - "$VLLM_BUILD_PROFILE" <<'PY' >/dev/null
-import importlib.util
-import sys
-
+  "$VENV/bin/python" - <<'PY' >/dev/null
 import vllm
+import vllm._rapid_sampling
 import vllm.rwkv7_ops
 from vllm.build_profile import get_build_profile_metadata
 
-expected = sys.argv[1]
 metadata = get_build_profile_metadata()
-if metadata.profile != expected:
-    raise SystemExit(
-        f"vLLM build profile mismatch: expected={expected} actual={metadata.profile}"
-    )
-stable = importlib.util.find_spec("vllm._C_stable_libtorch")
-if expected == "full":
-    if stable is None:
-        raise SystemExit("full vLLM profile lacks _C_stable_libtorch")
-elif expected == "rwkv":
-    if stable is not None:
-        raise SystemExit("RWKV-only vLLM profile unexpectedly contains generic stable ops")
-else:
-    raise SystemExit(f"unsupported vLLM build profile: {expected}")
+assert metadata.profile == "rwkv", metadata
+assert "_C_stable_libtorch" not in metadata.configured_targets, metadata
 PY
 }
 
@@ -412,21 +491,24 @@ check_python_packages() {
   return 1
 }
 
+validate_install_components
 configure_network
 configure_build_dirs
 clean_submodule_venvs
 ensure_uv
 check_compiler_env
-sync_uv_env
-check_native_env
 check_cuda_env
 configure_cuda_arch_list
-clean_vllm_cmake_cache
-install_vllm_package
-install_rwkv_lm_package
-install_rwkv_hf_package
-install_any2rwkv_package
-install_verl_package
+sync_uv_env
+check_native_env
+component_enabled vllm-rwkv && clean_vllm_cmake_cache
+component_enabled vllm-rwkv && install_vllm_package
+component_enabled rwkv-lm && install_rwkv_lm_package
+if component_enabled rwkv-hf; then
+  install_rwkv_hf_package
+  install_any2rwkv_package
+fi
+component_enabled verl-rwkv && install_verl_package
 check_python_packages
 
 clean_submodule_venvs
