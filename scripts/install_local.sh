@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
 VENV="${VENV:-$ROOT/.venv}"
 UV="${UV:-uv}"
-INSTALL_COMPONENTS="${INSTALL_COMPONENTS:-rwkv-hf,rwkv-lm}"
+INSTALL_COMPONENTS="${INSTALL_COMPONENTS:-rwkv-lm,dev}"
 INSTALL_SYSTEM_DEPS="${INSTALL_SYSTEM_DEPS:-0}"
 UPDATE_UV="${UPDATE_UV:-1}"
 UV_UPGRADE="${UV_UPGRADE:-1}"
@@ -224,8 +224,16 @@ sync_uv_env() {
   sync_args+=(--project "$ROOT" --python "$PYTHON_VERSION" --no-default-groups)
   [[ "$UV_UPGRADE" == "1" ]] && sync_args+=(--upgrade)
 
-  profile_has_rwkv && sync_args+=(--group rwkv)
-  profile_has_eval && sync_args+=(--group eval)
+  local component
+  local -a components=()
+  IFS=, read -r -a components <<<"$INSTALL_COMPONENTS"
+  for component in "${components[@]}"; do
+    case "$component" in
+      lighteval) sync_args+=(--group eval) ;;
+      scoreboard-server | scoreboard-client) ;;
+      *) sync_args+=(--group "$component") ;;
+    esac
+  done
 
   run "$UV" "${sync_args[@]}"
 }
@@ -241,14 +249,28 @@ validate_components() {
   ((${#components[@]})) || die "INSTALL_COMPONENTS must not be empty"
   for component in "${components[@]}"; do
     case "$component" in
-      rwkv-hf|rwkv-lm|vllm-rwkv|verl-rwkv|lighteval|scoreboard-server|scoreboard-client) ;;
+      dev | rwkv-lm | vllm-rwkv | verl-rwkv | verl-liger | lighteval | scoreboard-server | scoreboard-client) ;;
+      full) die "INSTALL_COMPONENTS=full is disabled; select explicit dependency groups" ;;
       *) die "unknown INSTALL_COMPONENTS entry: $component" ;;
     esac
   done
+
+  case "${INSTALL_PROFILE:-}" in
+    "" | rwkv) ;;
+    full) die "INSTALL_PROFILE=full is disabled; use INSTALL_COMPONENTS" ;;
+    *) die "INSTALL_PROFILE=${INSTALL_PROFILE} is disabled; use INSTALL_COMPONENTS" ;;
+  esac
+  case "${HELICOPTER_VLLM_BUILD_PROFILE:-}" in
+    "") ;;
+    full) die "HELICOPTER_VLLM_BUILD_PROFILE=full is disabled; use VLLM_BUILD_PROFILE=rwkv" ;;
+    *) die "HELICOPTER_VLLM_BUILD_PROFILE is unsupported; use VLLM_BUILD_PROFILE=rwkv" ;;
+  esac
+  [[ "$VLLM_BUILD_PROFILE" == "rwkv" ]] ||
+    die "VLLM_BUILD_PROFILE=$VLLM_BUILD_PROFILE is disabled; only rwkv is supported"
 }
 
-profile_has_rwkv() {
-  has_component rwkv-hf || has_component rwkv-lm || has_component vllm-rwkv || has_component verl-rwkv
+native_component_enabled() {
+  has_component rwkv-lm || has_component vllm-rwkv || has_component verl-rwkv
 }
 
 profile_has_eval() {
@@ -333,15 +355,12 @@ PY
 }
 
 vllm_native_ready() {
-  VLLM_BUILD_PROFILE="$VLLM_BUILD_PROFILE" "$VENV/bin/python" - <<'PY' >/dev/null
+  "$VENV/bin/python" - <<'PY' >/dev/null
 import importlib
-import os
 
 import vllm
 
 required = ["vllm._rapid_sampling", "vllm.rwkv7_ops"]
-if os.environ["VLLM_BUILD_PROFILE"] == "full":
-    required.append("vllm._C_stable_libtorch")
 for module in required:
     importlib.import_module(module)
 PY
@@ -432,12 +451,13 @@ check_python_packages() {
   return 1
 }
 
+validate_components
 configure_network
 configure_build_dirs
+native_component_enabled || CLEAN_SUBMODULE_VENVS=0
 clean_submodule_venvs
 ensure_uv
-validate_components
-profile_has_rwkv && check_compiler_env
+native_component_enabled && check_compiler_env
 sync_uv_env
 sync_lighteval_dev_dependencies
 sync_scoreboard_server_env
