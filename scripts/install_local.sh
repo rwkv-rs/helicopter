@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
 VENV="${VENV:-$ROOT/.venv}"
 UV="${UV:-uv}"
-INSTALL_PROFILE="${INSTALL_PROFILE:-rwkv}"
+INSTALL_COMPONENTS="${INSTALL_COMPONENTS:-rwkv-lm,dev}"
 INSTALL_SYSTEM_DEPS="${INSTALL_SYSTEM_DEPS:-0}"
 UPDATE_UV="${UPDATE_UV:-1}"
 UV_UPGRADE="${UV_UPGRADE:-1}"
@@ -14,7 +14,7 @@ UV_SYNC_INEXACT="${UV_SYNC_INEXACT:-1}"
 CLEAN_SUBMODULE_VENVS="${CLEAN_SUBMODULE_VENVS:-1}"
 CLEAN_VLLM_CMAKE_CACHE="${CLEAN_VLLM_CMAKE_CACHE:-1}"
 VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE:-cuda}"
-VLLM_BUILD_PROFILE="${VLLM_BUILD_PROFILE:-$INSTALL_PROFILE}"
+VLLM_BUILD_PROFILE="${VLLM_BUILD_PROFILE:-rwkv}"
 VLLM_VERSION_OVERRIDE="${VLLM_VERSION_OVERRIDE:-}"
 VLLM_REBUILD="${VLLM_REBUILD:-auto}"
 VERL_REINSTALL="${VERL_REINSTALL:-auto}"
@@ -55,6 +55,52 @@ die() {
   exit 1
 }
 
+component_enabled() {
+  local expected="$1" component
+  local -a components=()
+  IFS=, read -r -a components <<<"$INSTALL_COMPONENTS"
+  for component in "${components[@]}"; do
+    [[ "$component" == "$expected" ]] && return 0
+  done
+  return 1
+}
+
+validate_install_components() {
+  local component
+  local -a components=()
+  IFS=, read -r -a components <<<"$INSTALL_COMPONENTS"
+  ((${#components[@]} > 0)) || die "INSTALL_COMPONENTS must select at least one dependency group"
+  for component in "${components[@]}"; do
+    case "$component" in
+      dev | vllm-rwkv | verl-rwkv | rwkv-lm | verl-liger) ;;
+      full)
+        die "INSTALL_COMPONENTS=full is disabled; select explicit dependency groups"
+        ;;
+      *)
+        die "unknown INSTALL_COMPONENTS entry '$component'; use a comma-separated subset of dev,vllm-rwkv,verl-rwkv,rwkv-lm,verl-liger"
+        ;;
+    esac
+  done
+}
+
+native_component_enabled() {
+  component_enabled vllm-rwkv || component_enabled verl-rwkv || component_enabled rwkv-lm
+}
+
+case "${INSTALL_PROFILE:-}" in
+  "" | rwkv) ;;
+  full) die "INSTALL_PROFILE=full is disabled; use INSTALL_COMPONENTS" ;;
+  *) die "INSTALL_PROFILE=${INSTALL_PROFILE} is disabled; use INSTALL_COMPONENTS" ;;
+esac
+case "${HELICOPTER_VLLM_BUILD_PROFILE:-}" in
+  "") ;;
+  full) die "HELICOPTER_VLLM_BUILD_PROFILE=full is disabled; use VLLM_BUILD_PROFILE=rwkv" ;;
+  *) die "HELICOPTER_VLLM_BUILD_PROFILE is unsupported; use VLLM_BUILD_PROFILE=rwkv" ;;
+esac
+[[ "$VLLM_BUILD_PROFILE" == "rwkv" ]] ||
+  die "VLLM_BUILD_PROFILE=$VLLM_BUILD_PROFILE is disabled; only rwkv is supported"
+validate_install_components
+
 warn() {
   echo "warning: $*" >&2
 }
@@ -88,6 +134,7 @@ configure_build_dirs() {
 }
 
 clean_submodule_venvs() {
+  native_component_enabled || return 0
   [[ "$CLEAN_SUBMODULE_VENVS" == "1" ]] || return 0
 
   local env_dir
@@ -134,6 +181,7 @@ install_system_deps() {
 }
 
 check_compiler_env() {
+  native_component_enabled || return 0
   local missing=()
   have cc || missing+=("cc")
   have c++ || missing+=("c++")
@@ -149,6 +197,7 @@ check_compiler_env() {
 }
 
 check_native_env() {
+  native_component_enabled || return 0
   local missing=()
   have cmake || missing+=("cmake")
   have ninja || missing+=("ninja")
@@ -171,6 +220,7 @@ check_native_env() {
 }
 
 check_cuda_env() {
+  native_component_enabled || return 0
   [[ "$VLLM_TARGET_DEVICE" == "cuda" ]] || return 0
 
   if ! have nvcc && [[ -n "${CUDA_HOME:-}" && -x "$CUDA_HOME/bin/nvcc" ]]; then
@@ -188,6 +238,7 @@ check_cuda_env() {
 }
 
 configure_cuda_arch_list() {
+  native_component_enabled || return 0
   [[ "$VLLM_TARGET_DEVICE" == "cuda" ]] || return 0
   [[ -z "${TORCH_CUDA_ARCH_LIST:-}" ]] || return 0
   [[ -x "$VENV/bin/python" ]] || return 0
@@ -220,14 +271,15 @@ sync_uv_env() {
   local sync_args=(sync)
   [[ -n "$UV_INDEX_URL" ]] && sync_args+=(--index-url "$UV_INDEX_URL")
   [[ "$UV_SYNC_INEXACT" == "1" ]] && sync_args+=(--inexact)
-  sync_args+=(--project "$ROOT" --python "$PYTHON_VERSION" --no-default-groups --group rwkv)
+  sync_args+=(--project "$ROOT" --python "$PYTHON_VERSION" --no-default-groups)
   [[ "$UV_UPGRADE" == "1" ]] && sync_args+=(--upgrade)
 
-  case "$INSTALL_PROFILE" in
-    rwkv) ;;
-    full) sync_args+=(--group full) ;;
-    *) die "unknown INSTALL_PROFILE=$INSTALL_PROFILE; use rwkv or full" ;;
-  esac
+  local component
+  local -a components=()
+  IFS=, read -r -a components <<<"$INSTALL_COMPONENTS"
+  for component in "${components[@]}"; do
+    sync_args+=(--group "$component")
+  done
 
   run "$UV" "${sync_args[@]}"
 }
@@ -364,10 +416,10 @@ sync_uv_env
 check_native_env
 check_cuda_env
 configure_cuda_arch_list
-clean_vllm_cmake_cache
-install_vllm_package
-install_rwkv_lm_package
-install_verl_package
+component_enabled vllm-rwkv && clean_vllm_cmake_cache
+component_enabled vllm-rwkv && install_vllm_package
+component_enabled rwkv-lm && install_rwkv_lm_package
+component_enabled verl-rwkv && install_verl_package
 check_python_packages
 
 clean_submodule_venvs

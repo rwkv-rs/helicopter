@@ -12,8 +12,8 @@ The current focus is RWKV7:
 - `scripts/install_remote.sh`: prepare the BBT DevPod GPU workspace, sync this
   repository, and run the local installer remotely.
 - `scripts/install_local.sh`: create/update the project `.venv`, install the
-  declared RWKV dependency group, and install local editable `vllm`, `rwkv-lm`,
-  and `verl` packages.
+  selected capability dependency groups, and install the corresponding local
+  editable `vllm`, `rwkv-lm`, and `verl` packages.
 
 ## Repository layout
 
@@ -72,7 +72,7 @@ Important config sections:
 
 ## Prepare the environment
 
-Remote preparation is the expected path for full RWKV vLLM/verl work:
+Remote preparation is the expected path for RWKV vLLM/verl work:
 
 ```bash
 scripts/install_remote.sh
@@ -95,10 +95,16 @@ scripts/install_local.sh
 Useful install overrides:
 
 ```bash
-VLLM_REBUILD=1 scripts/install_local.sh
-VERL_REINSTALL=1 scripts/install_local.sh
-INSTALL_PROFILE=full scripts/install_local.sh
+INSTALL_COMPONENTS=rwkv-lm,dev scripts/install_local.sh
+INSTALL_COMPONENTS=vllm-rwkv,dev VLLM_REBUILD=1 scripts/install_local.sh
+INSTALL_COMPONENTS=verl-rwkv,rwkv-lm,dev VERL_REINSTALL=1 scripts/install_local.sh
+INSTALL_COMPONENTS=verl-rwkv,verl-liger,dev scripts/install_local.sh
 ```
+
+`pyproject.toml` defines separately selectable `vllm-rwkv`, `verl-rwkv`, and
+`rwkv-lm` runtime groups. `dev` contains `pre-commit` and test tooling;
+`verl-liger` is an explicit optional accelerator. `full` is not a dependency
+group and is rejected before synchronization or native builds.
 
 Use `DRY_RUN=1` to print installer actions without executing them:
 
