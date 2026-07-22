@@ -12,24 +12,8 @@ dependencies = []
 helicopter = "helicopter_cli.__main__:main"
 
 [dependency-groups]
-common = [
-  "pytest",
-  "pytest-asyncio==1.4.0",
-  "ruff>=0.12.0",
-  "socksio>=1.0.0",
-  "torch==2.11.0",
-]
-
-rwkv-lm = [
-  { include-group = "common" },
-  "deepspeed",
-  "pytorch-lightning==1.9.5",
-]
-
-vllm = [
-  { include-group = "common" },
+vllm-rwkv = [
   "aiohttp>=3.13.3",
-  "anthropic>=0.71.0",
   "blake3",
   "cachetools",
   "cbor2",
@@ -37,17 +21,16 @@ vllm = [
   "cmake>=3.26.1",
   "fastapi[standard]>=0.133.0,<0.137.0",
   "filelock>=3.16.1",
-  "jinja2",
+  "jinja2>=3.1.6",
   "msgspec",
-  "model-hosting-container-standards>=0.1.14,<1.0.0",
   "ninja",
-  "numpy>=2.0.0",
+  "numpy",
   "openai>=2.0.0",
   "openai-harmony>=0.0.3",
   "packaging>=24.2",
   "partial-json-parser",
   "pillow",
-  "prometheus-client>=0.18.0",
+  "prometheus_client>=0.18.0",
   "prometheus-fastapi-instrumentator>=8.0.0",
   "protobuf>=5.29.6,!=6.30.*,!=6.31.*,!=6.32.*,!=6.33.0.*,!=6.33.1.*,!=6.33.2.*,!=6.33.3.*,!=6.33.4.*",
   "pybase64",
@@ -65,16 +48,15 @@ vllm = [
   "setuptools-scm>=8.0",
   "starlette>=1.0.1",
   "tokenizers>=0.21.1",
-  "tblib==3.1.0",
+  "torch==2.11.0",
   "tqdm",
-  "transformers>=5.5.3,!=5.6.0",
-  "typing-extensions>=4.10",
+  "transformers>=5.5.3",
+  "typing_extensions>=4.10",
   "watchfiles",
   "wheel",
 ]
 
-verl = [
-  { include-group = "rwkv-lm" },
+verl-rwkv = [
   "accelerate",
   "codetiming",
   "datasets",
@@ -83,9 +65,9 @@ verl = [
   "hydra-core",
   "latex2sympy2-extended",
   "math-verify",
-  "nvtx",
-  "nvidia-ml-py>=12.560.30",
   "numpy>=2.0.0",
+  "nvidia-ml-py>=12.560.30",
+  "nvtx==0.2.15",
   "packaging>=20.0",
   "pandas",
   "peft",
@@ -95,21 +77,36 @@ verl = [
   "ray[default]>=2.41.0",
   "tensorboard",
   "tensordict>=0.8.0,<=0.10.0,!=0.9.0",
+  "torch==2.11.0",
   "torchdata",
   "transferqueue==0.1.8",
-  "transformers!=5.6.0",
+  "transformers>=5.5.3,!=5.6.0",
   "uvicorn",
   "wandb",
   "zstandard",
 ]
 
-full = [
-  "liger-kernel",
+rwkv-lm = [
+  "deepspeed",
+  "numpy>=2.0.0",
+  "pytorch-lightning==1.9.5",
+  "torch==2.11.0",
+]
+
+dev = [
   "pre-commit",
+  "pytest",
+  "pytest-asyncio",
+  "ruff>=0.12.0",
+]
+
+verl-liger = [
+  "liger-kernel",
 ]
 
 [tool.uv]
 package = true
+default-groups = []
 
 [tool.setuptools.packages.find]
 where = ["src/cli"]

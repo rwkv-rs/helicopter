@@ -46,7 +46,7 @@ REMOTE_ROOT="${REMOTE_ROOT:-/home/caizus/Projects/MachineLearning/helicopter}"
 REMOTE_VENV="${REMOTE_VENV:-$REMOTE_ROOT/.venv}"
 REMOTE_CUDA_HOME="${REMOTE_CUDA_HOME:-/usr/local/cuda}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
-INSTALL_COMPONENTS="${INSTALL_COMPONENTS:-rwkv-lm vllm verl}"
+INSTALL_COMPONENTS="${INSTALL_COMPONENTS:-rwkv-lm,dev}"
 UPDATE_UV="${UPDATE_UV:-0}"
 UV_UPGRADE="${UV_UPGRADE:-0}"
 RUN_PIP_CHECK="${RUN_PIP_CHECK:-1}"
@@ -131,10 +131,39 @@ have() {
 component_enabled() {
   local requested="$1"
   local component
-  for component in ${INSTALL_COMPONENTS//,/ }; do
+  local -a components=()
+  IFS=, read -r -a components <<<"$INSTALL_COMPONENTS"
+  for component in "${components[@]}"; do
     [[ "$component" == "$requested" ]] && return 0
   done
   return 1
+}
+
+validate_install_config() {
+  local component
+  local -a components=()
+  IFS=, read -r -a components <<<"$INSTALL_COMPONENTS"
+  ((${#components[@]} > 0)) || die "INSTALL_COMPONENTS must select at least one dependency group"
+  for component in "${components[@]}"; do
+    case "$component" in
+      dev | vllm-rwkv | verl-rwkv | rwkv-lm | verl-liger) ;;
+      full) die "INSTALL_COMPONENTS=full is disabled; select explicit dependency groups" ;;
+      *) die "unknown INSTALL_COMPONENTS entry '$component'; use a comma-separated subset of dev,vllm-rwkv,verl-rwkv,rwkv-lm,verl-liger" ;;
+    esac
+  done
+
+  case "${INSTALL_PROFILE:-}" in
+    "" | rwkv) ;;
+    full) die "INSTALL_PROFILE=full is disabled; use INSTALL_COMPONENTS" ;;
+    *) die "INSTALL_PROFILE=${INSTALL_PROFILE} is disabled; use INSTALL_COMPONENTS" ;;
+  esac
+  case "${HELICOPTER_VLLM_BUILD_PROFILE:-}" in
+    "") ;;
+    full) die "HELICOPTER_VLLM_BUILD_PROFILE=full is disabled; use VLLM_BUILD_PROFILE=rwkv" ;;
+    *) die "HELICOPTER_VLLM_BUILD_PROFILE is unsupported; use VLLM_BUILD_PROFILE=rwkv" ;;
+  esac
+  [[ "$VLLM_BUILD_PROFILE" == "rwkv" ]] ||
+    die "VLLM_BUILD_PROFILE=$VLLM_BUILD_PROFILE is disabled; only rwkv is supported"
 }
 
 require_local_tools() {
@@ -150,12 +179,12 @@ command -v uv || command -v curl
 command -v python3'
 
   if [[ "$INSTALL_REMOTE" == "1" ]] &&
-     { component_enabled vllm || component_enabled rwkv-lm; }; then
+     { component_enabled vllm-rwkv || component_enabled rwkv-lm; }; then
     script="$script
 command -v cc
 command -v c++"
   fi
-  if [[ "$INSTALL_REMOTE" == "1" ]] && component_enabled vllm; then
+  if [[ "$INSTALL_REMOTE" == "1" ]] && component_enabled vllm-rwkv; then
     script="$script
 nvidia-smi -L | wc -l
 test -x $(printf '%q' "$REMOTE_CUDA_HOME/bin/nvcc")"
@@ -287,6 +316,7 @@ install_remote_env() {
     "cd $quoted_root && env$(remote_env_args) bash scripts/install_local.sh"
 }
 
+validate_install_config
 require_local_tools
 verify_remote_tools
 sync_remote_repo

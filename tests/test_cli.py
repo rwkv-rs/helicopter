@@ -154,12 +154,17 @@ class ConfigResolutionTests(unittest.TestCase):
         manifest = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         dependencies = {
             dependency
-            for dependency in manifest["dependency-groups"]["verl"]
+            for dependency in manifest["dependency-groups"]["verl-rwkv"]
             if isinstance(dependency, str)
         }
 
         self.assertTrue(
-            {"math-verify", "latex2sympy2-extended", "nvtx"}.issubset(dependencies)
+            {
+                "math-verify",
+                "latex2sympy2-extended",
+                "nvtx==0.2.15",
+                "nvidia-ml-py>=12.560.30",
+            }.issubset(dependencies)
         )
 
     def test_default_config_uses_newest_local_toml_when_available(self) -> None:

@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
 VENV="${VENV:-$ROOT/.venv}"
 UV="${UV:-uv}"
-INSTALL_COMPONENTS="${INSTALL_COMPONENTS:-rwkv-lm vllm verl}"
+INSTALL_COMPONENTS="${INSTALL_COMPONENTS:-rwkv-lm,dev}"
 INSTALL_SYSTEM_DEPS="${INSTALL_SYSTEM_DEPS:-0}"
 UPDATE_UV="${UPDATE_UV:-1}"
 UV_UPGRADE="${UV_UPGRADE:-1}"
@@ -61,19 +61,32 @@ warn() {
 }
 
 validate_install_config() {
-  local component found=0
-  for component in ${INSTALL_COMPONENTS//,/ }; do
-    found=1
+  local component
+  local -a components=()
+  IFS=, read -r -a components <<<"$INSTALL_COMPONENTS"
+  ((${#components[@]} > 0)) || die "INSTALL_COMPONENTS must select at least one dependency group"
+  for component in "${components[@]}"; do
     case "$component" in
-      rwkv-lm|vllm|verl) ;;
-      *) die "unknown install component: $component; use rwkv-lm, vllm, or verl" ;;
+      dev | vllm-rwkv | verl-rwkv | rwkv-lm | verl-liger) ;;
+      full) die "INSTALL_COMPONENTS=full is disabled; select explicit dependency groups" ;;
+      *) die "unknown INSTALL_COMPONENTS entry '$component'; use a comma-separated subset of dev,vllm-rwkv,verl-rwkv,rwkv-lm,verl-liger" ;;
     esac
   done
-  [[ "$found" == "1" ]] || die "INSTALL_COMPONENTS must select at least one component"
 
-  if component_enabled vllm; then
-    [[ "$VLLM_BUILD_PROFILE" == "rwkv" ]] ||
-      die "vllm-rwkv must use VLLM_BUILD_PROFILE=rwkv; found $VLLM_BUILD_PROFILE"
+  case "${INSTALL_PROFILE:-}" in
+    "" | rwkv) ;;
+    full) die "INSTALL_PROFILE=full is disabled; use INSTALL_COMPONENTS" ;;
+    *) die "INSTALL_PROFILE=${INSTALL_PROFILE} is disabled; use INSTALL_COMPONENTS" ;;
+  esac
+  case "${HELICOPTER_VLLM_BUILD_PROFILE:-}" in
+    "") ;;
+    full) die "HELICOPTER_VLLM_BUILD_PROFILE=full is disabled; use VLLM_BUILD_PROFILE=rwkv" ;;
+    *) die "HELICOPTER_VLLM_BUILD_PROFILE is unsupported; use VLLM_BUILD_PROFILE=rwkv" ;;
+  esac
+
+  [[ "$VLLM_BUILD_PROFILE" == "rwkv" ]] ||
+    die "VLLM_BUILD_PROFILE=$VLLM_BUILD_PROFILE is disabled; only rwkv is supported"
+  if component_enabled vllm-rwkv; then
     [[ "$VLLM_TARGET_DEVICE" == "cuda" ]] ||
       die "VLLM_BUILD_PROFILE=rwkv requires VLLM_TARGET_DEVICE=cuda; found $VLLM_TARGET_DEVICE"
   fi
@@ -82,7 +95,9 @@ validate_install_config() {
 component_enabled() {
   local requested="$1"
   local component
-  for component in ${INSTALL_COMPONENTS//,/ }; do
+  local -a components=()
+  IFS=, read -r -a components <<<"$INSTALL_COMPONENTS"
+  for component in "${components[@]}"; do
     [[ "$component" == "$requested" ]] && return 0
   done
   return 1
@@ -132,11 +147,11 @@ clean_submodule_venvs() {
   [[ "$CLEAN_SUBMODULE_VENVS" == "1" ]] || return 0
 
   local component env_dir
-  for component in vllm verl rwkv-lm; do
+  for component in vllm-rwkv verl-rwkv rwkv-lm; do
     component_enabled "$component" || continue
     case "$component" in
-      vllm) env_dir="$VLLM/.venv" ;;
-      verl) env_dir="$VERL/.venv" ;;
+      vllm-rwkv) env_dir="$VLLM/.venv" ;;
+      verl-rwkv) env_dir="$VERL/.venv" ;;
       rwkv-lm) env_dir="$RWKV_LM/.venv" ;;
     esac
     [[ -e "$env_dir" ]] || continue
@@ -265,10 +280,12 @@ sync_uv_env() {
   local sync_args=(sync)
   [[ -n "$UV_INDEX_URL" ]] && sync_args+=(--index-url "$UV_INDEX_URL")
   [[ "$UV_SYNC_INEXACT" == "1" ]] && sync_args+=(--inexact)
-  sync_args+=(--project "$ROOT" --python "$PYTHON_VERSION" --no-default-groups --group common)
+  sync_args+=(--project "$ROOT" --python "$PYTHON_VERSION" --no-default-groups)
   local component
-  for component in rwkv-lm vllm verl; do
-    component_enabled "$component" && sync_args+=(--group "$component")
+  local -a components=()
+  IFS=, read -r -a components <<<"$INSTALL_COMPONENTS"
+  for component in "${components[@]}"; do
+    sync_args+=(--group "$component")
   done
   [[ "$UV_UPGRADE" == "1" ]] && sync_args+=(--upgrade)
 
@@ -385,10 +402,10 @@ install_verl_package() {
 prebuild_rwkv_native() {
   [[ "$PREBUILD_RWKV_NATIVE" != "0" ]] || return 0
   component_enabled rwkv-lm || return 0
-  if ! component_enabled verl; then
+  if ! component_enabled verl-rwkv; then
     [[ "$PREBUILD_RWKV_NATIVE" == "verify" ]] &&
-      die "PREBUILD_RWKV_NATIVE=verify requires the verl component"
-    echo "RWKV native prebuild skipped because the verl component is not selected"
+      die "PREBUILD_RWKV_NATIVE=verify requires the verl-rwkv component"
+    echo "RWKV native prebuild skipped because the verl-rwkv component is not selected"
     return 0
   fi
   [[ -n "${TORCH_EXTENSIONS_DIR:-}" ]] ||
@@ -501,11 +518,11 @@ validate_install_config
 remove_invalid_venv
 clean_submodule_venvs
 ensure_uv
-if component_enabled vllm || component_enabled rwkv-lm; then
+if component_enabled vllm-rwkv || component_enabled rwkv-lm; then
   check_compiler_env
 fi
 sync_uv_env
-if component_enabled vllm; then
+if component_enabled vllm-rwkv; then
   check_native_env
   check_cuda_env
   configure_cuda_arch_list
@@ -513,7 +530,7 @@ if component_enabled vllm; then
   install_vllm_package
 fi
 component_enabled rwkv-lm && install_rwkv_lm_package
-component_enabled verl && install_verl_package
+component_enabled verl-rwkv && install_verl_package
 prebuild_rwkv_native
 check_python_packages
 
