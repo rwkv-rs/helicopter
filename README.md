@@ -42,11 +42,13 @@ browser/CLI/evaluator -> scoreboard HTTP API -> backend service/repository -> da
 环境由控制仓库的 `helicopter-dev` 管理：
 
 ```bash
-./bin/helicopter-dev env sync feat-lighteval --target local --components lighteval
+./bin/helicopter-dev env sync fix-lighteval-unified-prompt --target local --components lighteval,dev
 ```
 
-评测依赖只由 eval extra 安装。基础 `helicopter --help` 不加载 LightEval 或 OpenAI
-client；vLLM native 安装默认且显式使用 `VLLM_BUILD_PROFILE=rwkv`，不回退到 `full`。
+`lighteval` 显式映射到根项目的 `eval` 依赖组；`dev` 单独提供 `pre-commit` 和测试工具。
+训练或推理环境按需选择 `rwkv-lm`、`verl-rwkv`、`verl-liger`、`vllm-rwkv`，不提供
+`full` 组或 profile。基础 `helicopter --help` 不加载 LightEval 或 OpenAI client；vLLM
+native 安装只允许 `VLLM_BUILD_PROFILE=rwkv`。
 
 ## 运行评测
 

@@ -56,12 +56,14 @@ REMOTE_SSH_HOST="${REMOTE_SSH_HOST:-$REMOTE_WORKSPACE_ID.devpod}"
 REMOTE_ROOT="${REMOTE_ROOT:-/workspace/Projects/MachineLearning/helicopter}"
 REMOTE_VENV="${REMOTE_VENV:-$REMOTE_ROOT/.venv}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
+INSTALL_COMPONENTS="${INSTALL_COMPONENTS:-rwkv-lm,dev}"
 INSTALL_PROFILE="${INSTALL_PROFILE:-rwkv}"
 UPDATE_UV="${UPDATE_UV:-0}"
 UV_UPGRADE="${UV_UPGRADE:-0}"
 RUN_PIP_CHECK="${RUN_PIP_CHECK:-1}"
 UV_SYNC_INEXACT="${UV_SYNC_INEXACT:-1}"
 VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE:-cuda}"
+VLLM_BUILD_PROFILE="${VLLM_BUILD_PROFILE:-rwkv}"
 VLLM_VERSION_OVERRIDE="${VLLM_VERSION_OVERRIDE:-0.11.2.dev278+gdbc3d9991}"
 VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED:-0}"
 VLLM_REBUILD="${VLLM_REBUILD:-auto}"
@@ -94,6 +96,32 @@ run() {
 die() {
   echo "error: $*" >&2
   exit 1
+}
+
+validate_install_config() {
+  local component
+  local -a components=()
+  IFS=, read -r -a components <<<"$INSTALL_COMPONENTS"
+  ((${#components[@]} > 0)) || die "INSTALL_COMPONENTS must select at least one dependency group"
+  for component in "${components[@]}"; do
+    case "$component" in
+      dev | rwkv-lm | vllm-rwkv | verl-rwkv | verl-liger | lighteval | scoreboard-server | scoreboard-client) ;;
+      full) die "INSTALL_COMPONENTS=full is disabled; select explicit dependency groups" ;;
+      *) die "unknown INSTALL_COMPONENTS entry: $component" ;;
+    esac
+  done
+  case "$INSTALL_PROFILE" in
+    "" | rwkv) ;;
+    full) die "INSTALL_PROFILE=full is disabled; use INSTALL_COMPONENTS" ;;
+    *) die "INSTALL_PROFILE=$INSTALL_PROFILE is disabled; use INSTALL_COMPONENTS" ;;
+  esac
+  case "${HELICOPTER_VLLM_BUILD_PROFILE:-}" in
+    "") ;;
+    full) die "HELICOPTER_VLLM_BUILD_PROFILE=full is disabled; use VLLM_BUILD_PROFILE=rwkv" ;;
+    *) die "HELICOPTER_VLLM_BUILD_PROFILE is unsupported; use VLLM_BUILD_PROFILE=rwkv" ;;
+  esac
+  [[ "$VLLM_BUILD_PROFILE" == "rwkv" ]] ||
+    die "VLLM_BUILD_PROFILE=$VLLM_BUILD_PROFILE is disabled; only rwkv is supported"
 }
 
 have() {
@@ -264,7 +292,9 @@ remote_env_args() {
   local args=(
     "PYTHON_VERSION=$PYTHON_VERSION"
     "VENV=$REMOTE_VENV"
+    "INSTALL_COMPONENTS=$INSTALL_COMPONENTS"
     "INSTALL_PROFILE=$INSTALL_PROFILE"
+    "VLLM_BUILD_PROFILE=$VLLM_BUILD_PROFILE"
     "INSTALL_SYSTEM_DEPS=0"
     "UPDATE_UV=$UPDATE_UV"
     "UV_UPGRADE=$UV_UPGRADE"
@@ -305,6 +335,7 @@ install_remote_env() {
     "cd $quoted_root && env$(remote_env_args) bash scripts/install_local.sh"
 }
 
+validate_install_config
 require_local_tools
 ensure_pod
 ensure_runtime_image
