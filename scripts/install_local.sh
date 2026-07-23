@@ -20,19 +20,18 @@ VLLM_REBUILD="${VLLM_REBUILD:-auto}"
 VERL_REINSTALL="${VERL_REINSTALL:-auto}"
 CMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-RelWithDebInfo}"
 BUILD_TMPDIR="${BUILD_TMPDIR:-}"
-PREBUILD_RWKV_NATIVE="${PREBUILD_RWKV_NATIVE:-0}"
-INSTALL_VERIFY_ONLY="${INSTALL_VERIFY_ONLY:-0}"
 UV_INDEX_URL="${UV_INDEX_URL:-${PYPI_INDEX_URL:-}}"
 HF_ENDPOINT="${HF_ENDPOINT:-}"
 CARGO_REGISTRY_MIRROR="${CARGO_REGISTRY_MIRROR:-}"
 CARGO_REGISTRY_MIRROR_NAME="${CARGO_REGISTRY_MIRROR_NAME:-rsproxy-sparse}"
+
+export VLLM_BUILD_PROFILE
 
 VLLM="$ROOT/src/infer/vllm-rwkv"
 RWKV_LM="$ROOT/src/train/rwkv-lm"
 VERL="$ROOT/src/train/verl-rwkv"
 STAMP_DIR="$VENV/.helicopter-stamps"
 VLLM_STAMP="$STAMP_DIR/vllm-native.sha256"
-RWKV_NATIVE_STAMP="$STAMP_DIR/rwkv-native.sha256"
 
 export PATH="$VENV/bin:$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 
@@ -56,11 +55,17 @@ die() {
   exit 1
 }
 
-warn() {
-  echo "warning: $*" >&2
+component_enabled() {
+  local expected="$1" component
+  local -a components=()
+  IFS=, read -r -a components <<<"$INSTALL_COMPONENTS"
+  for component in "${components[@]}"; do
+    [[ "$component" == "$expected" ]] && return 0
+  done
+  return 1
 }
 
-validate_install_config() {
+validate_install_components() {
   local component
   local -a components=()
   IFS=, read -r -a components <<<"$INSTALL_COMPONENTS"
@@ -68,39 +73,36 @@ validate_install_config() {
   for component in "${components[@]}"; do
     case "$component" in
       dev | vllm-rwkv | verl-rwkv | rwkv-lm | verl-liger) ;;
-      full) die "INSTALL_COMPONENTS=full is disabled; select explicit dependency groups" ;;
-      *) die "unknown INSTALL_COMPONENTS entry '$component'; use a comma-separated subset of dev,vllm-rwkv,verl-rwkv,rwkv-lm,verl-liger" ;;
+      full)
+        die "INSTALL_COMPONENTS=full is disabled; select explicit dependency groups"
+        ;;
+      *)
+        die "unknown INSTALL_COMPONENTS entry '$component'; use a comma-separated subset of dev,vllm-rwkv,verl-rwkv,rwkv-lm,verl-liger"
+        ;;
     esac
   done
-
-  case "${INSTALL_PROFILE:-}" in
-    "" | rwkv) ;;
-    full) die "INSTALL_PROFILE=full is disabled; use INSTALL_COMPONENTS" ;;
-    *) die "INSTALL_PROFILE=${INSTALL_PROFILE} is disabled; use INSTALL_COMPONENTS" ;;
-  esac
-  case "${HELICOPTER_VLLM_BUILD_PROFILE:-}" in
-    "") ;;
-    full) die "HELICOPTER_VLLM_BUILD_PROFILE=full is disabled; use VLLM_BUILD_PROFILE=rwkv" ;;
-    *) die "HELICOPTER_VLLM_BUILD_PROFILE is unsupported; use VLLM_BUILD_PROFILE=rwkv" ;;
-  esac
-
-  [[ "$VLLM_BUILD_PROFILE" == "rwkv" ]] ||
-    die "VLLM_BUILD_PROFILE=$VLLM_BUILD_PROFILE is disabled; only rwkv is supported"
-  if component_enabled vllm-rwkv; then
-    [[ "$VLLM_TARGET_DEVICE" == "cuda" ]] ||
-      die "VLLM_BUILD_PROFILE=rwkv requires VLLM_TARGET_DEVICE=cuda; found $VLLM_TARGET_DEVICE"
-  fi
 }
 
-component_enabled() {
-  local requested="$1"
-  local component
-  local -a components=()
-  IFS=, read -r -a components <<<"$INSTALL_COMPONENTS"
-  for component in "${components[@]}"; do
-    [[ "$component" == "$requested" ]] && return 0
-  done
-  return 1
+native_component_enabled() {
+  component_enabled vllm-rwkv || component_enabled verl-rwkv || component_enabled rwkv-lm
+}
+
+case "${INSTALL_PROFILE:-}" in
+  "" | rwkv) ;;
+  full) die "INSTALL_PROFILE=full is disabled; use INSTALL_COMPONENTS" ;;
+  *) die "INSTALL_PROFILE=${INSTALL_PROFILE} is disabled; use INSTALL_COMPONENTS" ;;
+esac
+case "${HELICOPTER_VLLM_BUILD_PROFILE:-}" in
+  "") ;;
+  full) die "HELICOPTER_VLLM_BUILD_PROFILE=full is disabled; use VLLM_BUILD_PROFILE=rwkv" ;;
+  *) die "HELICOPTER_VLLM_BUILD_PROFILE is unsupported; use VLLM_BUILD_PROFILE=rwkv" ;;
+esac
+[[ "$VLLM_BUILD_PROFILE" == "rwkv" ]] ||
+  die "VLLM_BUILD_PROFILE=$VLLM_BUILD_PROFILE is disabled; only rwkv is supported"
+validate_install_components
+
+warn() {
+  echo "warning: $*" >&2
 }
 
 version_at_least() {
@@ -129,31 +131,14 @@ configure_build_dirs() {
     mkdir -p "$BUILD_TMPDIR"
     export TMPDIR="$BUILD_TMPDIR"
   fi
-  if [[ -n "${TORCH_EXTENSIONS_DIR:-}" ]]; then
-    mkdir -p "$TORCH_EXTENSIONS_DIR"
-    export TORCH_EXTENSIONS_DIR
-  fi
-}
-
-remove_invalid_venv() {
-  [[ -d "$VENV" && ! -x "$VENV/bin/python" ]] || return 0
-  [[ "$VENV" == "$ROOT"/.venv ]] ||
-    die "refusing to remove invalid venv outside the project root: $VENV"
-  warn "removing invalid project environment without bin/python: $VENV"
-  run rm -rf "$VENV"
 }
 
 clean_submodule_venvs() {
+  native_component_enabled || return 0
   [[ "$CLEAN_SUBMODULE_VENVS" == "1" ]] || return 0
 
-  local component env_dir
-  for component in vllm-rwkv verl-rwkv rwkv-lm; do
-    component_enabled "$component" || continue
-    case "$component" in
-      vllm-rwkv) env_dir="$VLLM/.venv" ;;
-      verl-rwkv) env_dir="$VERL/.venv" ;;
-      rwkv-lm) env_dir="$RWKV_LM/.venv" ;;
-    esac
+  local env_dir
+  for env_dir in "$VLLM/.venv" "$VERL/.venv" "$RWKV_LM/.venv"; do
     [[ -e "$env_dir" ]] || continue
     [[ "$env_dir" == "$ROOT"/src/*/.venv ]] || die "refusing to remove unexpected venv path: $env_dir"
     run rm -rf "$env_dir"
@@ -196,6 +181,7 @@ install_system_deps() {
 }
 
 check_compiler_env() {
+  native_component_enabled || return 0
   local missing=()
   have cc || missing+=("cc")
   have c++ || missing+=("c++")
@@ -211,6 +197,7 @@ check_compiler_env() {
 }
 
 check_native_env() {
+  native_component_enabled || return 0
   local missing=()
   have cmake || missing+=("cmake")
   have ninja || missing+=("ninja")
@@ -233,6 +220,9 @@ check_native_env() {
 }
 
 check_cuda_env() {
+  native_component_enabled || return 0
+  [[ "$VLLM_TARGET_DEVICE" == "cuda" ]] || return 0
+
   if ! have nvcc && [[ -n "${CUDA_HOME:-}" && -x "$CUDA_HOME/bin/nvcc" ]]; then
     export PATH="$CUDA_HOME/bin:$PATH"
   fi
@@ -248,6 +238,7 @@ check_cuda_env() {
 }
 
 configure_cuda_arch_list() {
+  native_component_enabled || return 0
   [[ "$VLLM_TARGET_DEVICE" == "cuda" ]] || return 0
   [[ -z "${TORCH_CUDA_ARCH_LIST:-}" ]] || return 0
   [[ -x "$VENV/bin/python" ]] || return 0
@@ -281,13 +272,14 @@ sync_uv_env() {
   [[ -n "$UV_INDEX_URL" ]] && sync_args+=(--index-url "$UV_INDEX_URL")
   [[ "$UV_SYNC_INEXACT" == "1" ]] && sync_args+=(--inexact)
   sync_args+=(--project "$ROOT" --python "$PYTHON_VERSION" --no-default-groups)
+  [[ "$UV_UPGRADE" == "1" ]] && sync_args+=(--upgrade)
+
   local component
   local -a components=()
   IFS=, read -r -a components <<<"$INSTALL_COMPONENTS"
   for component in "${components[@]}"; do
     sync_args+=(--group "$component")
   done
-  [[ "$UV_UPGRADE" == "1" ]] && sync_args+=(--upgrade)
 
   run "$UV" "${sync_args[@]}"
 }
@@ -295,7 +287,6 @@ sync_uv_env() {
 vllm_native_fingerprint() {
   {
     printf 'VLLM_TARGET_DEVICE=%s\n' "$VLLM_TARGET_DEVICE"
-    printf 'VLLM_BUILD_PROFILE=%s\n' "$VLLM_BUILD_PROFILE"
     printf 'VLLM_VERSION_OVERRIDE=%s\n' "$VLLM_VERSION_OVERRIDE"
     printf 'CMAKE_BUILD_TYPE=%s\n' "$CMAKE_BUILD_TYPE"
     printf 'TORCH_CUDA_ARCH_LIST=%s\n' "${TORCH_CUDA_ARCH_LIST:-}"
@@ -310,9 +301,7 @@ print(f"platform={platform.platform()}")
 print(f"torch={torch.__version__}")
 print(f"torch_cuda={torch.version.cuda}")
 PY
-    find "$VLLM/CMakeLists.txt" "$VLLM/setup.py" \
-      "$VLLM/tools/build_profiles.py" "$VLLM/requirements/rwkv.txt" \
-      "$VLLM/cmake" "$VLLM/csrc" \
+    find "$VLLM/CMakeLists.txt" "$VLLM/setup.py" "$VLLM/cmake" "$VLLM/csrc" \
       -type f -print 2>/dev/null | LC_ALL=C sort | while IFS= read -r path; do
         sha256sum "$path"
       done
@@ -320,28 +309,23 @@ PY
 }
 
 vllm_native_ready() {
-  "$VENV/bin/python" - <<'PY' >/dev/null
-import vllm
-import vllm._rapid_sampling
-import vllm.rwkv7_ops
-from vllm.build_profile import get_build_profile_metadata
+  local -a modules=(vllm._C_stable_libtorch vllm.rwkv7_ops)
+  [[ "$VLLM_BUILD_PROFILE" == "rwkv" ]] &&
+    modules=(vllm._rapid_sampling vllm.rwkv7_ops)
+  "$VENV/bin/python" - "${modules[@]}" <<'PY' >/dev/null
+import importlib
+import sys
 
-metadata = get_build_profile_metadata()
-assert metadata.profile == "rwkv", metadata
-assert set(metadata.configured_targets) == {
-    "_rapid_sampling",
-    "cumem_allocator",
-    "rwkv7_ops",
-}, metadata
-assert "_C_stable_libtorch" not in metadata.configured_targets, metadata
-assert not metadata.external_projects, metadata
+import vllm
+
+for module in sys.argv[1:]:
+    importlib.import_module(module)
 PY
 }
 
 verl_ready() {
   "$VENV/bin/python" - <<'PY' >/dev/null
 import verl
-import nvtx
 PY
 }
 
@@ -363,13 +347,11 @@ install_vllm_package() {
 
   run env \
     VLLM_TARGET_DEVICE="$VLLM_TARGET_DEVICE" \
-    VLLM_BUILD_PROFILE="$VLLM_BUILD_PROFILE" \
     VLLM_VERSION_OVERRIDE="$VLLM_VERSION_OVERRIDE" \
     VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED:-0}" \
     CMAKE_BUILD_TYPE="$CMAKE_BUILD_TYPE" \
     "${pip[@]}" --no-deps --no-build-isolation -e "$VLLM" --torch-backend=auto
 
-  [[ "${DRY_RUN:-0}" == "1" ]] && return 0
   vllm_native_ready
   fingerprint="$(vllm_native_fingerprint)"
   printf '%s\n' "$fingerprint" >"$VLLM_STAMP"
@@ -399,79 +381,6 @@ install_verl_package() {
   run "${pip[@]}" --no-deps -e "$VERL"
 }
 
-prebuild_rwkv_native() {
-  [[ "$PREBUILD_RWKV_NATIVE" != "0" ]] || return 0
-  component_enabled rwkv-lm || return 0
-  if ! component_enabled verl-rwkv; then
-    [[ "$PREBUILD_RWKV_NATIVE" == "verify" ]] &&
-      die "PREBUILD_RWKV_NATIVE=verify requires the verl-rwkv component"
-    echo "RWKV native prebuild skipped because the verl-rwkv component is not selected"
-    return 0
-  fi
-  [[ -n "${TORCH_EXTENSIONS_DIR:-}" ]] ||
-    die "RWKV native prebuild requires a persistent TORCH_EXTENSIONS_DIR"
-  mkdir -p "$STAMP_DIR"
-  local fingerprint
-  fingerprint="$({
-    "$VENV/bin/python" "$ROOT/scripts/prebuild_rwkv_native.py" \
-      --rwkv-lm-path "$RWKV_LM" --ctx-len 10240 --chunk-ctx 2048 --print-manifest
-    printf 'TORCH_CUDA_ARCH_LIST=%s\n' "${TORCH_CUDA_ARCH_LIST:-}"
-    "$VENV/bin/python" - <<'PY'
-import sys
-import torch
-
-print(f"python={sys.version}")
-print(f"torch={torch.__version__}")
-print(f"torch_cuda={torch.version.cuda}")
-PY
-    /usr/local/cuda/bin/nvcc --version
-    c++ --version
-    find "$RWKV_LM/src/model.py" "$RWKV_LM/cuda" "$ROOT/scripts/prebuild_rwkv_native.py" \
-      "$VERL/verl/models/rwkv/native_imports.py" \
-      "$VERL/verl/workers/engine/rwkv_lm/env.py" \
-      "$VERL/verl/workers/engine/rwkv_lm/args.py" \
-      -type f -print 2>/dev/null | LC_ALL=C sort | while IFS= read -r path; do
-        sha256sum "$path"
-      done
-  } | sha256sum | awk '{print $1}')"
-  local extension
-  local -a extensions=(
-    rwkv7_clampw rwkv7_statepassing_clampw rwkv7_cmix_bf16_v5
-    rwkv7_tmix_mix6_bf16_v5 rwkv7_tmix_kk_pre_bf16_v5
-    rwkv7_tmix_lnx_rkvres_xg_bf16_v1 rwkv7_tmix_a_gate_bf16
-    rwkv7_tmix_vres_gate_bf16_v1 rwkv7_l2wrap_ce_bf16_v2
-  )
-  if [[ "$PREBUILD_RWKV_NATIVE" == "verify" ]]; then
-    [[ -f "$RWKV_NATIVE_STAMP" && "$(head -n 1 "$RWKV_NATIVE_STAMP")" == "fingerprint $fingerprint" ]] ||
-      die "RWKV native cache is stale or missing; run helicopter-dev env sync before the GPU workload"
-    for extension in "${extensions[@]}"; do
-      local expected_path="$TORCH_EXTENSIONS_DIR/$extension/$extension.so"
-      local recorded_hash
-      recorded_hash="$(awk -v name="$extension" -v path="$expected_path" \
-        '$1 == "artifact" && $2 == name && $3 == path { print $4 }' "$RWKV_NATIVE_STAMP")"
-      [[ -n "$recorded_hash" && -f "$expected_path" && "$(sha256sum "$expected_path" | awk '{print $1}')" == "$recorded_hash" ]] ||
-        die "RWKV native cache is missing $extension.so; run helicopter-dev env sync before the GPU workload"
-    done
-    echo "RWKV native extension cache verified without compilation: $TORCH_EXTENSIONS_DIR"
-    return 0
-  fi
-  [[ "$PREBUILD_RWKV_NATIVE" == "1" ]] ||
-    die "PREBUILD_RWKV_NATIVE must be 0, 1, or verify; found $PREBUILD_RWKV_NATIVE"
-  run "$VENV/bin/python" "$ROOT/scripts/prebuild_rwkv_native.py" \
-    --rwkv-lm-path "$RWKV_LM" --ctx-len 10240 --chunk-ctx 2048
-  if [[ "${DRY_RUN:-0}" != "1" ]]; then
-    local temporary_stamp="$RWKV_NATIVE_STAMP.tmp"
-    printf 'fingerprint %s\n' "$fingerprint" >"$temporary_stamp"
-    for extension in "${extensions[@]}"; do
-      local artifact_path="$TORCH_EXTENSIONS_DIR/$extension/$extension.so"
-      [[ -f "$artifact_path" ]] || die "RWKV native prebuild did not produce $artifact_path"
-      printf 'artifact %s %s %s\n' "$extension" "$artifact_path" \
-        "$(sha256sum "$artifact_path" | awk '{print $1}')" >>"$temporary_stamp"
-    done
-    mv "$temporary_stamp" "$RWKV_NATIVE_STAMP"
-  fi
-}
-
 check_python_packages() {
   [[ "$RUN_PIP_CHECK" == "1" ]] || return 0
 
@@ -498,40 +407,19 @@ check_python_packages() {
   return 1
 }
 
-if [[ "$INSTALL_VERIFY_ONLY" == "1" ]]; then
-  validate_install_config
-  [[ -x "$VENV/bin/python" ]] || die "verify-only install requires an existing workspace environment"
-  configure_build_dirs
-  check_compiler_env
-  check_cuda_env
-  configure_cuda_arch_list
-  prebuild_rwkv_native
-  check_python_packages
-  echo "Environment verification ready: $VENV"
-  exit 0
-fi
-[[ "$INSTALL_VERIFY_ONLY" == "0" ]] || die "INSTALL_VERIFY_ONLY must be 0 or 1"
-
 configure_network
 configure_build_dirs
-validate_install_config
-remove_invalid_venv
 clean_submodule_venvs
 ensure_uv
-if component_enabled vllm-rwkv || component_enabled rwkv-lm; then
-  check_compiler_env
-fi
+check_compiler_env
 sync_uv_env
-if component_enabled vllm-rwkv; then
-  check_native_env
-  check_cuda_env
-  configure_cuda_arch_list
-  clean_vllm_cmake_cache
-  install_vllm_package
-fi
+check_native_env
+check_cuda_env
+configure_cuda_arch_list
+component_enabled vllm-rwkv && clean_vllm_cmake_cache
+component_enabled vllm-rwkv && install_vllm_package
 component_enabled rwkv-lm && install_rwkv_lm_package
 component_enabled verl-rwkv && install_verl_package
-prebuild_rwkv_native
 check_python_packages
 
 clean_submodule_venvs

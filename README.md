@@ -75,7 +75,7 @@ Important config sections:
 
 ## Prepare the environment
 
-Remote preparation is the expected path for RWKV vLLM/verl work:
+Remote preparation is the expected path for full RWKV vLLM/verl work:
 
 ```bash
 scripts/install_remote.sh
@@ -111,16 +111,9 @@ Useful install overrides:
 ```bash
 VLLM_REBUILD=1 scripts/install_local.sh
 VERL_REINSTALL=1 scripts/install_local.sh
-INSTALL_COMPONENTS=rwkv-lm,dev scripts/install_local.sh
-INSTALL_COMPONENTS=vllm-rwkv,dev scripts/install_local.sh
-INSTALL_COMPONENTS=verl-rwkv,rwkv-lm,dev scripts/install_local.sh
-INSTALL_COMPONENTS=verl-rwkv,verl-liger,dev scripts/install_local.sh
+INSTALL_COMPONENTS=vllm scripts/install_local.sh
+INSTALL_COMPONENTS="rwkv-lm verl" scripts/install_local.sh
 ```
-
-`pyproject.toml` keeps the `vllm-rwkv`, `verl-rwkv`, and `rwkv-lm` runtimes
-separate. `dev` contains pre-commit and test tooling, and `verl-liger` is an
-explicit accelerator. There is no `full` group; installers reject it before
-running uv or native builds.
 
 Both local and remote installation use the RWKV-only vLLM build profile. The
 profile compiles `rwkv7_ops` without the generic stable/MoE extensions or vLLM

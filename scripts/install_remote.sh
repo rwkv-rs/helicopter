@@ -41,10 +41,20 @@ if [[ -f "$ENV_FILE" ]]; then
   load_env_file "$ENV_FILE"
 fi
 
-REMOTE_SSH_HOST="${REMOTE_SSH_HOST:-rwkv-sha-pro6000x8}"
-REMOTE_ROOT="${REMOTE_ROOT:-/home/caizus/Projects/MachineLearning/helicopter}"
+KUBECTL="${KUBECTL:-kubectl}"
+DEVPOD="${DEVPOD:-devpod}"
+DEVPOD_HOME="${DEVPOD_HOME:-$HOME/.devpod}"
+REMOTE_WORKSPACE_ID="${REMOTE_WORKSPACE_ID:-g6}"
+REMOTE_NAMESPACE="${REMOTE_NAMESPACE:-devpod}"
+REMOTE_POD="${REMOTE_POD:-devpod-default-g6-7378f}"
+REMOTE_NODE="${REMOTE_NODE:-g6}"
+REMOTE_IMAGE="${REMOTE_IMAGE:-mirrors.bbt.sspu.edu.cn:8081/sspu/bbt-devpod-ubuntu24-cuda:20260525}"
+DEVPOD_SEED_IMAGE="${DEVPOD_SEED_IMAGE:-nvcr.io/nvidia/cuda:13.2.1-cudnn-devel-ubuntu24.04}"
+DEVPOD_SOURCE="${DEVPOD_SOURCE:-$DEVPOD_HOME/manual-sources/$REMOTE_WORKSPACE_ID}"
+DEVPOD_POD_TEMPLATE="${DEVPOD_POD_TEMPLATE:-$DEVPOD_HOME/manual-sources/bbt-devpod-shared-mount-template.yaml}"
+REMOTE_SSH_HOST="${REMOTE_SSH_HOST:-$REMOTE_WORKSPACE_ID.devpod}"
+REMOTE_ROOT="${REMOTE_ROOT:-/workspace/Projects/MachineLearning/helicopter}"
 REMOTE_VENV="${REMOTE_VENV:-$REMOTE_ROOT/.venv}"
-REMOTE_CUDA_HOME="${REMOTE_CUDA_HOME:-/usr/local/cuda}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
 INSTALL_COMPONENTS="${INSTALL_COMPONENTS:-rwkv-lm,dev}"
 UPDATE_UV="${UPDATE_UV:-0}"
@@ -59,59 +69,17 @@ VLLM_REBUILD="${VLLM_REBUILD:-auto}"
 VERL_REINSTALL="${VERL_REINSTALL:-auto}"
 CMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-RelWithDebInfo}"
 BUILD_TMPDIR="${BUILD_TMPDIR:-$REMOTE_ROOT/.tmp}"
-REMOTE_HTTP_PROXY="${REMOTE_HTTP_PROXY:-}"
+REMOTE_HTTP_PROXY="${REMOTE_HTTP_PROXY:-http://192.168.122.1:10810}"
 REMOTE_HTTPS_PROXY="${REMOTE_HTTPS_PROXY:-$REMOTE_HTTP_PROXY}"
-REMOTE_NO_PROXY="${REMOTE_NO_PROXY:-localhost,127.0.0.1,::1}"
+REMOTE_NO_PROXY="${REMOTE_NO_PROXY:-localhost,127.0.0.1,::1,.svc,.cluster.local,.bbt.sspu.edu.cn,10.0.0.0/8,192.168.0.0/16}"
 PYPI_INDEX_URL="${PYPI_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 UV_INDEX_URL="${UV_INDEX_URL:-$PYPI_INDEX_URL}"
 HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 UV_LINK_MODE="${UV_LINK_MODE:-copy}"
 CARGO_REGISTRY_MIRROR="${CARGO_REGISTRY_MIRROR:-sparse+https://rsproxy.cn/index/}"
+DEVPOD_RECREATE="${DEVPOD_RECREATE:-0}"
 SYNC_REMOTE="${SYNC_REMOTE:-1}"
 INSTALL_REMOTE="${INSTALL_REMOTE:-1}"
-REMOTE_REQUIRED_DIRS="${REMOTE_REQUIRED_DIRS:-/home/caizus/Projects /home/caizus/Weights /home/caizus/Datasets}"
-
-die() {
-  echo "error: $*" >&2
-  exit 1
-}
-
-usage() {
-  cat <<'EOF'
-usage: scripts/install_remote.sh [options]
-
-Prepare the remote SSH host environment. For running remote commands and
-copying results back, use scripts/run_remote.sh.
-
-Options:
-  --no-sync       skip rsync to the remote repository
-  --no-install    skip scripts/install_local.sh on the remote host
-  -h, --help      show this help
-
-Examples:
-  scripts/install_remote.sh
-  SYNC_REMOTE=0 scripts/install_remote.sh
-EOF
-}
-
-while (($#)); do
-  case "$1" in
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    --no-sync)
-      SYNC_REMOTE=0
-      ;;
-    --no-install)
-      INSTALL_REMOTE=0
-      ;;
-    *)
-      die "unknown install_remote.sh option: $1; use scripts/run_remote.sh to run remote commands"
-      ;;
-  esac
-  shift
-done
 
 print_cmd() {
   printf '+'
@@ -124,22 +92,12 @@ run() {
   [[ "${DRY_RUN:-0}" == "1" ]] || "$@"
 }
 
-have() {
-  command -v "$1" >/dev/null 2>&1
+die() {
+  echo "error: $*" >&2
+  exit 1
 }
 
-component_enabled() {
-  local requested="$1"
-  local component
-  local -a components=()
-  IFS=, read -r -a components <<<"$INSTALL_COMPONENTS"
-  for component in "${components[@]}"; do
-    [[ "$component" == "$requested" ]] && return 0
-  done
-  return 1
-}
-
-validate_install_config() {
+validate_install_components() {
   local component
   local -a components=()
   IFS=, read -r -a components <<<"$INSTALL_COMPONENTS"
@@ -147,55 +105,156 @@ validate_install_config() {
   for component in "${components[@]}"; do
     case "$component" in
       dev | vllm-rwkv | verl-rwkv | rwkv-lm | verl-liger) ;;
-      full) die "INSTALL_COMPONENTS=full is disabled; select explicit dependency groups" ;;
-      *) die "unknown INSTALL_COMPONENTS entry '$component'; use a comma-separated subset of dev,vllm-rwkv,verl-rwkv,rwkv-lm,verl-liger" ;;
+      full)
+        die "INSTALL_COMPONENTS=full is disabled; select explicit dependency groups"
+        ;;
+      *)
+        die "unknown INSTALL_COMPONENTS entry '$component'; use a comma-separated subset of dev,vllm-rwkv,verl-rwkv,rwkv-lm,verl-liger"
+        ;;
     esac
   done
+}
 
-  case "${INSTALL_PROFILE:-}" in
-    "" | rwkv) ;;
-    full) die "INSTALL_PROFILE=full is disabled; use INSTALL_COMPONENTS" ;;
-    *) die "INSTALL_PROFILE=${INSTALL_PROFILE} is disabled; use INSTALL_COMPONENTS" ;;
-  esac
-  case "${HELICOPTER_VLLM_BUILD_PROFILE:-}" in
-    "") ;;
-    full) die "HELICOPTER_VLLM_BUILD_PROFILE=full is disabled; use VLLM_BUILD_PROFILE=rwkv" ;;
-    *) die "HELICOPTER_VLLM_BUILD_PROFILE is unsupported; use VLLM_BUILD_PROFILE=rwkv" ;;
-  esac
-  [[ "$VLLM_BUILD_PROFILE" == "rwkv" ]] ||
-    die "VLLM_BUILD_PROFILE=$VLLM_BUILD_PROFILE is disabled; only rwkv is supported"
+case "${INSTALL_PROFILE:-}" in
+  "" | rwkv) ;;
+  full) die "INSTALL_PROFILE=full is disabled; use INSTALL_COMPONENTS" ;;
+  *) die "INSTALL_PROFILE=${INSTALL_PROFILE} is disabled; use INSTALL_COMPONENTS" ;;
+esac
+case "${HELICOPTER_VLLM_BUILD_PROFILE:-}" in
+  "") ;;
+  full) die "HELICOPTER_VLLM_BUILD_PROFILE=full is disabled; use VLLM_BUILD_PROFILE=rwkv" ;;
+  *) die "HELICOPTER_VLLM_BUILD_PROFILE is unsupported; use VLLM_BUILD_PROFILE=rwkv" ;;
+esac
+[[ "$VLLM_BUILD_PROFILE" == "rwkv" ]] ||
+  die "VLLM_BUILD_PROFILE=$VLLM_BUILD_PROFILE is disabled; only rwkv is supported"
+validate_install_components
+
+have() {
+  command -v "$1" >/dev/null 2>&1
 }
 
 require_local_tools() {
+  have "$KUBECTL" || die "kubectl is required"
+  have "$DEVPOD" || die "devpod is required"
   have ssh || die "ssh is required"
   have rsync || die "rsync is required"
 }
 
-verify_remote_tools() {
-  local script required_dir
-  script='set -euo pipefail
-command -v git
-command -v uv || command -v curl
-command -v python3'
+pod_exists() {
+  "$KUBECTL" get pod "$REMOTE_POD" -n "$REMOTE_NAMESPACE" >/dev/null 2>&1
+}
 
-  if [[ "$INSTALL_REMOTE" == "1" ]] &&
-     { component_enabled vllm-rwkv || component_enabled rwkv-lm; }; then
-    script="$script
-command -v cc
-command -v c++"
-  fi
-  if [[ "$INSTALL_REMOTE" == "1" ]] && component_enabled vllm-rwkv; then
-    script="$script
-nvidia-smi -L | wc -l
-test -x $(printf '%q' "$REMOTE_CUDA_HOME/bin/nvcc")"
+pod_spec_image() {
+  "$KUBECTL" get pod "$REMOTE_POD" -n "$REMOTE_NAMESPACE" -o jsonpath='{.spec.containers[0].image}'
+}
+
+pod_status_image() {
+  "$KUBECTL" get pod "$REMOTE_POD" -n "$REMOTE_NAMESPACE" -o jsonpath='{.status.containerStatuses[0].image}'
+}
+
+pod_container_id() {
+  "$KUBECTL" get pod "$REMOTE_POD" -n "$REMOTE_NAMESPACE" -o jsonpath='{.status.containerStatuses[0].containerID}'
+}
+
+devpod_recreate() {
+  [[ "$DEVPOD_RECREATE" == "1" ]] || return 0
+
+  run "$DEVPOD" up "$DEVPOD_SOURCE" \
+    --id "$REMOTE_WORKSPACE_ID" \
+    --recreate \
+    --open-ide=false \
+    --provider kubernetes \
+    --context default \
+    --devpod-home "$DEVPOD_HOME" \
+    --devcontainer-image "$DEVPOD_SEED_IMAGE" \
+    --provider-option "RESOURCES=limits.nvidia.com/gpu=8" \
+    --provider-option "KUBERNETES_NAMESPACE=$REMOTE_NAMESPACE" \
+    --provider-option "NODE_SELECTOR=kubernetes.io/hostname=$REMOTE_NODE" \
+    --provider-option "POD_MANIFEST_TEMPLATE=$DEVPOD_POD_TEMPLATE" \
+    --provider-option "KUBERNETES_CONFIG=$HOME/.kube/config" \
+    --provider-option "POD_TIMEOUT=10m" \
+    --provider-option "STRICT_SECURITY=false"
+}
+
+ensure_pod() {
+  if ! pod_exists; then
+    devpod_recreate
   fi
 
-  for required_dir in $REMOTE_REQUIRED_DIRS; do
-    script="$script
-test -d $(printf '%q' "$required_dir")"
+  pod_exists || die "pod $REMOTE_NAMESPACE/$REMOTE_POD does not exist; set DEVPOD_RECREATE=1 to recreate it"
+
+  local node
+  node="$("$KUBECTL" get pod "$REMOTE_POD" -n "$REMOTE_NAMESPACE" -o jsonpath='{.spec.nodeName}')"
+  [[ "$node" == "$REMOTE_NODE" ]] || die "pod is on node $node, expected $REMOTE_NODE"
+}
+
+wait_for_running_image() {
+  local old_container_id="${1:-}"
+  local ready status_image new_container_id
+
+  for _ in {1..60}; do
+    ready="$("$KUBECTL" get pod "$REMOTE_POD" -n "$REMOTE_NAMESPACE" -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null || true)"
+    status_image="$(pod_status_image 2>/dev/null || true)"
+    new_container_id="$(pod_container_id 2>/dev/null || true)"
+
+    if [[ "$ready" == "true" && "$status_image" == "$REMOTE_IMAGE" ]]; then
+      if [[ -z "$old_container_id" || "$new_container_id" != "$old_container_id" ]]; then
+        return 0
+      fi
+    fi
+    sleep 5
   done
 
-  run ssh "$REMOTE_SSH_HOST" "bash -lc $(printf '%q' "$script")"
+  die "pod did not restart with image $REMOTE_IMAGE"
+}
+
+restart_remote_container() {
+  local old_container_id
+  old_container_id="$(pod_container_id 2>/dev/null || true)"
+
+  print_cmd "$KUBECTL" exec -n "$REMOTE_NAMESPACE" "$REMOTE_POD" -- sh -lc 'kill 1'
+  [[ "${DRY_RUN:-0}" == "1" ]] && return 0
+
+  "$KUBECTL" exec -n "$REMOTE_NAMESPACE" "$REMOTE_POD" -- sh -lc 'kill 1' >/dev/null 2>&1 || true
+  wait_for_running_image "$old_container_id"
+}
+
+ensure_runtime_image() {
+  local spec_image status_image
+  spec_image="$(pod_spec_image)"
+  status_image="$(pod_status_image 2>/dev/null || true)"
+
+  if [[ "$spec_image" != "$REMOTE_IMAGE" ]]; then
+    run "$KUBECTL" set image "pod/$REMOTE_POD" -n "$REMOTE_NAMESPACE" "devpod=$REMOTE_IMAGE"
+    restart_remote_container
+    [[ "${DRY_RUN:-0}" == "1" ]] && return 0
+  elif [[ "$status_image" != "$REMOTE_IMAGE" ]]; then
+    restart_remote_container
+    [[ "${DRY_RUN:-0}" == "1" ]] && return 0
+  fi
+
+  run "$KUBECTL" wait -n "$REMOTE_NAMESPACE" --for=condition=Ready "pod/$REMOTE_POD" --timeout=180s
+
+  spec_image="$(pod_spec_image)"
+  status_image="$(pod_status_image 2>/dev/null || true)"
+  [[ "$spec_image" == "$REMOTE_IMAGE" ]] || die "pod spec image is $spec_image, expected $REMOTE_IMAGE"
+  [[ "$status_image" == "$REMOTE_IMAGE" ]] || die "running pod image is $status_image, expected $REMOTE_IMAGE"
+}
+
+verify_remote_tools() {
+  run "$KUBECTL" exec -n "$REMOTE_NAMESPACE" "$REMOTE_POD" -- bash -lc \
+    'set -euo pipefail
+     command -v git
+     command -v uv
+     command -v python3
+     command -v cmake
+     command -v ninja
+     command -v cc
+     command -v nvcc
+     nvidia-smi -L | wc -l
+     test -d /workspace/Projects
+     test -d /workspace/Weights
+     test -d /workspace/Datasets'
 }
 
 sync_remote_repo() {
@@ -216,7 +275,6 @@ sync_remote_repo() {
     --exclude '.tmp/' \
     --exclude '.deps/' \
     --exclude '*.so' \
-    --exclude '/src/infer/vllm-rwkv/vllm/_build_profile.json' \
     --exclude 'build/' \
     --exclude 'dist/' \
     --exclude '*.egg-info/' \
@@ -233,47 +291,12 @@ sync_remote_repo() {
     --exclude '/datasets/' \
     --exclude '/data/' \
     "$ROOT/" "$REMOTE_SSH_HOST:$REMOTE_ROOT/"
-
-  write_remote_source_revision "$ROOT" "$REMOTE_ROOT/.helicopter-source-revision"
-  write_remote_source_revision \
-    "$ROOT/src/infer/vllm-rwkv" \
-    "$REMOTE_ROOT/src/infer/vllm-rwkv/.helicopter-source-revision"
-}
-
-local_git_revision() {
-  local path="$1"
-  local revision status
-
-  revision="$(git -C "$path" rev-parse --verify HEAD 2>/dev/null)" || return 0
-  status="$(git -C "$path" status --porcelain --untracked-files=all 2>/dev/null || true)"
-  if [[ -n "$status" ]]; then
-    revision="$revision-dirty"
-  fi
-  printf '%s\n' "$revision"
-}
-
-write_remote_source_revision() {
-  local local_path="$1"
-  local remote_marker="$2"
-  local revision remote_dir
-
-  revision="$(local_git_revision "$local_path")"
-  [[ -n "$revision" ]] || return 0
-
-  remote_dir="$(dirname "$remote_marker")"
-  run ssh "$REMOTE_SSH_HOST" \
-    "mkdir -p $(printf '%q' "$remote_dir") && printf '%s\n' $(printf '%q' "$revision") > $(printf '%q' "$remote_marker")"
 }
 
 remote_env_args() {
   local args=(
     "PYTHON_VERSION=$PYTHON_VERSION"
     "VENV=$REMOTE_VENV"
-    "REMOTE_VENV=$REMOTE_VENV"
-    "HELICOPTER_VENV=$REMOTE_VENV"
-    "HELICOPTER_PYTHON=$REMOTE_VENV/bin/python"
-    "CUDA_HOME=$REMOTE_CUDA_HOME"
-    "CUDA_PATH=$REMOTE_CUDA_HOME"
     "INSTALL_COMPONENTS=$INSTALL_COMPONENTS"
     "INSTALL_SYSTEM_DEPS=0"
     "UPDATE_UV=$UPDATE_UV"
@@ -316,8 +339,9 @@ install_remote_env() {
     "cd $quoted_root && env$(remote_env_args) bash scripts/install_local.sh"
 }
 
-validate_install_config
 require_local_tools
+ensure_pod
+ensure_runtime_image
 verify_remote_tools
 sync_remote_repo
 install_remote_env
