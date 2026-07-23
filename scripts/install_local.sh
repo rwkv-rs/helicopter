@@ -25,12 +25,11 @@ HF_ENDPOINT="${HF_ENDPOINT:-}"
 CARGO_REGISTRY_MIRROR="${CARGO_REGISTRY_MIRROR:-}"
 CARGO_REGISTRY_MIRROR_NAME="${CARGO_REGISTRY_MIRROR_NAME:-rsproxy-sparse}"
 
+export VLLM_BUILD_PROFILE
+
 VLLM="$ROOT/src/infer/vllm-rwkv"
 RWKV_LM="$ROOT/src/train/rwkv-lm"
 VERL="$ROOT/src/train/verl-rwkv"
-LIGHTEVAL_COMPONENT="$ROOT/src/eval/lighteval"
-SCOREBOARD_SERVER="$ROOT/src/scoreboard-server"
-SCOREBOARD_CLIENT="$ROOT/src/scoreboard-client"
 STAMP_DIR="$VENV/.helicopter-stamps"
 VLLM_STAMP="$STAMP_DIR/vllm-native.sha256"
 
@@ -55,6 +54,52 @@ die() {
   echo "error: $*" >&2
   exit 1
 }
+
+component_enabled() {
+  local expected="$1" component
+  local -a components=()
+  IFS=, read -r -a components <<<"$INSTALL_COMPONENTS"
+  for component in "${components[@]}"; do
+    [[ "$component" == "$expected" ]] && return 0
+  done
+  return 1
+}
+
+validate_install_components() {
+  local component
+  local -a components=()
+  IFS=, read -r -a components <<<"$INSTALL_COMPONENTS"
+  ((${#components[@]} > 0)) || die "INSTALL_COMPONENTS must select at least one dependency group"
+  for component in "${components[@]}"; do
+    case "$component" in
+      dev | vllm-rwkv | verl-rwkv | rwkv-lm | verl-liger) ;;
+      full)
+        die "INSTALL_COMPONENTS=full is disabled; select explicit dependency groups"
+        ;;
+      *)
+        die "unknown INSTALL_COMPONENTS entry '$component'; use a comma-separated subset of dev,vllm-rwkv,verl-rwkv,rwkv-lm,verl-liger"
+        ;;
+    esac
+  done
+}
+
+native_component_enabled() {
+  component_enabled vllm-rwkv || component_enabled verl-rwkv || component_enabled rwkv-lm
+}
+
+case "${INSTALL_PROFILE:-}" in
+  "" | rwkv) ;;
+  full) die "INSTALL_PROFILE=full is disabled; use INSTALL_COMPONENTS" ;;
+  *) die "INSTALL_PROFILE=${INSTALL_PROFILE} is disabled; use INSTALL_COMPONENTS" ;;
+esac
+case "${HELICOPTER_VLLM_BUILD_PROFILE:-}" in
+  "") ;;
+  full) die "HELICOPTER_VLLM_BUILD_PROFILE=full is disabled; use VLLM_BUILD_PROFILE=rwkv" ;;
+  *) die "HELICOPTER_VLLM_BUILD_PROFILE is unsupported; use VLLM_BUILD_PROFILE=rwkv" ;;
+esac
+[[ "$VLLM_BUILD_PROFILE" == "rwkv" ]] ||
+  die "VLLM_BUILD_PROFILE=$VLLM_BUILD_PROFILE is disabled; only rwkv is supported"
+validate_install_components
 
 warn() {
   echo "warning: $*" >&2
@@ -89,6 +134,7 @@ configure_build_dirs() {
 }
 
 clean_submodule_venvs() {
+  native_component_enabled || return 0
   [[ "$CLEAN_SUBMODULE_VENVS" == "1" ]] || return 0
 
   local env_dir
@@ -131,10 +177,11 @@ install_system_deps() {
   have apt-get || die "INSTALL_SYSTEM_DEPS=1 currently supports apt-get only"
   run sudo apt-get update
   run sudo apt-get install -y --no-install-recommends \
-    build-essential curl git ninja-build pkg-config python3-minimal
+    build-essential curl git ninja-build pkg-config
 }
 
 check_compiler_env() {
+  native_component_enabled || return 0
   local missing=()
   have cc || missing+=("cc")
   have c++ || missing+=("c++")
@@ -150,6 +197,7 @@ check_compiler_env() {
 }
 
 check_native_env() {
+  native_component_enabled || return 0
   local missing=()
   have cmake || missing+=("cmake")
   have ninja || missing+=("ninja")
@@ -172,6 +220,7 @@ check_native_env() {
 }
 
 check_cuda_env() {
+  native_component_enabled || return 0
   [[ "$VLLM_TARGET_DEVICE" == "cuda" ]] || return 0
 
   if ! have nvcc && [[ -n "${CUDA_HOME:-}" && -x "$CUDA_HOME/bin/nvcc" ]]; then
@@ -189,6 +238,7 @@ check_cuda_env() {
 }
 
 configure_cuda_arch_list() {
+  native_component_enabled || return 0
   [[ "$VLLM_TARGET_DEVICE" == "cuda" ]] || return 0
   [[ -z "${TORCH_CUDA_ARCH_LIST:-}" ]] || return 0
   [[ -x "$VENV/bin/python" ]] || return 0
@@ -228,111 +278,15 @@ sync_uv_env() {
   local -a components=()
   IFS=, read -r -a components <<<"$INSTALL_COMPONENTS"
   for component in "${components[@]}"; do
-    case "$component" in
-      lighteval) sync_args+=(--group eval) ;;
-      scoreboard-server | scoreboard-client) ;;
-      *) sync_args+=(--group "$component") ;;
-    esac
+    sync_args+=(--group "$component")
   done
 
   run "$UV" "${sync_args[@]}"
-}
-
-has_component() {
-  [[ ",$INSTALL_COMPONENTS," == *",$1,"* ]]
-}
-
-validate_components() {
-  local component
-  local -a components
-  IFS=',' read -r -a components <<<"$INSTALL_COMPONENTS"
-  ((${#components[@]})) || die "INSTALL_COMPONENTS must not be empty"
-  for component in "${components[@]}"; do
-    case "$component" in
-      dev | rwkv-lm | vllm-rwkv | verl-rwkv | verl-liger | lighteval | scoreboard-server | scoreboard-client) ;;
-      full) die "INSTALL_COMPONENTS=full is disabled; select explicit dependency groups" ;;
-      *) die "unknown INSTALL_COMPONENTS entry: $component" ;;
-    esac
-  done
-
-  case "${INSTALL_PROFILE:-}" in
-    "" | rwkv) ;;
-    full) die "INSTALL_PROFILE=full is disabled; use INSTALL_COMPONENTS" ;;
-    *) die "INSTALL_PROFILE=${INSTALL_PROFILE} is disabled; use INSTALL_COMPONENTS" ;;
-  esac
-  case "${HELICOPTER_VLLM_BUILD_PROFILE:-}" in
-    "") ;;
-    full) die "HELICOPTER_VLLM_BUILD_PROFILE=full is disabled; use VLLM_BUILD_PROFILE=rwkv" ;;
-    *) die "HELICOPTER_VLLM_BUILD_PROFILE is unsupported; use VLLM_BUILD_PROFILE=rwkv" ;;
-  esac
-  [[ "$VLLM_BUILD_PROFILE" == "rwkv" ]] ||
-    die "VLLM_BUILD_PROFILE=$VLLM_BUILD_PROFILE is disabled; only rwkv is supported"
-}
-
-native_component_enabled() {
-  has_component rwkv-lm || has_component vllm-rwkv || has_component verl-rwkv
-}
-
-profile_has_eval() {
-  has_component lighteval
-}
-
-profile_has_scoreboard_server() { has_component scoreboard-server; }
-profile_has_scoreboard_client() { has_component scoreboard-client; }
-
-profile_has_vllm() { has_component vllm-rwkv; }
-profile_has_rwkv_lm() { has_component rwkv-lm; }
-profile_has_verl() { has_component verl-rwkv; }
-
-ensure_bun() {
-  profile_has_scoreboard_client || return 0
-  if ! have bun; then
-    have curl || die "bun is missing and curl is not available to install it"
-    run sh -c 'curl -fsSL https://bun.sh/install | bash'
-    export PATH="$HOME/.bun/bin:$PATH"
-  fi
-  have bun || die "bun installation finished but bun is still not on PATH"
-}
-
-sync_scoreboard_server_env() {
-  profile_has_scoreboard_server || return 0
-  [[ -f "$SCOREBOARD_SERVER/uv.lock" ]] || die "scoreboard server lock is missing"
-  local sync_args=(sync --project "$SCOREBOARD_SERVER" --python "$PYTHON_VERSION" --group dev)
-  if [[ "$UV_UPGRADE" == "1" ]]; then
-    sync_args+=(--upgrade)
-  else
-    sync_args+=(--locked)
-  fi
-  [[ -n "$UV_INDEX_URL" ]] && sync_args+=(--index-url "$UV_INDEX_URL")
-  run "$UV" "${sync_args[@]}"
-}
-
-sync_lighteval_dev_dependencies() {
-  profile_has_eval || return 0
-  local sync_args=(sync --project "$LIGHTEVAL_COMPONENT" --python "$PYTHON_VERSION" --group dev --locked --inexact)
-  [[ -n "$UV_INDEX_URL" ]] && sync_args+=(--index-url "$UV_INDEX_URL")
-  run "$UV" "${sync_args[@]}"
-}
-
-sync_scoreboard_client_env() {
-  profile_has_scoreboard_client || return 0
-  [[ -f "$SCOREBOARD_CLIENT/bun.lock" ]] || die "scoreboard client lock is missing"
-  ensure_bun
-  if [[ "${DRY_RUN:-0}" == "1" ]]; then
-    print_cmd bun install --frozen-lockfile
-    return 0
-  fi
-  if [[ "$UV_UPGRADE" == "1" ]]; then
-    (cd "$SCOREBOARD_CLIENT" && bun install)
-  else
-    (cd "$SCOREBOARD_CLIENT" && bun install --frozen-lockfile)
-  fi
 }
 
 vllm_native_fingerprint() {
   {
     printf 'VLLM_TARGET_DEVICE=%s\n' "$VLLM_TARGET_DEVICE"
-    printf 'VLLM_BUILD_PROFILE=%s\n' "$VLLM_BUILD_PROFILE"
     printf 'VLLM_VERSION_OVERRIDE=%s\n' "$VLLM_VERSION_OVERRIDE"
     printf 'CMAKE_BUILD_TYPE=%s\n' "$CMAKE_BUILD_TYPE"
     printf 'TORCH_CUDA_ARCH_LIST=%s\n' "${TORCH_CUDA_ARCH_LIST:-}"
@@ -355,13 +309,16 @@ PY
 }
 
 vllm_native_ready() {
-  "$VENV/bin/python" - <<'PY' >/dev/null
+  local -a modules=(vllm._C_stable_libtorch vllm.rwkv7_ops)
+  [[ "$VLLM_BUILD_PROFILE" == "rwkv" ]] &&
+    modules=(vllm._rapid_sampling vllm.rwkv7_ops)
+  "$VENV/bin/python" - "${modules[@]}" <<'PY' >/dev/null
 import importlib
+import sys
 
 import vllm
 
-required = ["vllm._rapid_sampling", "vllm.rwkv7_ops"]
-for module in required:
+for module in sys.argv[1:]:
     importlib.import_module(module)
 PY
 }
@@ -390,7 +347,6 @@ install_vllm_package() {
 
   run env \
     VLLM_TARGET_DEVICE="$VLLM_TARGET_DEVICE" \
-    VLLM_BUILD_PROFILE="$VLLM_BUILD_PROFILE" \
     VLLM_VERSION_OVERRIDE="$VLLM_VERSION_OVERRIDE" \
     VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED:-0}" \
     CMAKE_BUILD_TYPE="$CMAKE_BUILD_TYPE" \
@@ -451,30 +407,19 @@ check_python_packages() {
   return 1
 }
 
-validate_components
 configure_network
 configure_build_dirs
-native_component_enabled || CLEAN_SUBMODULE_VENVS=0
 clean_submodule_venvs
 ensure_uv
-native_component_enabled && check_compiler_env
+check_compiler_env
 sync_uv_env
-sync_lighteval_dev_dependencies
-sync_scoreboard_server_env
-sync_scoreboard_client_env
-if profile_has_vllm; then
-  check_native_env
-  check_cuda_env
-  configure_cuda_arch_list
-  clean_vllm_cmake_cache
-  install_vllm_package
-fi
-if profile_has_rwkv_lm; then
-  install_rwkv_lm_package
-fi
-if profile_has_verl; then
-  install_verl_package
-fi
+check_native_env
+check_cuda_env
+configure_cuda_arch_list
+component_enabled vllm-rwkv && clean_vllm_cmake_cache
+component_enabled vllm-rwkv && install_vllm_package
+component_enabled rwkv-lm && install_rwkv_lm_package
+component_enabled verl-rwkv && install_verl_package
 check_python_packages
 
 clean_submodule_venvs
