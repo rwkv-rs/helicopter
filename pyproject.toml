@@ -66,6 +66,7 @@ verl-rwkv = [
   "latex2sympy2-extended",
   "math-verify",
   "numpy>=2.0.0",
+  "nvidia-ml-py>=12.560.30",
   "nvtx==0.2.15",
   "packaging>=20.0",
   "pandas",

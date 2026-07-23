@@ -162,6 +162,7 @@ class ConfigResolutionTests(unittest.TestCase):
             {
                 "math-verify",
                 "latex2sympy2-extended",
+                "nvidia-ml-py>=12.560.30",
                 "nvtx==0.2.15",
             }.issubset(dependencies)
         )

@@ -103,7 +103,7 @@ tree is already current.
 For local or already-synced workspace preparation:
 
 ```bash
-scripts/install_local.sh
+INSTALL_COMPONENTS=rwkv-lm,vllm-rwkv,verl-rwkv,dev scripts/install_local.sh
 ```
 
 Useful install overrides:
@@ -111,8 +111,8 @@ Useful install overrides:
 ```bash
 VLLM_REBUILD=1 scripts/install_local.sh
 VERL_REINSTALL=1 scripts/install_local.sh
-INSTALL_COMPONENTS=vllm scripts/install_local.sh
-INSTALL_COMPONENTS="rwkv-lm verl" scripts/install_local.sh
+INSTALL_COMPONENTS=vllm-rwkv scripts/install_local.sh
+INSTALL_COMPONENTS=rwkv-lm,verl-rwkv scripts/install_local.sh
 ```
 
 Both local and remote installation use the RWKV-only vLLM build profile. The
