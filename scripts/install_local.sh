@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
 VENV="${VENV:-$ROOT/.venv}"
 UV="${UV:-uv}"
-INSTALL_COMPONENTS="${INSTALL_COMPONENTS:-rwkv-lm,dev}"
+INSTALL_COMPONENTS="${INSTALL_COMPONENTS:-lighteval,dev}"
 INSTALL_SYSTEM_DEPS="${INSTALL_SYSTEM_DEPS:-0}"
 UPDATE_UV="${UPDATE_UV:-1}"
 UV_UPGRADE="${UV_UPGRADE:-1}"
@@ -30,6 +30,9 @@ export VLLM_BUILD_PROFILE
 VLLM="$ROOT/src/infer/vllm-rwkv"
 RWKV_LM="$ROOT/src/train/rwkv-lm"
 VERL="$ROOT/src/train/verl-rwkv"
+LIGHTEVAL_COMPONENT="$ROOT/src/eval/lighteval"
+SCOREBOARD_SERVER="$ROOT/src/scoreboard-server"
+SCOREBOARD_CLIENT="$ROOT/src/scoreboard-client"
 STAMP_DIR="$VENV/.helicopter-stamps"
 VLLM_STAMP="$STAMP_DIR/vllm-native.sha256"
 
@@ -72,12 +75,12 @@ validate_install_components() {
   ((${#components[@]} > 0)) || die "INSTALL_COMPONENTS must select at least one dependency group"
   for component in "${components[@]}"; do
     case "$component" in
-      dev | vllm-rwkv | verl-rwkv | rwkv-lm | verl-liger) ;;
+      dev | vllm-rwkv | verl-rwkv | rwkv-lm | verl-liger | lighteval | scoreboard-server | scoreboard-client) ;;
       full)
         die "INSTALL_COMPONENTS=full is disabled; select explicit dependency groups"
         ;;
       *)
-        die "unknown INSTALL_COMPONENTS entry '$component'; use a comma-separated subset of dev,vllm-rwkv,verl-rwkv,rwkv-lm,verl-liger"
+        die "unknown INSTALL_COMPONENTS entry '$component'; use a comma-separated subset of dev,vllm-rwkv,verl-rwkv,rwkv-lm,verl-liger,lighteval,scoreboard-server,scoreboard-client"
         ;;
     esac
   done
@@ -278,10 +281,60 @@ sync_uv_env() {
   local -a components=()
   IFS=, read -r -a components <<<"$INSTALL_COMPONENTS"
   for component in "${components[@]}"; do
-    sync_args+=(--group "$component")
+    case "$component" in
+      lighteval | scoreboard-server | scoreboard-client) ;;
+      *) sync_args+=(--group "$component") ;;
+    esac
   done
 
   run "$UV" "${sync_args[@]}"
+}
+
+sync_lighteval_component() {
+  component_enabled lighteval || return 0
+  [[ -f "$LIGHTEVAL_COMPONENT/uv.lock" ]] || die "LightEval component lock is missing"
+
+  local sync_args=(sync --project "$LIGHTEVAL_COMPONENT" --active --inexact)
+  component_enabled dev && sync_args+=(--group dev)
+  if [[ "$UV_UPGRADE" == "1" ]]; then
+    sync_args+=(--upgrade)
+  else
+    sync_args+=(--locked)
+  fi
+  [[ -n "$UV_INDEX_URL" ]] && sync_args+=(--index-url "$UV_INDEX_URL")
+  run env VIRTUAL_ENV="$VENV" "$UV" "${sync_args[@]}"
+}
+
+sync_scoreboard_server_component() {
+  component_enabled scoreboard-server || return 0
+  [[ -f "$SCOREBOARD_SERVER/uv.lock" ]] || die "Scoreboard server lock is missing"
+
+  local sync_args=(sync --project "$SCOREBOARD_SERVER" --python "$PYTHON_VERSION")
+  component_enabled dev && sync_args+=(--group dev)
+  if [[ "$UV_UPGRADE" == "1" ]]; then
+    sync_args+=(--upgrade)
+  else
+    sync_args+=(--locked)
+  fi
+  [[ -n "$UV_INDEX_URL" ]] && sync_args+=(--index-url "$UV_INDEX_URL")
+  run "$UV" "${sync_args[@]}"
+}
+
+sync_scoreboard_client_component() {
+  component_enabled scoreboard-client || return 0
+  [[ -f "$SCOREBOARD_CLIENT/package.json" ]] || die "Scoreboard client package.json is missing"
+  [[ -f "$SCOREBOARD_CLIENT/bun.lock" ]] || die "Scoreboard client lock is missing"
+
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    print_cmd bun install --cwd "$SCOREBOARD_CLIENT" --frozen-lockfile
+    return 0
+  fi
+  have bun || die "bun is required for the scoreboard-client component"
+  if [[ "$UV_UPGRADE" == "1" ]]; then
+    (cd "$SCOREBOARD_CLIENT" && bun install)
+  else
+    (cd "$SCOREBOARD_CLIENT" && bun install --frozen-lockfile)
+  fi
 }
 
 vllm_native_fingerprint() {
@@ -413,6 +466,9 @@ clean_submodule_venvs
 ensure_uv
 check_compiler_env
 sync_uv_env
+sync_lighteval_component
+sync_scoreboard_server_component
+sync_scoreboard_client_component
 check_native_env
 check_cuda_env
 configure_cuda_arch_list
