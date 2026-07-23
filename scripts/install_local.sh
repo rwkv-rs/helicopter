@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
 VENV="${VENV:-$ROOT/.venv}"
 UV="${UV:-uv}"
-INSTALL_COMPONENTS="${INSTALL_COMPONENTS:-rwkv-lm,dev}"
+INSTALL_COMPONENTS="${INSTALL_COMPONENTS:-rwkv-hf,rwkv-lm,dev}"
 INSTALL_SYSTEM_DEPS="${INSTALL_SYSTEM_DEPS:-0}"
 UPDATE_UV="${UPDATE_UV:-1}"
 UV_UPGRADE="${UV_UPGRADE:-1}"
@@ -30,6 +30,8 @@ export VLLM_BUILD_PROFILE
 VLLM="$ROOT/src/infer/vllm-rwkv"
 RWKV_LM="$ROOT/src/train/rwkv-lm"
 VERL="$ROOT/src/train/verl-rwkv"
+RWKV_HF="$ROOT/src/train/rwkv-hf"
+ANY2RWKV="$ROOT/src/train/any2rwkv"
 STAMP_DIR="$VENV/.helicopter-stamps"
 VLLM_STAMP="$STAMP_DIR/vllm-native.sha256"
 
@@ -72,19 +74,20 @@ validate_install_components() {
   ((${#components[@]} > 0)) || die "INSTALL_COMPONENTS must select at least one dependency group"
   for component in "${components[@]}"; do
     case "$component" in
-      dev | vllm-rwkv | verl-rwkv | rwkv-lm | verl-liger) ;;
+      dev | vllm-rwkv | verl-rwkv | rwkv-lm | rwkv-hf | verl-liger) ;;
       full)
         die "INSTALL_COMPONENTS=full is disabled; select explicit dependency groups"
         ;;
       *)
-        die "unknown INSTALL_COMPONENTS entry '$component'; use a comma-separated subset of dev,vllm-rwkv,verl-rwkv,rwkv-lm,verl-liger"
+        die "unknown INSTALL_COMPONENTS entry '$component'; use a comma-separated subset of dev,vllm-rwkv,verl-rwkv,rwkv-lm,rwkv-hf,verl-liger"
         ;;
     esac
   done
 }
 
 native_component_enabled() {
-  component_enabled vllm-rwkv || component_enabled verl-rwkv || component_enabled rwkv-lm
+  component_enabled vllm-rwkv || component_enabled verl-rwkv ||
+    component_enabled rwkv-lm || component_enabled rwkv-hf
 }
 
 case "${INSTALL_PROFILE:-}" in
@@ -138,7 +141,7 @@ clean_submodule_venvs() {
   [[ "$CLEAN_SUBMODULE_VENVS" == "1" ]] || return 0
 
   local env_dir
-  for env_dir in "$VLLM/.venv" "$VERL/.venv" "$RWKV_LM/.venv"; do
+  for env_dir in "$VLLM/.venv" "$VERL/.venv" "$RWKV_LM/.venv" "$RWKV_HF/.venv" "$ANY2RWKV/.venv"; do
     [[ -e "$env_dir" ]] || continue
     [[ "$env_dir" == "$ROOT"/src/*/.venv ]] || die "refusing to remove unexpected venv path: $env_dir"
     run rm -rf "$env_dir"
@@ -329,6 +332,34 @@ import verl
 PY
 }
 
+rwkv_hf_ready() {
+  "$VENV/bin/python" - "$RWKV_HF" <<'PY' >/dev/null
+import pathlib
+import sys
+
+import rwkv7_hf
+
+expected = pathlib.Path(sys.argv[1]).resolve()
+actual = pathlib.Path(rwkv7_hf.__file__).resolve()
+if expected not in actual.parents:
+    raise SystemExit(f"rwkv7_hf import resolved outside product package: {actual}")
+PY
+}
+
+any2rwkv_ready() {
+  "$VENV/bin/python" - "$ANY2RWKV" <<'PY' >/dev/null
+import pathlib
+import sys
+
+import any2rwkv
+
+expected = pathlib.Path(sys.argv[1]).resolve()
+actual = pathlib.Path(any2rwkv.__file__).resolve()
+if expected not in actual.parents:
+    raise SystemExit(f"any2rwkv import resolved outside product package: {actual}")
+PY
+}
+
 install_vllm_package() {
   local pip=( "$UV" pip install )
   [[ -n "$UV_INDEX_URL" ]] && pip+=(--index-url "$UV_INDEX_URL")
@@ -366,6 +397,19 @@ install_rwkv_lm_package() {
     run "${pip[@]}" --no-deps -e "$RWKV_LM"
   else
     echo "rwkv-lm has no local package metadata; dependencies are covered by pyproject.toml"
+  fi
+}
+
+install_rwkv_hf_packages() {
+  local pip=( "$UV" pip install )
+  [[ -n "$UV_INDEX_URL" ]] && pip+=(--index-url "$UV_INDEX_URL")
+  pip+=(--project "$ROOT" --python "$VENV/bin/python" )
+
+  run "${pip[@]}" --no-deps --no-build-isolation -e "$RWKV_HF"
+  run "${pip[@]}" --no-deps --no-build-isolation -e "$ANY2RWKV"
+  if [[ "${DRY_RUN:-0}" != "1" ]]; then
+    rwkv_hf_ready
+    any2rwkv_ready
   fi
 }
 
@@ -419,6 +463,7 @@ configure_cuda_arch_list
 component_enabled vllm-rwkv && clean_vllm_cmake_cache
 component_enabled vllm-rwkv && install_vllm_package
 component_enabled rwkv-lm && install_rwkv_lm_package
+component_enabled rwkv-hf && install_rwkv_hf_packages
 component_enabled verl-rwkv && install_verl_package
 check_python_packages
 

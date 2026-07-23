@@ -7,10 +7,33 @@ name = "any2rwkv"
 version = "0.1.0"
 description = "Contract-first Qwen3.5 text-backbone to native RWKV7 migration"
 requires-python = ">=3.12"
-dependencies = ["torch", "transformers>=5.5.3,<5.14,!=5.6.0", "safetensors", "huggingface-hub", "tokenizers>=0.21.1"]
+dependencies = [
+  "causal-conv1d==1.6.2.post1",
+  "datasets>=5.0.0",
+  "flash-linear-attention==0.5.1",
+  "huggingface-hub",
+  "numpy>=2.0.0",
+  "rwkv7-hf-adapter==0.5.0",
+  "safetensors>=0.6.2",
+  "tokenizers>=0.21.1",
+  "torch==2.11.0",
+  "transformers>=5.5.3,<5.14,!=5.6.0",
+  "wandb>=0.28,<0.29",
+]
 
 [project.scripts]
 any2rwkv = "any2rwkv.cli:main"
+
+[tool.uv.sources]
+rwkv7-hf-adapter = { path = "../rwkv-hf", editable = true }
+
+[[tool.uv.index]]
+name = "tuna"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
+[dependency-groups]
+dev = ["pytest>=8.0", "ruff>=0.14,<1"]
 
 [tool.setuptools.packages.find]
 where = ["."]

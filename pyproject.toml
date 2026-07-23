@@ -92,6 +92,20 @@ rwkv-lm = [
   "torch==2.11.0",
 ]
 
+rwkv-hf = [
+  "causal-conv1d==1.6.2.post1",
+  "datasets>=5.0.0",
+  "flash-linear-attention==0.5.1",
+  "huggingface-hub",
+  "ninja",
+  "numpy>=2.0.0",
+  "safetensors>=0.6.2",
+  "tokenizers>=0.21.1",
+  "torch==2.11.0",
+  "transformers>=5.5.3,<5.14,!=5.6.0",
+  "wandb>=0.28,<0.29",
+]
+
 dev = [
   "pre-commit",
   "pytest",
@@ -105,6 +119,12 @@ verl-liger = [
 [tool.uv]
 package = true
 default-groups = []
+
+[tool.uv.extra-build-dependencies]
+causal-conv1d = [{ requirement = "torch", match-runtime = true }]
+
+[tool.uv.extra-build-variables]
+causal-conv1d = { CAUSAL_CONV1D_FORCE_BUILD = "TRUE" }
 
 [tool.setuptools.packages.find]
 where = ["src/cli"]
