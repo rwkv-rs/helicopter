@@ -56,7 +56,7 @@ REMOTE_SSH_HOST="${REMOTE_SSH_HOST:-$REMOTE_WORKSPACE_ID.devpod}"
 REMOTE_ROOT="${REMOTE_ROOT:-/workspace/Projects/MachineLearning/helicopter}"
 REMOTE_VENV="${REMOTE_VENV:-$REMOTE_ROOT/.venv}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
-INSTALL_COMPONENTS="${INSTALL_COMPONENTS:-rwkv-hf,rwkv-lm,dev}"
+INSTALL_COMPONENTS="${INSTALL_COMPONENTS:-rwkv-lm,dev}"
 UPDATE_UV="${UPDATE_UV:-0}"
 UV_UPGRADE="${UV_UPGRADE:-0}"
 RUN_PIP_CHECK="${RUN_PIP_CHECK:-1}"
@@ -97,35 +97,37 @@ die() {
   exit 1
 }
 
-validate_install_config() {
+validate_install_components() {
   local component
   local -a components=()
   IFS=, read -r -a components <<<"$INSTALL_COMPONENTS"
   ((${#components[@]} > 0)) || die "INSTALL_COMPONENTS must select at least one dependency group"
   for component in "${components[@]}"; do
     case "$component" in
-      dev | vllm-rwkv | verl-rwkv | rwkv-lm | rwkv-hf | lighteval | verl-liger) ;;
-      full) die "INSTALL_COMPONENTS=full is disabled; select explicit dependency groups" ;;
-      *) die "unknown INSTALL_COMPONENTS entry '$component'; use a comma-separated subset of dev,vllm-rwkv,verl-rwkv,rwkv-lm,rwkv-hf,lighteval,verl-liger" ;;
+      dev | vllm-rwkv | verl-rwkv | rwkv-lm | verl-liger) ;;
+      full)
+        die "INSTALL_COMPONENTS=full is disabled; select explicit dependency groups"
+        ;;
+      *)
+        die "unknown INSTALL_COMPONENTS entry '$component'; use a comma-separated subset of dev,vllm-rwkv,verl-rwkv,rwkv-lm,verl-liger"
+        ;;
     esac
   done
-  if [[ ",$INSTALL_COMPONENTS," == *,verl-rwkv,* && ",$INSTALL_COMPONENTS," == *,lighteval,* ]]; then
-    die "verl-rwkv and lighteval are separate environments because their latex2sympy2-extended requirements conflict"
-  fi
-
-  case "${INSTALL_PROFILE:-}" in
-    "" | rwkv) ;;
-    full) die "INSTALL_PROFILE=full is disabled; use INSTALL_COMPONENTS" ;;
-    *) die "INSTALL_PROFILE=${INSTALL_PROFILE} is disabled; use INSTALL_COMPONENTS" ;;
-  esac
-  case "${HELICOPTER_VLLM_BUILD_PROFILE:-}" in
-    "") ;;
-    full) die "HELICOPTER_VLLM_BUILD_PROFILE=full is disabled; use VLLM_BUILD_PROFILE=rwkv" ;;
-    *) die "HELICOPTER_VLLM_BUILD_PROFILE is unsupported; use VLLM_BUILD_PROFILE=rwkv" ;;
-  esac
-  [[ "$VLLM_BUILD_PROFILE" == "rwkv" ]] ||
-    die "VLLM_BUILD_PROFILE=$VLLM_BUILD_PROFILE is disabled; only rwkv is supported"
 }
+
+case "${INSTALL_PROFILE:-}" in
+  "" | rwkv) ;;
+  full) die "INSTALL_PROFILE=full is disabled; use INSTALL_COMPONENTS" ;;
+  *) die "INSTALL_PROFILE=${INSTALL_PROFILE} is disabled; use INSTALL_COMPONENTS" ;;
+esac
+case "${HELICOPTER_VLLM_BUILD_PROFILE:-}" in
+  "") ;;
+  full) die "HELICOPTER_VLLM_BUILD_PROFILE=full is disabled; use VLLM_BUILD_PROFILE=rwkv" ;;
+  *) die "HELICOPTER_VLLM_BUILD_PROFILE is unsupported; use VLLM_BUILD_PROFILE=rwkv" ;;
+esac
+[[ "$VLLM_BUILD_PROFILE" == "rwkv" ]] ||
+  die "VLLM_BUILD_PROFILE=$VLLM_BUILD_PROFILE is disabled; only rwkv is supported"
+validate_install_components
 
 have() {
   command -v "$1" >/dev/null 2>&1
@@ -337,7 +339,6 @@ install_remote_env() {
     "cd $quoted_root && env$(remote_env_args) bash scripts/install_local.sh"
 }
 
-validate_install_config
 require_local_tools
 ensure_pod
 ensure_runtime_image

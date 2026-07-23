@@ -12,7 +12,8 @@ The current focus is RWKV7:
 - `scripts/install_remote.sh`: prepare the BBT DevPod GPU workspace, sync this
   repository, and run the local installer remotely.
 - `scripts/install_local.sh`: create/update the project `.venv`, install the
-  selected dependency groups, and install only their local editable packages.
+  declared RWKV dependency group, and install local editable `vllm`, `rwkv-lm`,
+  and `verl` packages.
 
 ## Repository layout
 
@@ -71,7 +72,7 @@ Important config sections:
 
 ## Prepare the environment
 
-Remote preparation is the expected path for RWKV vLLM/verl work:
+Remote preparation is the expected path for full RWKV vLLM/verl work:
 
 ```bash
 scripts/install_remote.sh
@@ -94,35 +95,10 @@ scripts/install_local.sh
 Useful install overrides:
 
 ```bash
-# Any2RWKV BF16 conversion and layerwise distillation (default)
-INSTALL_COMPONENTS=rwkv-hf,rwkv-lm,dev scripts/install_local.sh
-
-# Transformers/LightEval quality evaluation; no vLLM serving dependency
-INSTALL_COMPONENTS=rwkv-hf,rwkv-lm,lighteval,dev scripts/install_local.sh
-
-# RWKV-only vLLM serving
-INSTALL_COMPONENTS=vllm-rwkv,dev VLLM_REBUILD=1 scripts/install_local.sh
-
-# Existing Verl + native RWKV + vLLM rollout path
-INSTALL_COMPONENTS=verl-rwkv,rwkv-lm,vllm-rwkv,dev \
-  VERL_REINSTALL=1 scripts/install_local.sh
+VLLM_REBUILD=1 scripts/install_local.sh
+VERL_REINSTALL=1 scripts/install_local.sh
+INSTALL_PROFILE=full scripts/install_local.sh
 ```
-
-`pyproject.toml` defines seven independently selectable capability groups:
-`vllm-rwkv`, `verl-rwkv`, `rwkv-lm`, `rwkv-hf`, `lighteval`, `dev`, and
-`verl-liger`. `dev` contains pre-commit and test tooling; `verl-liger` is an
-explicit accelerator. There is no `full` group, and the installer
-does not install an editable subproject unless its group is selected.
-`verl-rwkv` and `lighteval` are deliberately separate environments because
-their `latex2sympy2-extended` requirements are incompatible. Any2RWKV inference
-and evaluation use Transformers directly; selecting `vllm-rwkv` does not add a
-vLLM path to Any2RWKV.
-
-The installer pins uv to `0.11.14`, and both the root project and the standalone
-Any2RWKV package use the same default Python index. If the versioned Astral
-installer is unreachable, an existing uv may install that exact version into an
-isolated tool environment through the configured index; it never substitutes a
-different uv release.
 
 Use `DRY_RUN=1` to print installer actions without executing them:
 
