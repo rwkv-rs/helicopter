@@ -8,11 +8,6 @@ version = "0.1.0"
 requires-python = ">=3.12,<3.13"
 dependencies = []
 
-[project.optional-dependencies]
-eval = [
-  "helicopter-lighteval",
-]
-
 [project.scripts]
 helicopter = "helicopter_cli.__main__:main"
 
@@ -107,21 +102,10 @@ verl-liger = [
   "liger-kernel",
 ]
 
-eval = [
-  "helicopter-lighteval",
-]
-
 [tool.uv]
 package = true
 default-groups = []
 
-[tool.uv.workspace]
-members = ["src/eval/lighteval"]
-
-[tool.uv.sources]
-helicopter-lighteval = { workspace = true }
-
 [tool.setuptools.packages.find]
 where = ["src/cli"]
 include = ["helicopter_cli*"]
-
