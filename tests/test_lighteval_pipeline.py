@@ -33,12 +33,22 @@ def test_layout_registry_passthrough_and_generation_contract():
 def test_pipeline_receives_tasks_precision_candidate_and_remote_output(monkeypatch, tmp_path):
     captured = {}
     for name in ("EvaluationTracker", "PipelineParameters", "RWKVVLLMModelConfig"): monkeypatch.setattr(evaluate, name, lambda **kw: kw)
-    monkeypatch.setattr(evaluate, "Pipeline", lambda **kw: captured.update(kw) or kw); evaluate.build_pipeline()
+    monkeypatch.setattr(evaluate, "RWKVPipeline", lambda **kw: captured.update(kw) or kw); evaluate.build_pipeline()
     assert captured["tasks"] == evaluate.TASKS and captured["pipeline_parameters"]["launcher_type"] is ParallelismManager.VLLM
     assert captured["model_config"]["max_num_seqs"] in evaluate.CONCURRENCY_CANDIDATES and captured["model_config"]["override_chat_template"] is True
     assert captured["model_config"]["model_name"] == Path(evaluate.MODEL_PATH).as_uri() and (captured["model_config"]["cache_dir"], captured["model_config"]["wkv_mode"]) == (str(evaluate.CACHE_DIR), evaluate.WKV_MODE)
     monkeypatch.delenv("LIGHTEVAL_OUTPUT_ROOT", raising=False); monkeypatch.setenv("REMOTE_RUN_LOG_DIR", str(tmp_path / "runs"))
     assert evaluate._output_dir("id") == tmp_path / "runs/lighteval/id"; monkeypatch.setenv("LIGHTEVAL_OUTPUT_ROOT", str(tmp_path / "explicit")); assert evaluate._output_dir("id") == tmp_path / "explicit/id"
+def test_strict_categorical_postprocessing_uses_only_closed_suffixes():
+    task = next(iter(Registry(tasks="mmlu:abstract_algebra|0").load_tasks().values())); doc = task.formatter({"subject": "abstract_algebra", "question": "1+1?", "choices": ["1", "2", "3", "4"], "answer": "B"}, task.name); method = task.metrics[0].category
+    raw = ["<think>x</think>\\boxed{A}", "<think>x</think>\\boxed{\\mathrm{B}}", "<think>x</think>Thus, the final choice is **C. detail**", "<think>x</think>D.", "<think>Answer: B</think>nothing", "<think>x", "<think>x</think>Correct option: B", "<think>x</think></think>Answer: B", "<think>x</think>Answer: B\n\\boxed{C}", "<think>x</think>choose B"]
+    tokens = [[1], [2], [3], [4], [5], [6], [7] * evaluate.MAX_NEW_TOKENS, [8], [9], [10]]
+    response = ModelResponse(text=raw.copy(), output_tokens=[item.copy() for item in tokens]); gsm = next(iter(Registry(tasks="gsm8k|0").load_tasks().values())); gsm_doc = gsm.formatter({"question": "1+1?", "answer": "work #### 2"}, gsm.name); untouched = ModelResponse(text=["<think>x</think>Answer: B"], output_tokens=[[1]])
+    pipeline = object.__new__(evaluate.RWKVPipeline); pipeline.pipeline_parameters = SimpleNamespace(remove_reasoning_tags=False); pipeline.sampling_docs = {method: [doc, gsm_doc]}; pipeline.tasks_dict = {doc.task_name: task, gsm_doc.task_name: gsm}
+    pipeline._post_process_outputs({method: [response, untouched]})
+    assert response.text_post_processed == [" A", " B", " C", " D", "", "", "", "", "", ""] and len(response.text_post_processed) == len(raw)
+    assert response.text == raw and response.output_tokens == tokens and untouched.text_post_processed is None and untouched.text == ["<think>x</think>Answer: B"]
+    assert [apply_metric([ModelResponse(text_post_processed=[value])], [doc], task.metrics)[0]["em"] for value in (" B", "")] == [1, 0]
 def test_official_vllm_init_bridge_cache_and_sampling(tmp_path, monkeypatch):
     assert is_package_available("vllm") and not getattr(VLLMModel, "is_dummy", False) and resolve_tokenizer_args(evaluate.MODEL_PATH)[0] == "rwkv" and resolve_tokenizer_args("facebook/opt-125m")[0] == "hf"
     checkpoint = tmp_path / Path(evaluate.MODEL_PATH).name; checkpoint.touch(); monkeypatch.chdir(tmp_path)
