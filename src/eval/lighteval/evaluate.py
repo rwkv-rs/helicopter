@@ -1,3 +1,4 @@
+# ruff: noqa: E401, E501, E701, E702
 import gzip, json, os, sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,7 +12,10 @@ from lighteval.pipeline import ParallelismManager, Pipeline, PipelineParameters
 MODEL_PATH = "/home/caizus/Weights/RWKV/rwkv7/pth/rwkv7-g1h-7.2b-20260710-ctx10240.pth"
 TASKS = os.environ.get("LIGHTEVAL_TASKS", "gsm8k|0")
 RUN_ID = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-OUTPUT_DIR = Path(os.environ.get("LIGHTEVAL_OUTPUT_ROOT", "outputs/lighteval")) / RUN_ID
+def _output_dir(run_id=RUN_ID) -> Path:
+    root = os.environ.get("LIGHTEVAL_OUTPUT_ROOT"); return Path(root) / run_id if root is not None else Path(os.environ.get("REMOTE_RUN_LOG_DIR", "outputs")) / "lighteval" / run_id
+def _cache_dir(run_id=RUN_ID) -> Path: return Path(".tmp/lighteval-cache") / run_id
+OUTPUT_DIR, CACHE_DIR = _output_dir(), _cache_dir()
 MAX_SAMPLES = int(value) if (value := os.environ.get("LIGHTEVAL_MAX_SAMPLES")) else None
 MAX_NEW_TOKENS = int(os.environ.get("LIGHTEVAL_MAX_NEW_TOKENS", "2048"))
 MAX_MODEL_LENGTH = 10240
@@ -33,7 +37,7 @@ class RWKVGenerationParameters(GenerationParameters):
         backend.update(repetition_penalty=self.frequency_penalty,
                        frequency_penalty=0.0, penalty_decay=self.penalty_decay)
         return backend
-class RWKVVLLMModelConfig(VLLMModelConfig): generation_parameters: RWKVGenerationParameters
+class RWKVVLLMModelConfig(VLLMModelConfig): generation_parameters: RWKVGenerationParameters; wkv_mode: str
 def _generation_parameters() -> RWKVGenerationParameters:
     return RWKVGenerationParameters(**GENERATION_PARAMETERS)
 def build_pipeline() -> Pipeline:
@@ -44,7 +48,8 @@ def build_pipeline() -> Pipeline:
     parameters = PipelineParameters(launcher_type=ParallelismManager.VLLM,
         max_samples=MAX_SAMPLES, remove_reasoning_tags=False)
     model = RWKVVLLMModelConfig(
-        model_name=MODEL_PATH, dtype="float16", max_model_length=MAX_MODEL_LENGTH,
+        model_name=Path(MODEL_PATH).as_uri(), cache_dir=str(CACHE_DIR), wkv_mode=WKV_MODE,
+        dtype="float16", max_model_length=MAX_MODEL_LENGTH,
         max_num_seqs=TARGET_CONCURRENCY,
         max_num_batched_tokens=max(MAX_MODEL_LENGTH, TARGET_CONCURRENCY * 128),
         enable_prefix_caching=False, override_chat_template=True,
