@@ -22,7 +22,7 @@ def artifacts(limit=3):
 def test_layout_registry_passthrough_and_generation_contract():
     component = ROOT / "src/eval/lighteval"; assert list(component.glob("*.py")) == [component / "evaluate.py"] and not (component / "pyproject.toml").exists()
     assert all(text not in (component / "evaluate.py").read_text() for text in ("Question:", "Answer:", "DAPO")) and 'kwargs.setdefault("disable_log_stats", "VLLM_LOG_STATS_INTERVAL" not in os.environ)' in (ROOT / "src/infer/vllm-rwkv/vllm/entrypoints/llm.py").read_text()
-    assert Registry(tasks=evaluate.TASKS).load_tasks()
+    assert Registry(tasks=evaluate.TASKS).load_tasks() and evaluate.DetectorFactory.seed == 0
     with pytest.raises(ValueError): Registry(tasks="definitely_unknown_task|0").load_tasks()
     params = evaluate._generation_parameters(); backend = params.to_vllm_dict()
     keys = ("temperature", "top_p", "top_k", "presence_penalty", "repetition_penalty", "frequency_penalty", "penalty_decay", "max_tokens")

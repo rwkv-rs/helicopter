@@ -4,10 +4,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.request import Request, urlopen
 import pyarrow.parquet as parquet
+from langdetect import DetectorFactory
 from lighteval.logging.evaluation_tracker import EvaluationTracker
 from lighteval.models.model_input import GenerationParameters
 from lighteval.models.vllm.vllm_model import VLLMModelConfig
 from lighteval.pipeline import ParallelismManager, Pipeline, PipelineParameters
+DetectorFactory.seed = 0
 # Edit these ordinary constants for an evaluation. Every run gets a unique directory.
 MODEL_PATH = "/home/caizus/Weights/RWKV/rwkv7/pth/rwkv7-g1h-7.2b-20260710-ctx10240.pth"
 TASKS = os.environ.get("LIGHTEVAL_TASKS", "gsm8k|0")
