@@ -1,7 +1,7 @@
 device = "NVIDIA RTX PRO 6000 Blackwell Workstation Edition"
 candidates = [40, 80, 160, 320, 640, 1280, 2560]
-[recommendation]
-"1.5B" = { fp16 = { VLLM_RWKV7_WKV_MODE = "fp16", LIGHTEVAL_TARGET_CONCURRENCY = 2560 }, fp32io16 = { VLLM_RWKV7_WKV_MODE = "fp32io16", LIGHTEVAL_TARGET_CONCURRENCY = 2560 } }
-"2.9B" = { fp16 = { VLLM_RWKV7_WKV_MODE = "fp16", LIGHTEVAL_TARGET_CONCURRENCY = 2560 }, fp32io16 = { VLLM_RWKV7_WKV_MODE = "fp32io16", LIGHTEVAL_TARGET_CONCURRENCY = 2560 } }
-"7.2B" = { fp16 = { VLLM_RWKV7_WKV_MODE = "fp16", LIGHTEVAL_TARGET_CONCURRENCY = 2560 }, fp32io16 = { VLLM_RWKV7_WKV_MODE = "fp32io16", LIGHTEVAL_TARGET_CONCURRENCY = 1280 } }
-"13.3B" = { fp16 = { VLLM_RWKV7_WKV_MODE = "fp16", LIGHTEVAL_TARGET_CONCURRENCY = 1280 }, fp32io16 = { VLLM_RWKV7_WKV_MODE = "fp32io16", LIGHTEVAL_TARGET_CONCURRENCY = 640 } }
+recommendations = [
+  { model_size = "1.5B", wkv_mode = "fp16", batch_size = 2560 }, { model_size = "1.5B", wkv_mode = "fp32io16", batch_size = 2560 },
+  { model_size = "2.9B", wkv_mode = "fp16", batch_size = 2560 }, { model_size = "2.9B", wkv_mode = "fp32io16", batch_size = 2560 },
+  { model_size = "7.2B", wkv_mode = "fp16", batch_size = 2560 }, { model_size = "7.2B", wkv_mode = "fp32io16", batch_size = 1280 },
+  { model_size = "13.3B", wkv_mode = "fp16", batch_size = 1280 }, { model_size = "13.3B", wkv_mode = "fp32io16", batch_size = 640 }]
