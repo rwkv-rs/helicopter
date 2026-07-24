@@ -48,7 +48,7 @@ def build_pipeline() -> Pipeline:
     os.environ["VLLM_RWKV7_WKV_MODE"] = WKV_MODE
     tracker = EvaluationTracker(output_dir=str(OUTPUT_DIR), save_details=True)
     parameters = PipelineParameters(launcher_type=ParallelismManager.VLLM,
-        max_samples=MAX_SAMPLES, dataset_loading_processes=8, remove_reasoning_tags=False)
+        max_samples=MAX_SAMPLES, remove_reasoning_tags=False)
     model = RWKVVLLMModelConfig(
         model_name=Path(MODEL_PATH).as_uri(), cache_dir=str(CACHE_DIR), wkv_mode=WKV_MODE,
         dtype="float16", max_model_length=MAX_MODEL_LENGTH,

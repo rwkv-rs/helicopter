@@ -13,7 +13,8 @@ from lighteval.tasks.registry import Registry
 from lighteval.utils.imports import is_package_available
 from vllm import LLM
 from vllm.engine.arg_utils import EngineArgs
-from vllm.tokenizers.registry import resolve_tokenizer_args
+from vllm.tokenizers.registry import get_tokenizer, resolve_tokenizer_args
+from vllm.tokenizers.rwkv_defaults import normalize_rwkv_message_content
 from vllm.transformers_utils.configs.rwkv7 import try_parse_rwkv7_pth_source
 ROOT = Path(__file__).parents[1]; SPEC = importlib.util.spec_from_file_location("helicopter_evaluate", ROOT / "src/eval/lighteval/evaluate.py"); evaluate = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader; SPEC.loader.exec_module(evaluate)
@@ -33,7 +34,7 @@ def test_pipeline_receives_tasks_precision_candidate_and_remote_output(monkeypat
     captured = {}
     for name in ("EvaluationTracker", "PipelineParameters", "RWKVVLLMModelConfig"): monkeypatch.setattr(evaluate, name, lambda **kw: kw)
     monkeypatch.setattr(evaluate, "Pipeline", lambda **kw: captured.update(kw) or kw); evaluate.build_pipeline()
-    assert captured["tasks"] == evaluate.TASKS and captured["pipeline_parameters"]["launcher_type"] is ParallelismManager.VLLM and captured["pipeline_parameters"]["dataset_loading_processes"] == 8
+    assert captured["tasks"] == evaluate.TASKS and captured["pipeline_parameters"]["launcher_type"] is ParallelismManager.VLLM
     assert captured["model_config"]["max_num_seqs"] in evaluate.CONCURRENCY_CANDIDATES and captured["model_config"]["override_chat_template"] is True
     assert captured["model_config"]["model_name"] == Path(evaluate.MODEL_PATH).as_uri() and (captured["model_config"]["cache_dir"], captured["model_config"]["wkv_mode"]) == (str(evaluate.CACHE_DIR), evaluate.WKV_MODE)
     monkeypatch.delenv("LIGHTEVAL_OUTPUT_ROOT", raising=False); monkeypatch.setenv("REMOTE_RUN_LOG_DIR", str(tmp_path / "runs"))
@@ -60,18 +61,16 @@ def test_official_vllm_init_bridge_cache_and_sampling(tmp_path, monkeypatch):
     assert captured["prompts"] == [{"prompt_token_ids": [1]}] and (params.stop, params.stop_token_ids, params.ignore_eos) == (["\nUser:"], [0], False)
     assert (params.n, params.max_tokens, params.repetition_penalty, params.frequency_penalty, params.penalty_decay) == (48, 13, 0.1, 0.0, 0.988)
 def test_official_task_native_metrics_receive_raw_completions(monkeypatch):
-    math = next(iter(Registry(tasks="gsm8k|0").load_tasks().values())); doc = math.formatter({"question": "1+1?", "answer": "work #### 2"}, math.name); prompt = {}
-    tokenizer = SimpleNamespace(apply_chat_template=lambda messages, **kw: (prompt.update(messages=messages, options=kw), "rendered")[1])
-    assert PromptManager(True, tokenizer).prepare_prompt(doc) == "rendered" and prompt["messages"][-1]["content"] == doc.query
-    seen, compute = [], math.metrics[0].compute_sample; monkeypatch.setattr(math.metrics[0], "compute_sample",
-        lambda **kw: seen.append(kw["model_response"].final_text[0]) or compute(**kw))
-    raw, truncated = "<think>open\nANSWER: 2", "<think>truncated"
-    assert [apply_metric([ModelResponse(text=[text])], [doc], math.metrics)[0]["extractive_match"] for text in (raw, truncated)] == [1, 0] and seen == [raw, truncated]
+    tokenizer = get_tokenizer("BlinkDL/rwkv7-g1", tokenizer_mode="rwkv"); cases = (("gsm8k|0", {"question": "1+1?", "answer": "work #### 2"}, "1+1?"), ("mmlu:abstract_algebra|0", {"subject": "abstract_algebra", "question": "1+1?", "choices": ["1", "2", "3", "4"], "answer": "B"}, "The following are multiple choice questions (with answers) about abstract algebra.\n1+1?\nA. 1\nB. 2\nC. 3\nD. 4"), ("math_500|0", {"problem": "Find 1+1.", "solution": "2"}, None), ("ifeval|0", {"prompt": "Use at least two words", "instruction_id_list": ["length_constraints:number_words"], "kwargs": [{"num_words": 2, "relation": "at least"}]}, None))
+    for name, row, expected in cases:
+        task = next(iter(Registry(tasks=name).load_tasks().values())); doc = task.formatter(row, task.name); query = doc.query; user = expected if expected is not None else normalize_rwkv_message_content(query)
+        assert PromptManager(True, tokenizer).prepare_prompt(doc) == f"User: {user}\n\nAssistant: <think" and doc.query == query
+        seen, response = {}, ModelResponse(text=[f"raw:{name}"]); monkeypatch.setattr(task.metrics[0], "compute_sample", lambda **kw: seen.update(kw) or {"probe": 1})
+        assert apply_metric([response], [doc], task.metrics[:1]) == [{"probe": 1}] and seen["doc"] is doc and seen["model_response"] is response and response.final_text == [f"raw:{name}"]
+    math = next(iter(Registry(tasks="gsm8k|0").load_tasks().values())); doc = math.formatter(cases[0][1], math.name); raw, truncated = "<think>open\nANSWER: 2", "<think>truncated"
+    assert [apply_metric([ModelResponse(text=[text])], [doc], math.metrics)[0]["extractive_match"] for text in (raw, truncated)] == [1, 0]
     results, rows = artifacts(2); rows[0]["model_response"] = {"text": [truncated], "output_tokens": [[1, 2]]}; assert evaluate.diagnose(results, rows)["truncated"] == 1
-    arc = next(iter(Registry(tasks="arc:easy|0").load_tasks().values())); arc_doc = arc.formatter({"question": "1+1?", "choices": {"text": ["1", "2", "3", "4"], "label": ["A", "B", "C", "D"]}, "answerKey": "B"}, arc.name)
-    assert apply_metric([ModelResponse(logprobs=[-2, -.1, -3, -4])], [arc_doc], arc.metrics)[0] == {"acc": 1}
-    instruction = next(iter(Registry(tasks="ifeval|0").load_tasks().values())); if_doc = instruction.formatter({"prompt": "Use at least two words", "instruction_id_list": ["length_constraints:number_words"], "kwargs": [{"num_words": 2, "relation": "at least"}]}, instruction.name)
-    assert apply_metric([ModelResponse(text=["hello world"])], [if_doc], instruction.metrics)[0] == {"prompt_level_strict_acc": 1, "inst_level_strict_acc": [True], "prompt_level_loose_acc": 1, "inst_level_loose_acc": [True]}
+    instruction = next(iter(Registry(tasks="ifeval|0").load_tasks().values())); if_doc = instruction.formatter(cases[3][1], instruction.name); assert apply_metric([ModelResponse(text=["hello world"])], [if_doc], instruction.metrics)[0] == {"prompt_level_strict_acc": 1, "inst_level_strict_acc": [True], "prompt_level_loose_acc": 1, "inst_level_loose_acc": [True]}
 def test_parser_reads_artifacts_written_by_pinned_evaluation_tracker(tmp_path):
     assert importlib.metadata.version("lighteval") == "0.13.0"
     tasks = Registry(tasks="gsm8k|0").load_tasks(); name, task = next(iter(tasks.items())); task.config.generation_size = 2
