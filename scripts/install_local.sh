@@ -467,8 +467,7 @@ from vllm import LLM
 assert md.version("lighteval") == "0.13.0"
 assert is_package_available("vllm") and not getattr(VLLMModel, "is_dummy", False)
 backend, captured = object.__new__(LLM), {}
-backend.model_config = SimpleNamespace(
-    runner_type="generate", tokenizer_mode="rwkv", hf_config=SimpleNamespace(model_type="rwkv7"))
+backend.model_config = SimpleNamespace(runner_type="generate", tokenizer_mode="rwkv", hf_config=SimpleNamespace(model_type="rwkv7"))
 backend._run_completion = MethodType(lambda self, **kw: captured.update(kw) or [], backend)
 settings = runpy.run_path(sys.argv[2])
 model = object.__new__(VLLMModel)
@@ -476,21 +475,13 @@ model.config = settings["RWKVVLLMModelConfig"](model_name=Path(settings["MODEL_P
 assert ((tokenizer := model._create_auto_tokenizer(model.config)).eos_token, tokenizer.pad_token) == ("<|endoftext|>",) * 2
 model.data_parallel_size, model.model = 1, backend
 model._generate(inputs=[[1]], max_new_tokens=17, stop_tokens=[], num_samples=2)
-assert captured["prompts"] == [{"prompt_token_ids": [1]}]
-params = captured["params"]
-assert (params.stop, params.stop_token_ids, params.ignore_eos) == (["\nUser:"], [0], False)
-assert (params.n, params.max_tokens, params.temperature, params.top_p, params.top_k,
-        params.presence_penalty, params.repetition_penalty, params.frequency_penalty, params.penalty_decay) == (2, 17, 0.96, 0.76, 32, 1.0, 0.1, 0.0, 0.988)
-assert Path(lighteval.__file__).is_relative_to(Path(sys.prefix))
-names = [item.metadata["Name"].lower().replace("_", "-") for item in md.distributions()]
-assert names.count("vllm") == 1 and not {"helicopter-lighteval", "lighteval-runner", "litellm"} & set(names)
-assert "vcs_info" not in json.loads(md.distribution("lighteval").read_text("direct_url.json") or "{}")
-direct = json.loads(md.distribution("vllm").read_text("direct_url.json"))
-assert direct.get("dir_info", {}).get("editable") is True
-assert Path(direct["url"].removeprefix("file://")).resolve() == Path(sys.argv[1]).resolve()
+assert captured["prompts"] == [{"prompt_token_ids": [1]}]; params = captured["params"]
+assert (params.stop, params.stop_token_ids, params.ignore_eos) == (["\nUser:"], [0], False) and (params.n, params.max_tokens, params.temperature, params.top_p, params.top_k, params.presence_penalty, params.repetition_penalty, params.frequency_penalty, params.penalty_decay) == (2, 17, 0.96, 0.76, 32, 1.0, 0.1, 0.0, 0.988)
+assert Path(lighteval.__file__).is_relative_to(Path(sys.prefix)); names = [item.metadata["Name"].lower().replace("_", "-") for item in md.distributions()]
+assert names.count("vllm") == 1 and not {"helicopter-lighteval", "lighteval-runner", "litellm"} & set(names) and "vcs_info" not in json.loads(md.distribution("lighteval").read_text("direct_url.json") or "{}")
+direct = json.loads(md.distribution("vllm").read_text("direct_url.json")); assert direct.get("dir_info", {}).get("editable") is True and Path(direct["url"].removeprefix("file://")).resolve() == Path(sys.argv[1]).resolve()
 PY
 }
-
 configure_network
 configure_build_dirs
 clean_submodule_venvs

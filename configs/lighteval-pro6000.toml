@@ -1,7 +1,0 @@
-device = "NVIDIA RTX PRO 6000 Blackwell Workstation Edition"
-candidates = [40, 80, 160, 320, 640, 1280, 2560]
-recommendations = [
-  { model_size = "1.5B", wkv_mode = "fp16", batch_size = 2560 }, { model_size = "1.5B", wkv_mode = "fp32io16", batch_size = 2560 },
-  { model_size = "2.9B", wkv_mode = "fp16", batch_size = 2560 }, { model_size = "2.9B", wkv_mode = "fp32io16", batch_size = 2560 },
-  { model_size = "7.2B", wkv_mode = "fp16", batch_size = 2560 }, { model_size = "7.2B", wkv_mode = "fp32io16", batch_size = 1280 },
-  { model_size = "13.3B", wkv_mode = "fp16", batch_size = 1280 }, { model_size = "13.3B", wkv_mode = "fp32io16", batch_size = 640 }]
