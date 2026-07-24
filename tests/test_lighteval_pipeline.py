@@ -33,7 +33,7 @@ def test_pipeline_receives_tasks_precision_candidate_and_remote_output(monkeypat
     captured = {}
     for name in ("EvaluationTracker", "PipelineParameters", "RWKVVLLMModelConfig"): monkeypatch.setattr(evaluate, name, lambda **kw: kw)
     monkeypatch.setattr(evaluate, "Pipeline", lambda **kw: captured.update(kw) or kw); evaluate.build_pipeline()
-    assert captured["tasks"] == evaluate.TASKS and captured["pipeline_parameters"]["launcher_type"] is ParallelismManager.VLLM
+    assert captured["tasks"] == evaluate.TASKS and captured["pipeline_parameters"]["launcher_type"] is ParallelismManager.VLLM and captured["pipeline_parameters"]["dataset_loading_processes"] == 8
     assert captured["model_config"]["max_num_seqs"] in evaluate.CONCURRENCY_CANDIDATES and captured["model_config"]["override_chat_template"] is True
     assert captured["model_config"]["model_name"] == Path(evaluate.MODEL_PATH).as_uri() and (captured["model_config"]["cache_dir"], captured["model_config"]["wkv_mode"]) == (str(evaluate.CACHE_DIR), evaluate.WKV_MODE)
     monkeypatch.delenv("LIGHTEVAL_OUTPUT_ROOT", raising=False); monkeypatch.setenv("REMOTE_RUN_LOG_DIR", str(tmp_path / "runs"))
