@@ -22,7 +22,7 @@ def artifacts(limit=3):
     return {"config_general": {"model_config": {"generation_parameters": {"max_new_tokens": limit}}}, "config_tasks": {"gsm8k|0": {"generation_size": 2}}, "results": {"gsm8k|0": {"exact_match": 0.5}}}, [{"doc": {"id": "0", "query": "1+1?", "task_name": "gsm8k|0"}, "model_response": {"text": ["2", "bad\nUser:"], "output_tokens": [[1, 2, 3], [4, 5]]}, "metric": {"exact_match": 1.0}}]
 def test_layout_registry_passthrough_and_generation_contract():
     component = ROOT / "src/eval/lighteval"; assert list(component.glob("*.py")) == [component / "evaluate.py"] and not (component / "pyproject.toml").exists()
-    recommendations = tomllib.loads((ROOT / "configs/lighteval-pro6000.toml").read_text())["recommendation"]; assert {size: {mode: entry["LIGHTEVAL_TARGET_CONCURRENCY"] for mode, entry in modes.items()} for size, modes in recommendations.items()} == {"1.5B": {"fp16": 2560, "fp32io16": 2560}, "2.9B": {"fp16": 2560, "fp32io16": 2560}, "7.2B": {"fp16": 2560, "fp32io16": 1280}, "13.3B": {"fp16": 1280, "fp32io16": 640}} and all(entry["LIGHTEVAL_MAX_MODEL_LENGTH"] == 8192 and entry["VLLM_RWKV7_WKV_MODE"] == mode for modes in recommendations.values() for mode, entry in modes.items())
+    recommendations = tomllib.loads((ROOT / "configs/lighteval-pro6000.toml").read_text())["recommendation"]; assert {size: {mode: entry["LIGHTEVAL_TARGET_CONCURRENCY"] for mode, entry in modes.items()} for size, modes in recommendations.items()} == {"1.5B": {"fp16": 2560, "fp32io16": 2560}, "2.9B": {"fp16": 2560, "fp32io16": 2560}, "7.2B": {"fp16": 2560, "fp32io16": 1280}, "13.3B": {"fp16": 1280, "fp32io16": 640}} and all("LIGHTEVAL_MAX_MODEL_LENGTH" not in entry and entry["VLLM_RWKV7_WKV_MODE"] == mode for modes in recommendations.values() for mode, entry in modes.items())
     assert all(text not in (component / "evaluate.py").read_text() for text in ("Question:", "Answer:", "DAPO")) and 'kwargs.setdefault("disable_log_stats", "VLLM_LOG_STATS_INTERVAL" not in os.environ)' in (ROOT / "src/infer/vllm-rwkv/vllm/entrypoints/llm.py").read_text()
     assert Registry(tasks=evaluate.TASKS).load_tasks() and evaluate.DetectorFactory.seed == 0
     with pytest.raises(ValueError): Registry(tasks="definitely_unknown_task|0").load_tasks()
@@ -52,7 +52,8 @@ def test_strict_categorical_postprocessing_uses_only_closed_suffixes():
     assert [apply_metric([ModelResponse(text_post_processed=[value])], [doc], task.metrics)[0]["em"] for value in (" B", "")] == [1, 0]
 def test_official_vllm_init_bridge_cache_and_sampling(tmp_path, monkeypatch):
     assert is_package_available("vllm") and not getattr(VLLMModel, "is_dummy", False) and resolve_tokenizer_args(evaluate.MODEL_PATH)[0] == "rwkv" and resolve_tokenizer_args("facebook/opt-125m")[0] == "hf"
-    checkpoint = tmp_path / Path(evaluate.MODEL_PATH).name; checkpoint.touch(); monkeypatch.chdir(tmp_path)
+    checkpoint = tmp_path / Path(evaluate.MODEL_PATH).name; checkpoint.touch(); invalid = tmp_path / "rwkv7.pth"; invalid.touch(); monkeypatch.chdir(tmp_path)
+    assert evaluate.build_rwkv7_config_from_pth(checkpoint).max_position_embeddings == evaluate.MAX_MODEL_LENGTH == 10240; pytest.raises(ValueError, evaluate.build_rwkv7_config_from_pth, invalid)
     cache_a, cache_b = evaluate._cache_dir("one"), evaluate._cache_dir("two"); captured = {}
     engine_globals = EngineArgs.__post_init__.__globals__; monkeypatch.setattr(engine_globals["huggingface_hub"].constants, "HF_HUB_OFFLINE", True); monkeypatch.setitem(engine_globals, "get_model_path", lambda *_: pytest.fail("RWKV file URI reached HF resolution"))
     monkeypatch.setattr(VLLMModel, "_create_auto_model", lambda self, config: captured.update(engine=EngineArgs(

@@ -10,6 +10,7 @@ from lighteval.metrics.metrics_sample import ExactMatches
 from lighteval.models.model_input import GenerationParameters
 from lighteval.models.vllm.vllm_model import VLLMModelConfig
 from lighteval.pipeline import ParallelismManager, Pipeline, PipelineParameters
+from vllm.transformers_utils.configs.rwkv7 import build_rwkv7_config_from_pth
 DetectorFactory.seed = 0
 # Edit these ordinary constants for an evaluation. Every run gets a unique directory.
 MODEL_PATH = os.environ.get("LIGHTEVAL_MODEL_PATH", "/home/caizus/Weights/RWKV/rwkv7/pth/rwkv7-g1h-7.2b-20260710-ctx10240.pth")
@@ -21,13 +22,11 @@ def _cache_dir(run_id=RUN_ID) -> Path: return Path(".tmp/lighteval-cache") / run
 OUTPUT_DIR, CACHE_DIR = _output_dir(), _cache_dir()
 MAX_SAMPLES = int(value) if (value := os.environ.get("LIGHTEVAL_MAX_SAMPLES")) else None
 MAX_NEW_TOKENS = int(os.environ.get("LIGHTEVAL_MAX_NEW_TOKENS", "8192"))
-MAX_MODEL_LENGTH = int(os.environ.get("LIGHTEVAL_MAX_MODEL_LENGTH", "10240"))
+MAX_MODEL_LENGTH = build_rwkv7_config_from_pth(MODEL_PATH).max_position_embeddings
 WKV_MODE = os.environ.get("VLLM_RWKV7_WKV_MODE", "fp16")
 os.environ["VLLM_USE_RAPID_SAMPLER"] = "1"
 CONCURRENCY_CANDIDATES = (40, 80, 160, 320, 640, 1280, 2560)
 TARGET_CONCURRENCY = int(os.environ.get("LIGHTEVAL_TARGET_CONCURRENCY", "40"))
-# Fill only after the seven-candidate Pro 6000 scans have produced evidence.
-SUPPORTED_WKV_MODES = ("fp16", "fp32io16")
 GENERATION_PARAMETERS = {
     "temperature": 0.96, "top_p": 0.76, "top_k": 32,
     "presence_penalty": 1.0, "frequency_penalty": 0.1, "penalty_decay": 0.988,
@@ -66,7 +65,7 @@ class RWKVPipeline(Pipeline):
                 if len(labels) <= 1 or labels != list("ABCDEFGHIJKLMNOPQRSTUVWXYZ"[:len(labels)]) or not metrics or not all(type(metric.sample_level_fn) is ExactMatches and metric.sample_level_fn.normalize_pred is None and metric.sample_level_fn.type_exact_match == "full" for metric in metrics): continue
                 response.text_post_processed = [_choice_answer(raw, response.output_tokens[i] if isinstance(response.output_tokens, list) and i < len(response.output_tokens) else None, choices) for i, raw in enumerate(response.text)]
 def build_pipeline() -> Pipeline:
-    if WKV_MODE not in SUPPORTED_WKV_MODES: raise ValueError("WKV_MODE must be fp16 or fp32io16")
+    if WKV_MODE not in ("fp16", "fp32io16"): raise ValueError("WKV_MODE must be fp16 or fp32io16")
     if TARGET_CONCURRENCY not in CONCURRENCY_CANDIDATES: raise ValueError("invalid concurrency candidate")
     os.environ["VLLM_RWKV7_WKV_MODE"] = WKV_MODE
     tracker = EvaluationTracker(output_dir=str(OUTPUT_DIR), save_details=True)
