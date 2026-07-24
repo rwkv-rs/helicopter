@@ -21,7 +21,7 @@ def _cache_dir(run_id=RUN_ID) -> Path: return Path(".tmp/lighteval-cache") / run
 OUTPUT_DIR, CACHE_DIR = _output_dir(), _cache_dir()
 MAX_SAMPLES = int(value) if (value := os.environ.get("LIGHTEVAL_MAX_SAMPLES")) else None
 MAX_NEW_TOKENS = int(os.environ.get("LIGHTEVAL_MAX_NEW_TOKENS", "8192"))
-MAX_MODEL_LENGTH = 10240
+MAX_MODEL_LENGTH = int(os.environ.get("LIGHTEVAL_MAX_MODEL_LENGTH", "10240"))
 WKV_MODE = os.environ.get("VLLM_RWKV7_WKV_MODE", "fp16")
 os.environ["VLLM_USE_RAPID_SAMPLER"] = "1"
 CONCURRENCY_CANDIDATES = (40, 80, 160, 320, 640, 1280, 2560)
