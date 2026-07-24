@@ -19,12 +19,10 @@ gemm_policy = "fp32-accumulation"
 launch_contract = "helicopter-eval-eager-v1"
 output_root = "src/eval/lighteval/results"
 cot_mode = "none"
-math_repair_strategy = "A"
 # GB10/g1h-7.2b capacity sweep: keep more requests in flight than the
 # max_num_seqs=512 server capacity. OpenAI's transport limit is 1000.
 max_concurrent_requests = 1000
 request_timeout_seconds = 3600
-allow_non_comparable = false
 
 [takeoff.grpo]
 project_name = "verl_rwkv_grpo"

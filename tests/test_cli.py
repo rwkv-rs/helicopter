@@ -51,7 +51,6 @@ def test_eval_cli_exposes_only_typed_canonical_run_contract() -> None:
         ]
     )
     assert args.task == "lighteval/math/gsm8k@0"
-    assert args.math_repair_strategy is None
     assert not hasattr(args, "model_args")
     assert not hasattr(args, "custom_tasks")
 

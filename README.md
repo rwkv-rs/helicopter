@@ -11,21 +11,22 @@ Helicopter 的评测组件位于 `src/eval/lighteval`，distribution 名称为
 src/eval/lighteval/
 ├── pyproject.toml
 ├── src/helicopter_lighteval/
-│   ├── evaluation.py       # 组合 LightEval Pipeline/Tracker
-│   ├── vllm_rwkv.py        # OpenAI-compatible terminal evidence adapter
+│   ├── evaluation.py       # OpenAI Chat Completions 与 LightEval native metric
 │   ├── scoreboard.py       # HTTP publication/retry
 │   └── datasets/
-│       ├── math.py          # 数学 A/B/C 与 math identity
-│       ├── knowledge.py     # knowledge identity；不复制 task
-│       ├── coding.py        # LiveCodeBench identity 与安全边界
-│       └── instruction_following.py # 单轮 IFEval/IFBench identity
+│       ├── benchmark.py     # BenchmarkInfo、BenchmarkName、Field 与公共准备逻辑
+│       ├── maths/           # 每个数学 Benchmark 独立拥有 get_query()
+│       ├── knowledge/       # MMLU、MMLU-Pro 与 GPQA
+│       ├── coding/          # LiveCodeBench 名称与安全边界
+│       └── instruction_following/ # IFEval 与 IFBench
 ├── tests/
 └── results/                # generated, Git ignored
 ```
 
-LightEval 是 dataset、prompt、chat messages、task registry、metric、样本生命周期和
-标准 results/details 的唯一 owner。Helicopter 不复制 snapshot、context、prompt
-template、generic model client、records/artifacts framework 或 synthetic benchmark。
+LightEval 是 dataset、task registry、reference 和 metric 的唯一 owner。Helicopter 从原始
+dataset row 生成统一 raw query；chat
+template 只由 vLLM-RWKV server 管理。Helicopter 不复制 snapshot、generic model client、
+records/artifacts framework 或 synthetic benchmark。
 `results/<run-id>` 与 `src/` 并列，不是 Python package。
 
 Scoreboard 的写入链路始终是：
@@ -69,18 +70,18 @@ task identity：
 - `lighteval/instruction-following/ifbench-test@0.1`
 - `lighteval/coding/livecodebench[-vN|-release-vN|-release-latest]@0`
 
-这些 alias 是按 family 划分的显式 allowlist；任意未列入的 registry 名称都会被拒绝，
-因此不能把 LiveCodeBench 伪装成 knowledge/math 来绕过 coding 隔离边界。alias 必须在
-pinned LightEval `Registry` 中存在并匹配 config version；dataset、
-PromptManager、task-native metric 和 `EvaluationTracker` 均由 LightEval 加载。不再传入
-本地 snapshot 或 snapshot manifest。示例：
+这些 Benchmark name 按 Field 进入显式 registry；任意未列入的名称都会被拒绝，
+因此不能把 LiveCodeBench 伪装成 knowledge/math 来绕过 coding 隔离边界。对应的
+`lighteval_task_name` 必须在 pinned LightEval `Registry` 中存在并匹配 config version；dataset、
+task-native metric 均由 LightEval 加载。不再传入本地 snapshot
+或 snapshot manifest。示例：
 
 `aime24`/`aime25` 使用 LightEval 的两个 native metric，但只把 signed `pass@k:*`
-作为 scoreboard primary；`avg@n:n=1` 保留在 LightEval native results/details。
+作为 scoreboard primary；`avg@n:n=1` 保留在 `terminal_evidence.json` 的 `native_metrics`。
 `ifeval`/`ifbench-test` 使用 grouped metric，scoreboard primary 固定为
 `prompt_level_strict_acc`。pinned config 没有正数 `generation_size` 时，评测端使用
 `32768`；显式 `--generation-limit` 优先。
-支持判断以当前 Pipeline 使用的 native GENERATIVE metric 为准；上游 config 中仅供
+支持判断以当前评估流程使用的 native GENERATIVE metric 为准；上游 config 中仅供
 Inspect 入口使用的可选 `scorer` 字段不会被本 adapter 当作 judge backend。
 
 ```bash
@@ -93,8 +94,7 @@ helicopter eval run rwkv-test lighteval/math/gsm8k@0 \
   --precision fp16-io-fp32-state \
   --gemm-policy fp32-accumulation \
   --launch-contract helicopter-eval-eager-v1 \
-  --cot-mode cot \
-  --math-repair-strategy A
+  --cot-mode cot
 ```
 
 本机 GB10 上对 `rwkv7-g1h-7.2b-20260710-ctx10240.pth` 的 eager-mode 容量扫描
@@ -103,35 +103,26 @@ helicopter eval run rwkv-test lighteval/math/gsm8k@0 \
 按吞吐平台选择，不继续为占用 unified memory 增大容量。GB10 驱动不提供独立 FB
 memory 数字，不能把 system unified-memory 使用量表述为显存占用率。
 
-CLI 只在 eval 子命令内 lazy import `helicopter_lighteval.evaluation`。服务端的
-`/v1/helicopter/attestation` 必须证明 served model、checkpoint、tokenizer/chat-template、
-server revision、WKV/precision/GEMM/launch contract 以及
-`openai-chat`、`output-token-ids`、`terminal-reason`、`prompt-evidence` capability；
-server revision 由当前 `src/infer/vllm-rwkv` submodule HEAD 派生，CLI/config 中的
-`server_revision` 只作为可选一致性断言，不能替代真实 source revision；
-official run 在生成前拒绝缺失或不匹配的 attestation。`--allow-non-comparable` 只能用于
-明确的 sanity 检查，不能产生 official leaderboard 成绩。
+CLI 只在 eval 子命令内 lazy import `helicopter_lighteval.evaluation`。评估端直接使用
+`openai.AsyncOpenAI` 请求部署好的 vLLM-RWKV `/v1/chat/completions`，没有单独的模型类、
+inferer manager 或 generation adapter。
 
-### 停止、截断和数学 A/B/C
+### 统一 prompt、停止与截断
 
-每个 completion 持续生成，直到 vLLM-RWKV 返回以下两种终止证据之一，或达到 task 的
-`generation_size`：
+每个 completion 持续生成，直到 vLLM-RWKV 返回以下两种原因之一：
 
 1. token `0`，或文本包含 `\nUser:`；记录为 `stop`；
 2. 生成 token 数达到上限；记录为 `length`，并计入整体 `truncation_rate`。
 
-`vllm_rwkv.py` 只保留并校验这些证据、prompt/output token IDs、usage 和 request ID，
-不重新拼接上下文，也不发送第二次生成请求。LightEval 的 prompt function 和
-`PromptManager` 产生 messages，chat template 由 vLLM-RWKV server 应用。
+所有 benchmark 都只发送一个 user message 到 `/v1/chat/completions`。数学与
+instruction-following task 使用 dataset 的原始问题；选择题只序列化题干和选项，不加入
+benchmark instruction、`Question:`、`Answer:`、输出格式要求或 CoT 指令。唯一 chat
+template 由 vLLM-RWKV server 应用。
 
-数学结果使用同一 LightEval task-native metric：
-
-- A：raw completion 直接交给 scorer；
-- B：有未闭合 `<think>` 时补 `</think>\nTherefore...`；
-- C：先执行 B，否则仅在截断 answer 时补 `\nTherefore...`。
-
-CoT 正常闭合时不会强插 `Therefore...`。raw/scored completion 和 repair action 都写入
-terminal evidence。
+评估端只读取 OpenAI response 的 `finish_reason`：`stop` 不截断，`length` 计为截断；
+其它值直接判为无效响应。它不读取 token IDs、`stop_reason`、usage 或 prompt text，
+不修补 completion、不重新拼接答案，也不发送第二次生成请求。raw completion 原样交给
+LightEval task-native metric（数学任务由其 `math_verify` 路径判分）。
 
 固定 LightEval 的 LiveCodeBench scorer 会在 evaluator 权限下执行 `exec`，不满足 coding
 隔离合同；因此 coding identity 虽然来自真实 upstream registry，当前仍在 provider import
@@ -146,9 +137,7 @@ Inspect/tool backend 和隔离合同的 change。
 
 ```text
 src/eval/lighteval/results/<run-id>/
-├── results/                  # LightEval native result files
-├── details/                  # LightEval native detail files
-├── terminal_evidence.json   # stop/truncation/raw/scored evidence
+├── terminal_evidence.json   # finish_reason/truncation/raw/scored evidence
 └── manifest.json             # identity/accounting/checksums/completed_at
 ```
 
@@ -172,13 +161,13 @@ helicopter eval publish \
 
 ## 验证
 
-评测组件测试覆盖固定 LightEval API smoke、OpenAI terminal evidence、stop/length 决策、
-数学 A/B/C、结果目录和 manifest checksum、严格 DTO projection、HTTP auth/idempotency、
-CLI lazy import 与 coding fail-closed。安装产物使用：
+评测组件测试覆盖固定 LightEval API smoke、统一 raw query、OpenAI terminal evidence、
+stop/length 决策、结果目录和 manifest checksum、严格 DTO projection、HTTP
+auth/idempotency、CLI lazy import 与 coding fail-closed。安装产物使用：
 
 ```bash
 scripts/verify_installed_wheels.sh
 ```
 
-Scoreboard server/client 与 vLLM-RWKV 产品代码保持原样；跨边界检查必须确认其路径没有
-被本组件 diff 修改。
+Scoreboard server/client 只投影 raw completion；vLLM-RWKV renderer 不识别或清洗任何
+benchmark-specific prompt。

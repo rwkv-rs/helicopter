@@ -11,7 +11,6 @@ from helicopter_lighteval.evaluation import (
     _scorer_revision,
     _terminal_payload,
 )
-from helicopter_lighteval.vllm_rwkv import AttestationDecision
 
 
 def test_max_samples_are_selection_not_dataset_rejection() -> None:
@@ -93,23 +92,23 @@ def test_scorer_revision_ignores_unexecuted_inspect_scorer() -> None:
     assert first == second
 
 
-def test_provider_mismatch_is_proxy_while_partial_verified_runs_are_sanity() -> None:
+def test_partial_runs_are_sanity_and_full_clean_runs_are_official() -> None:
     request = EvaluationRequest(
         model="model",
         task="lighteval/math/gsm8k@0",
         endpoint_url="http://server/v1",
         max_samples=1,
     )
+    assert _eligibility(request) == "sanity"
     assert (
         _eligibility(
-            request,
-            AttestationDecision(official=False, mismatches=("missing_attestation",)),
+            EvaluationRequest(
+                model="model",
+                task="lighteval/math/gsm8k@0",
+                endpoint_url="http://server/v1",
+            )
         )
-        == "proxy"
-    )
-    assert (
-        _eligibility(request, AttestationDecision(official=True, mismatches=()))
-        == "sanity"
+        == "official"
     )
 
 

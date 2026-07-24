@@ -1,0 +1,6 @@
+from .diamond import GPQA_DIAMOND_INFO
+from .extended import GPQA_EXTENDED_INFO
+from .main import GPQA_MAIN_INFO
+
+
+ALL_BENCHMARKS = (GPQA_DIAMOND_INFO, GPQA_MAIN_INFO, GPQA_EXTENDED_INFO)

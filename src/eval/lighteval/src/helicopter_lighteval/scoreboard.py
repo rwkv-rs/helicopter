@@ -317,7 +317,6 @@ def _publication_sample(sample: Any) -> dict[str, Any]:
         "status",
         "prompt",
         "raw_completion",
-        "scored_completion",
         "error_code",
         "error_message",
         "reference_answer",
@@ -326,24 +325,13 @@ def _publication_sample(sample: Any) -> dict[str, Any]:
     if any(field not in sample for field in required):
         raise ScoreboardPublicationError("sample evidence is missing a required field")
     generation_projection = {
-        "output_token_count": generation.get("output_token_count"),
         "finish_reason": generation.get("finish_reason"),
-        "stop_reason": generation.get("stop_reason"),
-        "terminal_reason": generation.get("terminal_reason"),
         "truncated": generation.get("truncated"),
         "generation_limit": generation.get("generation_limit"),
-        "request_id": generation.get("request_id"),
-        "usage": generation.get("usage"),
     }
     scoring_projection = {
         "scorer_revision": scoring.get("scorer_revision"),
-        "repair_strategy": scoring.get("repair_strategy"),
-        "repair_action": scoring.get("repair_action"),
     }
-    if generation_projection["usage"] is not None and not isinstance(
-        generation_projection["usage"], dict
-    ):
-        raise ScoreboardPublicationError("sample usage evidence is invalid")
     return {
         "sample_index": sample["sample_index"],
         "sample_id": sample["sample_id"],
@@ -351,7 +339,6 @@ def _publication_sample(sample: Any) -> dict[str, Any]:
         "status": "scored",
         "prompt": sample["prompt"],
         "raw_completion": sample["raw_completion"],
-        "scored_completion": sample["scored_completion"],
         "generation": generation_projection,
         "scoring": scoring_projection,
         "metrics": metrics,

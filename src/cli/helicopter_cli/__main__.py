@@ -95,12 +95,10 @@ def _add_eval(subparsers: Any) -> None:
     run.add_argument("--launch-contract")
     run.add_argument("--output-root", type=Path)
     run.add_argument("--cot-mode", choices=("none", "cot"))
-    run.add_argument("--math-repair-strategy", choices=("A", "B", "C"))
     run.add_argument("--max-concurrent-requests", type=int)
     run.add_argument("--request-timeout-seconds", type=float)
     run.add_argument("--max-samples", type=int)
     run.add_argument("--generation-limit", type=int)
-    run.add_argument("--allow-non-comparable", action="store_true", default=None)
     run.add_argument("--scoreboard-url")
     run.add_argument("--scoreboard-token-env", default="SCOREBOARD_TOKEN")
     run.add_argument("--endpoint-api-key-env", default="OPENAI_API_KEY")
@@ -186,12 +184,10 @@ def _run_evaluation(
             "launch_contract",
             "output_root",
             "cot_mode",
-            "math_repair_strategy",
             "max_concurrent_requests",
             "request_timeout_seconds",
             "max_samples",
             "generation_limit",
-            "allow_non_comparable",
             "scoreboard_url",
         )
     }
@@ -211,7 +207,6 @@ def _run_evaluation(
         gemm_policy=str(required("gemm_policy")),
         launch_contract=str(required("launch_contract")),
         cot_mode=str(resolved("cot_mode", "none")),
-        math_repair_strategy=str(resolved("math_repair_strategy", "A")),
         max_concurrent_requests=int(resolved("max_concurrent_requests", 16)),
         request_timeout_seconds=float(resolved("request_timeout_seconds", 3600.0)),
         generation_limit=resolved("generation_limit"),
@@ -219,7 +214,6 @@ def _run_evaluation(
         scoreboard_url=scoreboard_url,
         scoreboard_token=scoreboard_token,
         endpoint_api_key=endpoint_api_key,
-        allow_non_comparable=bool(resolved("allow_non_comparable", False)),
         config_digest=_evaluation_config_digest(config_values),
         product_revision=product_revision,
         product_dirty=product_dirty,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import inspect
 import json
@@ -13,13 +14,11 @@ from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
 
+from openai import AsyncOpenAI
+
+from .datasets import get_benchmark_info
+from .datasets.benchmark import Benchmark, BenchmarkInfo, Field
 from .datasets.coding import CODING_UNSUPPORTED_REASON
-from .datasets.coding import upstream_task_candidates as coding_task_candidates
-from .datasets.instruction_following import (
-    upstream_task_candidates as instruction_following_task_candidates,
-)
-from .datasets.knowledge import upstream_task_candidates as knowledge_task_candidates
-from .datasets.math import upstream_task_candidates as math_task_candidates
 
 
 LIGHTEVAL_REVISION = "64f4f5ae173626509fad6e477ca4ee56ebb26129"
@@ -54,18 +53,16 @@ class UnsupportedTaskError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
-class _TaskIdentity:
-    canonical: str
-    family: str
-    benchmark: str
-    version: str
-    upstream_name: str
+class _BenchmarkSelection:
+    canonical_task: str
+    info: BenchmarkInfo
+    task_version: str
 
     @property
-    def upstream_task(self) -> str:
+    def lighteval_task(self) -> str:
         # The public @version is the upstream task config version. The current
         # evaluator deliberately runs every supported task zero-shot.
-        return f"{self.upstream_name}|0"
+        return f"{self.info.lighteval_task_name}|0"
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,7 +82,6 @@ class EvaluationRequest:
     product_revision: str = ""
     product_dirty: bool = False
     cot_mode: str = "none"
-    math_repair_strategy: str = "A"
     max_concurrent_requests: int = 16
     request_timeout_seconds: float = 3600.0
     max_samples: int | None = None
@@ -94,7 +90,6 @@ class EvaluationRequest:
     scoreboard_url: str | None = None
     scoreboard_token: str | None = None
     endpoint_api_key: str | None = None
-    allow_non_comparable: bool = False
 
     def __post_init__(self) -> None:
         if (
@@ -105,8 +100,6 @@ class EvaluationRequest:
             raise ValueError("model, task, and endpoint_url are required")
         if self.cot_mode not in {"none", "cot"}:
             raise ValueError("cot_mode must be none or cot")
-        if self.math_repair_strategy not in {"A", "B", "C"}:
-            raise ValueError("math_repair_strategy must be A, B, or C")
         if (
             isinstance(self.max_concurrent_requests, bool)
             or not isinstance(self.max_concurrent_requests, int)
@@ -152,10 +145,10 @@ class EvaluationOutcome:
 
 
 def run_evaluation(request: EvaluationRequest) -> EvaluationOutcome:
-    """Run one official LightEval task and attach only product-specific evidence."""
+    """Generate through OpenAI chat completions and apply native LightEval metrics."""
 
     try:
-        task_identity = _task_identity(request.task)
+        selection = _select_benchmark(request.task)
     except UnsupportedTaskError as error:
         return EvaluationOutcome(
             run_id="unsupported",
@@ -163,24 +156,14 @@ def run_evaluation(request: EvaluationRequest) -> EvaluationOutcome:
             manifest_path=None,
             summary={"error": str(error)},
         )
-    canonical_task = task_identity.canonical
-    upstream_task = task_identity.upstream_task
-    if task_identity.family == "coding":
+    canonical_task = selection.canonical_task
+    if selection.info.field == Field.CODING:
         return EvaluationOutcome(
             run_id="unsupported",
             run_status="unsupported",
             manifest_path=None,
             summary={"error": CODING_UNSUPPORTED_REASON},
         )
-
-    from .vllm_rwkv import (
-        AttestationDecision,
-        ModelIdentity,
-        ProviderIdentity,
-        VllmRwkvModel,
-        attest,
-        fetch_attestation,
-    )
 
     run_id = uuid4().hex
     output_root = Path(request.output_root)
@@ -190,72 +173,28 @@ def run_evaluation(request: EvaluationRequest) -> EvaluationOutcome:
         raise ValueError("generated run id is unsafe")
     run_dir.mkdir(exist_ok=False)
 
-    expected_model = ModelIdentity(
-        served_name=request.model,
-        checkpoint_sha256=request.checkpoint_sha256,
-        tokenizer_revision=request.tokenizer_revision,
-        chat_template_revision=request.chat_template_revision,
-    )
-    expected_provider = ProviderIdentity(
-        server_revision=request.server_revision,
-        wkv_mode=request.wkv_mode,
-        precision=request.precision,
-        gemm_policy=request.gemm_policy,
-        launch_contract=request.launch_contract,
-    )
-    model: VllmRwkvModel | None = None
-    decision: AttestationDecision | None = None
+    benchmark = selection.info.create()
     try:
         _validate_identity_inputs(request)
-        actual_attestation = fetch_attestation(base_url=request.endpoint_url)
-        decision = attest(
-            expected_model=expected_model,
-            expected_provider=expected_provider,
-            expected_capabilities=(
-                "openai-chat",
-                "output-token-ids",
-                "terminal-reason",
-                "prompt-evidence",
-            ),
-            actual=actual_attestation,
-            allow_non_comparable=request.allow_non_comparable,
-        )
-        model = VllmRwkvModel(
-            model=request.model,
-            base_url=request.endpoint_url,
-            api_key=request.endpoint_api_key,
-            checkpoint_sha256=request.checkpoint_sha256,
-            tokenizer_revision=request.tokenizer_revision,
-            chat_template_revision=request.chat_template_revision,
-            server_revision=request.server_revision,
-            wkv_mode=request.wkv_mode,
-            precision=request.precision,
-            gemm_policy=request.gemm_policy,
-            launch_contract=request.launch_contract,
-            cot_mode=request.cot_mode,
-            math_repair_strategy=request.math_repair_strategy,
-            math_task=task_identity.family == "math",
-            max_concurrent_requests=request.max_concurrent_requests,
-            timeout_seconds=request.request_timeout_seconds,
-        )
-        # Keep the endpoint evidence on the adapter as the source of truth for
-        # provider identity, while allowing non-comparable runs to be inspected.
-        model.attestation = actual_attestation
-        pipeline, task = _build_pipeline(
+        task, documents = _load_task(
             request=request,
-            upstream_task=upstream_task,
-            run_dir=run_dir,
-            model=model,
+            lighteval_task=selection.lighteval_task,
+            benchmark=benchmark,
         )
         if request.generation_limit is not None:
             _override_generation_size(task, request.generation_limit)
-        pipeline.evaluate()
-        pipeline.save_and_push_results()
-        result_dict = pipeline.get_results()
+        responses, finish_reasons = asyncio.run(
+            _generate(request=request, documents=documents)
+        )
+        sample_metrics, result_dict = _score(
+            task=task, documents=documents, responses=responses
+        )
         samples = _collect_samples(
-            pipeline=pipeline,
-            model=model,
             task=task,
+            documents=documents,
+            responses=responses,
+            finish_reasons=finish_reasons,
+            sample_metrics=sample_metrics,
             canonical_task=canonical_task,
             request=request,
         )
@@ -276,8 +215,7 @@ def run_evaluation(request: EvaluationRequest) -> EvaluationOutcome:
             request=request,
             canonical_task=canonical_task,
             task=task,
-            decision=decision,
-            model=model,
+            benchmark=benchmark,
             sample_count=len(samples),
             result_dict=result_dict,
         )
@@ -335,93 +273,137 @@ def run_evaluation(request: EvaluationRequest) -> EvaluationOutcome:
             manifest_path=None,
             summary={"error": str(error)},
         )
-    finally:
-        if model is not None:
-            model.cleanup()
 
 
-def _build_pipeline(
-    *, request: EvaluationRequest, upstream_task: str, run_dir: Path, model: Any
+def _load_task(
+    *,
+    request: EvaluationRequest,
+    lighteval_task: str,
+    benchmark: Benchmark,
 ):
-    from lighteval.logging.evaluation_tracker import EvaluationTracker
-    from lighteval.pipeline import ParallelismManager, Pipeline, PipelineParameters
+    from lighteval.tasks.lighteval_task import LightevalTask
+    from lighteval.tasks.registry import Registry
 
-    tracker = EvaluationTracker(
-        output_dir=str(run_dir),
-        results_path_template="{output_dir}/results",
-        save_details=True,
-    )
-    parameters = PipelineParameters(
-        launcher_type=ParallelismManager.CUSTOM,
-        max_samples=request.max_samples,
-        remove_reasoning_tags=False,
-        dataset_loading_processes=1,
-        num_fewshot_seeds=1,
-    )
-    pipeline = Pipeline(
-        tasks=upstream_task,
-        pipeline_parameters=parameters,
-        evaluation_tracker=tracker,
-        model=model,
-    )
-    task_values = list(pipeline.tasks_dict.values())
+    tasks = Registry(tasks=lighteval_task, load_multilingual=False).load_tasks()
+    LightevalTask.load_datasets(tasks, dataset_loading_processes=1)
+    task_values = list(tasks.values())
     if len(task_values) != 1:
-        raise ValueError(
-            "one canonical task must resolve to exactly one LightEval task"
-        )
+        raise ValueError("one benchmark must resolve to one LightEval task")
     task = task_values[0]
+    documents = task.get_docs(request.max_samples)
+    benchmark.prepare_documents(task=task, documents=documents)
     _ensure_generation_size(task)
-    return pipeline, task
+    return task, documents
+
+
+async def _generate(*, request: EvaluationRequest, documents: list[Any]):
+    from lighteval.models.model_output import ModelResponse
+
+    semaphore = asyncio.Semaphore(request.max_concurrent_requests)
+    generation_prompt = "open_think" if request.cot_mode == "cot" else "fake_think"
+    async with AsyncOpenAI(
+        base_url=request.endpoint_url.rstrip("/"),
+        api_key=request.endpoint_api_key or "EMPTY",
+        timeout=request.request_timeout_seconds,
+        max_retries=0,
+    ) as client:
+
+        async def generate(document: Any):
+            async with semaphore:
+                response = await client.chat.completions.create(
+                    model=request.model,
+                    messages=[{"role": "user", "content": document.query}],
+                    max_tokens=document.generation_size,
+                    temperature=0.0,
+                    stop=["\nUser:"],
+                    extra_body={
+                        "stop_token_ids": [0],
+                        "chat_template_kwargs": {
+                            "rwkv_generation_prompt": generation_prompt
+                        },
+                    },
+                )
+            if len(response.choices) != 1:
+                raise ValueError("chat completion must return one choice")
+            choice = response.choices[0]
+            if choice.finish_reason not in {"stop", "length"}:
+                raise ValueError(f"unsupported finish_reason: {choice.finish_reason}")
+            if not isinstance(choice.message.content, str):
+                raise ValueError("chat completion content must be text")
+            return (
+                ModelResponse(
+                    input=[{"role": "user", "content": document.query}],
+                    text=[choice.message.content],
+                ),
+                choice.finish_reason,
+            )
+
+        generated = await asyncio.gather(
+            *(generate(document) for document in documents)
+        )
+    return [item[0] for item in generated], [item[1] for item in generated]
+
+
+def _score(*, task: Any, documents: list[Any], responses: list[Any]):
+    from lighteval.logging.info_loggers import MetricsLogger
+    from lighteval.metrics import apply_metric
+
+    sample_metrics = apply_metric(
+        docs=documents,
+        responses=responses,
+        metrics=task.metrics,
+    )
+    metrics_logger = MetricsLogger()
+    for metrics in sample_metrics:
+        metrics_logger.log(task.full_name, metrics)
+    metrics_logger.aggregate({task.full_name: task})
+    return sample_metrics, {
+        "results": {
+            task.full_name: dict(metrics_logger.metric_aggregated[task.full_name])
+        }
+    }
 
 
 def _collect_samples(
     *,
-    pipeline: Any,
-    model: Any,
     task: Any,
+    documents: list[Any],
+    responses: list[Any],
+    finish_reasons: list[str],
+    sample_metrics: list[dict[str, Any]],
     canonical_task: str,
     request: EvaluationRequest,
 ) -> list[dict[str, Any]]:
-    details = pipeline.get_details()
     samples: list[dict[str, Any]] = []
-    ordinal = 0
-    task_details = details.get(task.full_name, [])
-    for detail in task_details:
-        key = (task.full_name, str(detail.doc.id))
-        candidates = model.evidence.get(key, [])
-        if not candidates:
-            raise ValueError(f"terminal evidence is missing for {key}")
-        evidence = candidates.pop(0)
+    for ordinal, (document, response, finish_reason, metrics) in enumerate(
+        zip(documents, responses, finish_reasons, sample_metrics, strict=True)
+    ):
         reference = None
-        if detail.doc.choices:
+        if document.choices:
             try:
-                reference = detail.doc.choices[detail.doc.gold_index]
+                reference = document.choices[document.gold_index]
             except (IndexError, TypeError):
-                reference = detail.doc.choices[0]
+                reference = document.choices[0]
+        completion = response.text[0]
         samples.append(
             {
                 "sample_index": ordinal,
-                "sample_id": f"{task.full_name}:{detail.doc.id}",
+                "sample_id": f"{task.full_name}:{document.id}",
                 "attempt": 1,
                 "status": "scored",
-                "prompt": evidence.prompt_text,
-                "raw_completion": evidence.raw_completion,
-                "scored_completion": evidence.scored_completion,
+                "prompt": document.query,
+                "raw_completion": completion,
                 "generation": {
-                    **evidence.to_dict(),
-                    "output_token_count": evidence.output_token_count,
-                    "terminal_reason": evidence.terminal_reason.value,
-                    "request_id": evidence.request_id,
-                    "usage": asdict(evidence.usage),
+                    "finish_reason": finish_reason,
+                    "truncated": finish_reason == "length",
+                    "generation_limit": document.generation_size,
                 },
                 "scoring": {
                     "scorer_revision": _scorer_revision(task),
-                    "repair_strategy": evidence.repair_strategy,
-                    "repair_action": evidence.repair_action,
                 },
                 "metrics": {
                     str(key): float(value)
-                    for key, value in detail.metric.items()
+                    for key, value in metrics.items()
                     if _is_number(value)
                 },
                 "error_code": None,
@@ -438,7 +420,6 @@ def _collect_samples(
                 },
             }
         )
-        ordinal += 1
     return samples
 
 
@@ -469,13 +450,10 @@ def _build_identity_and_accounting(
     request: EvaluationRequest,
     canonical_task: str,
     task: Any,
-    decision: Any,
-    model: Any,
+    benchmark: Benchmark,
     sample_count: int,
     result_dict: Mapping[str, Any],
 ):
-    from .vllm_rwkv import digest_source
-
     fingerprint = _dataset_fingerprint(task)
     if fingerprint is None:
         raise ValueError("LightEval dataset did not expose a stable fingerprint")
@@ -490,15 +468,12 @@ def _build_identity_and_accounting(
     aggregate = _result_metrics_for_task(task=task, result_dict=result_dict)
     metric_name = _primary_metric_name(task, aggregate=aggregate)
     task_version = _canonical_version(canonical_task)
-    actual_attestation = model.attestation
     provider = {
-        **asdict(model.provider_identity),
-        "attestation_digest": _digest(actual_attestation.to_dict())
-        if actual_attestation is not None
-        else _digest({"missing": True}),
-        "attestation_verified": bool(decision.official),
-        "attestation_present": actual_attestation is not None,
-        "attestation_mismatches": list(decision.mismatches),
+        "server_revision": request.server_revision,
+        "wkv_mode": request.wkv_mode,
+        "precision": request.precision,
+        "gemm_policy": request.gemm_policy,
+        "launch_contract": request.launch_contract,
     }
     identity = {
         "task": {
@@ -507,13 +482,10 @@ def _build_identity_and_accounting(
             "version": str(task_version),
             "split": ",".join(task.config.evaluation_splits),
             "fewshot": int(task.config.num_fewshots),
-            "prompt_revision": digest_source(task.config.prompt_function),
+            "prompt_revision": benchmark.query_revision(),
             "scorer_revision": _scorer_revision(task),
             "generation_contract": "helicopter-lighteval-openai-v1",
             "cot_mode": request.cot_mode,
-            "repair_strategy": request.math_repair_strategy
-            if _is_math_task(canonical_task)
-            else "not-applicable",
             "dataset_digest": dataset_digest,
             "primary_metric": metric_name,
             "metrics": [
@@ -526,15 +498,20 @@ def _build_identity_and_accounting(
                 }
             ],
         },
-        "model": asdict(model.model_identity),
+        "model": {
+            "served_name": request.model,
+            "checkpoint_sha256": request.checkpoint_sha256,
+            "tokenizer_revision": request.tokenizer_revision,
+            "chat_template_revision": request.chat_template_revision,
+        },
         "provider": provider,
         "evaluator": {
             "product_revision": request.product_revision,
             "dirty": request.product_dirty,
         },
         "config_digest": request.config_digest or _digest(asdict(request)),
-        "eligibility": _eligibility(request, decision),
-        "comparable": bool(decision.official),
+        "eligibility": _eligibility(request),
+        "comparable": True,
     }
     accounting = _accounting(task, sample_count)
     return identity, accounting
@@ -612,9 +589,7 @@ def _validate_identity_inputs(request: EvaluationRequest) -> None:
         raise ValueError("product_revision must be a lowercase Git commit")
 
 
-def _eligibility(request: EvaluationRequest, decision: Any) -> str:
-    if not decision.official:
-        return "proxy"
+def _eligibility(request: EvaluationRequest) -> str:
     if (
         request.product_dirty
         or request.max_samples is not None
@@ -670,7 +645,7 @@ def _write_json(path: Path, payload: Any) -> None:
     )
 
 
-def _task_identity(task: str) -> _TaskIdentity:
+def _select_benchmark(task: str) -> _BenchmarkSelection:
     match = _CANONICAL_TASK_RE.fullmatch(task)
     if match is None:
         raise ValueError(
@@ -678,52 +653,39 @@ def _task_identity(task: str) -> _TaskIdentity:
         )
 
     family = match.group("family")
-    benchmark = match.group("benchmark")
+    benchmark_name = match.group("benchmark")
     version = match.group("version")
     if family in {"function-calling", "agent"}:
         raise UnsupportedTaskError(
             f"LightEval revision {LIGHTEVAL_REVISION} has no {family} benchmark task"
         )
 
-    resolvers = {
-        "math": math_task_candidates,
-        "knowledge": knowledge_task_candidates,
-        "coding": coding_task_candidates,
-        "instruction-following": instruction_following_task_candidates,
-    }
-    resolver = resolvers.get(family)
-    if resolver is None:
+    if family not in {"math", "knowledge", "coding", "instruction-following"}:
         raise UnsupportedTaskError(f"unsupported LightEval task family: {family}")
 
-    candidates = resolver(benchmark)
+    info = get_benchmark_info(family, benchmark_name)
+    if info is None:
+        raise UnsupportedTaskError(f"unsupported LightEval benchmark: {benchmark_name}")
     configs = _light_eval_task_configs()
-    registered = [
-        configs[candidate] for candidate in candidates if candidate in configs
-    ]
-    if not registered:
+    config = configs.get(info.lighteval_task_name)
+    if config is None:
         raise UnsupportedTaskError(
             f"task {task} is not registered by pinned LightEval revision {LIGHTEVAL_REVISION}"
         )
 
-    version_matches = [
-        config for config in registered if str(config.version) == version
-    ]
-    if not version_matches:
-        versions = sorted({str(config.version) for config in registered})
+    if str(config.version) != version:
         raise UnsupportedTaskError(
-            f"task {task} has no matching LightEval config version; available versions: {versions}"
+            f"task {task} has no matching LightEval config version; "
+            f"available version: {config.version}"
         )
-    config = version_matches[0]
     if family != "coding" and not _supports_generation_only(config):
         raise UnsupportedTaskError(
             f"task {task} requires an unsupported metric or generation backend"
         )
-    return _TaskIdentity(
-        canonical=task,
-        family=family,
-        benchmark=benchmark,
-        version=version,
-        upstream_name=str(config.name),
+    return _BenchmarkSelection(
+        canonical_task=task,
+        info=info,
+        task_version=version,
     )
 
 
@@ -803,8 +765,7 @@ def _override_generation_size(task: Any, limit: int) -> None:
 def _set_generation_size(task: Any, limit: int) -> None:
     task.generation_size = limit
     task.config.generation_size = limit
-    # Existing documents are created during Pipeline initialization.  Updating
-    # the task before evaluate also updates the request source for generated docs.
+    # get_docs() caches the generated documents on the task.
     docs = getattr(task, "_docs", None)
     if docs is not None:
         for doc in docs:
@@ -904,11 +865,6 @@ def _stable_identity_value(value: Any) -> Any:
             "state": _stable_identity_value(state),
         }
     return {"type": f"{value.__class__.__module__}.{value.__class__.__qualname__}"}
-
-
-def _is_math_task(task: str) -> bool:
-    match = _CANONICAL_TASK_RE.fullmatch(task)
-    return bool(match and match.group("family") == "math")
 
 
 def _is_number(value: Any) -> bool:

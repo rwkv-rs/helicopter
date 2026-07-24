@@ -23,7 +23,6 @@ def _identity() -> dict:
             "scorer_revision": "s" * 64,
             "generation_contract": "helicopter-lighteval-openai-v1",
             "cot_mode": "none",
-            "repair_strategy": "A",
             "dataset_digest": "d" * 64,
             "primary_metric": "extractive_match",
             "metrics": [
@@ -48,10 +47,6 @@ def _identity() -> dict:
             "precision": "fp16-io-fp32-state",
             "gemm_policy": "fp32-accumulation",
             "launch_contract": "helicopter-eval-v1",
-            "attestation_digest": "a" * 64,
-            "attestation_verified": True,
-            "attestation_present": True,
-            "attestation_mismatches": [],
         },
         "evaluator": {"product_revision": "e" * 40, "dirty": False},
         "config_digest": "f" * 64,
@@ -63,7 +58,6 @@ def _identity() -> dict:
 def _write_run(tmp_path):
     run_dir = tmp_path / "run-1"
     run_dir.mkdir()
-    usage = {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}
     sample = {
         "sample_index": 0,
         "sample_id": "gsm8k|0:0",
@@ -71,24 +65,13 @@ def _write_run(tmp_path):
         "status": "scored",
         "prompt": "Question",
         "raw_completion": "answer",
-        "scored_completion": "answer",
         "generation": {
-            "output_token_count": 2,
-            "output_token_ids": [4, 0],
-            "prompt_token_ids": [1],
-            "prompt_text": "Question",
             "finish_reason": "stop",
-            "stop_reason": 0,
-            "terminal_reason": "stop",
             "truncated": False,
             "generation_limit": 4,
-            "request_id": "req",
-            "usage": usage,
         },
         "scoring": {
             "scorer_revision": "s" * 64,
-            "repair_strategy": "A",
-            "repair_action": "none",
         },
         "metrics": {"extractive_match": 1.0},
         "error_code": None,

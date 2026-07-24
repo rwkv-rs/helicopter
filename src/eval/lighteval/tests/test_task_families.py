@@ -11,12 +11,12 @@ from helicopter_lighteval.evaluation import (
     _override_generation_size,
     _primary_metric_name,
     UnsupportedTaskError,
-    _task_identity,
+    _select_benchmark,
 )
 
 
 @pytest.mark.parametrize(
-    ("canonical", "upstream"),
+    ("canonical", "lighteval_task"),
     [
         ("lighteval/knowledge/mmlu-abstract-algebra@0", "mmlu:abstract_algebra|0"),
         ("lighteval/knowledge/mmlu-pro@0", "mmlu_pro|0"),
@@ -25,12 +25,12 @@ from helicopter_lighteval.evaluation import (
         ("lighteval/knowledge/gpqa-extended@0", "gpqa:extended|0"),
     ],
 )
-def test_generation_only_knowledge_aliases_resolve_to_pinned_upstream(
-    canonical: str, upstream: str
+def test_generation_only_knowledge_names_select_pinned_lighteval_tasks(
+    canonical: str, lighteval_task: str
 ) -> None:
-    identity = _task_identity(canonical)
-    assert identity.upstream_task == upstream
-    assert identity.family == "knowledge"
+    selection = _select_benchmark(canonical)
+    assert selection.lighteval_task == lighteval_task
+    assert selection.info.field.value == "knowledge"
 
 
 def test_all_pinned_mmlu_subjects_resolve_through_knowledge_family() -> None:
@@ -41,8 +41,8 @@ def test_all_pinned_mmlu_subjects_resolve_through_knowledge_family() -> None:
     assert len(subjects) == 57
     for subject in subjects:
         canonical = f"lighteval/knowledge/mmlu-{subject.replace('_', '-')}@0"
-        identity = _task_identity(canonical)
-        assert identity.upstream_task == f"mmlu:{subject}|0"
+        selection = _select_benchmark(canonical)
+        assert selection.lighteval_task == f"mmlu:{subject}|0"
 
 
 @pytest.mark.parametrize(
@@ -57,7 +57,7 @@ def test_registered_but_unsupported_or_unknown_knowledge_tasks_fail_closed(
     canonical: str,
 ) -> None:
     with pytest.raises(UnsupportedTaskError):
-        _task_identity(canonical)
+        _select_benchmark(canonical)
 
 
 @pytest.mark.parametrize(
@@ -71,9 +71,11 @@ def test_registered_but_unsupported_or_unknown_knowledge_tasks_fail_closed(
         "lighteval/math/lcb:codegeneration@0",
     ],
 )
-def test_family_aliases_cannot_cross_coding_or_judge_boundaries(canonical: str) -> None:
+def test_benchmark_names_cannot_cross_coding_or_judge_boundaries(
+    canonical: str,
+) -> None:
     with pytest.raises(UnsupportedTaskError):
-        _task_identity(canonical)
+        _select_benchmark(canonical)
 
 
 def test_supported_knowledge_metrics_are_signed_binary_metrics() -> None:
@@ -91,7 +93,7 @@ def test_supported_knowledge_metrics_are_signed_binary_metrics() -> None:
 
 
 @pytest.mark.parametrize(
-    ("canonical", "upstream"),
+    ("canonical", "lighteval_task"),
     [
         ("lighteval/math/aime24@2", "aime24|0"),
         ("lighteval/math/aime25@2", "aime25|0"),
@@ -103,33 +105,33 @@ def test_supported_knowledge_metrics_are_signed_binary_metrics() -> None:
         ),
     ],
 )
-def test_low_cost_math_aliases_resolve_to_pinned_upstream(
-    canonical: str, upstream: str
+def test_low_cost_maths_names_select_pinned_lighteval_tasks(
+    canonical: str, lighteval_task: str
 ) -> None:
-    identity = _task_identity(canonical)
-    assert identity.upstream_task == upstream
-    assert identity.family == "math"
+    selection = _select_benchmark(canonical)
+    assert selection.lighteval_task == lighteval_task
+    assert selection.info.field.value == "maths"
 
 
 @pytest.mark.parametrize(
-    ("canonical", "upstream"),
+    ("canonical", "lighteval_task"),
     [
         ("lighteval/instruction-following/ifeval@0.1", "ifeval|0"),
         ("lighteval/instruction-following/ifbench-test@0.1", "ifbench_test|0"),
     ],
 )
-def test_single_turn_instruction_aliases_resolve_to_pinned_upstream(
-    canonical: str, upstream: str
+def test_single_turn_instruction_names_select_pinned_lighteval_tasks(
+    canonical: str, lighteval_task: str
 ) -> None:
-    identity = _task_identity(canonical)
-    assert identity.upstream_task == upstream
-    assert identity.version == "0.1"
-    assert identity.family == "instruction-following"
+    selection = _select_benchmark(canonical)
+    assert selection.lighteval_task == lighteval_task
+    assert selection.task_version == "0.1"
+    assert selection.info.field.value == "instruction_following"
 
 
-def test_multiturn_instruction_alias_is_not_fabricated() -> None:
+def test_multiturn_instruction_benchmark_is_not_fabricated() -> None:
     with pytest.raises(UnsupportedTaskError):
-        _task_identity("lighteval/instruction-following/ifbench-multiturn@0.1")
+        _select_benchmark("lighteval/instruction-following/ifbench-multiturn@0.1")
 
 
 def test_low_cost_tasks_have_one_signed_primary_metric() -> None:
@@ -170,7 +172,7 @@ def test_missing_generation_size_gets_a_stable_default() -> None:
 
 
 @pytest.mark.parametrize(
-    ("canonical", "upstream"),
+    ("canonical", "lighteval_task"),
     [
         ("lighteval/coding/livecodebench@0", "lcb:codegeneration|0"),
         ("lighteval/coding/livecodebench-v6@0", "lcb:codegeneration_v6|0"),
@@ -180,15 +182,15 @@ def test_missing_generation_size_gets_a_stable_default() -> None:
         ),
     ],
 )
-def test_livecodebench_aliases_resolve_without_enabling_execution(
-    canonical: str, upstream: str
+def test_livecodebench_names_select_tasks_without_enabling_execution(
+    canonical: str, lighteval_task: str
 ) -> None:
-    identity = _task_identity(canonical)
-    assert identity.upstream_task == upstream
-    assert identity.family == "coding"
+    selection = _select_benchmark(canonical)
+    assert selection.lighteval_task == lighteval_task
+    assert selection.info.field.value == "coding"
 
 
 @pytest.mark.parametrize("family", ["function-calling", "agent"])
 def test_absent_function_and_agent_families_are_not_fabricated(family: str) -> None:
     with pytest.raises(UnsupportedTaskError, match="has no"):
-        _task_identity(f"lighteval/{family}/default@0")
+        _select_benchmark(f"lighteval/{family}/default@0")
