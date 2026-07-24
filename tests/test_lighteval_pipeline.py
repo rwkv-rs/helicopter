@@ -27,7 +27,7 @@ def test_layout_registry_passthrough_and_generation_contract():
     with pytest.raises(ValueError): Registry(tasks="definitely_unknown_task|0").load_tasks()
     params = evaluate._generation_parameters(); backend = params.to_vllm_dict()
     keys = ("temperature", "top_p", "top_k", "presence_penalty", "repetition_penalty", "frequency_penalty", "penalty_decay", "max_tokens")
-    assert tuple(backend[key] for key in keys) == (0.96, 0.76, 32, 1.0, 0.1, 0.0, 0.988, 2048) and backend["stop"] == ["\nUser:"]
+    assert tuple(backend[key] for key in keys) == (0.96, 0.76, 32, 1.0, 0.1, 0.0, 0.988, 8192) and backend["stop"] == ["\nUser:"]
     config = evaluate.RWKVVLLMModelConfig(model_name="model", wkv_mode="fp16", generation_parameters=params)
     logical = config.model_dump()["generation_parameters"]; assert (logical["frequency_penalty"], logical["penalty_decay"]) == (0.1, 0.988)
 def test_pipeline_receives_tasks_precision_candidate_and_remote_output(monkeypatch, tmp_path):
