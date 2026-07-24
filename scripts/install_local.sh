@@ -472,8 +472,8 @@ backend.model_config = SimpleNamespace(
 backend._run_completion = MethodType(lambda self, **kw: captured.update(kw) or [], backend)
 settings = runpy.run_path(sys.argv[2])
 model = object.__new__(VLLMModel)
-model.config = settings["RWKVVLLMModelConfig"](
-    model_name="compatibility-probe", generation_parameters=settings["_generation_parameters"]())
+model.config = settings["RWKVVLLMModelConfig"](model_name=settings["MODEL_PATH"], generation_parameters=settings["_generation_parameters"]())
+assert ((tokenizer := model._create_auto_tokenizer(model.config)).eos_token, tokenizer.pad_token) == ("<|endoftext|>",) * 2
 model.data_parallel_size, model.model = 1, backend
 model._generate(inputs=[[1]], max_new_tokens=17, stop_tokens=[], num_samples=2)
 assert captured["prompts"] == [{"prompt_token_ids": [1]}]
