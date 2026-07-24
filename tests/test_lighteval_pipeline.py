@@ -11,18 +11,16 @@ from lighteval.tasks.prompt_manager import PromptManager
 from lighteval.tasks.registry import Registry
 from lighteval.utils.imports import is_package_available
 from vllm import LLM
+from vllm.tokenizers.registry import resolve_tokenizer_args
 ROOT = Path(__file__).parents[1]
 SPEC = importlib.util.spec_from_file_location("helicopter_evaluate", ROOT / "src/eval/lighteval/evaluate.py")
 evaluate = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader; SPEC.loader.exec_module(evaluate)
 def artifacts(limit=3):
     return {
-        "config_general": {"model_config": {"generation_parameters": {"max_new_tokens": limit}}},
-        "config_tasks": {"gsm8k|0": {"generation_size": 2}},
-        "results": {"gsm8k|0": {"exact_match": 0.5}}}, [{
+        "config_general": {"model_config": {"generation_parameters": {"max_new_tokens": limit}}}, "config_tasks": {"gsm8k|0": {"generation_size": 2}}, "results": {"gsm8k|0": {"exact_match": 0.5}}}, [{
         "doc": {"id": "0", "query": "1+1?", "task_name": "gsm8k|0"},
-        "model_response": {"text": ["2", "bad\nUser:"], "output_tokens": [[1, 2, 3], [4, 5]]},
-        "metric": {"exact_match": 1.0}}]
+        "model_response": {"text": ["2", "bad\nUser:"], "output_tokens": [[1, 2, 3], [4, 5]]}, "metric": {"exact_match": 1.0}}]
 def test_layout_registry_passthrough_and_generation_contract():
     component = ROOT / "src/eval/lighteval"
     assert list(component.glob("*.py")) == [component / "evaluate.py"]
@@ -32,8 +30,7 @@ def test_layout_registry_passthrough_and_generation_contract():
     with pytest.raises(ValueError): Registry(tasks="definitely_unknown_task|0").load_tasks()
     params = evaluate._generation_parameters()
     backend = params.to_vllm_dict()
-    keys = ("temperature", "top_p", "top_k", "presence_penalty", "repetition_penalty",
-            "frequency_penalty", "penalty_decay", "max_tokens")
+    keys = ("temperature", "top_p", "top_k", "presence_penalty", "repetition_penalty", "frequency_penalty", "penalty_decay", "max_tokens")
     assert tuple(backend[key] for key in keys) == (0.96, 0.76, 32, 1.0, 0.1, 0.0, 0.988, 2048)
     assert backend["stop"] == ["\nUser:"]
     config = evaluate.RWKVVLLMModelConfig(model_name="model", generation_parameters=params)
@@ -47,34 +44,31 @@ def test_pipeline_receives_tasks_precision_and_candidate_unchanged(monkeypatch):
     evaluate.build_pipeline()
     assert captured["tasks"] == evaluate.TASKS
     assert captured["pipeline_parameters"]["launcher_type"] is ParallelismManager.VLLM
-    assert (captured["model_config"]["max_num_seqs"] in evaluate.CONCURRENCY_CANDIDATES
-            and captured["model_config"]["override_chat_template"] is True)
+    assert captured["model_config"]["max_num_seqs"] in evaluate.CONCURRENCY_CANDIDATES and captured["model_config"]["override_chat_template"] is True
 def test_official_vllm_bridge_restores_rwkv_boundaries_and_sampling():
     assert is_package_available("vllm") and not getattr(VLLMModel, "is_dummy", False)
+    assert resolve_tokenizer_args(evaluate.MODEL_PATH)[0] == "rwkv"
+    assert resolve_tokenizer_args("facebook/opt-125m")[0] == "hf"
+    config = evaluate.RWKVVLLMModelConfig(model_name=evaluate.MODEL_PATH, generation_parameters=evaluate._generation_parameters())
+    tokenizer = object.__new__(VLLMModel)._create_auto_tokenizer(config)
+    assert (tokenizer.bos_token, tokenizer.eos_token, tokenizer.pad_token) == ("<|endoftext|>",) * 3
     backend, captured = object.__new__(LLM), {}
-    backend.model_config = SimpleNamespace(
-        runner_type="generate", tokenizer_mode="rwkv",
-        hf_config=SimpleNamespace(model_type="rwkv7"))
-    backend._run_completion = MethodType(
-        lambda self, **kwargs: captured.update(kwargs) or [], backend)
+    backend.model_config = SimpleNamespace(runner_type="generate", tokenizer_mode="rwkv", hf_config=SimpleNamespace(model_type="rwkv7"))
+    backend._run_completion = MethodType(lambda self, **kwargs: captured.update(kwargs) or [], backend)
     model = object.__new__(VLLMModel)
-    model.config = evaluate.RWKVVLLMModelConfig(
-        model_name="probe", generation_parameters=evaluate._generation_parameters())
+    model.config = config
     model.data_parallel_size, model.model = 1, backend
     task = next(iter(Registry(tasks="aime24_gpassk|0").load_tasks().values()))
-    model._generate(inputs=[[1]], max_new_tokens=13, stop_tokens=[],
-                    num_samples=max(task.num_samples))
+    model._generate(inputs=[[1]], max_new_tokens=13, stop_tokens=[], num_samples=max(task.num_samples))
     params = captured["params"]
     assert captured["prompts"] == [{"prompt_token_ids": [1]}]
     assert (params.stop, params.stop_token_ids, params.ignore_eos) == (["\nUser:"], [0], False)
-    assert (params.n, params.max_tokens, params.repetition_penalty,
-            params.frequency_penalty, params.penalty_decay) == (48, 13, 0.1, 0.0, 0.988)
+    assert (params.n, params.max_tokens, params.repetition_penalty, params.frequency_penalty, params.penalty_decay) == (48, 13, 0.1, 0.0, 0.988)
 def test_official_task_native_metrics_receive_raw_completions(monkeypatch):
     math = next(iter(Registry(tasks="gsm8k|0").load_tasks().values()))
     doc = math.formatter({"question": "1+1?", "answer": "work #### 2"}, math.name)
     prompt = {}
-    tokenizer = SimpleNamespace(apply_chat_template=lambda messages, **kw:
-        (prompt.update(messages=messages, options=kw), "rendered")[1])
+    tokenizer = SimpleNamespace(apply_chat_template=lambda messages, **kw: (prompt.update(messages=messages, options=kw), "rendered")[1])
     assert PromptManager(True, tokenizer).prepare_prompt(doc) == "rendered" and prompt["messages"][-1]["content"] == doc.query
     seen, compute = [], math.metrics[0].compute_sample
     monkeypatch.setattr(math.metrics[0], "compute_sample",
