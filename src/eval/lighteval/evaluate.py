@@ -12,7 +12,7 @@ from lighteval.models.vllm.vllm_model import VLLMModelConfig
 from lighteval.pipeline import ParallelismManager, Pipeline, PipelineParameters
 DetectorFactory.seed = 0
 # Edit these ordinary constants for an evaluation. Every run gets a unique directory.
-MODEL_PATH = "/home/caizus/Weights/RWKV/rwkv7/pth/rwkv7-g1h-7.2b-20260710-ctx10240.pth"
+MODEL_PATH = os.environ.get("LIGHTEVAL_MODEL_PATH", "/home/caizus/Weights/RWKV/rwkv7/pth/rwkv7-g1h-7.2b-20260710-ctx10240.pth")
 TASKS = os.environ.get("LIGHTEVAL_TASKS", "gsm8k|0")
 RUN_ID = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
 def _output_dir(run_id=RUN_ID) -> Path:
