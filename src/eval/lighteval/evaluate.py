@@ -27,7 +27,7 @@ os.environ["VLLM_USE_RAPID_SAMPLER"] = "1"
 CONCURRENCY_CANDIDATES = (40, 80, 160, 320, 640, 1280, 2560)
 TARGET_CONCURRENCY = int(os.environ.get("LIGHTEVAL_TARGET_CONCURRENCY", "40"))
 # Fill only after the seven-candidate Pro 6000 scans have produced evidence.
-PRO6000_RECOMMENDED_CONCURRENCY = {"fp16": 2560, "fp32io16": 1280}
+SUPPORTED_WKV_MODES = ("fp16", "fp32io16")
 GENERATION_PARAMETERS = {
     "temperature": 0.96, "top_p": 0.76, "top_k": 32,
     "presence_penalty": 1.0, "frequency_penalty": 0.1, "penalty_decay": 0.988,
@@ -66,7 +66,7 @@ class RWKVPipeline(Pipeline):
                 if len(labels) <= 1 or labels != list("ABCDEFGHIJKLMNOPQRSTUVWXYZ"[:len(labels)]) or not metrics or not all(type(metric.sample_level_fn) is ExactMatches and metric.sample_level_fn.normalize_pred is None and metric.sample_level_fn.type_exact_match == "full" for metric in metrics): continue
                 response.text_post_processed = [_choice_answer(raw, response.output_tokens[i] if isinstance(response.output_tokens, list) and i < len(response.output_tokens) else None, choices) for i, raw in enumerate(response.text)]
 def build_pipeline() -> Pipeline:
-    if WKV_MODE not in PRO6000_RECOMMENDED_CONCURRENCY: raise ValueError("WKV_MODE must be fp16 or fp32io16")
+    if WKV_MODE not in SUPPORTED_WKV_MODES: raise ValueError("WKV_MODE must be fp16 or fp32io16")
     if TARGET_CONCURRENCY not in CONCURRENCY_CANDIDATES: raise ValueError("invalid concurrency candidate")
     os.environ["VLLM_RWKV7_WKV_MODE"] = WKV_MODE
     tracker = EvaluationTracker(output_dir=str(OUTPUT_DIR), save_details=True)
