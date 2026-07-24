@@ -27,7 +27,7 @@ os.environ["VLLM_USE_RAPID_SAMPLER"] = "1"
 CONCURRENCY_CANDIDATES = (40, 80, 160, 320, 640, 1280, 2560)
 TARGET_CONCURRENCY = int(os.environ.get("LIGHTEVAL_TARGET_CONCURRENCY", "40"))
 # Fill only after the seven-candidate Pro 6000 scans have produced evidence.
-PRO6000_RECOMMENDED_CONCURRENCY = {"fp16": None, "fp32io16": None}
+PRO6000_RECOMMENDED_CONCURRENCY = {"fp16": 2560, "fp32io16": 1280}
 GENERATION_PARAMETERS = {
     "temperature": 0.96, "top_p": 0.76, "top_k": 32,
     "presence_penalty": 1.0, "frequency_penalty": 0.1, "penalty_decay": 0.988,
