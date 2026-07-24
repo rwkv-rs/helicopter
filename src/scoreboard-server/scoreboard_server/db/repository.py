@@ -23,7 +23,16 @@ from scoreboard_server.cores.normalize import (
     split_dataset,
 )
 from scoreboard_server.db.connection import init_db
-from scoreboard_server.db.models import Benchmark, Checker, Completion, EvalRecord, EvaluationPublication, Score, ScoreModel, Task
+from scoreboard_server.db.models import (
+    Benchmark,
+    Checker,
+    Completion,
+    EvalRecord,
+    EvaluationPublication,
+    Score,
+    ScoreModel,
+    Task,
+)
 from scoreboard_server.db.resume import ResumeContext, TaskLookup
 from scoreboard_server.db.settings import DatabaseSettings
 
@@ -63,7 +72,9 @@ class ScoreboardStore:
     async def _ensure_db(self) -> None:
         await init_db(self.settings)
 
-    async def _benchmark(self, dataset: str, *, num_samples: int | None = None) -> Benchmark:
+    async def _benchmark(
+        self, dataset: str, *, num_samples: int | None = None
+    ) -> Benchmark:
         await self._ensure_db()
         name, split = split_dataset(dataset)
         defaults = {"url": None, "status": "Todo", "num_samples": int(num_samples or 0)}
@@ -90,7 +101,9 @@ class ScoreboardStore:
         )
         return score_model
 
-    async def ensure_benchmark_num_samples(self, *, dataset: str, num_samples: int) -> None:
+    async def ensure_benchmark_num_samples(
+        self, *, dataset: str, num_samples: int
+    ) -> None:
         if int(num_samples) <= 0:
             return
         await self._benchmark(dataset, num_samples=int(num_samples))
@@ -108,11 +121,15 @@ class ScoreboardStore:
     ) -> ResumeContext:
         benchmark = await self._benchmark(dataset)
         score_model = await self._model(model)
-        ctx = ResumeContext(benchmark_id=benchmark.benchmark_id, model_id=score_model.model_id)
+        ctx = ResumeContext(
+            benchmark_id=benchmark.benchmark_id, model_id=score_model.model_id
+        )
         if force_new_task:
             return ctx
 
-        sanitized_sampling = sanitize_json(sampling_config) if sampling_config is not None else None
+        sanitized_sampling = (
+            sanitize_json(sampling_config) if sampling_config is not None else None
+        )
         resolved_config_path = self._task_config_path(config_path)
         task_query = Task.filter(
             evaluator=job_name or "",
@@ -131,14 +148,24 @@ class ScoreboardStore:
         for task in tasks:
             if json_key(task.sampling_config) != json_key(sanitized_sampling):
                 continue
-            status = "Completed" if await Score.filter(task_id=task.task_id).exists() else task.status
+            status = (
+                "Completed"
+                if await Score.filter(task_id=task.task_id).exists()
+                else task.status
+            )
             lookup = TaskLookup(task_id=task.task_id, status=status)
             matches.append(lookup)
             if status.lower() == "completed":
                 completed_ids.append(task.task_id)
 
-        resumable = tuple(task.task_id for task in matches if task.status.lower() in {"running", "failed"})
-        running = tuple(task.task_id for task in matches if task.status.lower() == "running")
+        resumable = tuple(
+            task.task_id
+            for task in matches
+            if task.status.lower() in {"running", "failed"}
+        )
+        running = tuple(
+            task.task_id for task in matches if task.status.lower() == "running"
+        )
         if len(resumable) > 1 and len(running) == 1:
             resumable = running
         ctx.matching_tasks = tuple(matches)
@@ -147,7 +174,9 @@ class ScoreboardStore:
         if not completed_ids and len(resumable) == 1:
             ctx.task_id = resumable[0]
             ctx.can_resume = True
-            ctx.completed_keys = await self.list_completion_keys(task_id=str(ctx.task_id), status="Completed")
+            ctx.completed_keys = await self.list_completion_keys(
+                task_id=str(ctx.task_id), status="Completed"
+            )
         elif completed_ids:
             ctx.task_id = completed_ids[-1]
         elif resumable:
@@ -183,7 +212,9 @@ class ScoreboardStore:
             model=score_model,
             benchmark=benchmark,
             description=os.environ.get("RWKV_TASK_DESC"),
-            sampling_config=sanitize_json(sampling_config) if sampling_config is not None else None,
+            sampling_config=sanitize_json(sampling_config)
+            if sampling_config is not None
+            else None,
             log_path=os.environ.get("RWKV_SKILLS_LOG_PATH", ""),
         )
         return str(task.task_id)
@@ -219,7 +250,9 @@ class ScoreboardStore:
             config_path=config_path,
         )
 
-    async def insert_completion_payloads_batch(self, *, payloads: Sequence[dict[str, Any]], task_id: str) -> int:
+    async def insert_completion_payloads_batch(
+        self, *, payloads: Sequence[dict[str, Any]], task_id: str
+    ) -> int:
         await self._ensure_db()
         if not payloads:
             return 0
@@ -229,9 +262,15 @@ class ScoreboardStore:
             for payload in payloads:
                 if str(payload.get("_stage", "answer")).strip().lower() != "answer":
                     continue
-                sample_index = parse_nonneg_int(payload.get("sample_index"), "sample_index")
-                repeat_index = parse_nonneg_int(payload.get("repeat_index"), "repeat_index")
-                pass_index = parse_nonneg_int(payload.get("pass_index", 0), "pass_index")
+                sample_index = parse_nonneg_int(
+                    payload.get("sample_index"), "sample_index"
+                )
+                repeat_index = parse_nonneg_int(
+                    payload.get("repeat_index"), "repeat_index"
+                )
+                pass_index = parse_nonneg_int(
+                    payload.get("pass_index", 0), "pass_index"
+                )
                 context = self._build_completion_context(payload)
                 await Completion.update_or_create(
                     task=task,
@@ -247,15 +286,21 @@ class ScoreboardStore:
                 count += 1
         return count
 
-    async def insert_completion_payload(self, *, payload: dict[str, Any], task_id: str) -> None:
+    async def insert_completion_payload(
+        self, *, payload: dict[str, Any], task_id: str
+    ) -> None:
         await self.insert_completion_payloads_batch(payloads=[payload], task_id=task_id)
 
-    async def ingest_eval_payloads(self, *, payloads: Iterable[dict[str, Any]], task_id: str) -> int:
+    async def ingest_eval_payloads(
+        self, *, payloads: Iterable[dict[str, Any]], task_id: str
+    ) -> int:
         await self._ensure_db()
         mapping = await self._completion_id_map(task_id=task_id, status="Completed")
         existing = {
             row.completion_id
-            for row in await EvalRecord.filter(completion__task_id=int(task_id)).only("completion_id")
+            for row in await EvalRecord.filter(completion__task_id=int(task_id)).only(
+                "completion_id"
+            )
         }
         inserted = 0
         for payload in payloads:
@@ -272,9 +317,13 @@ class ScoreboardStore:
                 completion=completion,
                 defaults={
                     "answer": self._bounded_text(payload.get("answer"), 65_536),
-                    "ref_answer": self._bounded_text(self._extract_reference_answer(payload), 4_096),
+                    "ref_answer": self._bounded_text(
+                        self._extract_reference_answer(payload), 4_096
+                    ),
                     "is_passed": bool(payload.get("is_passed", False)),
-                    "fail_reason": self._bounded_text(payload.get("fail_reason"), 2_048),
+                    "fail_reason": self._bounded_text(
+                        payload.get("fail_reason"), 2_048
+                    ),
                     "created_at": now_utc_naive(),
                 },
             )
@@ -282,12 +331,16 @@ class ScoreboardStore:
             inserted += 1
         return inserted
 
-    async def ingest_checker_payloads(self, *, payloads: Iterable[dict[str, Any]], task_id: str) -> int:
+    async def ingest_checker_payloads(
+        self, *, payloads: Iterable[dict[str, Any]], task_id: str
+    ) -> int:
         await self._ensure_db()
         mapping = await self._completion_id_map(task_id=task_id, status="Completed")
         existing = {
             row.completion_id
-            for row in await Checker.filter(completion__task_id=int(task_id)).only("completion_id")
+            for row in await Checker.filter(completion__task_id=int(task_id)).only(
+                "completion_id"
+            )
         }
         inserted = 0
         for payload in payloads:
@@ -304,12 +357,22 @@ class ScoreboardStore:
                 completion=completion,
                 defaults={
                     "answer_correct": bool(payload.get("answer_correct", False)),
-                    "instruction_following_error": bool(payload.get("instruction_following_error", False)),
-                    "world_knowledge_error": bool(payload.get("world_knowledge_error", False)),
+                    "instruction_following_error": bool(
+                        payload.get("instruction_following_error", False)
+                    ),
+                    "world_knowledge_error": bool(
+                        payload.get("world_knowledge_error", False)
+                    ),
                     "math_error": bool(payload.get("math_error", False)),
-                    "reasoning_logic_error": bool(payload.get("reasoning_logic_error", False)),
-                    "thought_contains_correct_answer": bool(payload.get("thought_contains_correct_answer", False)),
-                    "needs_human_review": bool(payload.get("needs_human_review", False)),
+                    "reasoning_logic_error": bool(
+                        payload.get("reasoning_logic_error", False)
+                    ),
+                    "thought_contains_correct_answer": bool(
+                        payload.get("thought_contains_correct_answer", False)
+                    ),
+                    "needs_human_review": bool(
+                        payload.get("needs_human_review", False)
+                    ),
                     "reason": str(payload.get("reason") or ""),
                     "created_at": now_utc_naive(),
                 },
@@ -330,22 +393,38 @@ class ScoreboardStore:
         task_ids: dict[str, int] = {}
 
         primary_payloads = list(payloads_by_group.get(primary_group, ()))
-        await self.ingest_eval_payloads(payloads=primary_payloads, task_id=str(parent_task_id))
+        await self.ingest_eval_payloads(
+            payloads=primary_payloads, task_id=str(parent_task_id)
+        )
         task_ids[str(primary_group)] = parent_task_id
 
         for group, payloads in payloads_by_group.items():
             if group == primary_group:
                 continue
-            strategy_task_id = await self.create_eval_strategy_task(parent_task_id=parent_task_id, strategy=str(group))
-            await self.insert_completion_payloads_batch(payloads=completion_payloads, task_id=str(strategy_task_id))
-            await self.ingest_eval_payloads(payloads=list(payloads), task_id=str(strategy_task_id))
-            await self.update_task_status(task_id=str(strategy_task_id), status="completed")
+            strategy_task_id = await self.create_eval_strategy_task(
+                parent_task_id=parent_task_id, strategy=str(group)
+            )
+            await self.insert_completion_payloads_batch(
+                payloads=completion_payloads, task_id=str(strategy_task_id)
+            )
+            await self.ingest_eval_payloads(
+                payloads=list(payloads), task_id=str(strategy_task_id)
+            )
+            await self.update_task_status(
+                task_id=str(strategy_task_id), status="completed"
+            )
             task_ids[str(group)] = strategy_task_id
         return task_ids
 
-    async def create_eval_strategy_task(self, *, parent_task_id: int, strategy: str) -> int:
+    async def create_eval_strategy_task(
+        self, *, parent_task_id: int, strategy: str
+    ) -> int:
         await self._ensure_db()
-        parent = await Task.filter(task_id=int(parent_task_id)).select_related("model", "benchmark").first()
+        parent = (
+            await Task.filter(task_id=int(parent_task_id))
+            .select_related("model", "benchmark")
+            .first()
+        )
         if parent is None:
             raise RuntimeError(f"parent task not found: {parent_task_id}")
 
@@ -370,39 +449,55 @@ class ScoreboardStore:
             model=parent.model,
             benchmark=parent.benchmark,
             description="; ".join(desc_parts),
-            sampling_config=parent.sampling_config if isinstance(parent.sampling_config, dict) else None,
+            sampling_config=parent.sampling_config
+            if isinstance(parent.sampling_config, dict)
+            else None,
             log_path=parent.log_path or "",
         )
         return int(task.task_id)
 
-    async def record_score_payload(self, *, payload: dict[str, Any], task_id: str) -> None:
+    async def record_score_payload(
+        self, *, payload: dict[str, Any], task_id: str
+    ) -> None:
         await self._ensure_db()
         task = await Task.get(task_id=int(task_id))
         await Score.update_or_create(
             task=task,
             defaults={
                 "cot_mode": canonical_cot_mode(payload),
-                "metrics": sanitize_json(payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}),
+                "metrics": sanitize_json(
+                    payload.get("metrics")
+                    if isinstance(payload.get("metrics"), dict)
+                    else {}
+                ),
                 "created_at": parse_datetime(payload.get("created_at")),
             },
         )
         task.status = "Completed"
         await task.save(update_fields=["status"])
 
-    async def count_completions(self, *, task_id: str, status: str | None = None) -> int:
+    async def count_completions(
+        self, *, task_id: str, status: str | None = None
+    ) -> int:
         query = Completion.filter(task_id=int(task_id))
         if status:
             query = query.filter(status=canonical_completion_status(status))
         return await query.count()
 
-    async def list_completion_keys(self, *, task_id: str, status: str | None = None) -> set[tuple[int, int, int]]:
+    async def list_completion_keys(
+        self, *, task_id: str, status: str | None = None
+    ) -> set[tuple[int, int, int]]:
         query = Completion.filter(task_id=int(task_id))
         if status:
             query = query.filter(status=canonical_completion_status(status))
         rows = await query.order_by("sample_index", "avg_repeat_index", "pass_index")
-        return {(row.sample_index, row.avg_repeat_index, row.pass_index) for row in rows}
+        return {
+            (row.sample_index, row.avg_repeat_index, row.pass_index) for row in rows
+        }
 
-    async def list_completion_payloads(self, *, task_id: str, status: str | None = None) -> list[dict[str, Any]]:
+    async def list_completion_payloads(
+        self, *, task_id: str, status: str | None = None
+    ) -> list[dict[str, Any]]:
         rows = await self._completion_rows(task_id=task_id, status=status)
         payloads: list[dict[str, Any]] = []
         for row in rows:
@@ -411,7 +506,9 @@ class ScoreboardStore:
                 "sample_index": row.sample_index,
                 "repeat_index": row.avg_repeat_index,
                 "pass_index": row.pass_index,
-                "sampling_config": context.get("sampling_config") if isinstance(context.get("sampling_config"), dict) else {},
+                "sampling_config": context.get("sampling_config")
+                if isinstance(context.get("sampling_config"), dict)
+                else {},
                 "context": context,
             }
             stages = context.get("stages")
@@ -438,13 +535,26 @@ class ScoreboardStore:
         grouped: dict[tuple[int, int, str, str], Score] = {}
         for row in rows:
             task = row.task
-            key = (task.model_id, task.benchmark_id, task.evaluator, json_key(task.sampling_config))
+            key = (
+                task.model_id,
+                task.benchmark_id,
+                task.evaluator,
+                json_key(task.sampling_config),
+            )
             prev = grouped.get(key)
-            if prev is None or (row.created_at, row.score_id) > (prev.created_at, prev.score_id):
+            if prev is None or (row.created_at, row.score_id) > (
+                prev.created_at,
+                prev.score_id,
+            ):
                 grouped[key] = row
-        return [self._score_row_for_space(row) for row in sorted(grouped.values(), key=lambda item: item.created_at)]
+        return [
+            self._score_row_for_space(row)
+            for row in sorted(grouped.values(), key=lambda item: item.created_at)
+        ]
 
-    async def list_score_history_pairs(self, *, is_tmp: bool = False) -> list[dict[str, Any]]:
+    async def list_score_history_pairs(
+        self, *, is_tmp: bool = False
+    ) -> list[dict[str, Any]]:
         scores = await Score.filter(
             task__is_tmp=is_tmp,
             task__is_param_search=False,
@@ -452,21 +562,32 @@ class ScoreboardStore:
         pairs = {
             (
                 score.task.model.model_name,
-                join_dataset(score.task.benchmark.benchmark_name, score.task.benchmark.benchmark_split),
+                join_dataset(
+                    score.task.benchmark.benchmark_name,
+                    score.task.benchmark.benchmark_split,
+                ),
             )
             for score in scores
         }
-        return [{"model": model, "dataset": dataset} for model, dataset in sorted(pairs)]
+        return [
+            {"model": model, "dataset": dataset} for model, dataset in sorted(pairs)
+        ]
 
-    async def list_score_history(self, *, model: str, dataset: str, is_tmp: bool = False) -> list[dict[str, Any]]:
+    async def list_score_history(
+        self, *, model: str, dataset: str, is_tmp: bool = False
+    ) -> list[dict[str, Any]]:
         benchmark_name, benchmark_split = split_dataset(dataset)
-        rows = await Score.filter(
-            task__model__model_name=normalize_model_name(model),
-            task__benchmark__benchmark_name=benchmark_name,
-            task__benchmark__benchmark_split=benchmark_split,
-            task__is_tmp=is_tmp,
-            task__is_param_search=False,
-        ).select_related("task", "task__model", "task__benchmark").order_by("created_at", "score_id")
+        rows = (
+            await Score.filter(
+                task__model__model_name=normalize_model_name(model),
+                task__benchmark__benchmark_name=benchmark_name,
+                task__benchmark__benchmark_split=benchmark_split,
+                task__is_tmp=is_tmp,
+                task__is_param_search=False,
+            )
+            .select_related("task", "task__model", "task__benchmark")
+            .order_by("created_at", "score_id")
+        )
         return [self._history_row(row) for row in rows]
 
     async def list_scores_by_dataset(
@@ -477,26 +598,49 @@ class ScoreboardStore:
         is_param_search: bool,
     ) -> list[dict[str, Any]]:
         benchmark_name, benchmark_split = split_dataset(dataset)
-        rows = await Score.filter(
-            task__benchmark__benchmark_name=benchmark_name,
-            task__benchmark__benchmark_split=benchmark_split,
-            task__model__model_name=normalize_model_name(model),
-            task__is_param_search=bool(is_param_search),
-            task__is_tmp=False,
-        ).select_related("task", "task__model", "task__benchmark").order_by("-created_at", "-score_id")
+        rows = (
+            await Score.filter(
+                task__benchmark__benchmark_name=benchmark_name,
+                task__benchmark__benchmark_split=benchmark_split,
+                task__model__model_name=normalize_model_name(model),
+                task__is_param_search=bool(is_param_search),
+                task__is_tmp=False,
+            )
+            .select_related("task", "task__model", "task__benchmark")
+            .order_by("-created_at", "-score_id")
+        )
         return [self._score_row_for_space(row) for row in rows]
 
     async def get_score_history_detail(self, *, task_id: str) -> dict[str, Any] | None:
-        score = await Score.filter(task_id=int(task_id)).select_related("task", "task__model", "task__benchmark").first()
-        task = await Task.filter(task_id=int(task_id)).select_related("model", "benchmark").first()
+        score = (
+            await Score.filter(task_id=int(task_id))
+            .select_related("task", "task__model", "task__benchmark")
+            .first()
+        )
+        task = (
+            await Task.filter(task_id=int(task_id))
+            .select_related("model", "benchmark")
+            .first()
+        )
         if score is None and task is None:
             return None
-        completion = await Completion.filter(task_id=int(task_id)).order_by("sample_index", "avg_repeat_index", "pass_index").first()
+        completion = (
+            await Completion.filter(task_id=int(task_id))
+            .order_by("sample_index", "avg_repeat_index", "pass_index")
+            .first()
+        )
         publication = await EvaluationPublication.filter(task_id=int(task_id)).first()
-        stored_accounting = publication.accounting_payload if publication is not None and isinstance(publication.accounting_payload, Mapping) else {}
+        stored_accounting = (
+            publication.accounting_payload
+            if publication is not None
+            and isinstance(publication.accounting_payload, Mapping)
+            else {}
+        )
         generated_samples = stored_accounting.get("generated_samples")
         truncated_samples = stored_accounting.get("truncated_samples")
-        if not isinstance(generated_samples, int) or not isinstance(truncated_samples, int):
+        if not isinstance(generated_samples, int) or not isinstance(
+            truncated_samples, int
+        ):
             completions = await Completion.filter(task_id=int(task_id)).only("context")
             generated_samples = len(completions)
             truncated_samples = sum(
@@ -526,7 +670,11 @@ class ScoreboardStore:
         }
 
     async def get_score_payload(self, *, task_id: str) -> dict[str, Any] | None:
-        score = await Score.filter(task_id=int(task_id)).select_related("task", "task__model", "task__benchmark").first()
+        score = (
+            await Score.filter(task_id=int(task_id))
+            .select_related("task", "task__model", "task__benchmark")
+            .first()
+        )
         return self._score_row_for_space(score) if score else None
 
     async def get_latest_task_generation_progress(
@@ -537,21 +685,27 @@ class ScoreboardStore:
         benchmark_name: str,
         benchmark_split: str,
     ) -> dict[str, Any] | None:
-        task = await Task.filter(
-            evaluator=evaluator,
-            model__model_name=normalize_model_name(model_name),
-            benchmark__benchmark_name=benchmark_name,
-            benchmark__benchmark_split=benchmark_split,
-            is_param_search=False,
-            is_tmp=False,
-        ).order_by("-task_id").first()
+        task = (
+            await Task.filter(
+                evaluator=evaluator,
+                model__model_name=normalize_model_name(model_name),
+                benchmark__benchmark_name=benchmark_name,
+                benchmark__benchmark_split=benchmark_split,
+                is_param_search=False,
+                is_tmp=False,
+            )
+            .order_by("-task_id")
+            .first()
+        )
         if task is None:
             return None
         return {
             "task_id": task.task_id,
             "status": task.status,
             "sampling_config": task.sampling_config,
-            "completed_completions": await Completion.filter(task_id=task.task_id, status="Completed").count(),
+            "completed_completions": await Completion.filter(
+                task_id=task.task_id, status="Completed"
+            ).count(),
             "total_completions": await Completion.filter(task_id=task.task_id).count(),
             "has_score": await Score.filter(task_id=task.task_id).exists(),
         }
@@ -621,7 +775,7 @@ class ScoreboardStore:
                 "answer": (
                     eval_row.answer
                     if eval_row is not None
-                    else str(evidence.get("scored_completion") or "")
+                    else str(evidence.get("raw_completion") or "")
                 ),
                 "ref_answer": eval_row.ref_answer if eval_row is not None else "",
                 "fail_reason": eval_row.fail_reason if eval_row is not None else "",
@@ -640,12 +794,17 @@ class ScoreboardStore:
         repeat_index: int,
         pass_index: int = 0,
     ) -> Any | None:
-        row = await EvalRecord.filter(
-            completion__task_id=int(task_id),
-            completion__sample_index=int(sample_index),
-            completion__avg_repeat_index=int(repeat_index),
-            completion__pass_index=int(pass_index),
-        ).select_related("completion").order_by("-eval_id").first()
+        row = (
+            await EvalRecord.filter(
+                completion__task_id=int(task_id),
+                completion__sample_index=int(sample_index),
+                completion__avg_repeat_index=int(repeat_index),
+                completion__pass_index=int(pass_index),
+            )
+            .select_related("completion")
+            .order_by("-eval_id")
+            .first()
+        )
         if row is not None:
             return row.completion.context
         completion = await Completion.filter(
@@ -657,42 +816,75 @@ class ScoreboardStore:
         return completion.context if completion is not None else None
 
     async def get_task_bundle(self, *, task_id: str) -> dict[str, Any] | None:
-        task = await Task.filter(task_id=int(task_id)).select_related("model", "benchmark").first()
+        task = (
+            await Task.filter(task_id=int(task_id))
+            .select_related("model", "benchmark")
+            .first()
+        )
         if not task:
             return None
-        return {"task": self._task_dict(task), "model": self._model_dict(task.model), "benchmark": self._benchmark_dict(task.benchmark)}
+        return {
+            "task": self._task_dict(task),
+            "model": self._model_dict(task.model),
+            "benchmark": self._benchmark_dict(task.benchmark),
+        }
 
     async def list_completions_rows(self, *, task_id: str) -> list[dict[str, Any]]:
         rows = await Completion.filter(task_id=int(task_id)).order_by("completions_id")
         return [self._completion_dict(row) for row in rows]
 
     async def list_eval_rows(self, *, task_id: str) -> list[dict[str, Any]]:
-        rows = await EvalRecord.filter(completion__task_id=int(task_id)).select_related("completion").order_by("eval_id")
+        rows = (
+            await EvalRecord.filter(completion__task_id=int(task_id))
+            .select_related("completion")
+            .order_by("eval_id")
+        )
         return [self._eval_dict(row) for row in rows]
 
     async def list_checker_rows(self, *, task_id: str) -> list[dict[str, Any]]:
-        rows = await Checker.filter(completion__task_id=int(task_id)).select_related("completion").order_by("checker_id")
+        rows = (
+            await Checker.filter(completion__task_id=int(task_id))
+            .select_related("completion")
+            .order_by("checker_id")
+        )
         return [self._checker_dict(row) for row in rows]
 
     async def list_checker_keys(self, *, task_id: str) -> set[tuple[int, int, int]]:
-        rows = await Checker.filter(completion__task_id=int(task_id)).select_related("completion")
+        rows = await Checker.filter(completion__task_id=int(task_id)).select_related(
+            "completion"
+        )
         return {
-            (row.completion.sample_index, row.completion.avg_repeat_index, row.completion.pass_index)
+            (
+                row.completion.sample_index,
+                row.completion.avg_repeat_index,
+                row.completion.pass_index,
+            )
             for row in rows
         }
 
     async def list_scores_rows(self, *, task_id: str) -> list[dict[str, Any]]:
-        rows = await Score.filter(task_id=int(task_id)).order_by("-created_at", "-score_id")
+        rows = await Score.filter(task_id=int(task_id)).order_by(
+            "-created_at", "-score_id"
+        )
         return [self._score_dict(row) for row in rows]
 
     async def update_task_status(self, *, task_id: str, status: str) -> None:
-        await Task.filter(task_id=int(task_id)).update(status=canonical_task_status(status))
+        await Task.filter(task_id=int(task_id)).update(
+            status=canonical_task_status(status)
+        )
 
-    async def _completion_id_map(self, *, task_id: str, status: str | None = None) -> dict[tuple[int, int, int], int]:
+    async def _completion_id_map(
+        self, *, task_id: str, status: str | None = None
+    ) -> dict[tuple[int, int, int], int]:
         rows = await self._completion_rows(task_id=task_id, status=status)
-        return {(row.sample_index, row.avg_repeat_index, row.pass_index): row.completions_id for row in rows}
+        return {
+            (row.sample_index, row.avg_repeat_index, row.pass_index): row.completions_id
+            for row in rows
+        }
 
-    async def _completion_rows(self, *, task_id: str, status: str | None = None) -> list[Completion]:
+    async def _completion_rows(
+        self, *, task_id: str, status: str | None = None
+    ) -> list[Completion]:
         query = Completion.filter(task_id=int(task_id))
         if status:
             query = query.filter(status=canonical_completion_status(status))
@@ -709,8 +901,19 @@ class ScoreboardStore:
                     "stop_reason": payload.get(f"stop_reason{idx}"),
                 }
             )
-        context = {"stages": stages, "sampling_config": payload.get("sampling_config", {})}
-        for key in ("stats", "agent_result", "agent_info", "agent_trace", "task_id", "domain", "instruction"):
+        context = {
+            "stages": stages,
+            "sampling_config": payload.get("sampling_config", {}),
+        }
+        for key in (
+            "stats",
+            "agent_result",
+            "agent_info",
+            "agent_trace",
+            "task_id",
+            "domain",
+            "instruction",
+        ):
             if key in payload:
                 context[key] = payload[key]
         sanitized = sanitize_json(context)
@@ -725,13 +928,22 @@ class ScoreboardStore:
 
     @staticmethod
     def _task_config_path(config_path: str | None = None) -> str | None:
-        raw = config_path if config_path is not None else os.environ.get("RWKV_TASK_CONFIG_PATH")
+        raw = (
+            config_path
+            if config_path is not None
+            else os.environ.get("RWKV_TASK_CONFIG_PATH")
+        )
         value = str(raw or "").strip()
         return value or None
 
     @staticmethod
     def _task_is_tmp() -> bool:
-        return os.environ.get("RWKV_TASK_IS_TMP", "").strip().lower() in {"1", "true", "yes", "on"}
+        return os.environ.get("RWKV_TASK_IS_TMP", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
 
     @staticmethod
     def _normalize_reference_value(value: Any) -> str | None:
@@ -851,7 +1063,10 @@ class ScoreboardStore:
     @staticmethod
     def _eval_dict(eval_record: EvalRecord) -> dict[str, Any]:
         completion_id = getattr(eval_record, "completion_id", None)
-        if completion_id is None and getattr(eval_record, "completion", None) is not None:
+        if (
+            completion_id is None
+            and getattr(eval_record, "completion", None) is not None
+        ):
             completion_id = eval_record.completion.completions_id
         return {
             "eval_id": eval_record.eval_id,

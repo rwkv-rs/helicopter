@@ -3,7 +3,9 @@ from __future__ import annotations
 from scoreboard_server.dtos.api.admin.eval.status import AdminEvalStatusResponse
 
 
-SCHEDULER_CONTROL_ERROR = "Scheduler control is not part of the migrated scoreboard server."
+SCHEDULER_CONTROL_ERROR = (
+    "Scheduler control is not part of the migrated scoreboard server."
+)
 
 _DISABLED_STATUS: AdminEvalStatusResponse = {
     "status": "idle",

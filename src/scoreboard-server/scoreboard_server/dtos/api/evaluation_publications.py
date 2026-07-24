@@ -34,7 +34,6 @@ class TaskIdentity(StrictModel):
     scorer_revision: str = Field(min_length=1)
     generation_contract: str = Field(min_length=1)
     cot_mode: Literal["none", "cot"]
-    repair_strategy: str = Field(min_length=1)
     dataset_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     primary_metric: str = Field(min_length=1)
     metrics: list[MetricIdentity] = Field(min_length=1)
@@ -53,10 +52,6 @@ class ProviderIdentity(StrictModel):
     precision: str = Field(min_length=1)
     gemm_policy: str = Field(min_length=1)
     launch_contract: str = Field(min_length=1)
-    attestation_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
-    attestation_verified: bool
-    attestation_present: bool
-    attestation_mismatches: list[str]
 
 
 class EvaluatorIdentity(StrictModel):
@@ -75,18 +70,11 @@ class PublicationIdentity(StrictModel):
 
     @model_validator(mode="after")
     def validate_eligibility(self) -> PublicationIdentity:
-        provider_verified = (
-            self.provider.attestation_verified
-            and self.provider.attestation_present
-            and not self.provider.attestation_mismatches
-        )
-        if self.comparable != provider_verified:
-            raise ValueError("comparability does not match provider attestation")
         if self.eligibility == "official" and (
             not self.comparable or self.evaluator.dirty
         ):
             raise ValueError(
-                "official publication requires verified evidence from a clean evaluator"
+                "official publication requires comparable evidence from a clean evaluator"
             )
         return self
 
@@ -107,41 +95,20 @@ class SampleAccounting(StrictModel):
     cancelled: int = Field(ge=0)
 
 
-class TokenUsage(StrictModel):
-    prompt_tokens: int = Field(ge=0)
-    completion_tokens: int = Field(ge=0)
-    total_tokens: int = Field(ge=0)
-
-    @model_validator(mode="after")
-    def validate_total(self) -> TokenUsage:
-        if self.total_tokens != self.prompt_tokens + self.completion_tokens:
-            raise ValueError("token usage total does not close")
-        return self
-
-
 class GenerationEvidence(StrictModel):
-    output_token_count: int = Field(ge=0)
-    finish_reason: str
-    stop_reason: str | int | None
-    terminal_reason: Literal["stop", "length"]
+    finish_reason: Literal["stop", "length"]
     truncated: bool
     generation_limit: int = Field(gt=0)
-    request_id: str | None
-    usage: TokenUsage | None
 
     @model_validator(mode="after")
     def validate_generation_evidence(self) -> GenerationEvidence:
-        if self.truncated != (self.terminal_reason == "length"):
-            raise ValueError("truncation does not match terminal reason")
-        if self.truncated and self.output_token_count != self.generation_limit:
-            raise ValueError("truncated generation did not reach its token limit")
+        if self.truncated != (self.finish_reason == "length"):
+            raise ValueError("truncation does not match finish_reason")
         return self
 
 
 class ScoringEvidence(StrictModel):
     scorer_revision: str = Field(min_length=1)
-    repair_strategy: str = Field(min_length=1)
-    repair_action: str = Field(min_length=1)
 
 
 class PublishedSample(StrictModel):
@@ -151,7 +118,6 @@ class PublishedSample(StrictModel):
     status: Literal["scored"]
     prompt: str
     raw_completion: str
-    scored_completion: str
     generation: GenerationEvidence
     scoring: ScoringEvidence
     metrics: dict[str, float]
@@ -261,8 +227,6 @@ class EvaluationPublicationRequest(StrictModel):
                 raise ValueError("sample is missing the primary metric")
             if sample.scoring.scorer_revision != self.identity.task.scorer_revision:
                 raise ValueError("sample scorer revision does not match task identity")
-            if sample.scoring.repair_strategy != self.identity.task.repair_strategy:
-                raise ValueError("sample repair strategy does not match task identity")
         return self
 
 

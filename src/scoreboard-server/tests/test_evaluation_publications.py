@@ -91,7 +91,6 @@ def _publication_payload(*, binary: bool = True, official: bool = True) -> dict:
             "scorer_revision": "scorer-v1",
             "generation_contract": "rwkv-stop-v1",
             "cot_mode": "none",
-            "repair_strategy": "A",
             "dataset_digest": "a" * 64,
             "primary_metric": "exact_match",
             "metrics": [
@@ -116,10 +115,6 @@ def _publication_payload(*, binary: bool = True, official: bool = True) -> dict:
             "precision": "fp16-io-fp32-state",
             "gemm_policy": "fp32-accumulation",
             "launch_contract": "launch-v1",
-            "attestation_digest": "c" * 64,
-            "attestation_verified": official,
-            "attestation_present": True,
-            "attestation_mismatches": [],
         },
         "evaluator": {"product_revision": "d" * 40, "dirty": False},
         "config_digest": "e" * 64,
@@ -148,21 +143,13 @@ def _publication_payload(*, binary: bool = True, official: bool = True) -> dict:
         "status": "scored",
         "prompt": "What is 1 + 1?",
         "raw_completion": "2",
-        "scored_completion": "2",
         "generation": {
-            "output_token_count": 2,
             "finish_reason": "stop",
-            "stop_reason": 0,
-            "terminal_reason": "stop",
             "truncated": False,
             "generation_limit": 256,
-            "request_id": "request-1",
-            "usage": {"prompt_tokens": 2, "completion_tokens": 2, "total_tokens": 4},
         },
         "scoring": {
             "scorer_revision": "scorer-v1",
-            "repair_strategy": "A",
-            "repair_action": "none",
         },
         "metrics": {"exact_match": 1.0 if binary else 0.75},
         "error_code": None,
@@ -184,10 +171,7 @@ def _publication_payload(*, binary: bool = True, official: bool = True) -> dict:
         "primary_metric": "exact_match",
         "truncated_samples": 0,
         "generated_samples": 1,
-        "performance": {
-            "token_usage_attribution": "per_request_usage",
-            "total_tokens": 4,
-        },
+        "performance": {"status": "not_attributable"},
         "manifest": {
             "digest": manifest_digest,
             "identity_digest": _digest(identity),
@@ -340,10 +324,6 @@ async def test_publication_rejects_inconsistent_artifact_evidence(
     dirty_official["identity"]["evaluator"]["dirty"] = True
     cases.append(dirty_official)
 
-    unverified_official = json.loads(json.dumps(payload))
-    unverified_official["identity"]["provider"]["attestation_verified"] = False
-    cases.append(unverified_official)
-
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://testserver"
     ) as client:
@@ -372,7 +352,6 @@ async def test_publication_rejects_inconsistent_artifact_evidence(
         422,
         422,
         422,
-        422,
     ]
     assert oversized_response.status_code == 413
     assert await Task.all().count() == 0
@@ -386,22 +365,12 @@ async def test_nonbinary_proxy_stays_out_of_official_and_enters_non_official_sco
     payload = _publication_payload(binary=False, official=False)
     sample = payload["samples"][0]
     sample["raw_completion"] = "unfinished reasoning"
-    sample["scored_completion"] = "unfinished reasoning\nTherefore..."
     sample["generation"].update(
         {
-            "output_token_count": 256,
             "finish_reason": "length",
-            "stop_reason": None,
-            "terminal_reason": "length",
             "truncated": True,
-            "usage": {
-                "prompt_tokens": 2,
-                "completion_tokens": 256,
-                "total_tokens": 258,
-            },
         }
     )
-    sample["scoring"]["repair_action"] = "append-think-and-therefore"
     payload["truncated_samples"] = 1
     headers = {
         "Authorization": "Bearer publisher-token",
@@ -494,13 +463,9 @@ async def test_nonbinary_proxy_stays_out_of_official_and_enters_non_official_sco
         )
     assert await EvalRecord.all().count() == 0
     assert records["records"][0]["is_passed"] is None
-    assert records["records"][0]["answer"] == "unfinished reasoning\nTherefore..."
+    assert records["records"][0]["answer"] == "unfinished reasoning"
     assert context["context"]["evidence"]["metrics"] == {"exact_match": 0.75}
     assert context["context"]["evidence"]["generation"]["truncated"] is True
-    assert (
-        context["context"]["evidence"]["scoring"]["repair_action"]
-        == "append-think-and-therefore"
-    )
     assert official_meta["scope"] == "official"
     assert official_meta["entry_count"] == 0
     assert official_leaderboard["scope"] == "official"

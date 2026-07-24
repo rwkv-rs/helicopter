@@ -25,12 +25,39 @@ def build_leaderboard_payload(
     visible = _select_entries(entries, selected_model)
     param_columns = _param_columns(visible, is_delta=is_delta)
     domains = []
-    for group in ("knowledge", "math", "coding", "agent", "instruction_following", "function_call"):
+    for group in (
+        "knowledge",
+        "math",
+        "coding",
+        "agent",
+        "instruction_following",
+        "function_call",
+    ):
         rows = _rows_for_domain(visible, group, param_columns, is_delta=is_delta)
-        label = next(item["label"] for item in _domain_groups_with_naive() if item["key"] == group)
-        title = next(item["title"] for item in _domain_groups_with_naive() if item["key"] == group)
-        domains.append({"key": group, "title": title, "label": label, "param_columns": param_columns, "rows": rows})
-    naive_entries = [entry for entry in entries if is_naive(entry.get("task"), entry.get("sampling_config"))]
+        label = next(
+            item["label"]
+            for item in _domain_groups_with_naive()
+            if item["key"] == group
+        )
+        title = next(
+            item["title"]
+            for item in _domain_groups_with_naive()
+            if item["key"] == group
+        )
+        domains.append(
+            {
+                "key": group,
+                "title": title,
+                "label": label,
+                "param_columns": param_columns,
+                "rows": rows,
+            }
+        )
+    naive_entries = [
+        entry
+        for entry in entries
+        if is_naive(entry.get("task"), entry.get("sampling_config"))
+    ]
     naive_columns = _param_columns(naive_entries, is_delta=is_delta)
     payload = {
         "scope": scope,
@@ -47,9 +74,13 @@ def build_leaderboard_payload(
             "label": "朴素榜",
             "is_delta": is_delta,
             "param_columns": naive_columns,
-            "rows": _rows_for_domain(naive_entries, None, naive_columns, is_delta=is_delta),
+            "rows": _rows_for_domain(
+                naive_entries, None, naive_columns, is_delta=is_delta
+            ),
         },
-        "overview": _overview(domains, param_columns, is_delta=is_delta) if is_field_avg else None,
+        "overview": _overview(domains, param_columns, is_delta=is_delta)
+        if is_field_avg
+        else None,
         "selection": _selection(entries, visible, selected_model),
         "charts": serialize_charts(visible),
         "errors": [],
@@ -91,11 +122,19 @@ def build_meta_payload(
 
 def _domain_groups_with_naive() -> list[dict[str, str]]:
     return [
-        {"key": "knowledge", "label": "Knowledge", "title": "知识类（MMLU / Multi-choice）"},
+        {
+            "key": "knowledge",
+            "label": "Knowledge",
+            "title": "知识类（MMLU / Multi-choice）",
+        },
         {"key": "math", "label": "Math", "title": "数学推理（AIME / Math-500 等）"},
         {"key": "coding", "label": "Coding", "title": "代码"},
         {"key": "agent", "label": "Agent", "title": "Agent 工作流"},
-        {"key": "instruction_following", "label": "Instruction Following", "title": "指令遵循（IFEval 等）"},
+        {
+            "key": "instruction_following",
+            "label": "Instruction Following",
+            "title": "指令遵循（IFEval 等）",
+        },
         {"key": "function_call", "label": "Function Call", "title": "函数调用"},
         {"key": "naive", "label": "朴素榜", "title": "朴素榜"},
     ]
@@ -111,13 +150,17 @@ def _table_view_label(view: str) -> str:
     return labels.get(view, labels["benchmark_detail_delta"])
 
 
-def _select_entries(entries: list[dict[str, Any]], selected_model: str | None) -> list[dict[str, Any]]:
+def _select_entries(
+    entries: list[dict[str, Any]], selected_model: str | None
+) -> list[dict[str, Any]]:
     if selected_model and selected_model != "每档最新（调度策略）":
         return [entry for entry in entries if entry["model"] == selected_model]
     return entries
 
 
-def _param_columns(entries: list[dict[str, Any]], *, is_delta: bool) -> list[dict[str, Any]]:
+def _param_columns(
+    entries: list[dict[str, Any]], *, is_delta: bool
+) -> list[dict[str, Any]]:
     by_param: dict[str, list[dict[str, Any]]] = {}
     for entry in entries:
         _, _, param = parse_model_tags(str(entry["model"]))
@@ -126,7 +169,9 @@ def _param_columns(entries: list[dict[str, Any]], *, is_delta: bool) -> list[dic
     for param, param_entries in sorted(by_param.items(), key=lambda item: item[0]):
         models = sorted(
             {str(entry["model"]) for entry in param_entries},
-            key=lambda model: max(e["created_at"] for e in param_entries if e["model"] == model),
+            key=lambda model: max(
+                e["created_at"] for e in param_entries if e["model"] == model
+            ),
         )
         latest = models[-1] if models else ""
         prev = models[-2] if is_delta and len(models) > 1 else None
@@ -155,7 +200,9 @@ def _rows_for_domain(
         dataset = str(entry["dataset"])
         if domain is not None and domain_for(dataset, entry.get("task")) != domain:
             continue
-        metric, _ = metric_from_context(entry.get("metrics") or {}, entry.get("sampling_config"))
+        metric, _ = metric_from_context(
+            entry.get("metrics") or {}, entry.get("sampling_config")
+        )
         if metric is None:
             continue
         eval_method = "cot" if entry.get("cot") else "nocot"
@@ -169,22 +216,48 @@ def _rows_for_domain(
             latest_percent = _entry_percent(latest, metric)
             prev_percent = _entry_percent(prev, metric)
             if is_delta:
-                delta = None if latest_percent is None or prev_percent is None else latest_percent - prev_percent
+                delta = (
+                    None
+                    if latest_percent is None or prev_percent is None
+                    else latest_percent - prev_percent
+                )
                 cells.append(
                     {
                         "prev": prev_percent,
                         "latest": latest_percent,
                         "delta": delta,
-                        "prev_meta": _cell_meta(prev, dataset, eval_method, metric, column.get("prev_label")),
-                        "latest_meta": _cell_meta(latest, dataset, eval_method, metric, column.get("latest_label")),
+                        "prev_meta": _cell_meta(
+                            prev, dataset, eval_method, metric, column.get("prev_label")
+                        ),
+                        "latest_meta": _cell_meta(
+                            latest,
+                            dataset,
+                            eval_method,
+                            metric,
+                            column.get("latest_label"),
+                        ),
                     }
                 )
             else:
-                cells.append({"percent": latest_percent, "meta": _cell_meta(latest, dataset, eval_method, metric, column.get("latest_label"))})
+                cells.append(
+                    {
+                        "percent": latest_percent,
+                        "meta": _cell_meta(
+                            latest,
+                            dataset,
+                            eval_method,
+                            metric,
+                            column.get("latest_label"),
+                        ),
+                    }
+                )
         rows.append(
             {
                 "benchmark_name": dataset,
-                "num_samples": max((entry.get("samples") or 0 for entry in group_entries), default=0) or None,
+                "num_samples": max(
+                    (entry.get("samples") or 0 for entry in group_entries), default=0
+                )
+                or None,
                 "eval_method": eval_method,
                 "k_metric": metric,
                 "cells": cells,
@@ -193,17 +266,25 @@ def _rows_for_domain(
     return rows
 
 
-def _entry_for_model(entries: list[dict[str, Any]], model: Any) -> dict[str, Any] | None:
+def _entry_for_model(
+    entries: list[dict[str, Any]], model: Any
+) -> dict[str, Any] | None:
     if not model:
         return None
     candidates = [entry for entry in entries if entry["model"] == model]
-    return max(candidates, key=lambda entry: (entry["created_at"], entry.get("score_id") or 0), default=None)
+    return max(
+        candidates,
+        key=lambda entry: (entry["created_at"], entry.get("score_id") or 0),
+        default=None,
+    )
 
 
 def _entry_percent(entry: dict[str, Any] | None, metric: str) -> float | None:
     if entry is None:
         return None
-    _, value = metric_from_context(entry.get("metrics") or {}, entry.get("sampling_config"))
+    _, value = metric_from_context(
+        entry.get("metrics") or {}, entry.get("sampling_config")
+    )
     if metric in (entry.get("metrics") or {}):
         value = (entry.get("metrics") or {}).get(metric)
     try:
@@ -239,7 +320,9 @@ def _cell_meta(
     }
 
 
-def _overview(domains: list[dict[str, Any]], columns: list[dict[str, Any]], *, is_delta: bool) -> list[dict[str, Any]]:
+def _overview(
+    domains: list[dict[str, Any]], columns: list[dict[str, Any]], *, is_delta: bool
+) -> list[dict[str, Any]]:
     rows = []
     for domain in domains:
         cells = []
@@ -257,22 +340,46 @@ def _overview(domains: list[dict[str, Any]], columns: list[dict[str, Any]], *, i
                 elif cell["percent"] is not None:
                     values.append(cell["percent"])
             if is_delta:
-                latest = sum(latest_values) / len(latest_values) if latest_values else None
+                latest = (
+                    sum(latest_values) / len(latest_values) if latest_values else None
+                )
                 prev = sum(prev_values) / len(prev_values) if prev_values else None
-                cells.append({"prev": prev, "latest": latest, "delta": None if latest is None or prev is None else latest - prev})
+                cells.append(
+                    {
+                        "prev": prev,
+                        "latest": latest,
+                        "delta": None
+                        if latest is None or prev is None
+                        else latest - prev,
+                    }
+                )
             else:
                 cells.append({"percent": sum(values) / len(values) if values else None})
-        rows.append({"domain_key": domain["key"], "domain_title": domain["title"], "cells": cells})
+        rows.append(
+            {
+                "domain_key": domain["key"],
+                "domain_title": domain["title"],
+                "cells": cells,
+            }
+        )
     return rows
 
 
-def _selection(entries: list[dict[str, Any]], visible: list[dict[str, Any]], selected_model: str | None) -> dict[str, Any]:
+def _selection(
+    entries: list[dict[str, Any]],
+    visible: list[dict[str, Any]],
+    selected_model: str | None,
+) -> dict[str, Any]:
     value = selected_model or "每档最新（调度策略）"
     return {
         "dropdown_value": value,
         "selected_label": value,
         "auto_selected": value == "每档最新（调度策略）",
         "model_sequence": sorted({entry["model"] for entry in visible}),
-        "skipped_small_params": max(0, len({entry["model"] for entry in entries}) - len({entry["model"] for entry in visible})),
+        "skipped_small_params": max(
+            0,
+            len({entry["model"] for entry in entries})
+            - len({entry["model"] for entry in visible}),
+        ),
         "auto_label": "每档最新（调度策略）",
     }

@@ -4,4 +4,11 @@ from scoreboard_server.dtos.api.admin.eval.options import AdminEvalOptionsRespon
 
 
 def admin_eval_options_response() -> AdminEvalOptionsResponse:
-    return {"jobs": [], "domains": [], "model_select": [], "worker_profile": [], "protocol": [], "run_mode": []}
+    return {
+        "jobs": [],
+        "domains": [],
+        "model_select": [],
+        "worker_profile": [],
+        "protocol": [],
+        "run_mode": [],
+    }

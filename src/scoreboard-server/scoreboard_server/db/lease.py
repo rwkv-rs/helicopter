@@ -75,13 +75,17 @@ class SchedulerLeaseStore:
                 str(owner_id),
                 str(node_id),
                 int(lease_duration_s),
-                json.dumps(dict(lease_meta), ensure_ascii=False) if lease_meta is not None else None,
+                json.dumps(dict(lease_meta), ensure_ascii=False)
+                if lease_meta is not None
+                else None,
                 int(lease_duration_s),
             ],
         )
         return bool(rows)
 
-    async def renew(self, *, job_ids: Sequence[str], owner_id: str, lease_duration_s: int) -> set[str]:
+    async def renew(
+        self, *, job_ids: Sequence[str], owner_id: str, lease_duration_s: int
+    ) -> set[str]:
         normalized = [str(job_id) for job_id in job_ids if str(job_id).strip()]
         if not normalized:
             return set()
@@ -153,7 +157,9 @@ class SchedulerLeaseStore:
                 claimed_at=row["claimed_at"],
                 heartbeat_at=row["heartbeat_at"],
                 lease_until=row["lease_until"],
-                lease_meta=row.get("lease_meta") if isinstance(row.get("lease_meta"), dict) else None,
+                lease_meta=row.get("lease_meta")
+                if isinstance(row.get("lease_meta"), dict)
+                else None,
             )
             for row in rows
         ]
@@ -173,7 +179,9 @@ class SchedulerLeaseManager:
         self.owner_id = str(owner_id)
         self.lease_duration_s = max(5, int(lease_duration_s))
 
-    async def claim(self, job_id: str, *, lease_meta: Mapping[str, Any] | None = None) -> bool:
+    async def claim(
+        self, job_id: str, *, lease_meta: Mapping[str, Any] | None = None
+    ) -> bool:
         return await self.store.claim(
             job_id=job_id,
             owner_id=self.owner_id,
@@ -196,7 +204,11 @@ class SchedulerLeaseManager:
         return await self.store.release_all(owner_id=self.owner_id)
 
     async def active_foreign_job_ids(self) -> set[str]:
-        return {lease.job_id for lease in await self.store.list_active() if lease.owner_id != self.owner_id}
+        return {
+            lease.job_id
+            for lease in await self.store.list_active()
+            if lease.owner_id != self.owner_id
+        }
 
 
 __all__ = ["SchedulerLeaseManager", "SchedulerLeaseRecord", "SchedulerLeaseStore"]

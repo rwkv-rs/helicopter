@@ -3,7 +3,9 @@ from __future__ import annotations
 from fastapi import FastAPI
 
 from scoreboard_server.dtos.api.admin.eval.options import AdminEvalOptionsResponse
-from scoreboard_server.services.api.admin.eval.options import admin_eval_options_response
+from scoreboard_server.services.api.admin.eval.options import (
+    admin_eval_options_response,
+)
 
 
 def register(app: FastAPI) -> None:

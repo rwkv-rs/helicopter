@@ -6,7 +6,9 @@ from .settings import DatabaseSettings
 from .schema import apply_schema_sql
 
 
-async def init_db(settings: DatabaseSettings | None = None, *, generate_schemas: bool = False) -> None:
+async def init_db(
+    settings: DatabaseSettings | None = None, *, generate_schemas: bool = False
+) -> None:
     if Tortoise._inited:
         return
     resolved = settings or DatabaseSettings.from_env()

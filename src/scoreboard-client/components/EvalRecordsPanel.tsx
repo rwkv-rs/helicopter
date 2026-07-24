@@ -108,7 +108,7 @@ function EvalTable({ records, taskId }: { records: EvalRecord[]; taskId: number 
               <th>sample</th>
               <th>repeat</th>
               <th>pass_idx</th>
-              <th>scored_completion</th>
+              <th>completion</th>
               <th>ref_answer</th>
               <th>is_passed</th>
               <th>fail_reason</th>
@@ -252,8 +252,7 @@ function StructuredContext({
         {hasEvidence ? (
           <>
             <EvidenceText label="Assembled prompt" value={evidence.prompt} />
-            <EvidenceText label="Raw completion" value={evidence.raw_completion} />
-            <EvidenceText label="Scored completion" value={evidence.scored_completion} />
+            <EvidenceText label="Completion" value={evidence.raw_completion} />
           </>
         ) : stages.length > 0 ? (
           stages.map((stageValue, index) => {

@@ -9,6 +9,8 @@ from scoreboard_server.services.api.admin.eval.status import SCHEDULER_CONTROL_E
 
 def register(app: FastAPI) -> None:
     @app.post("/api/admin/eval/start")
-    async def admin_start(payload: dict[str, Any] | None = Body(default=None)) -> dict[str, Any]:
+    async def admin_start(
+        payload: dict[str, Any] | None = Body(default=None),
+    ) -> dict[str, Any]:
         _ = payload
         raise HTTPException(status_code=501, detail=SCHEDULER_CONTROL_ERROR)

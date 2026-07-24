@@ -22,12 +22,25 @@ async def eval_context_response(
         repeat_index=repeat_index,
         pass_index=pass_index,
     )
-    event: dict[str, Any] = {"view": "text", "raw_text": "", "context": None, "stop_tokens": {}, "errors": []}
+    event: dict[str, Any] = {
+        "view": "text",
+        "raw_text": "",
+        "context": None,
+        "stop_tokens": {},
+        "errors": [],
+    }
     if context is None:
         event["raw_text"] = "当前样本没有 context 内容。"
         return event
-    event["raw_text"] = json.dumps(context, ensure_ascii=False, indent=2) if isinstance(context, dict) else str(context)
-    if isinstance(context, dict) and (isinstance(context.get("stages"), list) or isinstance(context.get("sampling_config"), dict)):
+    event["raw_text"] = (
+        json.dumps(context, ensure_ascii=False, indent=2)
+        if isinstance(context, dict)
+        else str(context)
+    )
+    if isinstance(context, dict) and (
+        isinstance(context.get("stages"), list)
+        or isinstance(context.get("sampling_config"), dict)
+    ):
         event["view"] = "structured"
         event["context"] = context
         event["stop_tokens"] = _stop_tokens(context.get("sampling_config"))

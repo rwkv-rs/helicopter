@@ -133,7 +133,11 @@ async def _seed_scoreboard(settings: DatabaseSettings) -> int:
     assert inserted == 2
     await service.record_score_payload(
         task_id=task_id,
-        payload={"cot_mode": "NoCoT", "metrics": {"avg@1": 0.5}, "created_at": "2026-07-01T12:00:00"},
+        payload={
+            "cot_mode": "NoCoT",
+            "metrics": {"avg@1": 0.5},
+            "created_at": "2026-07-01T12:00:00",
+        },
     )
     return int(task_id)
 
@@ -144,7 +148,9 @@ async def test_scoreboard_api_serves_leaderboard_records_context_and_history(
     task_id = await _seed_scoreboard(database_settings)
     app = create_app(settings=database_settings)
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as client:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
         meta = (await client.get("/api/meta")).json()
         assert meta["scope"] == "official"
         assert meta["entry_count"] == 1
@@ -152,10 +158,15 @@ async def test_scoreboard_api_serves_leaderboard_records_context_and_history(
         assert any(group["key"] == "math" for group in meta["domain_groups"])
 
         leaderboard = (
-            await client.get("/api/leaderboard", params={"model": "rwkv7-g1g-1.5b", "view": "benchmark_detail_latest"})
+            await client.get(
+                "/api/leaderboard",
+                params={"model": "rwkv7-g1g-1.5b", "view": "benchmark_detail_latest"},
+            )
         ).json()
         assert leaderboard["scope"] == "official"
-        math_domain = next(domain for domain in leaderboard["domains"] if domain["key"] == "math")
+        math_domain = next(
+            domain for domain in leaderboard["domains"] if domain["key"] == "math"
+        )
         assert math_domain["rows"][0]["benchmark_name"] == "gsm8k_test"
         assert math_domain["rows"][0]["cells"][0]["percent"] == 50.0
         assert math_domain["rows"][0]["cells"][0]["meta"]["task_id"] == task_id
@@ -165,19 +176,31 @@ async def test_scoreboard_api_serves_leaderboard_records_context_and_history(
         refresh = (await client.post("/api/refresh")).json()
         assert refresh == {"scope": "official", "entry_count": 1, "errors": []}
 
-        records = (await client.get("/api/eval-records", params={"task_id": task_id, "limit": 10})).json()
+        records = (
+            await client.get(
+                "/api/eval-records", params={"task_id": task_id, "limit": 10}
+            )
+        ).json()
         assert len(records["records"]) == 2
         assert records["records"][1]["fail_reason"] == "wrong arithmetic"
 
         wrong = (
-            await client.get("/api/eval-records", params={"task_id": task_id, "only_wrong": "true", "limit": 10})
+            await client.get(
+                "/api/eval-records",
+                params={"task_id": task_id, "only_wrong": "true", "limit": 10},
+            )
         ).json()
         assert [row["sample_index"] for row in wrong["records"]] == [1]
 
         context = (
             await client.get(
                 "/api/eval-context",
-                params={"task_id": task_id, "sample_index": 0, "repeat_index": 0, "pass_index": 0},
+                params={
+                    "task_id": task_id,
+                    "sample_index": 0,
+                    "repeat_index": 0,
+                    "pass_index": 0,
+                },
             )
         ).json()
         assert context["view"] == "structured"
@@ -188,12 +211,17 @@ async def test_scoreboard_api_serves_leaderboard_records_context_and_history(
         assert {"model": "rwkv7-g1g-1.5b", "dataset": "gsm8k_test"} in options["pairs"]
 
         history = (
-            await client.get("/api/score-history", params={"model": "rwkv7-g1g-1.5b", "benchmark": "gsm8k_test"})
+            await client.get(
+                "/api/score-history",
+                params={"model": "rwkv7-g1g-1.5b", "benchmark": "gsm8k_test"},
+            )
         ).json()
         assert history["total"] == 1
         assert history["groups"][0]["points"][0]["percent"] == 50.0
 
-        detail = (await client.get("/api/score-history/detail", params={"task_id": task_id})).json()
+        detail = (
+            await client.get("/api/score-history/detail", params={"task_id": task_id})
+        ).json()
         assert detail["found"] is True
         assert detail["metric"] == "avg@1"
         assert detail["sampling"]["stages"]["answer"]["temperature"] == 0.2
@@ -203,7 +231,9 @@ async def test_leaderboard_exposes_upstream_coding_chart_payload(
     database_settings: DatabaseSettings,
 ) -> None:
     service = ScoreboardStore(settings=database_settings)
-    await service.ensure_benchmark_num_samples(dataset="humaneval_test", num_samples=164)
+    await service.ensure_benchmark_num_samples(
+        dataset="humaneval_test", num_samples=164
+    )
     task_id = await service.get_or_create_task(
         job_name="code_generation",
         job_id="job-code",
@@ -215,11 +245,17 @@ async def test_leaderboard_exposes_upstream_coding_chart_payload(
     )
     await service.record_score_payload(
         task_id=task_id,
-        payload={"cot_mode": "NoCoT", "metrics": {"pass@1": 0.25}, "created_at": "2026-07-01T12:00:00"},
+        payload={
+            "cot_mode": "NoCoT",
+            "metrics": {"pass@1": 0.25},
+            "created_at": "2026-07-01T12:00:00",
+        },
     )
     app = create_app(settings=database_settings)
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as client:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
         leaderboard = (
             await client.get(
                 "/api/leaderboard",
@@ -292,7 +328,9 @@ async def test_leaderboard_exposes_upstream_non_coding_chart_payloads(
 
     app = create_app(settings=database_settings)
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as client:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
         leaderboard = (
             await client.get(
                 "/api/leaderboard",
@@ -303,7 +341,10 @@ async def test_leaderboard_exposes_upstream_non_coding_chart_payloads(
     knowledge = leaderboard["charts"]["knowledge"]
     assert knowledge["type"] == "knowledge_bar"
     assert knowledge["subjects"] == ["Physics", "History"]
-    assert {row["subject"]: row["score"] for row in knowledge["data"]} == {"Physics": 0.8, "History": 0.6}
+    assert {row["subject"]: row["score"] for row in knowledge["data"]} == {
+        "Physics": 0.8,
+        "History": 0.6,
+    }
 
     math = leaderboard["charts"]["math"]
     assert math["type"] == "aime_line"
@@ -354,24 +395,46 @@ async def test_delta_detail_rows_keep_cot_and_nocot_benchmarks_adjacent(
             )
             await service.record_score_payload(
                 task_id=task_id,
-                payload={"cot_mode": cot_mode, "metrics": {"accuracy": accuracy}, "created_at": created_at},
+                payload={
+                    "cot_mode": cot_mode,
+                    "metrics": {"accuracy": accuracy},
+                    "created_at": created_at,
+                },
             )
 
-    await record_pair(dataset="mmlu_test", cot_mode="CoT", prev_accuracy=0.40, latest_accuracy=0.41)
-    await record_pair(dataset="mmlu_test", cot_mode="NoCoT", prev_accuracy=0.50, latest_accuracy=0.51)
-    await record_pair(dataset="supergpqa_test", cot_mode="CoT", prev_accuracy=0.20, latest_accuracy=0.90)
+    await record_pair(
+        dataset="mmlu_test", cot_mode="CoT", prev_accuracy=0.40, latest_accuracy=0.41
+    )
+    await record_pair(
+        dataset="mmlu_test", cot_mode="NoCoT", prev_accuracy=0.50, latest_accuracy=0.51
+    )
+    await record_pair(
+        dataset="supergpqa_test",
+        cot_mode="CoT",
+        prev_accuracy=0.20,
+        latest_accuracy=0.90,
+    )
     app = create_app(settings=database_settings)
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as client:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
         leaderboard = (
             await client.get(
                 "/api/leaderboard",
-                params={"model": "每档最新（调度策略）", "view": "benchmark_detail_delta"},
+                params={
+                    "model": "每档最新（调度策略）",
+                    "view": "benchmark_detail_delta",
+                },
             )
         ).json()
 
-    knowledge = next(domain for domain in leaderboard["domains"] if domain["key"] == "knowledge")
-    row_keys = [(row["benchmark_name"], row["eval_method"]) for row in knowledge["rows"]]
+    knowledge = next(
+        domain for domain in leaderboard["domains"] if domain["key"] == "knowledge"
+    )
+    row_keys = [
+        (row["benchmark_name"], row["eval_method"]) for row in knowledge["rows"]
+    ]
     assert row_keys[:3] == [
         ("mmlu_test", "cot"),
         ("mmlu_test", "nocot"),
@@ -564,14 +627,19 @@ async def test_service_exposes_upstream_database_operation_surface(
         ],
     )
     assert checker_inserted == 2
-    assert await service.list_checker_keys(task_id=str(task_id)) == {(0, 0, 0), (1, 0, 0)}
+    assert await service.list_checker_keys(task_id=str(task_id)) == {
+        (0, 0, 0),
+        (1, 0, 0),
+    }
 
     completion_rows = await service.list_completions_rows(task_id=str(task_id))
     eval_rows = await service.list_eval_rows(task_id=str(task_id))
     checker_rows = await service.list_checker_rows(task_id=str(task_id))
     score_rows = await service.list_scores_rows(task_id=str(task_id))
     assert [row["sample_index"] for row in completion_rows] == [0, 1]
-    assert {row["completions_id"] for row in eval_rows} == {row["completions_id"] for row in completion_rows}
+    assert {row["completions_id"] for row in eval_rows} == {
+        row["completions_id"] for row in completion_rows
+    }
     assert checker_rows[1]["needs_human_review"] is True
     assert score_rows[0]["metrics"] == {"avg@1": 0.5}
 
@@ -616,7 +684,9 @@ async def test_service_exposes_upstream_database_operation_surface(
 
     strategy_task_ids = await service.ingest_eval_payload_groups(
         task_id=str(task_id),
-        completion_payloads=await service.list_completion_payloads(task_id=str(task_id), status="Completed"),
+        completion_payloads=await service.list_completion_payloads(
+            task_id=str(task_id), status="Completed"
+        ),
         payloads_by_group={
             "primary": [
                 {
@@ -658,8 +728,12 @@ async def test_scheduler_lease_store_keeps_foreign_active_jobs(
     database_settings: DatabaseSettings,
 ) -> None:
     store = SchedulerLeaseStore(settings=database_settings)
-    first = SchedulerLeaseManager(store, node_id="node-a", owner_id="owner-a", lease_duration_s=30)
-    second = SchedulerLeaseManager(store, node_id="node-b", owner_id="owner-b", lease_duration_s=30)
+    first = SchedulerLeaseManager(
+        store, node_id="node-a", owner_id="owner-a", lease_duration_s=30
+    )
+    second = SchedulerLeaseManager(
+        store, node_id="node-b", owner_id="owner-b", lease_duration_s=30
+    )
 
     assert await first.claim("job-1", lease_meta={"task_id": 1}) is True
     assert await second.claim("job-1") is False
@@ -674,18 +748,30 @@ async def test_admin_stub_routes_keep_upstream_client_contract(
 ) -> None:
     app = create_app(settings=database_settings)
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as client:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
         health = (await client.get("/api/admin/health")).json()
         assert health == {"status": "disabled", "active": False, "auth_required": False}
 
         options = (await client.get("/api/admin/eval/options")).json()
-        assert options == {"jobs": [], "domains": [], "model_select": [], "worker_profile": [], "protocol": [], "run_mode": []}
+        assert options == {
+            "jobs": [],
+            "domains": [],
+            "model_select": [],
+            "worker_profile": [],
+            "protocol": [],
+            "run_mode": [],
+        }
 
         assert (await client.get("/api/admin/eval/draft")).json() == {}
 
         status = (await client.get("/api/admin/eval/status")).json()
         assert status["status"] == "idle"
-        assert status["error"] == "Scheduler control is not part of the migrated scoreboard server."
+        assert (
+            status["error"]
+            == "Scheduler control is not part of the migrated scoreboard server."
+        )
         assert status["queue_head"] == []
         assert status["available_gpus"] == []
 
@@ -693,11 +779,21 @@ async def test_admin_stub_routes_keep_upstream_client_contract(
         assert start.status_code == 501
         assert start.json()["detail"] == status["error"]
 
-        assert (await client.post("/api/admin/eval/pause")).json()["error"] == status["error"]
-        assert (await client.post("/api/admin/eval/resume")).json()["error"] == status["error"]
-        assert (await client.post("/api/admin/eval/cancel")).json()["error"] == status["error"]
+        assert (await client.post("/api/admin/eval/pause")).json()["error"] == status[
+            "error"
+        ]
+        assert (await client.post("/api/admin/eval/resume")).json()["error"] == status[
+            "error"
+        ]
+        assert (await client.post("/api/admin/eval/cancel")).json()["error"] == status[
+            "error"
+        ]
 
-        backpressure = (await client.get("/api/admin/backpressure", params={"infer_base_url": "http://infer"})).json()
+        backpressure = (
+            await client.get(
+                "/api/admin/backpressure", params={"infer_base_url": "http://infer"}
+            )
+        ).json()
         assert backpressure == {
             "infer_base_url": "http://infer",
             "available_gpus": [],

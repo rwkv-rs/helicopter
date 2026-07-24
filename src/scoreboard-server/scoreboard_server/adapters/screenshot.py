@@ -34,7 +34,9 @@ def _positive_int(raw_value: Any, fallback: int, *, low: int, high: int) -> int:
     return min(max(value, low), high)
 
 
-def capture_page(*, url: Any = None, width: Any = None, height: Any = None) -> dict[str, Any]:
+def capture_page(
+    *, url: Any = None, width: Any = None, height: Any = None
+) -> dict[str, Any]:
     target_url = _local_url(url)
     viewport_width = _positive_int(width, 1440, low=900, high=2400)
     viewport_height = _positive_int(height, 1200, low=700, high=1800)

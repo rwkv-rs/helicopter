@@ -19,11 +19,19 @@ TABLE_VIEW_LABELS: dict[str, str] = {
     "field_avg_delta": "领域均分（上一代 vs 最新）",
 }
 DOMAIN_GROUPS: tuple[dict[str, Any], ...] = (
-    {"key": "knowledge", "label": "Knowledge", "title": "知识类（MMLU / Multi-choice）"},
+    {
+        "key": "knowledge",
+        "label": "Knowledge",
+        "title": "知识类（MMLU / Multi-choice）",
+    },
     {"key": "math", "label": "Math", "title": "数学推理（AIME / Math-500 等）"},
     {"key": "coding", "label": "Coding", "title": "代码"},
     {"key": "agent", "label": "Agent", "title": "Agent 工作流"},
-    {"key": "instruction_following", "label": "Instruction Following", "title": "指令遵循（IFEval 等）"},
+    {
+        "key": "instruction_following",
+        "label": "Instruction Following",
+        "title": "指令遵循（IFEval 等）",
+    },
     {"key": "function_call", "label": "Function Call", "title": "函数调用"},
 )
 EVAL_PAGE_SIZE = 15
@@ -73,7 +81,9 @@ def parse_datetime(value: Any) -> datetime:
         return value.replace(tzinfo=None)
     if isinstance(value, str) and value.strip():
         try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None)
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(
+                tzinfo=None
+            )
         except ValueError:
             pass
     return now_utc_naive()
@@ -174,11 +184,18 @@ def sanitize_json(value: Any, *, max_depth: int = 6, _depth: int = 0) -> Any:
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace").replace("\x00", "")
     if isinstance(value, Mapping):
-        return {str(sanitize_json(k, _depth=_depth + 1)): sanitize_json(v, _depth=_depth + 1) for k, v in value.items()}
+        return {
+            str(sanitize_json(k, _depth=_depth + 1)): sanitize_json(
+                v, _depth=_depth + 1
+            )
+            for k, v in value.items()
+        }
     if isinstance(value, (list, tuple)):
         return [sanitize_json(item, _depth=_depth + 1) for item in value]
     if isinstance(value, set):
-        return [sanitize_json(item, _depth=_depth + 1) for item in sorted(value, key=str)]
+        return [
+            sanitize_json(item, _depth=_depth + 1) for item in sorted(value, key=str)
+        ]
     try:
         json.dumps(value)
         return value
@@ -187,7 +204,9 @@ def sanitize_json(value: Any, *, max_depth: int = 6, _depth: int = 0) -> Any:
 
 
 def json_key(value: Any) -> str:
-    return json.dumps(sanitize_json(value), ensure_ascii=False, sort_keys=True, default=str)
+    return json.dumps(
+        sanitize_json(value), ensure_ascii=False, sort_keys=True, default=str
+    )
 
 
 def git_hash() -> str:
@@ -232,10 +251,17 @@ def numeric_value(value: Any) -> float | None:
         return None
 
 
-def metric_from_context(metrics: Mapping[str, Any], sampling_config: Any = None) -> tuple[str | None, float | None]:
+def metric_from_context(
+    metrics: Mapping[str, Any], sampling_config: Any = None
+) -> tuple[str | None, float | None]:
     configured: list[str] = []
     if isinstance(sampling_config, Mapping):
-        for key in ("display_metric_key", "score_metric_key", "primary_metric_key", "metric_key"):
+        for key in (
+            "display_metric_key",
+            "score_metric_key",
+            "primary_metric_key",
+            "metric_key",
+        ):
             value = sampling_config.get(key)
             if isinstance(value, str):
                 configured.append(value)
@@ -283,15 +309,36 @@ def domain_for(dataset: str, evaluator: Any = None) -> str:
     token = f"{dataset} {evaluator or ''}".lower()
     normalized_token = re.sub(r"[^a-z0-9]+", "_", token).strip("_")
     compact_token = re.sub(r"[^a-z0-9]+", "", token)
-    if any(part in normalized_token or part in compact_token for part in AGENT_BENCHMARK_TOKENS):
+    if any(
+        part in normalized_token or part in compact_token
+        for part in AGENT_BENCHMARK_TOKENS
+    ):
         return "agent"
-    if any(part in token for part in ("human_eval", "humaneval", "mbpp", "livecodebench", "code")):
+    if any(
+        part in token
+        for part in ("human_eval", "humaneval", "mbpp", "livecodebench", "code")
+    ):
         return "coding"
     if any(part in token for part in ("ifeval", "instruction")):
         return "instruction_following"
-    if any(part in token for part in ("bfcl", "mcp", "tau", "browsecomp", "function", "tool")):
+    if any(
+        part in token
+        for part in ("bfcl", "mcp", "tau", "browsecomp", "function", "tool")
+    ):
         return "function_call"
-    if any(part in token for part in ("gsm", "math", "aime", "amc", "minerva", "olympiad", "gaokao", "svamp")):
+    if any(
+        part in token
+        for part in (
+            "gsm",
+            "math",
+            "aime",
+            "amc",
+            "minerva",
+            "olympiad",
+            "gaokao",
+            "svamp",
+        )
+    ):
         return "math"
     return "knowledge"
 
@@ -304,7 +351,10 @@ def is_naive(evaluator: Any, sampling_config: Any) -> bool:
             sampling_config = json.loads(sampling_config)
         except (TypeError, ValueError):
             sampling_config = None
-    return isinstance(sampling_config, Mapping) and sampling_config.get("prompt_profile") == "naive"
+    return (
+        isinstance(sampling_config, Mapping)
+        and sampling_config.get("prompt_profile") == "naive"
+    )
 
 
 def stop_token_display(token_id: int) -> str:

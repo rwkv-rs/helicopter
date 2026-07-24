@@ -12,9 +12,7 @@ async def leaderboard_response(
     view: str,
     scope: str = "official",
 ) -> LeaderboardResponse:
-    entries = await store.list_latest_scores_for_space(
-        is_tmp=scope == "non_official"
-    )
+    entries = await store.list_latest_scores_for_space(is_tmp=scope == "non_official")
     return build_leaderboard_payload(
         entries,
         selected_model=model,

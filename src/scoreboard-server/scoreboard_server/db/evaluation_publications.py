@@ -166,7 +166,7 @@ class EvaluationPublicationRepository:
                         {
                             "prompt": sample["prompt"],
                             "completion": sample["raw_completion"],
-                            "stop_reason": sample["generation"]["terminal_reason"],
+                            "stop_reason": sample["generation"]["finish_reason"],
                         }
                     ],
                     "sampling_config": task.sampling_config,
@@ -189,7 +189,7 @@ class EvaluationPublicationRepository:
                     await EvalRecord.create(
                         using_db=connection,
                         completion=completion,
-                        answer=str(sample["scored_completion"])[:65_536],
+                        answer=str(sample["raw_completion"])[:65_536],
                         ref_answer=str(reference_answer)[:4_096],
                         is_passed=passed,
                         fail_reason="" if passed else "primary metric mismatch",

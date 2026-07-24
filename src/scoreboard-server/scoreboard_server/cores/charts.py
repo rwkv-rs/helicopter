@@ -25,7 +25,10 @@ def serialize_charts(entries: list[dict[str, Any]]) -> dict[str, Any]:
 def _knowledge_chart(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
     subject_scores: dict[str, dict[str, float]] = {}
     for entry in entries:
-        if domain_for(str(entry.get("dataset") or ""), entry.get("task")) != "knowledge":
+        if (
+            domain_for(str(entry.get("dataset") or ""), entry.get("task"))
+            != "knowledge"
+        ):
             continue
         details = _task_details(entry)
         acc_map = details.get("accuracy_by_subject")
@@ -52,8 +55,17 @@ def _knowledge_chart(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
             subject_sums.setdefault(label, []).append(score)
     if not data:
         return None
-    subjects = sorted(subject_sums, key=lambda subject: sum(subject_sums[subject]) / len(subject_sums[subject]), reverse=True)
-    return {"type": "knowledge_bar", "subjects": subjects, "models": _chart_models(data), "data": data}
+    subjects = sorted(
+        subject_sums,
+        key=lambda subject: sum(subject_sums[subject]) / len(subject_sums[subject]),
+        reverse=True,
+    )
+    return {
+        "type": "knowledge_bar",
+        "subjects": subjects,
+        "models": _chart_models(data),
+        "data": data,
+    }
 
 
 def _math_chart(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -64,11 +76,15 @@ def _math_chart(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
         base = _dataset_base(str(entry.get("dataset") or "")).lower()
         if base not in {"aime24", "aime25"}:
             continue
-        curve = _pass_curve(entry.get("metrics") or {}, _task_details(entry).get("pass_curve"))
+        curve = _pass_curve(
+            entry.get("metrics") or {}, _task_details(entry).get("pass_curve")
+        )
         if not curve:
             continue
         name = f"{base.upper()} · {_chart_model_label(entry)}"
-        order.setdefault(name, (base.upper(), _chart_model_sort_key(str(entry.get("model") or ""))))
+        order.setdefault(
+            name, (base.upper(), _chart_model_sort_key(str(entry.get("model") or "")))
+        )
         points = series.setdefault(name, [])
         for k, acc in curve.items():
             points.append({"k": int(k), "acc": float(acc)})
@@ -79,7 +95,10 @@ def _math_chart(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
     return {
         "type": "aime_line",
         "ks": sorted(ks),
-        "series": [{"name": name, "points": sorted(series[name], key=lambda item: item["k"])} for name in ordered_names],
+        "series": [
+            {"name": name, "points": sorted(series[name], key=lambda item: item["k"])}
+            for name in ordered_names
+        ],
     }
 
 
@@ -87,7 +106,10 @@ def _instruction_chart(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
     data: list[dict[str, Any]] = []
     domains: set[str] = set()
     for entry in entries:
-        if domain_for(str(entry.get("dataset") or ""), entry.get("task")) != "instruction_following":
+        if (
+            domain_for(str(entry.get("dataset") or ""), entry.get("task"))
+            != "instruction_following"
+        ):
             continue
         details = _task_details(entry)
         buckets: dict[str, list[float]] = {}
@@ -103,12 +125,25 @@ def _instruction_chart(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
                 buckets.setdefault(domain, []).append(score)
         for domain, scores in buckets.items():
             domains.add(domain)
-            data.append({"domain": domain, "model": _chart_model_label(entry), "score": sum(scores) / len(scores)})
+            data.append(
+                {
+                    "domain": domain,
+                    "model": _chart_model_label(entry),
+                    "score": sum(scores) / len(scores),
+                }
+            )
     if not data:
         return None
     domain_order = [domain for domain in _INSTRUCTION_DOMAIN_ORDER if domain in domains]
-    domain_order.extend(domain for domain in sorted(domains) if domain not in domain_order)
-    return {"type": "instruction_bar", "domains": domain_order, "models": _chart_models(data), "data": data}
+    domain_order.extend(
+        domain for domain in sorted(domains) if domain not in domain_order
+    )
+    return {
+        "type": "instruction_bar",
+        "domains": domain_order,
+        "models": _chart_models(data),
+        "data": data,
+    }
 
 
 def _coding_chart(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -119,14 +154,18 @@ def _agent_chart(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
     return _benchmark_score_chart(entries, domain="agent", chart_type="agent_bar")
 
 
-def _benchmark_score_chart(entries: list[dict[str, Any]], *, domain: str, chart_type: str) -> dict[str, Any] | None:
+def _benchmark_score_chart(
+    entries: list[dict[str, Any]], *, domain: str, chart_type: str
+) -> dict[str, Any] | None:
     data: list[dict[str, Any]] = []
     datasets: set[str] = set()
     for entry in entries:
         dataset = str(entry.get("dataset") or "")
         if domain_for(dataset, entry.get("task")) != domain:
             continue
-        metric, value = metric_from_context(entry.get("metrics") or {}, entry.get("sampling_config"))
+        metric, value = metric_from_context(
+            entry.get("metrics") or {}, entry.get("sampling_config")
+        )
         if value is None:
             continue
         label = _dataset_base(dataset).upper()
@@ -141,7 +180,12 @@ def _benchmark_score_chart(entries: list[dict[str, Any]], *, domain: str, chart_
         )
     if not data:
         return None
-    return {"type": chart_type, "datasets": sorted(datasets), "models": _chart_models(data), "data": data}
+    return {
+        "type": chart_type,
+        "datasets": sorted(datasets),
+        "models": _chart_models(data),
+        "data": data,
+    }
 
 
 def _dataset_base(dataset: str) -> str:

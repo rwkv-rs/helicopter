@@ -13,4 +13,6 @@ class ScoreModel(Model):
 
     class Meta:
         table = "model"
-        unique_together = (("arch_version", "data_version", "num_params", "model_name"),)
+        unique_together = (
+            ("arch_version", "data_version", "num_params", "model_name"),
+        )
