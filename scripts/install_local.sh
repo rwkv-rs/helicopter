@@ -15,7 +15,7 @@ CLEAN_SUBMODULE_VENVS="${CLEAN_SUBMODULE_VENVS:-1}"
 CLEAN_VLLM_CMAKE_CACHE="${CLEAN_VLLM_CMAKE_CACHE:-1}"
 VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE:-cuda}"
 VLLM_BUILD_PROFILE="${VLLM_BUILD_PROFILE:-rwkv}"
-VLLM_VERSION_OVERRIDE="${VLLM_VERSION_OVERRIDE:-}"
+VLLM_VERSION_OVERRIDE="${VLLM_VERSION_OVERRIDE:-0.10.1+rwkv.compat}"
 VLLM_REBUILD="${VLLM_REBUILD:-auto}"
 VERL_REINSTALL="${VERL_REINSTALL:-auto}"
 CMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-RelWithDebInfo}"
@@ -30,7 +30,6 @@ export VLLM_BUILD_PROFILE
 VLLM="$ROOT/src/infer/vllm-rwkv"
 RWKV_LM="$ROOT/src/train/rwkv-lm"
 VERL="$ROOT/src/train/verl-rwkv"
-LIGHTEVAL_COMPONENT="$ROOT/src/eval/lighteval"
 SCOREBOARD_SERVER="$ROOT/src/scoreboard-server"
 SCOREBOARD_CLIENT="$ROOT/src/scoreboard-client"
 STAMP_DIR="$VENV/.helicopter-stamps"
@@ -87,7 +86,8 @@ validate_install_components() {
 }
 
 native_component_enabled() {
-  component_enabled vllm-rwkv || component_enabled verl-rwkv || component_enabled rwkv-lm
+  component_enabled lighteval || component_enabled vllm-rwkv ||
+    component_enabled verl-rwkv || component_enabled rwkv-lm
 }
 
 case "${INSTALL_PROFILE:-}" in
@@ -131,6 +131,7 @@ EOF
 
 configure_build_dirs() {
   if [[ -n "$BUILD_TMPDIR" ]]; then
+    [[ "$BUILD_TMPDIR" == /* ]] || BUILD_TMPDIR="$ROOT/$BUILD_TMPDIR"
     mkdir -p "$BUILD_TMPDIR"
     export TMPDIR="$BUILD_TMPDIR"
   fi
@@ -282,7 +283,7 @@ sync_uv_env() {
   IFS=, read -r -a components <<<"$INSTALL_COMPONENTS"
   for component in "${components[@]}"; do
     case "$component" in
-      lighteval | scoreboard-server | scoreboard-client) ;;
+      scoreboard-server | scoreboard-client) ;;
       *) sync_args+=(--group "$component") ;;
     esac
   done
@@ -290,19 +291,11 @@ sync_uv_env() {
   run "$UV" "${sync_args[@]}"
 }
 
-sync_lighteval_component() {
+clean_legacy_lighteval_distributions() {
   component_enabled lighteval || return 0
-  [[ -f "$LIGHTEVAL_COMPONENT/uv.lock" ]] || die "LightEval component lock is missing"
-
-  local sync_args=(sync --project "$LIGHTEVAL_COMPONENT" --active --inexact)
-  component_enabled dev && sync_args+=(--group dev)
-  if [[ "$UV_UPGRADE" == "1" ]]; then
-    sync_args+=(--upgrade)
-  else
-    sync_args+=(--locked)
-  fi
-  [[ -n "$UV_INDEX_URL" ]] && sync_args+=(--index-url "$UV_INDEX_URL")
-  run env VIRTUAL_ENV="$VENV" "$UV" "${sync_args[@]}"
+  [[ -x "$VENV/bin/python" ]] || return 0
+  run "$UV" pip uninstall --python "$VENV/bin/python" \
+    helicopter-lighteval lighteval-runner litellm
 }
 
 sync_scoreboard_server_component() {
@@ -460,23 +453,62 @@ check_python_packages() {
   return 1
 }
 
+check_lighteval_environment() {
+  component_enabled lighteval || return 0
+  [[ "${DRY_RUN:-0}" == "1" ]] && return 0
+  "$VENV/bin/python" - "$VLLM" "$ROOT/src/eval/lighteval/evaluate.py" <<'PY'
+import importlib.metadata as md, json, runpy, sys
+from pathlib import Path
+from types import MethodType, SimpleNamespace
+import lighteval
+from lighteval.models.vllm.vllm_model import VLLMModel
+from lighteval.utils.imports import is_package_available
+from vllm import LLM
+assert md.version("lighteval") == "0.13.0"
+assert is_package_available("vllm") and not getattr(VLLMModel, "is_dummy", False)
+backend, captured = object.__new__(LLM), {}
+backend.model_config = SimpleNamespace(
+    runner_type="generate", tokenizer_mode="rwkv", hf_config=SimpleNamespace(model_type="rwkv7"))
+backend._run_completion = MethodType(lambda self, **kw: captured.update(kw) or [], backend)
+settings = runpy.run_path(sys.argv[2])
+model = object.__new__(VLLMModel)
+model.config = settings["RWKVVLLMModelConfig"](
+    model_name="compatibility-probe", generation_parameters=settings["_generation_parameters"]())
+model.data_parallel_size, model.model = 1, backend
+model._generate(inputs=[[1]], max_new_tokens=17, stop_tokens=[], num_samples=2)
+assert captured["prompts"] == [{"prompt_token_ids": [1]}]
+params = captured["params"]
+assert (params.stop, params.stop_token_ids, params.ignore_eos) == (["\nUser:"], [0], False)
+assert (params.n, params.max_tokens, params.temperature, params.top_p, params.top_k,
+        params.presence_penalty, params.repetition_penalty, params.frequency_penalty, params.penalty_decay) == (2, 17, 0.96, 0.76, 32, 1.0, 0.1, 0.0, 0.988)
+assert Path(lighteval.__file__).is_relative_to(Path(sys.prefix))
+names = [item.metadata["Name"].lower().replace("_", "-") for item in md.distributions()]
+assert names.count("vllm") == 1 and not {"helicopter-lighteval", "lighteval-runner", "litellm"} & set(names)
+assert "vcs_info" not in json.loads(md.distribution("lighteval").read_text("direct_url.json") or "{}")
+direct = json.loads(md.distribution("vllm").read_text("direct_url.json"))
+assert direct.get("dir_info", {}).get("editable") is True
+assert Path(direct["url"].removeprefix("file://")).resolve() == Path(sys.argv[1]).resolve()
+PY
+}
+
 configure_network
 configure_build_dirs
 clean_submodule_venvs
 ensure_uv
 check_compiler_env
+clean_legacy_lighteval_distributions
 sync_uv_env
-sync_lighteval_component
 sync_scoreboard_server_component
 sync_scoreboard_client_component
 check_native_env
 check_cuda_env
 configure_cuda_arch_list
-component_enabled vllm-rwkv && clean_vllm_cmake_cache
-component_enabled vllm-rwkv && install_vllm_package
+(component_enabled lighteval || component_enabled vllm-rwkv) && clean_vllm_cmake_cache
+(component_enabled lighteval || component_enabled vllm-rwkv) && install_vllm_package
 component_enabled rwkv-lm && install_rwkv_lm_package
 component_enabled verl-rwkv && install_verl_package
 check_python_packages
+check_lighteval_environment
 
 clean_submodule_venvs
 

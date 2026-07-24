@@ -6,24 +6,6 @@
 [infer]
 enable_auto_tool_choice = false
 
-[eval]
-# Workload identity fields may be overridden by explicit CLI flags. Secrets are
-# read only from --endpoint-api-key-env / --scoreboard-token-env and never TOML.
-endpoint_url = "http://127.0.0.1:8000/v1"
-checkpoint_sha256 = "replace-with-64-character-checkpoint-digest"
-tokenizer_revision = "rwkv-tokenizer-v1"
-chat_template_revision = "rwkv-chat-v1"
-wkv_mode = "fp32io16"
-precision = "fp16-io-fp32-state"
-gemm_policy = "fp32-accumulation"
-launch_contract = "helicopter-eval-eager-v1"
-output_root = "src/eval/lighteval/results"
-cot_mode = "none"
-# GB10/g1h-7.2b capacity sweep: keep more requests in flight than the
-# max_num_seqs=512 server capacity. OpenAI's transport limit is 1000.
-max_concurrent_requests = 1000
-request_timeout_seconds = 3600
-
 [takeoff.grpo]
 project_name = "verl_rwkv_grpo"
 experiment_name = "rwkv7_grpo_vllm"
@@ -89,12 +71,4 @@ sha256 = "1fe61e5c4b9037ffd4723a11c4de146d99c26bcd89e00a61afa67ef653d215e8"
 [models."g1h-7.2b-eval".infer]
 wkv_mode = "fp32io16"
 gpu_memory_utilization = 0.9
-# Local GB10 eager-mode sweep selected B512: B1024 was slower while consuming
-# about twice the recurrent-state memory.
-max_num_seqs = 512
 max_num_batched_tokens = 10240
-tokenizer_revision = "sha256:e6dee3d4e31b4d5c40ac99508ac6c701ceef4bed681bf2167ce9a908552bca89"
-chat_template_revision = "sha256:87a5c16f5f052451b2daa261baed47a08a4d15e7e0e3888761beda2a836cecfe"
-precision = "fp16-io-fp32-state"
-gemm_policy = "fp32-accumulation"
-launch_contract = "helicopter-eval-eager-v1"

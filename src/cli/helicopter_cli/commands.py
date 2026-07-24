@@ -2,9 +2,6 @@ from __future__ import annotations
 
 import os
 import sys
-import hashlib
-import json
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -585,92 +582,6 @@ def build_infer_plan(
         served_model_name,
     ]
 
-    if args.serve_evaluation:
-        server_revision = vllm_rwkv_revision(config, root=root, env=env)
-        configured_server_revision = pick(
-            args.server_revision, infer.get("server_revision")
-        )
-        if (
-            configured_server_revision is not None
-            and str(configured_server_revision) != server_revision
-        ):
-            raise SystemExit(
-                "evaluation server revision does not match the vllm-rwkv "
-                f"submodule: configured {configured_server_revision}, actual "
-                f"{server_revision}"
-            )
-        attestation_values = {
-            "wkv_mode": wkv_mode,
-            "checkpoint_sha256": pick(args.checkpoint_sha256, model.get("sha256")),
-            "tokenizer_revision": pick(
-                args.tokenizer_revision, infer.get("tokenizer_revision")
-            ),
-            "chat_template_revision": pick(
-                args.chat_template_revision, infer.get("chat_template_revision")
-            ),
-            "server_revision": server_revision,
-            "precision": pick(args.precision, infer.get("precision")),
-            "gemm_policy": pick(args.gemm_policy, infer.get("gemm_policy")),
-            "launch_contract": pick(args.launch_contract, infer.get("launch_contract")),
-        }
-        missing = sorted(
-            name for name, value in attestation_values.items() if not value
-        )
-        if missing:
-            raise SystemExit(
-                "evaluation server attestation fields are required: "
-                + ", ".join(missing)
-            )
-        checkpoint_digest = str(attestation_values["checkpoint_sha256"])
-        if len(checkpoint_digest) != 64 or any(
-            character not in "0123456789abcdef" for character in checkpoint_digest
-        ):
-            raise SystemExit(
-                "evaluation checkpoint SHA-256 must be lowercase hexadecimal"
-            )
-        if not args.dry_run:
-            actual_digest = _sha256_file(model_path)
-            if actual_digest != checkpoint_digest:
-                raise SystemExit(
-                    "evaluation checkpoint digest mismatch: "
-                    f"expected {checkpoint_digest}, found {actual_digest}"
-                )
-        contract = {
-            "schema_version": 1,
-            "model": {
-                "served_name": served_model_name,
-                "checkpoint_sha256": checkpoint_digest,
-                "tokenizer_revision": str(attestation_values["tokenizer_revision"]),
-                "chat_template_revision": str(
-                    attestation_values["chat_template_revision"]
-                ),
-            },
-            "provider": {
-                "server_revision": str(attestation_values["server_revision"]),
-                "wkv_mode": str(attestation_values["wkv_mode"]),
-                "precision": str(attestation_values["precision"]),
-                "gemm_policy": str(attestation_values["gemm_policy"]),
-                "launch_contract": str(attestation_values["launch_contract"]),
-            },
-            "capabilities": [
-                "openai-chat",
-                "output-token-ids",
-                "terminal-reason",
-                "prompt-evidence",
-            ],
-        }
-        command.extend(
-            [
-                "--helicopter-attestation-json",
-                json.dumps(contract, sort_keys=True, separators=(",", ":")),
-            ]
-        )
-        # RWKV recurrent state may occupy non-contiguous request rows after
-        # continuous-batch turnover.  The current decode CUDA Graph capture
-        # binds contiguous dummy rows, so evaluation must use live inputs until
-        # the provider has a slot-aware graph contract.
-        command.append("--enforce-eager")
-
     option_values = {
         "--tensor-parallel-size": pick(
             args.tensor_parallel_size,
@@ -717,46 +628,6 @@ def build_infer_plan(
     plan_env = strip_vllm_env(env)
     plan_env.update(shown_env)
     return CommandPlan(command=command, cwd=root, shown_env=shown_env, env=plan_env)
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while chunk := stream.read(8 * 1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def vllm_rwkv_revision(
-    config: dict[str, Any], *, root: Path, env: dict[str, str]
-) -> str:
-    paths = table(config, "paths")
-    source = resolve_path(
-        str(
-            pick(
-                paths.get("vllm_rwkv_path"),
-                env_value(env, "HELICOPTER_VLLM_RWKV_PATH", "VLLM_RWKV_PATH"),
-                "src/infer/vllm-rwkv",
-            )
-        ),
-        root=root,
-        env=env,
-    )
-    result = subprocess.run(
-        ["git", "-C", str(source), "rev-parse", "HEAD"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    revision = result.stdout.strip()
-    if (
-        result.returncode != 0
-        or len(revision) != 40
-        or any(character not in "0123456789abcdef" for character in revision)
-    ):
-        detail = result.stderr.strip() or "not a Git checkout"
-        raise SystemExit(f"cannot derive vllm-rwkv revision from {source}: {detail}")
-    return revision
 
 
 def build_takeoff_plan(

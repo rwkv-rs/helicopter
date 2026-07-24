@@ -1,0 +1,7 @@
+device = "NVIDIA RTX PRO 6000 Blackwell Workstation Edition"
+candidates = [40, 80, 160, 320, 640, 1280, 2560]
+[precision.fp16]
+status = "pending-pro6000-scan"
+
+[precision.fp32io16]
+status = "pending-pro6000-scan"

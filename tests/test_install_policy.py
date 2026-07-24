@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MAIN_GROUPS = {"dev", "rwkv-lm", "verl-liger", "verl-rwkv", "vllm-rwkv"}
+MAIN_GROUPS = {"dev", "lighteval", "rwkv-lm", "verl-liger", "verl-rwkv", "vllm-rwkv"}
 
 
 class InstallPolicyTests(unittest.TestCase):
@@ -23,26 +23,19 @@ class InstallPolicyTests(unittest.TestCase):
         self.assertEqual(manifest["tool"]["uv"]["default-groups"], [])
         self.assertNotIn("full", manifest["dependency-groups"])
 
-    def test_child_components_own_their_manifests_and_locks(self) -> None:
+    def test_lighteval_is_a_locked_root_group_without_a_child_package(self) -> None:
+        manifest = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        group = manifest["dependency-groups"]["lighteval"]
+        self.assertEqual(group[0], {"include-group": "vllm-rwkv"})
+        self.assertIn("lighteval[extended-tasks,math]==0.13.0", group)
+        self.assertFalse(any("git+" in str(item) or str(item).startswith("vllm") for item in group[1:]))
         for relative in (
             "src/eval/lighteval/pyproject.toml",
             "src/eval/lighteval/uv.lock",
-            "src/scoreboard-server/pyproject.toml",
-            "src/scoreboard-server/uv.lock",
-            "src/scoreboard-client/package.json",
-            "src/scoreboard-client/bun.lock",
         ):
-            self.assertTrue((ROOT / relative).is_file(), relative)
+            self.assertFalse((ROOT / relative).exists(), relative)
 
-        lighteval = tomllib.loads(
-            (ROOT / "src/eval/lighteval/pyproject.toml").read_text(encoding="utf-8")
-        )
-        dependencies = set(lighteval["project"]["dependencies"])
-        self.assertTrue(any(item.startswith("httpx>=") for item in dependencies))
-        self.assertTrue(any(item.startswith("openai>=") for item in dependencies))
-        self.assertTrue(any(item.startswith("lighteval @ git+") for item in dependencies))
-
-    def test_local_installer_routes_lighteval_outside_root_groups(self) -> None:
+    def test_local_installer_routes_lighteval_through_the_root_group(self) -> None:
         result = subprocess.run(
             ["bash", str(ROOT / "scripts/install_local.sh")],
             cwd=ROOT,
@@ -61,10 +54,10 @@ class InstallPolicyTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--group dev", result.stdout)
-        self.assertNotIn("--group lighteval", result.stdout)
+        self.assertIn("--group lighteval", result.stdout)
         self.assertIn("--project", result.stdout)
-        self.assertIn("src/eval/lighteval", result.stdout)
-        self.assertIn("--active", result.stdout)
+        self.assertIn("pip uninstall", result.stdout)
+        self.assertNotIn("--project src/eval/lighteval", result.stdout)
 
     def test_installers_reject_full_before_external_actions(self) -> None:
         for script in ("install_local.sh", "install_remote.sh"):
