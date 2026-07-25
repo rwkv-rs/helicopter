@@ -37,6 +37,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--responses", type=int, default=16)
     parser.add_argument("--context-length", type=int, default=10240)
     parser.add_argument("--vllm-source-revision", required=True)
+    parser.add_argument(
+        "--prompt-audit-json",
+        type=Path,
+        help="Replay the exact rendered prompt and token IDs from another audit.",
+    )
     parser.add_argument("--historical-run-dir", type=Path)
     parser.add_argument("--output", type=Path)
     return parser.parse_args()
@@ -209,20 +214,37 @@ def main() -> None:
     )
     tokenizer = llm.get_tokenizer()
     messages = row["source_prompt"]
-    rendered_prompt = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-        rwkv_generation_prompt="open_think",
-    )
-    prompt_token_ids = list(
-        tokenizer.apply_chat_template(
+    if args.prompt_audit_json is None:
+        rendered_prompt = tokenizer.apply_chat_template(
             messages,
-            tokenize=True,
+            tokenize=False,
             add_generation_prompt=True,
             rwkv_generation_prompt="open_think",
         )
-    )
+        prompt_token_ids = list(
+            tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+                rwkv_generation_prompt="open_think",
+            )
+        )
+        prompt_replay = None
+    else:
+        prompt_audit = json.loads(args.prompt_audit_json.read_text())
+        replay_input = prompt_audit["input"]
+        if replay_input["problem"] != row["prompt"]:
+            raise RuntimeError("replayed prompt problem does not match candidate")
+        if replay_input["ground_truth"] != row["reward_model"]["ground_truth"]:
+            raise RuntimeError("replayed prompt ground truth does not match candidate")
+        rendered_prompt = replay_input["rendered_prompt"]
+        prompt_token_ids = list(replay_input["prompt_token_ids"])
+        prompt_replay = {
+            "source_audit_json": str(args.prompt_audit_json),
+            "source_vllm_revision": prompt_audit["current_runtime"][
+                "vllm_source_revision_declared_by_control"
+            ],
+        }
     max_tokens = args.context_length - len(prompt_token_ids)
     if max_tokens < 1:
         raise RuntimeError(
@@ -330,6 +352,7 @@ def main() -> None:
                 "add_generation_prompt": True,
                 "rwkv_generation_prompt": "open_think",
             },
+            "prompt_replay": prompt_replay,
             "rendered_prompt": rendered_prompt,
             "decoded_prompt_with_special_tokens": tokenizer.decode(
                 prompt_token_ids,
