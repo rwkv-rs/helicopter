@@ -3,7 +3,13 @@
 import { useMemo } from "react";
 
 import { useComparisonStore } from "./store";
-import type { DomainId } from "./types";
+import type {
+  ComparisonId,
+  DomainId,
+  ModelVariant,
+  ScoreArm,
+  ScoreCellSelection,
+} from "./types";
 
 const DOMAINS: { id: DomainId; label: string }[] = [
   { id: "regular", label: "常规评估" },
@@ -24,6 +30,77 @@ const REGULAR_BENCHMARKS = new Set([
 
 function percent(value: number): string {
   return `${value.toFixed(1)}%`;
+}
+
+const DEFAULT_SAMPLING_CONFIG = {
+  temperature: 0.6,
+  topP: 0.95,
+  topK: 40,
+  maxTokens: 32768,
+  seed: 42,
+} as const;
+
+function promptTemplateFor(comparisonId: ComparisonId, arm: ScoreArm): string {
+  if (comparisonId === "prompt_template") {
+    return arm === "a"
+      ? "User✿{task.problem}✿\\nBot✿<think"
+      : "User: {task.problem}\\n\\nAssistant: <think";
+  }
+  if (comparisonId === "fake_cot" && arm === "a") {
+    return "User: {task.problem}\\n\\nAssistant: <think></think>";
+  }
+  if (comparisonId === "fake_cot") {
+    return "User: {task.problem}\\n\\nAssistant: <think";
+  }
+  return "User✿{task.problem}✿\\nBot✿<think";
+}
+
+function scoreSelection({
+  comparisonId,
+  comparisonLabel,
+  parameterGroupId,
+  parameterLabel,
+  benchmark,
+  metric,
+  samples,
+  arm,
+  armLabel,
+  model,
+  score,
+  truncationRate,
+}: {
+  comparisonId: ComparisonId;
+  comparisonLabel: string;
+  parameterGroupId: string;
+  parameterLabel: string;
+  benchmark: string;
+  metric: string;
+  samples: number;
+  arm: ScoreArm;
+  armLabel: string;
+  model: ModelVariant;
+  score: number;
+  truncationRate: number;
+}): ScoreCellSelection {
+  return {
+    comparisonId,
+    comparisonLabel,
+    parameterGroupId,
+    parameterLabel,
+    benchmark,
+    metric,
+    samples,
+    arm,
+    armLabel,
+    model: model.label,
+    architecture: model.architecture,
+    generation: model.generation,
+    parameterCount: model.parameters,
+    score,
+    truncationRate,
+    promptTemplate: promptTemplateFor(comparisonId, arm),
+    samplingConfig: { ...DEFAULT_SAMPLING_CONFIG },
+  };
 }
 
 function ArmHeadingLabel({ label }: { label: string }) {
@@ -111,10 +188,10 @@ export function ScoreMatrix() {
             </tr>
             <tr>
               {parameterGroups.flatMap((group) => [
-                <th className="arm-heading" key={`${group.id}-a`} title={group.aModel}>
+                <th className="arm-heading" key={`${group.id}-a`} title={group.aModel.label}>
                   <ArmHeadingLabel label={comparison.aLabel} />
                 </th>,
-                <th className="arm-heading" key={`${group.id}-b`} title={group.bModel}>
+                <th className="arm-heading" key={`${group.id}-b`} title={group.bModel.label}>
                   <ArmHeadingLabel label={comparison.bLabel} />
                 </th>,
                 <th className="delta-heading" key={`${group.id}-delta`}>delta</th>,
@@ -145,7 +222,7 @@ export function ScoreMatrix() {
                         onClick={() =>
                           dispatch({
                             type: "select-score-cell",
-                            selection: {
+                            selection: scoreSelection({
                               comparisonId: state.comparisonId,
                               comparisonLabel: comparison.label,
                               parameterGroupId: group.id,
@@ -157,7 +234,8 @@ export function ScoreMatrix() {
                               armLabel: comparison.aLabel,
                               model: group.aModel,
                               score: score.a,
-                            },
+                              truncationRate: score.aTruncationRate,
+                            }),
                           })
                         }
                         type="button"
@@ -172,7 +250,7 @@ export function ScoreMatrix() {
                         onClick={() =>
                           dispatch({
                             type: "select-score-cell",
-                            selection: {
+                            selection: scoreSelection({
                               comparisonId: state.comparisonId,
                               comparisonLabel: comparison.label,
                               parameterGroupId: group.id,
@@ -184,7 +262,8 @@ export function ScoreMatrix() {
                               armLabel: comparison.bLabel,
                               model: group.bModel,
                               score: score.b,
-                            },
+                              truncationRate: score.bTruncationRate,
+                            }),
                           })
                         }
                         type="button"

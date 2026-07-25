@@ -47,7 +47,7 @@ export function ScoreHistoryPage() {
                       {group.label} · {comparison.label}
                     </div>
                     <div className="muted">
-                      {group.aModel} / {group.bModel} · {points.length} 条分数
+                      {group.aModel.label} / {group.bModel.label} · {points.length} 条分数
                     </div>
                   </div>
                   {!group.comparable ? (
@@ -111,4 +111,3 @@ export function ScoreHistoryPage() {
     </>
   );
 }
-

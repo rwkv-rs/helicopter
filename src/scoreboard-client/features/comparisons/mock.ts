@@ -153,6 +153,9 @@ function buildAnswerSample(
       : outcome === "incorrect"
         ? "answer_mismatch"
         : unansweredReasons[index % unansweredReasons.length];
+  const assembledPrompt = selection.promptTemplate
+    .replace("{task.problem}", problem)
+    .replaceAll("\\n", "\n");
   return {
     id: `${selection.comparisonId}-${selection.parameterGroupId}-${selection.arm}-${outcome}-${index}`,
     problemId: `${selection.benchmark.toLowerCase().replaceAll(" ", "-")}-${String(index + 1).padStart(4, "0")}`,
@@ -162,8 +165,7 @@ function buildAnswerSample(
     isPassed:
       outcome === "correct" ? true : outcome === "incorrect" ? false : null,
     context: {
-      problem,
-      assembledPrompt: `User: ${problem}\n\nAssistant: <think>`,
+      assembledPrompt,
       rawCompletion,
       failReason,
       generatedTokens:
@@ -172,8 +174,6 @@ function buildAnswerSample(
           : Math.round(80 + random() * 420),
       latencyMs: Math.round(450 + random() * 3800),
       runId: `mock-${selection.comparisonId}-${selection.parameterGroupId}-${selection.arm}`,
-      model: selection.model,
-      metric: selection.metric,
     },
   };
 }
@@ -202,17 +202,39 @@ function buildAnswerSampleGroups(
 function parameterGroups(comparisonId: ComparisonId): ParameterGroup[] {
   return PARAMETER_LABELS.map((label, index) => {
     const architectureDelta = comparisonId === "architecture" ? [6.7, 3.4, 4.2, 12.8][index] : 0;
+    const qwenParameters = ["1.7B", "3B", "7.5B", "15B"][index];
+    const aModel =
+      comparisonId === "architecture"
+        ? {
+            label: `Qwen3.5 ${qwenParameters}`,
+            architecture: "QWEN" as const,
+            generation: "3.5",
+            parameters: qwenParameters,
+          }
+        : comparisonId === "generation"
+          ? {
+              label: `RWKV G1G ${label}`,
+              architecture: "RWKV" as const,
+              generation: "G1G",
+              parameters: label,
+            }
+          : {
+              label: `RWKV G1H ${label}`,
+              architecture: "RWKV" as const,
+              generation: "G1H",
+              parameters: label,
+            };
+    const bModel = {
+      label: `RWKV G1H ${label}`,
+      architecture: "RWKV" as const,
+      generation: "G1H",
+      parameters: label,
+    };
     return {
       id: label.toLowerCase(),
       label,
-      aModel:
-        comparisonId === "architecture"
-          ? `Qwen3.5 ${["1.7B", "3B", "7.5B", "15B"][index]}`
-          : `RWKV7 g1g ${label}`,
-      bModel:
-        comparisonId === "architecture"
-          ? `RWKV ${label}`
-          : `RWKV7 g1h ${label}`,
+      aModel,
+      bModel,
       parameterDeltaPercent: architectureDelta,
       comparable: architectureDelta <= 10,
     };
@@ -223,7 +245,7 @@ function buildBenchmarks(random: () => number): BenchmarkScore[] {
   return BENCHMARKS.map(([benchmark, samples, evalMethod, metric, domain], rowIndex) => {
     const scores = Object.fromEntries(
       COMPARISONS.map((comparison, comparisonIndex) => {
-        const byParameter: Record<string, { a: number; b: number }> = {};
+        const byParameter: BenchmarkScore["scores"][ComparisonId] = {};
         PARAMETER_LABELS.forEach((label, parameterIndex) => {
           const scaleGain = parameterIndex * 9.5;
           const taskBias = rowIndex * 1.8;
@@ -231,7 +253,12 @@ function buildBenchmarks(random: () => number): BenchmarkScore[] {
           const a = clamp(18 + scaleGain + taskBias + comparisonBias + random() * 12);
           const effect = comparison.id === "fake_cot" ? 5.5 : 2.8;
           const b = clamp(a + effect + (random() - 0.5) * 5);
-          byParameter[label.toLowerCase()] = { a, b };
+          byParameter[label.toLowerCase()] = {
+            a,
+            b,
+            aTruncationRate: random() * 4.5,
+            bTruncationRate: random() * 3.2,
+          };
         });
         return [comparison.id, byParameter];
       }),
@@ -261,7 +288,7 @@ function buildHistory(
             benchmark: run % 2 === 0 ? "MATH-500" : "AIME24",
             comparisonId: comparison.id,
             arm,
-            model: arm === "a" ? group.aModel : group.bModel,
+            model: arm === "a" ? group.aModel.label : group.bModel.label,
             promptProfile: comparison.id === "prompt_template" ? (arm === "a" ? "rwkv" : "assistant") : "unified",
             precision: comparison.id === "precision" ? (arm === "a" ? "fp16" : "fp32io16") : "fp32io16",
             samples: run % 2 === 0 ? 500 : 64,

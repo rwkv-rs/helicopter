@@ -36,6 +36,20 @@ test("shows a fixed answer panel with ten samples for every outcome", async ({ p
     .click();
 
   await expect(panel.getByText("AIME24", { exact: true })).toBeVisible();
+  await expect(panel.getByText("模型架构", { exact: true })).toBeVisible();
+  await expect(panel.getByText("RWKV", { exact: true })).toBeVisible();
+  await expect(panel.getByText("模型代际", { exact: true })).toBeVisible();
+  await expect(panel.getByText("G1G", { exact: true })).toBeVisible();
+  await expect(panel.getByText("参数量", { exact: true })).toBeVisible();
+  await expect(panel.getByText("n_samples", { exact: true })).toBeVisible();
+  await expect(panel.getByText("k_metrics", { exact: true })).toBeVisible();
+  await expect(panel.getByText("截断率", { exact: true })).toBeVisible();
+  await expect(panel.getByText("评估分数", { exact: true })).toBeVisible();
+  await expect(panel.getByText("prompt_template", { exact: true })).toBeVisible();
+  await expect(panel.getByText("sampling_config", { exact: true })).toBeVisible();
+  await expect(
+    panel.getByText("User✿{task.problem}✿\\nBot✿<think", { exact: true }),
+  ).toBeVisible();
   await expect(panel.getByRole("tab", { name: /正确作答 10/ })).toBeVisible();
   await expect(panel.getByRole("tab", { name: /错误作答 10/ })).toBeVisible();
   await expect(panel.getByRole("tab", { name: /未能作答 10/ })).toBeVisible();
@@ -52,7 +66,12 @@ test("shows a fixed answer panel with ten samples for every outcome", async ({ p
   let contextDialog = page.getByRole("dialog", { name: "aime24-0001 完整上下文" });
   await expect(contextDialog.getByText("assembled prompt")).toBeVisible();
   await expect(contextDialog.getByText("raw completion")).toBeVisible();
+  await expect(contextDialog.getByText("基础信息", { exact: true })).toBeVisible();
   await expect(contextDialog.getByText("scoring result")).toBeVisible();
+  await expect(contextDialog.getByText("is_passed", { exact: true })).toHaveCount(1);
+  await expect(contextDialog.getByText("prompt_template", { exact: true })).toBeVisible();
+  await expect(contextDialog.getByText("sampling_config", { exact: true })).toBeVisible();
+  await expect(contextDialog.getByText("problem", { exact: true })).toHaveCount(0);
   await contextDialog.getByRole("button", { name: "关闭" }).click();
 
   await panel.getByRole("tab", { name: /错误作答/ }).click();

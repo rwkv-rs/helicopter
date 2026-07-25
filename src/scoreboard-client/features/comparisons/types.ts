@@ -22,13 +22,27 @@ export interface ComparisonOption {
   contract: string;
 }
 
+export interface ModelVariant {
+  label: string;
+  architecture: "RWKV" | "QWEN";
+  generation: string;
+  parameters: string;
+}
+
 export interface ParameterGroup {
   id: string;
   label: string;
-  aModel: string;
-  bModel: string;
+  aModel: ModelVariant;
+  bModel: ModelVariant;
   parameterDeltaPercent: number;
   comparable: boolean;
+}
+
+export interface ComparisonScore {
+  a: number;
+  b: number;
+  aTruncationRate: number;
+  bTruncationRate: number;
 }
 
 export interface BenchmarkScore {
@@ -37,7 +51,7 @@ export interface BenchmarkScore {
   evalMethod: string;
   metric: string;
   domain: Exclude<DomainId, "regular">;
-  scores: Record<ComparisonId, Record<string, { a: number; b: number }>>;
+  scores: Record<ComparisonId, Record<string, ComparisonScore>>;
 }
 
 export interface HistoryPoint {
@@ -70,7 +84,19 @@ export interface ScoreCellSelection {
   arm: ScoreArm;
   armLabel: string;
   model: string;
+  architecture: ModelVariant["architecture"];
+  generation: string;
+  parameterCount: string;
   score: number;
+  truncationRate: number;
+  promptTemplate: string;
+  samplingConfig: {
+    temperature: number;
+    topP: number;
+    topK: number;
+    maxTokens: number;
+    seed: number;
+  };
 }
 
 export interface AnswerSample {
@@ -81,15 +107,12 @@ export interface AnswerSample {
   extractedAnswer: string;
   isPassed: boolean | null;
   context: {
-    problem: string;
     assembledPrompt: string;
     rawCompletion: string;
     failReason: string | null;
     generatedTokens: number;
     latencyMs: number;
     runId: string;
-    model: string;
-    metric: string;
   };
 }
 

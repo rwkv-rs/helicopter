@@ -17,13 +17,40 @@ const OUTCOMES: { id: AnswerOutcome; label: string }[] = [
 ];
 
 function SelectionSummary({ selection }: { selection: ScoreCellSelection }) {
+  const fields = [
+    ["模型架构", selection.architecture],
+    ["模型代际", selection.generation],
+    ["参数量", selection.parameterCount],
+    ["Benchmark", selection.benchmark],
+    ["n_samples", String(selection.samples)],
+    ["k_metrics", selection.metric],
+    ["截断率", `${selection.truncationRate.toFixed(1)}%`],
+    ["评估分数", `${selection.score.toFixed(1)}%`],
+  ];
+
   return (
-    <div className="answer-selection-summary">
-      <strong>{selection.benchmark}</strong>
-      <span>{selection.parameterLabel}</span>
-      <span>{selection.armLabel}</span>
-      <span>{selection.model}</span>
-      <b>{selection.score.toFixed(1)}%</b>
+    <dl className="answer-selection-summary">
+      {fields.map(([label, value]) => (
+        <div className="answer-summary-item" key={label}>
+          <dt>{label}</dt>
+          <dd>{value}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function RuntimeConfig({ selection }: { selection: ScoreCellSelection }) {
+  return (
+    <div className="answer-runtime-config">
+      <div className="answer-config-item prompt-template">
+        <span>prompt_template</span>
+        <code>{selection.promptTemplate}</code>
+      </div>
+      <div className="answer-config-item">
+        <span>sampling_config</span>
+        <code>{JSON.stringify(selection.samplingConfig)}</code>
+      </div>
     </div>
   );
 }
@@ -40,9 +67,11 @@ function PassedBadge({ value }: { value: boolean | null }) {
 
 function ContextDetailModal({
   sample,
+  selection,
   onClose,
 }: {
   sample: AnswerSample;
+  selection: ScoreCellSelection;
   onClose: () => void;
 }) {
   useEffect(() => {
@@ -63,14 +92,7 @@ function ContextDetailModal({
         role="dialog"
       >
         <header className="modal-head">
-          <div>
-            <div className="card-title">完整模型上下文</div>
-            <div className="context-outcome">
-              <span>problem_id={sample.problemId}</span>
-              <span>repeat_id={sample.repeatId}</span>
-              <PassedBadge value={sample.isPassed} />
-            </div>
-          </div>
+          <div className="card-title">完整模型上下文</div>
           <button className="btn" onClick={onClose} type="button">
             关闭
           </button>
@@ -85,33 +107,34 @@ function ContextDetailModal({
               <div className="stage-label">raw completion</div>
               <pre>{sample.context.rawCompletion || "无原始输出"}</pre>
             </div>
-            <div className="stage">
-              <div className="stage-label">problem</div>
-              <pre>{sample.context.problem}</pre>
-            </div>
           </div>
           <div className="modal-col right">
+            <div className="card-title">基础信息</div>
+            <SelectionSummary selection={selection} />
+            <dl className="answer-context-meta answer-context-outcome-meta">
+              <dt>problem_id</dt>
+              <dd>{sample.problemId}</dd>
+              <dt>repeat_id</dt>
+              <dd>{sample.repeatId}</dd>
+              <dt>is_passed</dt>
+              <dd>
+                <PassedBadge value={sample.isPassed} />
+              </dd>
+            </dl>
+            <RuntimeConfig selection={selection} />
             <div className="card-title">scoring result</div>
             <dl className="answer-context-meta">
               <dt>ground_truth</dt>
               <dd>{sample.groundTruth}</dd>
               <dt>extracted_answer</dt>
               <dd>{sample.extractedAnswer || "—"}</dd>
-              <dt>is_passed</dt>
-              <dd>
-                <PassedBadge value={sample.isPassed} />
-              </dd>
               <dt>fail_reason</dt>
               <dd>{sample.context.failReason || "—"}</dd>
             </dl>
             <div className="card-title token-title">generation metadata</div>
             <dl className="answer-context-meta">
-              <dt>model</dt>
-              <dd>{sample.context.model}</dd>
               <dt>run_id</dt>
               <dd>{sample.context.runId}</dd>
-              <dt>metric</dt>
-              <dd>{sample.context.metric}</dd>
               <dt>generated_tokens</dt>
               <dd>{sample.context.generatedTokens}</dd>
               <dt>latency_ms</dt>
@@ -168,10 +191,13 @@ export function AnswerDetailsPanel() {
   return (
     <section aria-label="作答详情" className="card answer-detail-panel">
       <header className="panel-head answer-detail-head">
-        <div>
+        <div className="answer-selection-block">
           <div className="card-title">作答详情</div>
           {selection ? (
-            <SelectionSummary selection={selection} />
+            <>
+              <SelectionSummary selection={selection} />
+              <RuntimeConfig selection={selection} />
+            </>
           ) : (
             <div className="answer-unselected-label">未选择 benchmark</div>
           )}
@@ -286,10 +312,11 @@ export function AnswerDetailsPanel() {
           </>
         ) : null}
       </div>
-      {detailSample ? (
+      {detailSample && selection ? (
         <ContextDetailModal
           onClose={() => setDetailSample(null)}
           sample={detailSample}
+          selection={selection}
         />
       ) : null}
     </section>
