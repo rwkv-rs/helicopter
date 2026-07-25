@@ -9,6 +9,8 @@ The current focus is RWKV7:
 - `infer`: start a vLLM server for an RWKV checkpoint.
 - `takeoff`: start verl training for an RWKV checkpoint. The supported takeoff
   path is GRPO.
+- `eval`: run the complete default LightEval registry for multiple weights in
+  both WKV modes, publish it to Scoreboard, and clean standard local results.
 - `scripts/install_remote.sh`: prepare the BBT DevPod GPU workspace, sync this
   repository, and run the local installer remotely.
 - `scripts/install_local.sh`: create/update the project `.venv`, install the
@@ -20,6 +22,7 @@ The current focus is RWKV7:
 ```text
 configs/
   example.toml              # public example experiment config
+  eval/lighteval.toml       # minimal full-registry evaluation config
   local/*.toml              # machine-local experiment configs
 scripts/
   install_local.sh          # prepare the current machine/workspace
@@ -28,6 +31,8 @@ src/cli/helicopter_cli/     # Python CLI package
 src/infer/vllm-rwkv/        # vLLM RWKV implementation
 src/train/rwkv-lm/          # RWKV training code
 src/train/verl-rwkv/        # verl RWKV integration
+src/scoreboard-server/      # PostgreSQL campaign and query API
+src/scoreboard-client/      # complete-campaign evaluation UI
 ```
 
 `AGENTS.md` is intentionally ignored in this repository because it may contain
@@ -97,12 +102,17 @@ Useful install overrides:
 ```bash
 INSTALL_COMPONENTS=rwkv-lm,dev scripts/install_local.sh
 INSTALL_COMPONENTS=vllm-rwkv,dev VLLM_REBUILD=1 scripts/install_local.sh
+INSTALL_COMPONENTS=lighteval,dev scripts/install_local.sh
+INSTALL_COMPONENTS=scoreboard-server,scoreboard-client,dev scripts/install_local.sh
 INSTALL_COMPONENTS=verl-rwkv,rwkv-lm,dev VERL_REINSTALL=1 scripts/install_local.sh
 INSTALL_COMPONENTS=verl-rwkv,verl-liger,dev scripts/install_local.sh
 ```
 
 `pyproject.toml` defines separately selectable `vllm-rwkv`, `verl-rwkv`, and
-`rwkv-lm` runtime groups. `dev` contains `pre-commit` and test tooling;
+`rwkv-lm` runtime groups. `lighteval` selects the complete evaluation runtime
+and installs the repository's editable vLLM-RWKV package. `scoreboard-server`
+and `scoreboard-client` prepare their independently locked applications.
+`dev` contains `pre-commit` and test tooling;
 `verl-liger` is an explicit optional accelerator. `full` is not a dependency
 group and is rejected before synchronization or native builds.
 
@@ -190,6 +200,31 @@ helicopter takeoff g1g-1.5b grpo \
   --override trainer.total_epochs=1 \
   --override trainer.save_freq=10
 ```
+
+### Run the complete LightEval registry
+
+The public config contains only a schema version and one or more weight paths:
+
+```bash
+helicopter eval \
+  --config ./configs/eval/lighteval.toml \
+  --dry-run
+
+helicopter eval --config ./configs/eval/lighteval.toml
+```
+
+`eval` always discovers the complete default built-in registry dynamically and
+runs every full evaluation split for both `fp16` and `fp32io16`; benchmarks are
+not listed in the config. Native perplexity tasks use raw rolling
+log-likelihood rather than the chat-generation path. Scoreboard publication is
+mandatory, and a successful campaign cleans the standard local results/details
+after database confirmation.
+Copy `.env.example` to the private eval environment file and run
+`chmod 600 .env.local` before using it. The file must be owned by the current
+user and must not be a symlink.
+See [docs/evaluation/lighteval.md](docs/evaluation/lighteval.md) for private
+environment variables, resume behavior, failure semantics, query endpoints, and
+the DB-only cleanup contract.
 
 `takeoff` requires the project Python executable to exist. By default it uses
 the configured `.venv/bin/python`; set `HELICOPTER_PYTHON` or `paths.python` only

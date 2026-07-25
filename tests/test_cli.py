@@ -104,8 +104,12 @@ def build_takeoff_plan(
         venv_python = ROOT / ".venv/bin/python"
     original_exists = Path.exists
     with mock.patch.object(Path, "exists", autospec=True) as exists:
-        exists.side_effect = lambda path: True if path == venv_python else original_exists(path)
-        return commands.build_takeoff_plan(args, root=ROOT, env=loaded_env, config=loaded_config)
+        exists.side_effect = lambda path: (
+            True if path == venv_python else original_exists(path)
+        )
+        return commands.build_takeoff_plan(
+            args, root=ROOT, env=loaded_env, config=loaded_config
+        )
 
 
 class DotenvTests(unittest.TestCase):
@@ -144,6 +148,39 @@ class DotenvTests(unittest.TestCase):
             self.assertEqual(path, root / ".env.local")
             self.assertEqual(loaded_env["WEIGHT_PATH"], "/from-env")
 
+    def test_private_load_revalidates_and_reads_the_open_descriptor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env_file = root / ".env.local"
+            env_file.write_text("PRIVATE=value\n")
+            env_file.chmod(0o600)
+
+            loaded_env, path = env.load_env(
+                root,
+                ".env.local",
+                use_fallbacks=False,
+                require_private=True,
+            )
+
+            self.assertEqual(path, env_file)
+            self.assertEqual(loaded_env["PRIVATE"], "value")
+
+    def test_private_load_rejects_symlink_even_after_path_discovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "secret.env"
+            target.write_text("PRIVATE=value\n")
+            target.chmod(0o600)
+            (root / ".env.local").symlink_to(target)
+
+            with self.assertRaises(OSError):
+                env.load_env(
+                    root,
+                    ".env.local",
+                    use_fallbacks=False,
+                    require_private=True,
+                )
+
 
 class ConfigResolutionTests(unittest.TestCase):
     def test_default_config_uses_newest_local_toml_when_available(self) -> None:
@@ -162,7 +199,9 @@ class ConfigResolutionTests(unittest.TestCase):
         loaded_config = load_example_config()
         loaded_env = {"WEIGHT_PATH": "/weights/RWKV"}
 
-        model_path, model = config.resolve_model_path(loaded_config, "g1g-1.5b", root=ROOT, env=loaded_env)
+        model_path, model = config.resolve_model_path(
+            loaded_config, "g1g-1.5b", root=ROOT, env=loaded_env
+        )
 
         self.assertEqual(model["served_model_name"], "g1g-1.5b")
         self.assertEqual(
@@ -201,7 +240,9 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(plan.shown_env, {})
         self.assertEqual({key for key in plan.env if key.startswith("VLLM_")}, set())
 
-    def test_takeoff_plan_uses_verl_module_entrypoint_and_default_overrides(self) -> None:
+    def test_takeoff_plan_uses_verl_module_entrypoint_and_default_overrides(
+        self,
+    ) -> None:
         loaded_config = load_example_config()
         venv_python = ROOT / ".venv/bin/python"
 
@@ -254,7 +295,8 @@ class CommandPlanTests(unittest.TestCase):
                 "data.max_prompt_length": "1024",
                 "data.max_response_length": "7168",
                 "reward.custom_reward_function.path": str(
-                    ROOT / "src/train/verl-rwkv/examples/rwkv_trainer/math_verify_reward.py"
+                    ROOT
+                    / "src/train/verl-rwkv/examples/rwkv_trainer/math_verify_reward.py"
                 ),
                 "actor_rollout_ref.actor.use_dynamic_bsz": "False",
                 "actor_rollout_ref.model.path": "/weights/RWKV/rwkv7-g1g-1.5b-20260526-ctx8192.pth",
@@ -329,7 +371,11 @@ class CommandPlanTests(unittest.TestCase):
     def test_takeoff_config_adv_estimator_becomes_hydra_overrides(self) -> None:
         loaded_config = load_example_config()
         takeoff = loaded_config["takeoff"]
-        takeoff["grpo"] = {**takeoff["grpo"], "adv_estimator": "maxrl", "reward_manager": "dapo"}
+        takeoff["grpo"] = {
+            **takeoff["grpo"],
+            "adv_estimator": "maxrl",
+            "reward_manager": "dapo",
+        }
 
         overrides = hydra_map(build_takeoff_plan(loaded_config))
 
@@ -434,11 +480,16 @@ class CommandPlanTests(unittest.TestCase):
     def test_takeoff_config_can_enable_validation_dump_dir(self) -> None:
         loaded_config = load_example_config()
         takeoff = loaded_config["takeoff"]
-        takeoff["grpo"] = {**takeoff["grpo"], "validation_data_dir": "logs/validation/run"}
+        takeoff["grpo"] = {
+            **takeoff["grpo"],
+            "validation_data_dir": "logs/validation/run",
+        }
 
         overrides = hydra_map(build_takeoff_plan(loaded_config))
 
-        self.assertEqual(overrides["trainer.validation_data_dir"], "logs/validation/run")
+        self.assertEqual(
+            overrides["trainer.validation_data_dir"], "logs/validation/run"
+        )
 
     def test_takeoff_config_can_override_training_rollout_top_p(self) -> None:
         loaded_config = load_example_config()
@@ -449,7 +500,9 @@ class CommandPlanTests(unittest.TestCase):
 
         self.assertEqual(overrides["actor_rollout_ref.rollout.top_p"], "0.65")
 
-    def test_takeoff_rollout_gpu_count_becomes_top_level_and_actor_rollout_overrides(self) -> None:
+    def test_takeoff_rollout_gpu_count_becomes_top_level_and_actor_rollout_overrides(
+        self,
+    ) -> None:
         loaded_config = load_example_config()
         takeoff = loaded_config["takeoff"]
         takeoff["grpo"] = {
@@ -493,7 +546,9 @@ class CommandPlanTests(unittest.TestCase):
             ],
         }
 
-        plan = build_takeoff_plan(loaded_config, args=takeoff_args(dataset="dapo_math_17k"))
+        plan = build_takeoff_plan(
+            loaded_config, args=takeoff_args(dataset="dapo_math_17k")
+        )
         overrides = hydra_map(plan)
 
         self.assertEqual(
@@ -524,8 +579,12 @@ class CommandPlanTests(unittest.TestCase):
 
         self.assertEqual(
             {
-                "actor_rollout_ref.actor.use_kl_loss": overrides["actor_rollout_ref.actor.use_kl_loss"],
-                "actor_rollout_ref.actor.kl_loss_coef": overrides["actor_rollout_ref.actor.kl_loss_coef"],
+                "actor_rollout_ref.actor.use_kl_loss": overrides[
+                    "actor_rollout_ref.actor.use_kl_loss"
+                ],
+                "actor_rollout_ref.actor.kl_loss_coef": overrides[
+                    "actor_rollout_ref.actor.kl_loss_coef"
+                ],
             },
             {
                 "actor_rollout_ref.actor.use_kl_loss": "False",
@@ -619,31 +678,48 @@ class CommandPlanTests(unittest.TestCase):
             f"dataset root not found: {missing_dataset_root / 'partial'}",
         )
 
-    def test_takeoff_user_overrides_are_appended_after_generated_overrides(self) -> None:
+    def test_takeoff_user_overrides_are_appended_after_generated_overrides(
+        self,
+    ) -> None:
         loaded_config = load_example_config()
         plan = build_takeoff_plan(
             loaded_config,
-            args=takeoff_args(override=["trainer.total_epochs=1", "trainer.save_freq=10"]),
+            args=takeoff_args(
+                override=["trainer.total_epochs=1", "trainer.save_freq=10"]
+            ),
         )
 
         self.assertEqual(hydra_values(plan, "trainer.total_epochs"), ["2", "1"])
         self.assertEqual(hydra_values(plan, "trainer.save_freq"), ["20", "10"])
-        self.assertEqual(plan.command[-2:], ["trainer.total_epochs=1", "trainer.save_freq=10"])
+        self.assertEqual(
+            plan.command[-2:], ["trainer.total_epochs=1", "trainer.save_freq=10"]
+        )
 
     def test_takeoff_rejects_missing_default_venv_python(self) -> None:
         config = load_example_config()
         env = {
             key: value
             for key, value in os.environ.items()
-            if key not in {"HELICOPTER_PYTHON", "PYTHON", "HELICOPTER_VENV", "VENV", "REMOTE_VENV"}
+            if key
+            not in {
+                "HELICOPTER_PYTHON",
+                "PYTHON",
+                "HELICOPTER_VENV",
+                "VENV",
+                "REMOTE_VENV",
+            }
         }
         venv_python = ROOT / ".venv/bin/python"
         original_exists = Path.exists
 
         with mock.patch.object(Path, "exists", autospec=True) as exists:
-            exists.side_effect = lambda path: False if path == venv_python else original_exists(path)
+            exists.side_effect = lambda path: (
+                False if path == venv_python else original_exists(path)
+            )
             with self.assertRaises(SystemExit) as raised:
-                commands.python_executable(config, root=ROOT, env=env, require_configured=True)
+                commands.python_executable(
+                    config, root=ROOT, env=env, require_configured=True
+                )
 
         self.assertEqual(
             str(raised.exception),
