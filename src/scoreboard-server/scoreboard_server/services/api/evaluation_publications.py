@@ -1,193 +1,97 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-import hashlib
-import hmac
 import json
-import math
-import os
-import re
-from typing import Any, Mapping
+import secrets
 
-from scoreboard_server.db.evaluation_publications import (
-    EvaluationPublicationRepository,
-    PublicationConflict,
+from pydantic import ValidationError
+
+from scoreboard_server.db.repository import (
+    PublicationConflictError,
+    ScoreboardRepository,
+)
+from scoreboard_server.dtos.api.evaluation_results import (
+    EvaluationPublication,
     PublicationReceipt,
+    content_digest,
 )
-from scoreboard_server.dtos.api.evaluation_publications import (
-    EvaluationPublicationRequest,
-)
-
-
-MAX_PUBLICATION_TRANSFER_BYTES = 16 * 1024 * 1024
-MAX_PUBLICATION_BYTES = 64 * 1024 * 1024
-_RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 
 class PublicationAuthenticationError(RuntimeError):
     pass
 
 
-class PublicationAuthorizationError(RuntimeError):
-    pass
-
-
 class PublicationPayloadError(ValueError):
-    pass
+    def __init__(self, detail: object):
+        super().__init__(str(detail))
+        self.detail = detail
 
 
-class PublicationPayloadTooLarge(PublicationPayloadError):
-    pass
-
-
-class PublicationConflictError(RuntimeError):
-    pass
-
-
-@dataclass(frozen=True, slots=True)
-class TokenGrant:
-    subject: str
-    roles: frozenset[str]
+def publication_tokens_from_env(raw: str) -> dict[str, str]:
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("SCOREBOARD_PUBLICATION_TOKENS must be JSON") from error
+    if not isinstance(value, dict) or not all(
+        isinstance(token, str)
+        and token
+        and isinstance(source, str)
+        and source
+        for token, source in value.items()
+    ):
+        raise RuntimeError(
+            "SCOREBOARD_PUBLICATION_TOKENS must map non-empty tokens to sources"
+        )
+    return value
 
 
 class EvaluationPublicationService:
     def __init__(
         self,
-        repository: EvaluationPublicationRepository,
-        grants: Mapping[str, TokenGrant],
+        repository: ScoreboardRepository,
+        publication_tokens: dict[str, str],
     ) -> None:
-        self._repository = repository
-        self._grants = dict(grants)
+        self.repository = repository
+        self.publication_tokens = publication_tokens
+
+    def source_for_authorization(self, authorization: str) -> str:
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() != "bearer" or not token:
+            raise PublicationAuthenticationError("Bearer token required")
+        for candidate, source in self.publication_tokens.items():
+            if secrets.compare_digest(candidate, token):
+                return source
+        raise PublicationAuthenticationError("invalid publication token")
 
     async def publish(
         self,
         *,
-        run_id: str,
-        authorization: str | None,
-        idempotency_key: str,
-        request: EvaluationPublicationRequest,
+        publication_id: str,
+        authorization: str,
+        idempotency_key: str | None,
+        raw: dict,
     ) -> PublicationReceipt:
-        subject = self._publisher_subject(authorization)
-        if not _RUN_ID.fullmatch(run_id):
-            raise PublicationPayloadError("run_id is not a normalized identifier")
-        payload = request.model_dump(mode="json")
-        encoded = _canonical_json(payload)
-        if len(encoded) > MAX_PUBLICATION_BYTES:
-            raise PublicationPayloadTooLarge(
-                "publication exceeds the request size limit"
-            )
-        manifest = payload["manifest"]
-        if idempotency_key != f"publish:{manifest['digest']}":
+        source = self.source_for_authorization(authorization)
+        digest = content_digest(raw)
+        if idempotency_key != f"publish:{digest}":
             raise PublicationPayloadError(
-                "idempotency key must be derived from the manifest digest"
-            )
-        if _digest(payload["identity"]) != manifest["identity_digest"]:
-            raise PublicationPayloadError("identity digest does not match payload")
-        if _digest(payload["accounting"]) != manifest["accounting_digest"]:
-            raise PublicationPayloadError("accounting digest does not match payload")
-        metric = next(
-            item
-            for item in payload["identity"]["task"]["metrics"]
-            if item["name"] == payload["primary_metric"]
-        )
-        values = [payload["metrics"][payload["primary_metric"]]] + [
-            sample["metrics"][payload["primary_metric"]]
-            for sample in payload["samples"]
-        ]
-        if any(
-            value < metric["minimum"] or value > metric["maximum"] for value in values
-        ):
-            raise PublicationPayloadError(
-                "primary metric is outside its declared range"
-            )
-        sample_values = values[1:]
-        expected_aggregate = (
-            sum(sample_values) / len(sample_values)
-            if metric["aggregation"] == "mean"
-            else sum(sample_values)
-        )
-        if not math.isclose(values[0], expected_aggregate, rel_tol=0.0, abs_tol=1e-12):
-            raise PublicationPayloadError(
-                "primary metric does not match its declared sample aggregation"
-            )
-        if metric["binary_correctness"] and any(
-            sample["reference_answer"] is None
-            or sample["metrics"][payload["primary_metric"]] not in {0.0, 1.0}
-            for sample in payload["samples"]
-        ):
-            raise PublicationPayloadError(
-                "binary metrics require reference answers and exact boolean values"
+                "Idempotency-Key does not match canonical content digest"
             )
         try:
-            return await self._repository.publish(
-                run_id=run_id,
-                publisher_subject=subject,
-                idempotency_key=idempotency_key,
-                request_digest=_digest({"run_id": run_id, "payload": payload}),
-                payload=payload,
-            )
-        except PublicationConflict as error:
-            raise PublicationConflictError(str(error)) from error
-
-    def authenticate(self, authorization: str | None) -> str:
-        return self._publisher_subject(authorization)
-
-    def _publisher_subject(self, authorization: str | None) -> str:
-        prefix = "Bearer "
-        if authorization is None or not authorization.startswith(prefix):
-            raise PublicationAuthenticationError("bearer token is required")
-        presented = authorization[len(prefix) :]
-        grant = next(
-            (
-                candidate
-                for token, candidate in self._grants.items()
-                if hmac.compare_digest(token, presented)
-            ),
-            None,
+            publication = EvaluationPublication.model_validate(raw)
+        except ValidationError as error:
+            raise PublicationPayloadError(error.errors()) from error
+        return await self.repository.publish(
+            publication_id=publication_id,
+            digest=digest,
+            source=source,
+            publication=publication,
         )
-        if grant is None:
-            raise PublicationAuthenticationError("bearer token is invalid")
-        if "publisher" not in grant.roles:
-            raise PublicationAuthorizationError("publisher role is required")
-        return grant.subject
 
 
-def publication_grants_from_env() -> dict[str, TokenGrant]:
-    raw = os.environ.get("SCOREBOARD_AUTH_TOKENS", "").strip()
-    if not raw:
-        return {}
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as error:
-        raise ValueError("SCOREBOARD_AUTH_TOKENS must be valid JSON") from error
-    if not isinstance(payload, dict):
-        raise ValueError("SCOREBOARD_AUTH_TOKENS must be a JSON object")
-    grants: dict[str, TokenGrant] = {}
-    for token, value in payload.items():
-        if not isinstance(token, str) or not token or not isinstance(value, dict):
-            raise ValueError("scoreboard auth token entries are invalid")
-        subject = value.get("subject")
-        roles = value.get("roles")
-        if (
-            not isinstance(subject, str)
-            or not subject
-            or not isinstance(roles, list)
-            or not all(isinstance(role, str) and role for role in roles)
-        ):
-            raise ValueError("scoreboard auth token grant is invalid")
-        grants[token] = TokenGrant(subject, frozenset(roles))
-    return grants
-
-
-def _canonical_json(value: Any) -> bytes:
-    return json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        default=str,
-    ).encode()
-
-
-def _digest(value: Any) -> str:
-    return hashlib.sha256(_canonical_json(value)).hexdigest()
+__all__ = [
+    "EvaluationPublicationService",
+    "PublicationAuthenticationError",
+    "PublicationConflictError",
+    "PublicationPayloadError",
+    "publication_tokens_from_env",
+]

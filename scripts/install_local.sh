@@ -148,6 +148,14 @@ clean_submodule_venvs() {
   done
 }
 
+repair_local_venv() {
+  [[ -d "$VENV" && ! -x "$VENV/bin/python" ]] || return 0
+  [[ "$VENV" == "$ROOT/.venv" ]] ||
+    die "refusing to remove invalid environment outside workspace: $VENV"
+  warn "removing invalid workspace environment without a Python executable: $VENV"
+  run rm -rf "$VENV"
+}
+
 clean_vllm_cmake_cache() {
   [[ "$CLEAN_VLLM_CMAKE_CACHE" == "1" ]] || return 0
   [[ -d "$VLLM/.deps" ]] || return 0
@@ -463,6 +471,7 @@ check_python_packages() {
 configure_network
 configure_build_dirs
 clean_submodule_venvs
+repair_local_venv
 ensure_uv
 check_compiler_env
 sync_uv_env

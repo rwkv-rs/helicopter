@@ -5,13 +5,8 @@ import os
 
 
 def _int_env(name: str, default: int) -> int:
-    raw = os.environ.get(name)
-    if raw is None or raw == "":
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
+    value = os.environ.get(name)
+    return default if value in (None, "") else int(value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +21,10 @@ class DatabaseSettings:
 
     @classmethod
     def from_env(cls) -> "DatabaseSettings":
+        min_size = max(1, _int_env("SCOREBOARD_DB_MIN_SIZE", 1))
+        max_size = max(1, _int_env("SCOREBOARD_DB_MAX_SIZE", 10))
+        if min_size > max_size:
+            raise ValueError("SCOREBOARD_DB_MIN_SIZE cannot exceed SCOREBOARD_DB_MAX_SIZE")
         return cls(
             host=os.environ.get("SCOREBOARD_DB_HOST")
             or os.environ.get("PGHOST")
@@ -35,35 +34,10 @@ class DatabaseSettings:
             or os.environ.get("PGUSER")
             or "postgres",
             password=os.environ.get("SCOREBOARD_DB_PASSWORD")
-            or os.environ.get("PGPASSWORD")
-            or None,
+            or os.environ.get("PGPASSWORD"),
             database=os.environ.get("SCOREBOARD_DB_NAME")
             or os.environ.get("PGDATABASE")
             or "helicopter_scoreboard",
-            min_size=max(1, _int_env("SCOREBOARD_DB_MIN_SIZE", 1)),
-            max_size=max(1, _int_env("SCOREBOARD_DB_MAX_SIZE", 10)),
+            min_size=min_size,
+            max_size=max_size,
         )
-
-    def tortoise_config(self) -> dict[str, object]:
-        return {
-            "connections": {
-                "default": {
-                    "engine": "tortoise.backends.asyncpg",
-                    "credentials": {
-                        "host": self.host,
-                        "port": self.port,
-                        "user": self.user,
-                        "password": self.password,
-                        "database": self.database,
-                        "minsize": self.min_size,
-                        "maxsize": self.max_size,
-                    },
-                },
-            },
-            "apps": {
-                "models": {
-                    "models": ["scoreboard_server.db.models"],
-                    "default_connection": "default",
-                },
-            },
-        }

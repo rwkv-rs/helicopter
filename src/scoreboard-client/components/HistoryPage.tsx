@@ -16,7 +16,7 @@ export function HistoryPage() {
   const { state, dispatch, selectedHistoryPoint } = useComparisonStore();
   const series = useMemo(() => {
     if (!state.data) return [];
-    return state.data.parameterGroups[state.comparisonId].map((group) => ({
+    return (state.data.parameterGroups[state.comparisonId] ?? []).map((group) => ({
       group,
       points: state.data!.history.filter(
         (point) =>
@@ -28,9 +28,13 @@ export function HistoryPage() {
 
   if (state.status === "loading") return <div className="spinner">正在准备历史数据…</div>;
   if (!state.data) return <div className="error-bar">历史数据不可用。</div>;
+  if (!state.data.comparisons.length) {
+    return <div className="empty">尚无带 comparison metadata 的历史结果。</div>;
+  }
   const comparison = state.data.comparisons.find(
     (item) => item.id === state.comparisonId,
-  )!;
+  );
+  if (!comparison) return <div className="empty">当前对比维度没有结果。</div>;
 
   return (
     <>

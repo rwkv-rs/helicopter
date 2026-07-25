@@ -1,1 +1,1 @@
-"""Use-case services for /api routes."""
+"""API use cases."""

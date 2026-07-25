@@ -1,208 +1,117 @@
 from __future__ import annotations
 
-import asyncio
 import json
-import re
-from typing import Any
 import zlib
 
-from fastapi import FastAPI, Header, HTTPException, Response
+from fastapi import FastAPI, Header, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 
-from scoreboard_server.dtos.api.evaluation_publications import (
-    EvaluationPublicationRequest,
-    EvaluationPublicationResponse,
-)
 from scoreboard_server.services.api.evaluation_publications import (
     EvaluationPublicationService,
     PublicationAuthenticationError,
-    PublicationAuthorizationError,
     PublicationConflictError,
     PublicationPayloadError,
-    PublicationPayloadTooLarge,
-    MAX_PUBLICATION_BYTES,
-    MAX_PUBLICATION_TRANSFER_BYTES,
 )
 
 
-_PUBLICATION_PATH = re.compile(
-    r"/api/v1/evaluation-publications/[A-Za-z0-9][A-Za-z0-9._-]{0,127}"
-)
+MAX_COMPRESSED_BYTES = 64 * 1024 * 1024
+MAX_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
 
 
-class PublicationRequestBoundary:
-    def __init__(self, app: Any, *, service: EvaluationPublicationService) -> None:
-        self._app = app
-        self._service = service
-        self._publication_slot = asyncio.Semaphore(1)
-
-    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
-        if (
-            scope.get("type") != "http"
-            or scope.get("method") != "PUT"
-            or not _PUBLICATION_PATH.fullmatch(scope.get("path", ""))
-        ):
-            await self._app(scope, receive, send)
-            return
-        async with self._publication_slot:
-            await self._handle_publication(scope, receive, send)
-
-    async def _handle_publication(self, scope: dict, receive: Any, send: Any) -> None:
-        headers = {
-            key.decode("latin-1").lower(): value.decode("latin-1")
-            for key, value in scope.get("headers", [])
-        }
+async def _publication_json(request: Request) -> dict:
+    content_length = request.headers.get("Content-Length")
+    if content_length is not None:
         try:
-            self._service.authenticate(headers.get("authorization"))
-        except PublicationAuthenticationError as error:
-            await _send_error(send, 401, "unauthorized", str(error))
-            return
-        except PublicationAuthorizationError as error:
-            await _send_error(send, 403, "forbidden", str(error))
-            return
-        content_length = headers.get("content-length")
-        if content_length is not None:
-            try:
-                declared_size = int(content_length)
-            except ValueError:
-                await _send_error(
-                    send, 400, "invalid_content_length", "content length is invalid"
+            if int(content_length) > MAX_COMPRESSED_BYTES:
+                raise HTTPException(
+                    status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    "compressed publication exceeds size limit",
                 )
-                return
-            if declared_size > MAX_PUBLICATION_TRANSFER_BYTES:
-                await _send_error(
-                    send,
-                    413,
-                    "publication_too_large",
-                    "publication exceeds the request size limit",
-                )
-                return
-        body = bytearray()
-        more_body = True
-        while more_body:
-            message = await receive()
-            if message["type"] != "http.request":
-                await self._app(scope, receive, send)
-                return
-            body.extend(message.get("body", b""))
-            if len(body) > MAX_PUBLICATION_TRANSFER_BYTES:
-                await _send_error(
-                    send,
-                    413,
-                    "publication_too_large",
-                    "publication exceeds the request size limit",
-                )
-                return
-            more_body = bool(message.get("more_body"))
-
-        encoding = headers.get("content-encoding", "identity").lower()
-        if encoding == "gzip":
-            try:
-                decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
-                decoded = decompressor.decompress(
-                    bytes(body), MAX_PUBLICATION_BYTES + 1
-                )
-                decoded += decompressor.flush(
-                    max(1, MAX_PUBLICATION_BYTES + 1 - len(decoded))
-                )
-            except zlib.error:
-                await _send_error(
-                    send, 400, "invalid_gzip", "publication gzip body is invalid"
-                )
-                return
-            if (
-                len(decoded) > MAX_PUBLICATION_BYTES
-                or decompressor.unconsumed_tail
-                or not decompressor.eof
-            ):
-                await _send_error(
-                    send,
-                    413,
-                    "publication_too_large",
-                    "publication exceeds the decompressed request size limit",
-                )
-                return
-            body = bytearray(decoded)
-        elif encoding != "identity":
-            await _send_error(
-                send,
-                415,
-                "unsupported_content_encoding",
-                "publication content encoding must be gzip or identity",
+        except ValueError as error:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, "invalid Content-Length"
+            ) from error
+    body = await request.body()
+    if len(body) > MAX_COMPRESSED_BYTES:
+        raise HTTPException(
+            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            "compressed publication exceeds size limit",
+        )
+    encoding = request.headers.get("Content-Encoding", "identity").lower()
+    if encoding == "gzip":
+        try:
+            decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+            decoded = decompressor.decompress(body, MAX_UNCOMPRESSED_BYTES + 1)
+            decoded += decompressor.flush(
+                max(1, MAX_UNCOMPRESSED_BYTES + 1 - len(decoded))
             )
-            return
-
-        scope["headers"] = [
-            (key, value)
-            for key, value in scope.get("headers", [])
-            if key.lower() not in {b"content-encoding", b"content-length"}
-        ] + [(b"content-length", str(len(body)).encode())]
-
-        delivered = False
-
-        async def replay_body() -> dict[str, Any]:
-            nonlocal delivered
-            if delivered:
-                return {"type": "http.disconnect"}
-            delivered = True
-            return {"type": "http.request", "body": bytes(body), "more_body": False}
-
-        await self._app(scope, replay_body, send)
+        except zlib.error as error:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, "invalid gzip body"
+            ) from error
+        if (
+            len(decoded) > MAX_UNCOMPRESSED_BYTES
+            or decompressor.unconsumed_tail
+            or not decompressor.eof
+        ):
+            raise HTTPException(
+                status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                "publication exceeds uncompressed size limit",
+            )
+        body = decoded
+    elif encoding != "identity":
+        raise HTTPException(
+            status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            f"unsupported Content-Encoding: {encoding}",
+        )
+    if len(body) > MAX_UNCOMPRESSED_BYTES:
+        raise HTTPException(
+            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            "publication exceeds uncompressed size limit",
+        )
+    try:
+        value = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid JSON body") from error
+    if not isinstance(value, dict):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "body must be an object")
+    return value
 
 
 def register(app: FastAPI, service: EvaluationPublicationService) -> None:
-    app.add_middleware(PublicationRequestBoundary, service=service)
-
-    @app.put(
-        "/api/v1/evaluation-publications/{run_id}",
-        response_model=EvaluationPublicationResponse,
-    )
+    @app.put("/api/v1/evaluation-publications/{publication_id:path}")
     async def publish_evaluation(
-        run_id: str,
-        request: EvaluationPublicationRequest,
-        response: Response,
-        authorization: str | None = Header(default=None),
-        idempotency_key: str = Header(..., alias="Idempotency-Key"),
-    ) -> EvaluationPublicationResponse:
+        publication_id: str,
+        request: Request,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ):
+        raw = await _publication_json(request)
         try:
             receipt = await service.publish(
-                run_id=run_id,
-                authorization=authorization,
+                publication_id=publication_id,
+                authorization=request.headers.get("Authorization", ""),
                 idempotency_key=idempotency_key,
-                request=request,
+                raw=raw,
             )
         except PublicationAuthenticationError as error:
-            raise _http_error(401, "unauthorized", str(error)) from error
-        except PublicationAuthorizationError as error:
-            raise _http_error(403, "forbidden", str(error)) from error
-        except PublicationPayloadTooLarge as error:
-            raise _http_error(413, "publication_too_large", str(error)) from error
+            raise HTTPException(
+                status.HTTP_401_UNAUTHORIZED, str(error)
+            ) from error
         except PublicationPayloadError as error:
-            raise _http_error(422, "invalid_publication", str(error)) from error
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY, error.detail
+            ) from error
         except PublicationConflictError as error:
-            raise _http_error(409, "publication_conflict", str(error)) from error
-        response.status_code = 201 if receipt.disposition == "created" else 200
-        return EvaluationPublicationResponse(
-            run_id=run_id,
-            task_id=receipt.task_id,
-            status="completed",
-            disposition=receipt.disposition,
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"publication id already contains different content: {error}",
+            ) from error
+        response_status = (
+            status.HTTP_201_CREATED
+            if receipt.disposition == "created"
+            else status.HTTP_200_OK
         )
-
-
-def _http_error(status: int, code: str, message: str) -> HTTPException:
-    return HTTPException(status_code=status, detail={"code": code, "message": message})
-
-
-async def _send_error(send: Any, status: int, code: str, message: str) -> None:
-    body = json.dumps({"detail": {"code": code, "message": message}}).encode()
-    await send(
-        {
-            "type": "http.response.start",
-            "status": status,
-            "headers": [
-                (b"content-type", b"application/json"),
-                (b"content-length", str(len(body)).encode()),
-            ],
-        }
-    )
-    await send({"type": "http.response.body", "body": body})
+        return JSONResponse(
+            status_code=response_status,
+            content=receipt.model_dump(mode="json"),
+        )

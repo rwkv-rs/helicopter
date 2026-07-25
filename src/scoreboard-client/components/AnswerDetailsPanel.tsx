@@ -14,6 +14,7 @@ const OUTCOMES: { id: AnswerOutcome; label: string }[] = [
   { id: "correct", label: "正确作答" },
   { id: "incorrect", label: "错误作答" },
   { id: "unanswered", label: "未能作答" },
+  { id: "undetermined", label: "无法判定" },
 ];
 
 function SelectionSummary({ selection }: { selection: ScoreCellSelection }) {
@@ -92,7 +93,7 @@ function RuntimeConfig({ selection }: { selection: ScoreCellSelection }) {
           {samplingParameters.map(([label, value]) => (
             <div key={label}>
               <dt>{label}</dt>
-              <dd>{value}</dd>
+              <dd>{value ?? "—"}</dd>
             </div>
           ))}
         </dl>
@@ -176,6 +177,10 @@ function ContextDetailModal({
               <dd>{sample.extractedAnswer || "—"}</dd>
               <dt>fail_reason</dt>
               <dd>{sample.context.failReason || "—"}</dd>
+              <dt>sample_metric</dt>
+              <dd>
+                <code>{JSON.stringify(sample.sampleMetric)}</code>
+              </dd>
             </dl>
             <div className="card-title token-title">generation metadata</div>
             <dl className="answer-context-meta">
@@ -184,7 +189,7 @@ function ContextDetailModal({
               <dt>generated_tokens</dt>
               <dd>{sample.context.generatedTokens}</dd>
               <dt>latency_ms</dt>
-              <dd>{sample.context.latencyMs}</dd>
+              <dd>{sample.context.latencyMs ?? "—"}</dd>
             </dl>
           </div>
         </div>
@@ -300,7 +305,7 @@ export function AnswerDetailsPanel() {
         {selection && !loading && !error && activeGroup ? (
           <>
             <div className="answer-sample-note">
-              从该结果类别的 {activeGroup.total} 条记录中随机抽取{" "}
+              显示该结果类别 {activeGroup.total} 条记录中的前{" "}
               <strong>{activeGroup.items.length}</strong> 条
             </div>
             <div className="answer-records-wrap">

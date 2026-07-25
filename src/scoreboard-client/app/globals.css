@@ -399,18 +399,6 @@ table.pivot.bench-table tbody tr:hover .axis-method,
 table.pivot.bench-table tbody tr:hover .axis-kmetric {
   background: var(--bg-hover);
 }
-.capture-status {
-  color: var(--good);
-  font-family: var(--mono);
-  font-size: 11px;
-  max-width: 520px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.capture-status.error {
-  color: var(--bad);
-}
 .cell-info {
   margin-left: 4px;
   color: var(--text-muted);
@@ -663,189 +651,8 @@ table.pivot.bench-table tbody tr:hover .axis-kmetric {
   color: var(--text);
 }
 
-/* ---- Admin ---- */
-.btn-danger {
-  border-color: rgba(240, 99, 122, 0.4);
-  color: var(--bad);
-}
-.btn-danger:hover:not(:disabled) {
-  background: rgba(240, 99, 122, 0.12);
-  border-color: var(--bad);
-}
 .btn:disabled {
   cursor: not-allowed;
-}
-
-.mono-sm {
-  font-family: var(--mono);
-  font-size: 12px;
-}
-
-.admin-status-head {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-.admin-controls {
-  margin-left: auto;
-  display: flex;
-  gap: 8px;
-}
-
-.stat-pill {
-  display: inline-block;
-  padding: 3px 12px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-}
-.stat-pill.stat-run {
-  background: var(--accent-soft);
-  color: var(--accent);
-}
-.stat-pill.stat-warn {
-  background: rgba(245, 177, 76, 0.16);
-  color: var(--warn);
-}
-.stat-pill.stat-good {
-  background: rgba(62, 207, 142, 0.16);
-  color: var(--good);
-}
-.stat-pill.stat-bad {
-  background: rgba(240, 99, 122, 0.16);
-  color: var(--bad);
-}
-.stat-pill.stat-idle {
-  background: var(--bg-hover);
-  color: var(--text-muted);
-}
-
-.progress-bar {
-  height: 8px;
-  background: var(--bg-elevated);
-  border-radius: 999px;
-  overflow: hidden;
-  margin: 16px 0;
-}
-.progress-fill {
-  height: 100%;
-  background: var(--accent);
-  border-radius: 999px;
-  transition: width 0.4s ease;
-}
-.progress-fill.stat-good {
-  background: var(--good);
-}
-.progress-fill.stat-bad {
-  background: var(--bad);
-}
-.progress-fill.stat-warn {
-  background: var(--warn);
-}
-
-.stat-grid {
-  display: grid;
-  grid-template-columns: repeat(6, 1fr);
-  gap: 10px;
-}
-.stat-cell {
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 12px;
-  text-align: center;
-}
-.stat-num {
-  font-size: 22px;
-  font-weight: 650;
-  font-variant-numeric: tabular-nums;
-}
-.stat-label {
-  font-size: 11px;
-  color: var(--text-muted);
-  margin-top: 2px;
-}
-
-.admin-grid {
-  display: grid;
-  grid-template-columns: 1.1fr 0.9fr;
-  gap: 18px;
-  margin-top: 18px;
-  align-items: start;
-}
-@media (max-width: 1100px) {
-  .admin-grid {
-    grid-template-columns: 1fr;
-  }
-  .stat-grid {
-    grid-template-columns: repeat(3, 1fr);
-  }
-}
-
-.config-editor {
-  width: 100%;
-  min-height: 440px;
-  resize: vertical;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  color: var(--text-dim);
-  padding: 12px;
-  font-family: var(--mono);
-  font-size: 12px;
-  line-height: 1.5;
-  outline: none;
-}
-.config-editor:focus {
-  border-color: var(--accent);
-}
-
-.queue-cols {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
-}
-.queue-head-label {
-  font-size: 12px;
-  color: var(--text-muted);
-  margin-bottom: 8px;
-}
-.job-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  max-height: 220px;
-  overflow: auto;
-}
-.job-item {
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--text-dim);
-  padding: 4px 8px;
-  border-radius: 6px;
-  margin-bottom: 3px;
-  background: var(--bg-elevated);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.job-item.active {
-  color: var(--accent);
-  background: var(--accent-soft);
-}
-
-.chip {
-  display: inline-block;
-  padding: 2px 10px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-family: var(--mono);
-  background: var(--bg-hover);
-  color: var(--text-dim);
-  margin-left: 6px;
 }
 
 /* ---- Next.js scoreboard compatibility ---- */
@@ -895,11 +702,6 @@ table.pivot.bench-table tbody tr:hover .axis-kmetric {
   border-radius: var(--radius-sm);
   background: var(--bg-elevated);
 }
-.token-stage {
-  color: var(--text-muted);
-  font-size: 12px;
-  margin-bottom: 8px;
-}
 .token-title {
   margin-top: 16px;
 }
@@ -909,8 +711,7 @@ table.pivot.bench-table tbody tr:hover .axis-kmetric {
   }
   .app-header,
   .modal-body,
-  .sh-layout,
-  .admin-grid {
+  .sh-layout {
     display: block;
   }
   .page-nav {

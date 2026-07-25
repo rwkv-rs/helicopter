@@ -36,11 +36,11 @@ function percent(value: number): string {
 }
 
 const DEFAULT_SAMPLING_CONFIG = {
-  temperature: 0.6,
-  topP: 0.95,
-  topK: 40,
-  maxTokens: 32768,
-  seed: 42,
+  temperature: null,
+  topP: null,
+  topK: null,
+  maxTokens: null,
+  seed: null,
 } as const;
 
 function promptTemplateFor(comparisonId: ComparisonId, arm: ScoreArm): string {
@@ -66,7 +66,12 @@ function scoreSelection(
   arm: ScoreArm,
 ): ScoreCellSelection {
   const model = arm === "a" ? group.aModel : group.bModel;
+  const prefix = arm === "a" ? "a" : "b";
   return {
+    evaluationId:
+      score[`${prefix}EvaluationId`] ??
+      `mock:${comparison.id}:${group.id}:${row.benchmark}:${arm}`,
+    runId: score[`${prefix}RunId`] ?? "mock",
     comparisonId: comparison.id,
     parameterGroupId: group.id,
     benchmark: row.benchmark,
@@ -79,8 +84,10 @@ function scoreSelection(
     score: score[arm],
     truncationRate:
       arm === "a" ? score.aTruncationRate : score.bTruncationRate,
-    promptTemplate: promptTemplateFor(comparison.id, arm),
-    samplingConfig: { ...DEFAULT_SAMPLING_CONFIG },
+    promptTemplate:
+      score[`${prefix}PromptTemplate`] ?? promptTemplateFor(comparison.id, arm),
+    samplingConfig:
+      score[`${prefix}SamplingConfig`] ?? { ...DEFAULT_SAMPLING_CONFIG },
   };
 }
 
@@ -110,8 +117,11 @@ export function ScoreMatrix() {
   if (!state.data) return null;
   const comparison = state.data.comparisons.find(
     (item) => item.id === state.comparisonId,
-  )!;
-  const parameterGroups = state.data.parameterGroups[state.comparisonId];
+  );
+  if (!comparison) {
+    return <section className="card empty">尚无可展示的对比结果。</section>;
+  }
+  const parameterGroups = state.data.parameterGroups[state.comparisonId] ?? [];
 
   return (
     <section className="card matrix-card">
@@ -141,7 +151,9 @@ export function ScoreMatrix() {
             {comparison.contract}
           </div>
         </div>
-        <span className="mock-badge">临时展示数据</span>
+        <span className="mock-badge">
+          {state.data.source === "api" ? "LightEval reported" : "临时展示数据"}
+        </span>
       </div>
       <div className="comparison-matrix-wrap">
         <table className="comparison-matrix">

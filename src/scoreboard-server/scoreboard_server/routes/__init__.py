@@ -1,1 +1,1 @@
-"""FastAPI route adapters."""
+"""HTTP routing boundary."""

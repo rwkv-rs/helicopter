@@ -11,7 +11,7 @@ import {
   useReducer,
 } from "react";
 
-import { MockComparisonDataSource } from "../lib/comparison_mock";
+import { ApiComparisonDataSource } from "../lib/comparison_api";
 import type {
   AnswerSampleGroups,
   ComparisonDataSource,
@@ -56,7 +56,13 @@ function comparisonReducer(
 ): ComparisonState {
   switch (action.type) {
     case "loaded":
-      return { ...state, status: "ready", data: action.data, error: null };
+      return {
+        ...state,
+        status: "ready",
+        data: action.data,
+        error: null,
+        comparisonId: action.data.comparisons[0]?.id ?? state.comparisonId,
+      };
     case "failed":
       return { ...state, status: "error", error: action.error };
     case "select-comparison":
@@ -86,7 +92,7 @@ interface ComparisonContextValue {
 }
 
 const ComparisonContext = createContext<ComparisonContextValue | null>(null);
-const DEFAULT_DATA_SOURCE = new MockComparisonDataSource();
+const DEFAULT_DATA_SOURCE = new ApiComparisonDataSource();
 
 export function ComparisonProvider({
   children,

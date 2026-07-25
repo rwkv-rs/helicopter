@@ -1,1 +1,1 @@
-"""External process and tool adapters."""
+"""External adapters retained as an extension boundary."""

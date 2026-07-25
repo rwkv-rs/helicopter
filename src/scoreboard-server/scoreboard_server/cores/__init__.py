@@ -1,1 +1,1 @@
-"""Database-independent scoreboard rules and payload builders."""
+"""Pure domain helpers retained as an extension boundary."""

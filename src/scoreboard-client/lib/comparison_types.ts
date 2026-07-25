@@ -24,7 +24,7 @@ export interface ComparisonOption {
 
 export interface ModelVariant {
   label: string;
-  architecture: "RWKV" | "QWEN";
+  architecture: string;
   generation: string;
   parameters: string;
 }
@@ -43,6 +43,14 @@ export interface ComparisonScore {
   b: number;
   aTruncationRate: number;
   bTruncationRate: number;
+  aEvaluationId?: string;
+  bEvaluationId?: string;
+  aRunId?: string;
+  bRunId?: string;
+  aPromptTemplate?: string;
+  bPromptTemplate?: string;
+  aSamplingConfig?: SamplingConfig;
+  bSamplingConfig?: SamplingConfig;
 }
 
 export interface BenchmarkScore {
@@ -71,9 +79,23 @@ export interface HistoryPoint {
 }
 
 export type ScoreArm = "a" | "b";
-export type AnswerOutcome = "correct" | "incorrect" | "unanswered";
+export type AnswerOutcome =
+  | "correct"
+  | "incorrect"
+  | "unanswered"
+  | "undetermined";
+
+export interface SamplingConfig {
+  temperature: number | null;
+  topP: number | null;
+  topK: number | null;
+  maxTokens: number | null;
+  seed: number | null;
+}
 
 export interface ScoreCellSelection {
+  evaluationId: string;
+  runId: string;
   comparisonId: ComparisonId;
   parameterGroupId: string;
   benchmark: string;
@@ -86,13 +108,7 @@ export interface ScoreCellSelection {
   score: number;
   truncationRate: number;
   promptTemplate: string;
-  samplingConfig: {
-    temperature: number;
-    topP: number;
-    topK: number;
-    maxTokens: number;
-    seed: number;
-  };
+  samplingConfig: SamplingConfig;
 }
 
 export interface AnswerSample {
@@ -102,12 +118,13 @@ export interface AnswerSample {
   groundTruth: string;
   extractedAnswer: string;
   isPassed: boolean | null;
+  sampleMetric: Record<string, unknown>;
   context: {
     assembledPrompt: string;
     rawCompletion: string;
     failReason: string | null;
     generatedTokens: number;
-    latencyMs: number;
+    latencyMs: number | null;
     runId: string;
   };
 }

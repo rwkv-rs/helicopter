@@ -1,24 +1,56 @@
+"""PostgreSQL pool lifecycle and schema initialization."""
+
 from __future__ import annotations
 
-from tortoise import Tortoise
+import json
 
+import asyncpg
+
+from .schema import SCHEMA_SQL
 from .settings import DatabaseSettings
-from .schema import apply_schema_sql
 
 
-async def init_db(settings: DatabaseSettings | None = None, *, generate_schemas: bool = False) -> None:
-    if Tortoise._inited:
-        return
-    resolved = settings or DatabaseSettings.from_env()
-    await Tortoise.init(config=resolved.tortoise_config())
-    if generate_schemas:
-        await Tortoise.generate_schemas(safe=True)
-        await apply_schema_sql()
+async def _configure_connection(connection: asyncpg.Connection) -> None:
+    for type_name in ("json", "jsonb"):
+        await connection.set_type_codec(
+            type_name,
+            schema="pg_catalog",
+            encoder=lambda value: json.dumps(
+                value, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+            ),
+            decoder=json.loads,
+            format="text",
+        )
 
 
-async def close_db() -> None:
-    if not Tortoise._inited:
-        return
-    await Tortoise.close_connections()
-    Tortoise.apps.clear()
-    Tortoise._inited = False
+class Database:
+    def __init__(self, settings: DatabaseSettings):
+        self.settings = settings
+        self.pool: asyncpg.Pool | None = None
+
+    async def start(self) -> None:
+        if self.pool is not None:
+            return
+        self.pool = await asyncpg.create_pool(
+            host=self.settings.host,
+            port=self.settings.port,
+            user=self.settings.user,
+            password=self.settings.password,
+            database=self.settings.database,
+            min_size=self.settings.min_size,
+            max_size=self.settings.max_size,
+            init=_configure_connection,
+        )
+        async with self.pool.acquire() as connection:
+            await connection.execute(SCHEMA_SQL)
+
+    async def stop(self) -> None:
+        if self.pool is None:
+            return
+        await self.pool.close()
+        self.pool = None
+
+    def require_pool(self) -> asyncpg.Pool:
+        if self.pool is None:
+            raise RuntimeError("database is not started")
+        return self.pool

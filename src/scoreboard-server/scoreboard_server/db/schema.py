@@ -1,70 +1,41 @@
-from __future__ import annotations
-
-from tortoise import Tortoise
-
-
 SCHEMA_SQL = """
-CREATE INDEX IF NOT EXISTS idx_task_model ON task(model_id);
-CREATE INDEX IF NOT EXISTS idx_task_benchmark ON task(benchmark_id);
-CREATE INDEX IF NOT EXISTS idx_task_is_tmp_created_at ON task(is_tmp, created_at);
-CREATE INDEX IF NOT EXISTS idx_task_status_created_at ON task(status, created_at);
-CREATE INDEX IF NOT EXISTS idx_task_identity_lookup ON task(model_id, benchmark_id, evaluator, git_hash, config_path);
-CREATE INDEX IF NOT EXISTS idx_completions_task ON completions(task_id);
-CREATE INDEX IF NOT EXISTS idx_eval_completion ON eval(completions_id);
-CREATE INDEX IF NOT EXISTS idx_checker_completion ON checker(completions_id);
-CREATE INDEX IF NOT EXISTS idx_checker_needs_human_review ON checker(needs_human_review);
-CREATE INDEX IF NOT EXISTS idx_scores_task ON scores(task_id);
-CREATE INDEX IF NOT EXISTS idx_scheduler_lease_owner ON scheduler_lease(owner_id);
-CREATE INDEX IF NOT EXISTS idx_scheduler_lease_until ON scheduler_lease(lease_until);
-CREATE INDEX IF NOT EXISTS idx_scheduler_lease_node ON scheduler_lease(node_id);
+CREATE TABLE IF NOT EXISTS evaluation_result (
+    id uuid PRIMARY KEY,
+    publication_id text NOT NULL UNIQUE,
+    content_digest text NOT NULL CHECK (content_digest ~ '^[0-9a-f]{64}$'),
+    source_run_id text NOT NULL,
+    source text NOT NULL,
+    visibility text NOT NULL CHECK (visibility = 'non_official'),
+    task_name text NOT NULL,
+    task_config jsonb NOT NULL,
+    artifact jsonb NOT NULL,
+    model jsonb NOT NULL,
+    benchmark jsonb NOT NULL,
+    evaluation jsonb NOT NULL,
+    comparisons jsonb NOT NULL,
+    sampling_config jsonb NOT NULL,
+    primary_metric text NOT NULL,
+    aggregates jsonb NOT NULL,
+    diagnostics jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
 
-CREATE OR REPLACE VIEW view_model_version AS
-SELECT
-    model_id,
-    model_name,
-    arch_version,
-    data_version,
-    num_params,
-    concat_ws('_', arch_version, data_version, num_params) AS model_version
-FROM model;
+CREATE TABLE IF NOT EXISTS evaluation_sample (
+    evaluation_id uuid NOT NULL REFERENCES evaluation_result(id) ON DELETE CASCADE,
+    sample_index integer NOT NULL CHECK (sample_index >= 0),
+    outcome text NOT NULL CHECK (
+        outcome IN ('correct', 'incorrect', 'unanswered', 'undetermined')
+    ),
+    doc jsonb NOT NULL,
+    metric jsonb NOT NULL,
+    model_response jsonb NOT NULL,
+    PRIMARY KEY (evaluation_id, sample_index)
+);
 
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_benchmark_status') THEN
-        ALTER TABLE benchmark ADD CONSTRAINT chk_benchmark_status
-            CHECK (status IN ('Todo', 'Buggy', 'Low', 'DataSynthesizing', 'Completed'));
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_task_status') THEN
-        ALTER TABLE task ADD CONSTRAINT chk_task_status CHECK (status IN ('Running', 'Completed', 'Failed'));
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_completions_sample_index') THEN
-        ALTER TABLE completions ADD CONSTRAINT chk_completions_sample_index CHECK (sample_index >= 0);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_completions_avg_repeat_index') THEN
-        ALTER TABLE completions ADD CONSTRAINT chk_completions_avg_repeat_index CHECK (avg_repeat_index >= 0);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_completions_pass_index') THEN
-        ALTER TABLE completions ADD CONSTRAINT chk_completions_pass_index CHECK (pass_index >= 0);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_completions_status') THEN
-        ALTER TABLE completions ADD CONSTRAINT chk_completions_status CHECK (status IN ('Running', 'Completed', 'Failed'));
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_eval_answer_size') THEN
-        ALTER TABLE eval ADD CONSTRAINT chk_eval_answer_size CHECK (char_length(answer) <= 65536);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_eval_ref_answer_size') THEN
-        ALTER TABLE eval ADD CONSTRAINT chk_eval_ref_answer_size CHECK (char_length(ref_answer) <= 4096);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_eval_fail_reason_size') THEN
-        ALTER TABLE eval ADD CONSTRAINT chk_eval_fail_reason_size CHECK (char_length(fail_reason) <= 2048);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_scores_cot_mode') THEN
-        ALTER TABLE scores ADD CONSTRAINT chk_scores_cot_mode CHECK (cot_mode IN ('NoCoT', 'CoT'));
-    END IF;
-END $$;
+CREATE INDEX IF NOT EXISTS evaluation_result_created_at_idx
+    ON evaluation_result(created_at DESC);
+CREATE INDEX IF NOT EXISTS evaluation_result_source_run_idx
+    ON evaluation_result(source_run_id);
+CREATE INDEX IF NOT EXISTS evaluation_sample_outcome_idx
+    ON evaluation_sample(evaluation_id, outcome, sample_index);
 """
-
-
-async def apply_schema_sql() -> None:
-    connection = Tortoise.get_connection("default")
-    await connection.execute_script(SCHEMA_SQL)
