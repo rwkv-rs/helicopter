@@ -1,41 +1,51 @@
-# A config is one complete, reproducible experiment. Machine-local paths still
-# come from .env.local or .env.remote; configs are not split or inherited.
-
 [experiment]
-name = "gsm8k-grpo-example"
-project = "verl_rwkv_grpo"
+name = "maxrl-dapo-math-17k"
+project = "helicopter-math"
 seed = 42
 optimizer_steps = 200
 
 [model]
-name = "g1g-1.5b"
-checkpoint = "${WEIGHT_PATH}/rwkv7-g1g-1.5b-20260526-ctx8192.pth"
+name = "g1h-7.2b"
+checkpoint = "${WEIGHT_PATH}/rwkv7-g1h-7.2b-20260710-ctx10240.pth"
 prompt_mode = "open_think"
 
 [data.train]
-files = ["${DATASETS_PATH}/gsm8k/train.parquet"]
+files = ["${DATASETS_PATH}/DAPO/dapo-math-17k-processed.parquet"]
+prompt_field = "source_prompt"
 
 [data.validation]
 
 [[data.validation.suites]]
-name = "gsm8k"
-file = "${DATASETS_PATH}/gsm8k/test.parquet"
+name = "aime24"
+file = "${DATASETS_PATH}/AIME24/test.parquet"
+
+[[data.validation.suites]]
+name = "aime25"
+file = "${DATASETS_PATH}/AIME25/test.parquet"
+
+[[data.validation.suites]]
+name = "amc23"
+file = "${DATASETS_PATH}/AMC23/test.parquet"
+
+[[data.validation.suites]]
+name = "math500"
+file = "${DATASETS_PATH}/math500/test.parquet"
 
 [algorithm]
-name = "grpo"
-prompts_per_step = 56
-responses_per_prompt = 8
+name = "maxrl"
+prompts_per_step = 32
+responses_per_prompt = 16
 ppo_clip = 0.2
 dual_clip = 3.0
 entropy_coefficient = 0.0
 kl_coefficient = 0.0
 
 [reward]
-manager = "naive"
+manager = "dapo"
 scorer = "math_verify"
 
 [optimizer]
-learning_rate = 1e-5
+learning_rate = 1e-6
 warmup_steps = 0
 weight_decay = 0.01
 gradient_norm_limit = 0.3
@@ -47,7 +57,7 @@ top_p = 0.95
 
 [generation.validation]
 strategy = "sample"
-responses_per_prompt = 4
+responses_per_prompt = 8
 temperature = 0.96
 top_k = 32
 top_p = 0.76
@@ -73,9 +83,10 @@ weight_update_bucket_mib = 64
 [evaluation]
 before_training = true
 every_optimizer_steps = 50
+output_directory = "logs/validation/maxrl-dapo-math-17k"
 
 [checkpoint]
-every_optimizer_steps = 20
+every_optimizer_steps = 50
 
 [logging]
-backends = ["console", "file"]
+backends = ["console", "file", "wandb"]

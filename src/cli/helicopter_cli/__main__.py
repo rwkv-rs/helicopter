@@ -30,6 +30,11 @@ def build_parser() -> argparse.ArgumentParser:
     infer.add_argument("model", help="model alias from configs")
     infer.add_argument("--wkv-mode", choices=WKV_MODES)
     infer.add_argument("--emb-device", choices=EMB_DEVICES)
+    infer.add_argument(
+        "--allow-fp16-accumulation",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
     infer.add_argument("--host")
     infer.add_argument("--port")
     infer.add_argument("--served-model-name")
@@ -45,11 +50,19 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_options(takeoff)
     takeoff.add_argument("model", help="model alias from configs")
     takeoff.add_argument("algorithm", choices=("grpo",))
-    takeoff.add_argument("--dataset", required=True, help="dataset alias from configs")
+    takeoff.add_argument(
+        "--dataset",
+        help="legacy dataset alias; grouped experiment configs select their own data files",
+    )
     takeoff.add_argument("--num-nodes", type=int)
     takeoff.add_argument("--num-devices", type=int)
     takeoff.add_argument("--wkv-mode", choices=WKV_MODES)
     takeoff.add_argument("--emb-device", choices=EMB_DEVICES)
+    takeoff.add_argument(
+        "--allow-fp16-accumulation",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
     takeoff.add_argument("--override", action="append", help="extra Hydra override passed to verl")
     takeoff.set_defaults(plan_builder=build_takeoff_plan)
 

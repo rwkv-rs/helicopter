@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .config import dataset_root, resolve_model_path, table
+from .config import SELECTED_DATASET_KEY, dataset_root, is_grouped_config, resolve_model_path, table
 from .env import env_value, pick
 from .paths import resolve_path
 
@@ -33,6 +34,8 @@ def format_hydra_file_list(value: Any, *, root: Path, env: dict[str, str]) -> st
 def format_hydra_value(value: Any) -> str:
     if isinstance(value, bool):
         return "True" if value else "False"
+    if isinstance(value, list):
+        return json.dumps(value, separators=(",", ":"))
     return str(value)
 
 
@@ -87,11 +90,37 @@ def apply_rwkv_env(
     *,
     wkv_mode: str | None,
     emb_device: str | None,
+    allow_fp16_accumulation: bool | None,
 ) -> None:
+    if emb_device not in (None, "gpu"):
+        raise SystemExit(
+            "RWKV7 Model Runner V2 keeps embeddings on GPU; CPU embedding is not supported"
+        )
+    expected_fp16_accumulation = wkv_mode == "fp16" if wkv_mode is not None else None
+    if (
+        allow_fp16_accumulation is not None
+        and expected_fp16_accumulation is not None
+        and allow_fp16_accumulation != expected_fp16_accumulation
+    ):
+        raise SystemExit(
+            f"RWKV7 Model Runner V2 derives GEMM accumulation from WKV mode: "
+            f"{wkv_mode} requires allow_fp16_accumulation={expected_fp16_accumulation}"
+        )
     if wkv_mode is not None:
         command_env["VLLM_RWKV7_WKV_MODE"] = wkv_mode
-    if emb_device is not None:
-        command_env["VLLM_RWKV7_EMB_DEVICE"] = emb_device
+
+
+def resolve_fp16_accumulation(
+    configured_value: Any,
+    *,
+    wkv_mode: str | None,
+    name: str,
+) -> bool | None:
+    if configured_value is not None:
+        return binary_flag(configured_value, name=name)
+    if wkv_mode is not None:
+        return wkv_mode == "fp16"
+    return None
 
 
 def strip_vllm_env(env: dict[str, str]) -> dict[str, str]:
@@ -129,6 +158,147 @@ def hydra_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def binary_flag(value: Any, *, name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip()
+    if text == "1":
+        return True
+    if text == "0":
+        return False
+    raise SystemExit(f"{name} must be 0 or 1, got {value!r}")
+
+
+def strict_positive_int(value: Any, *, name: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f"{name} must be an integer, got {value!r}") from exc
+    if parsed <= 0:
+        raise SystemExit(f"{name} must be positive, got {parsed}")
+    return parsed
+
+
+def hydra_override_map(overrides: list[str]) -> dict[str, str]:
+    resolved: dict[str, str] = {}
+    for override in overrides:
+        if "=" not in override:
+            continue
+        key, value = override.split("=", 1)
+        resolved[key.lstrip("+")] = value
+    return resolved
+
+
+def validate_strict_on_policy_overrides(
+    overrides: list[str],
+    *,
+    env: dict[str, str],
+    train_prompt_key: str,
+    val_prompt_key: str,
+) -> None:
+    resolved = hydra_override_map(overrides)
+    required = {
+        "trainer.v1.trainer_mode": "sync",
+        "actor_rollout_ref.hybrid_engine": "True",
+        "actor_rollout_ref.actor.ppo_epochs": "1",
+        "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu": "1",
+        "actor_rollout_ref.actor.use_dynamic_bsz": "False",
+        "actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu": "1",
+        "actor_rollout_ref.ref.log_prob_use_dynamic_bsz": "False",
+        "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu": "1",
+        "actor_rollout_ref.rollout.log_prob_use_dynamic_bsz": "False",
+        "actor_rollout_ref.rollout.ignore_eos": "False",
+        "actor_rollout_ref.rollout.top_p": "0.95",
+        "actor_rollout_ref.rollout.val_kwargs.do_sample": "True",
+        "actor_rollout_ref.rollout.val_kwargs.temperature": "0.96",
+        "actor_rollout_ref.rollout.val_kwargs.top_p": "0.76",
+        "actor_rollout_ref.rollout.val_kwargs.top_k": "32",
+        "actor_rollout_ref.rollout.val_kwargs.presence_penalty": "1.0",
+        "actor_rollout_ref.rollout.val_kwargs.frequency_penalty": "0.1",
+        "actor_rollout_ref.rollout.val_kwargs.penalty_decay": "0.988",
+        "actor_rollout_ref.rollout.checkpoint_engine.backend": "naive",
+        "actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes": "64",
+        "ray_kwargs.ray_init.runtime_env.env_vars.VLLM_USE_V2_MODEL_RUNNER": '"1"',
+        "ray_kwargs.ray_init.runtime_env.env_vars.VLLM_LOGGING_LEVEL": '"INFO"',
+        "ray_kwargs.ray_init.runtime_env.env_vars.VLLM_RWKV7_STRICT_STREAMING_WEIGHT_UPDATE": '"1"',
+        "algorithm.rollout_correction.rollout_is": "token",
+        "algorithm.rollout_correction.rollout_is_threshold": "2.0",
+        "algorithm.rollout_correction.rollout_is_batch_normalize": "False",
+        "algorithm.rollout_correction.rollout_rs": "null",
+        "algorithm.rollout_correction.bypass_mode": "False",
+        "data.dataloader_num_workers": "0",
+        "trainer.nnodes": "1",
+        "trainer.n_gpus_per_node": "8",
+        "actor_rollout_ref.rollout.tensor_model_parallel_size": "1",
+        "actor_rollout_ref.rollout.data_parallel_size": "1",
+        "actor_rollout_ref.rollout.pipeline_model_parallel_size": "1",
+        "actor_rollout_ref.actor.engine.infctx": "True",
+        "actor_rollout_ref.ref.engine.infctx": "True",
+        "actor_rollout_ref.actor.engine.chunk_ctx": "2048",
+        "actor_rollout_ref.ref.engine.chunk_ctx": "2048",
+        "data.derive_sequence_lengths": "True",
+        "data.filter_overlong_prompts": "False",
+        "data.max_prompt_length": "null",
+        "data.max_response_length": "null",
+        "data.train_prompt_key": train_prompt_key,
+        "data.val_prompt_key": val_prompt_key,
+        "data.prompt_prefix_token_id": "0",
+        "data.truncation": "error",
+    }
+    for key, expected in required.items():
+        actual = resolved.get(key)
+        if actual != expected:
+            raise SystemExit(
+                f"strict on-policy takeoff requires {key}={expected}, got {actual!r}"
+            )
+    train_batch_size = strict_positive_int(
+        resolved.get("data.train_batch_size"), name="data.train_batch_size"
+    )
+    ppo_mini_batch_size = strict_positive_int(
+        resolved.get("actor_rollout_ref.actor.ppo_mini_batch_size"),
+        name="actor_rollout_ref.actor.ppo_mini_batch_size",
+    )
+    if ppo_mini_batch_size != train_batch_size:
+        raise SystemExit(
+            "strict on-policy takeoff requires "
+            "actor_rollout_ref.actor.ppo_mini_batch_size == data.train_batch_size, "
+            f"got {ppo_mini_batch_size} != {train_batch_size}"
+        )
+
+    model_context = strict_positive_int(
+        resolved.get("data.model_context_length"), name="data.model_context_length"
+    )
+    if strict_positive_int(
+        resolved.get("actor_rollout_ref.rollout.max_model_len"),
+        name="actor_rollout_ref.rollout.max_model_len",
+    ) != model_context:
+        raise SystemExit(
+            "strict on-policy takeoff requires rollout.max_model_len to match the "
+            "ctx suffix derived from the checkpoint filename"
+        )
+    for key in (
+        "actor_rollout_ref.actor.engine.ctx_len",
+        "actor_rollout_ref.ref.engine.ctx_len",
+    ):
+        if strict_positive_int(resolved.get(key), name=key) != model_context:
+            raise SystemExit(
+                f"strict on-policy takeoff requires {key} to match the checkpoint ctx suffix"
+            )
+    forbidden = {
+        "rollout.nnodes",
+        "rollout.n_gpus_per_node",
+        "actor_rollout_ref.actor.ppo_max_token_len_per_gpu",
+        "actor_rollout_ref.ref.log_prob_max_token_len_per_gpu",
+        "actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu",
+    }
+    present = sorted(forbidden.intersection(resolved))
+    if present:
+        raise SystemExit(
+            "strict on-policy takeoff forbids separate rollout resource overrides: "
+            + ", ".join(present)
+        )
 
 
 def reward_function_path(takeoff: dict[str, Any], env: dict[str, str], verl_path: Path) -> Path:
@@ -178,15 +348,13 @@ def build_grpo_hydra_overrides(
         else:
             val_files = f"['{data_root}/test.parquet']"
 
-    dynamic_bsz = takeoff_value(takeoff, env, "rwkv_use_dynamic_bsz", "RWKV_USE_DYNAMIC_BSZ", False)
-    ppo_micro_batch_size = takeoff_value(takeoff, env, "ppo_micro_batch_size", "PPO_MICRO_BATCH_SIZE", 8)
-    ppo_max_token_len_per_gpu = takeoff_value(
-        takeoff,
-        env,
-        "ppo_max_token_len_per_gpu",
-        "PPO_MAX_TOKEN_LEN_PER_GPU",
-        8192,
-    )
+    train_prompt_key = str(dataset.get("train_prompt_key", "prompt")).strip()
+    val_prompt_key = str(dataset.get("val_prompt_key", "prompt")).strip()
+    if not train_prompt_key or not val_prompt_key:
+        raise SystemExit("dataset prompt keys must not be empty")
+
+    dynamic_bsz = False
+    ppo_micro_batch_size = 1
     rollout_tensor_parallel_size = takeoff_value(
         takeoff,
         env,
@@ -201,7 +369,11 @@ def build_grpo_hydra_overrides(
         "ROLLOUT_GPU_MEM_UTIL",
     )
     rollout_n = takeoff_value(takeoff, env, "rollout_n", "ROLLOUT_N", 8)
-    rollout_top_p = takeoff_value(takeoff, env, "rollout_top_p", "ROLLOUT_TOP_P", 0.8)
+    rollout_temperature = takeoff_value(
+        takeoff, env, "rollout_temperature", "ROLLOUT_TEMPERATURE", 1.0
+    )
+    rollout_top_k = takeoff_value(takeoff, env, "rollout_top_k", "ROLLOUT_TOP_K", -1)
+    rollout_top_p = takeoff_value(takeoff, env, "rollout_top_p", "ROLLOUT_TOP_P", 1.0)
     rollout_max_num_seqs = takeoff_value(takeoff, env, "rollout_max_num_seqs", "ROLLOUT_MAX_NUM_SEQS")
     rollout_max_num_batched_tokens = takeoff_value(
         takeoff,
@@ -209,23 +381,12 @@ def build_grpo_hydra_overrides(
         "rollout_max_num_batched_tokens",
         "ROLLOUT_MAX_NUM_BATCHED_TOKENS",
     )
-    rollout_n_gpus_per_node = takeoff_value(
+    rollout_update_bucket_mb = takeoff_value(
         takeoff,
         env,
-        "rollout_n_gpus_per_node",
-        "ROLLOUT_NGPUS_PER_NODE",
-    )
-    rollout_data_parallel_size = takeoff_value(
-        takeoff,
-        env,
-        "rollout_data_parallel_size",
-        "ROLLOUT_DP",
-    )
-    rollout_pipeline_parallel_size = takeoff_value(
-        takeoff,
-        env,
-        "rollout_pipeline_parallel_size",
-        "ROLLOUT_PP",
+        "rollout_update_weights_bucket_megabytes",
+        "ROLLOUT_UPDATE_WEIGHTS_BUCKET_MEGABYTES",
+        64,
     )
     trainer_n_gpus_per_node = takeoff_value(
         takeoff,
@@ -234,14 +395,44 @@ def build_grpo_hydra_overrides(
         "TRAIN_NGPUS_PER_NODE",
         num_devices,
     )
+    train_batch_size = takeoff_value(
+        takeoff,
+        env,
+        "train_batch_size",
+        "TRAIN_BATCH_SIZE",
+        56,
+    )
+    ppo_mini_batch_size = takeoff_value(
+        takeoff,
+        env,
+        "ppo_mini_batch_size",
+        "PPO_MINI_BATCH_SIZE",
+        train_batch_size,
+    )
+    ppo_epochs = takeoff_value(takeoff, env, "ppo_epochs", "PPO_EPOCHS", 1)
+    seed = takeoff_value(takeoff, env, "seed", "HELICOPTER_SEED", 42)
     rwkv_ctx_len = takeoff_value(takeoff, env, "ctx_len", "RWKV_CTX_LEN")
+    wkv_mode = str(takeoff_value(takeoff, env, "wkv_mode", "HELICOPTER_TAKEOFF_WKV_MODE", "fp32io16"))
+    rollout_io_dtype = "float16" if wkv_mode in {"fp32io16", "fp16"} else None
     rwkv_infctx = hydra_bool(takeoff_value(takeoff, env, "infctx", "RWKV_INFCTX", False))
     rwkv_chunk_ctx = takeoff_value(takeoff, env, "chunk_ctx", "RWKV_CHUNK_CTX")
     val_do_sample = takeoff_value(takeoff, env, "val_do_sample", "VAL_DO_SAMPLE", True)
-    val_temperature = takeoff_value(takeoff, env, "val_temperature", "VAL_TEMPERATURE", 1)
+    val_temperature = takeoff_value(takeoff, env, "val_temperature", "VAL_TEMPERATURE", 0.96)
     val_top_k = takeoff_value(takeoff, env, "val_top_k", "VAL_TOP_K", 32)
-    val_top_p = takeoff_value(takeoff, env, "val_top_p", "VAL_TOP_P", 0.28)
+    val_top_p = takeoff_value(takeoff, env, "val_top_p", "VAL_TOP_P", 0.76)
+    val_presence_penalty = takeoff_value(
+        takeoff, env, "val_presence_penalty", "VAL_PRESENCE_PENALTY", 1.0
+    )
+    val_frequency_penalty = takeoff_value(
+        takeoff, env, "val_frequency_penalty", "VAL_FREQUENCY_PENALTY", 0.1
+    )
+    val_penalty_decay = takeoff_value(
+        takeoff, env, "val_penalty_decay", "VAL_PENALTY_DECAY", 0.988
+    )
     val_n = takeoff_value(takeoff, env, "val_n", "VAL_N", 4)
+    trainer_loggers = takeoff_value(
+        takeoff, env, "trainer_loggers", "TRAINER_LOGGERS", ["console", "file"]
+    )
     rwkv_generation_prompt = takeoff_value(
         takeoff,
         env,
@@ -277,10 +468,16 @@ def build_grpo_hydra_overrides(
         "algorithm.use_kl_in_reward=False",
         f"data.train_files={train_files}",
         f"data.val_files={val_files}",
-        f"data.train_batch_size={format_hydra_value(takeoff_value(takeoff, env, 'train_batch_size', 'TRAIN_BATCH_SIZE', 56))}",
-        f"data.max_prompt_length={format_hydra_value(takeoff_value(takeoff, env, 'max_prompt_length', 'MAX_PROMPT_LENGTH', 512))}",
-        f"data.max_response_length={format_hydra_value(takeoff_value(takeoff, env, 'max_response_length', 'MAX_RESPONSE_LENGTH', 7168))}",
-        "data.filter_overlong_prompts=True",
+        f"+data.train_prompt_key={format_hydra_value(train_prompt_key)}",
+        f"+data.val_prompt_key={format_hydra_value(val_prompt_key)}",
+        f"data.train_batch_size={format_hydra_value(train_batch_size)}",
+        f"data.seed={format_hydra_value(seed)}",
+        "data.max_prompt_length=null",
+        "data.max_response_length=null",
+        f"+data.model_context_length={format_hydra_value(rwkv_ctx_len)}",
+        "+data.derive_sequence_lengths=True",
+        "+data.prompt_prefix_token_id=0",
+        "data.filter_overlong_prompts=False",
         "data.truncation=error",
         f"reward.custom_reward_function.path={reward_path}",
         "reward.custom_reward_function.name=compute_score",
@@ -291,11 +488,12 @@ def build_grpo_hydra_overrides(
         "actor@actor_rollout_ref.actor=rwkv_lm",
         f"actor_rollout_ref.actor.engine.rwkv_lm_path={rwkv_lm_path}",
         f"actor_rollout_ref.actor.optim.lr={format_hydra_value(takeoff_value(takeoff, env, 'actor_lr', 'ACTOR_LR', '1e-5'))}",
-        f"actor_rollout_ref.actor.ppo_mini_batch_size={format_hydra_value(takeoff_value(takeoff, env, 'ppo_mini_batch_size', 'PPO_MINI_BATCH_SIZE', 56))}",
+        f"actor_rollout_ref.actor.ppo_mini_batch_size={format_hydra_value(ppo_mini_batch_size)}",
+        f"actor_rollout_ref.actor.ppo_epochs={format_hydra_value(ppo_epochs)}",
+        f"actor_rollout_ref.actor.data_loader_seed={format_hydra_value(seed)}",
         f"actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu={format_hydra_value(ppo_micro_batch_size)}",
         f"actor_rollout_ref.actor.use_dynamic_bsz={format_hydra_value(dynamic_bsz)}",
-        f"actor_rollout_ref.actor.ppo_max_token_len_per_gpu={format_hydra_value(ppo_max_token_len_per_gpu)}",
-        f"actor_rollout_ref.actor.use_kl_loss={format_hydra_value(takeoff_value(takeoff, env, 'actor_use_kl_loss', 'ACTOR_USE_KL_LOSS', False))}",
+        f"actor_rollout_ref.actor.use_kl_loss={format_hydra_value(takeoff_value(takeoff, env, 'actor_use_kl_loss', 'ACTOR_USE_KL_LOSS', True))}",
         f"actor_rollout_ref.actor.kl_loss_coef={format_hydra_value(takeoff_value(takeoff, env, 'actor_kl_loss_coef', 'ACTOR_KL_LOSS_COEF', 0.0))}",
         f"actor_rollout_ref.actor.kl_loss_type={format_hydra_value(takeoff_value(takeoff, env, 'actor_kl_loss_type', 'ACTOR_KL_LOSS_TYPE', 'low_var_kl'))}",
     ]
@@ -348,25 +546,63 @@ def build_grpo_hydra_overrides(
             f"actor_rollout_ref.ref.engine.rwkv_lm_path={rwkv_lm_path}",
             f"actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu={format_hydra_value(ppo_micro_batch_size)}",
             f"actor_rollout_ref.ref.log_prob_use_dynamic_bsz={format_hydra_value(dynamic_bsz)}",
-            f"actor_rollout_ref.ref.log_prob_max_token_len_per_gpu={format_hydra_value(ppo_max_token_len_per_gpu)}",
             "actor_rollout_ref.rollout.name=vllm",
             "actor_rollout_ref.rollout.load_format=auto",
+            f"actor_rollout_ref.rollout.max_model_len={format_hydra_value(rwkv_ctx_len)}",
             f"actor_rollout_ref.rollout.tensor_model_parallel_size={format_hydra_value(rollout_tensor_parallel_size)}",
             f"actor_rollout_ref.rollout.n={format_hydra_value(rollout_n)}",
+            f"actor_rollout_ref.rollout.seed={format_hydra_value(seed)}",
+            f"actor_rollout_ref.rollout.temperature={format_hydra_value(rollout_temperature)}",
+            f"actor_rollout_ref.rollout.top_k={format_hydra_value(rollout_top_k)}",
             f"actor_rollout_ref.rollout.top_p={format_hydra_value(rollout_top_p)}",
+            "actor_rollout_ref.rollout.ignore_eos=False",
             "actor_rollout_ref.rollout.enable_prefix_caching=False",
             f"actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu={format_hydra_value(ppo_micro_batch_size)}",
             f"actor_rollout_ref.rollout.log_prob_use_dynamic_bsz={format_hydra_value(dynamic_bsz)}",
-            f"actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu={format_hydra_value(ppo_max_token_len_per_gpu)}",
             "+actor_rollout_ref.rollout.engine_kwargs.vllm.tokenizer_mode=rwkv",
-            "actor_rollout_ref.hybrid_engine=False",
-            f"rollout.nnodes={format_hydra_value(num_nodes)}",
+            "+actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend=uni",
+            '+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_USE_V2_MODEL_RUNNER="1"',
+            '+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_LOGGING_LEVEL="INFO"',
+            '+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_RWKV7_STRICT_STREAMING_WEIGHT_UPDATE="1"',
+            "actor_rollout_ref.hybrid_engine=True",
+            "trainer.v1.trainer_mode=sync",
+            "actor_rollout_ref.rollout.checkpoint_engine.backend=naive",
+            "actor_rollout_ref.rollout.checkpoint_engine."
+            f"update_weights_bucket_megabytes={format_hydra_value(rollout_update_bucket_mb)}",
+            "algorithm.rollout_correction.rollout_is=token",
+            "algorithm.rollout_correction.rollout_is_threshold=2.0",
+            "algorithm.rollout_correction.rollout_is_batch_normalize=False",
+            "algorithm.rollout_correction.rollout_rs=null",
+            "algorithm.rollout_correction.bypass_mode=False",
+            "data.dataloader_num_workers=0",
             f"actor_rollout_ref.rollout.val_kwargs.do_sample={format_hydra_value(val_do_sample)}",
             f"actor_rollout_ref.rollout.val_kwargs.temperature={format_hydra_value(val_temperature)}",
             f"actor_rollout_ref.rollout.val_kwargs.top_k={format_hydra_value(val_top_k)}",
             f"actor_rollout_ref.rollout.val_kwargs.top_p={format_hydra_value(val_top_p)}",
+            "actor_rollout_ref.rollout.val_kwargs."
+            f"presence_penalty={format_hydra_value(val_presence_penalty)}",
+            "actor_rollout_ref.rollout.val_kwargs."
+            f"frequency_penalty={format_hydra_value(val_frequency_penalty)}",
+            "actor_rollout_ref.rollout.val_kwargs."
+            f"penalty_decay={format_hydra_value(val_penalty_decay)}",
             f"actor_rollout_ref.rollout.val_kwargs.n={format_hydra_value(val_n)}",
         ]
+    )
+    if rollout_io_dtype is not None:
+        # RWKV-LM's training CUDA extensions are BF16-only. Keep the native
+        # actor/ref engine precision while making the vLLM FP16 boundary explicit.
+        overrides.append(f"actor_rollout_ref.rollout.dtype={rollout_io_dtype}")
+    append_hydra_override(
+        overrides,
+        "data.train_max_samples",
+        takeoff_value(takeoff, env, "train_max_samples", "TRAIN_MAX_SAMPLES"),
+        optional=True,
+    )
+    append_hydra_override(
+        overrides,
+        "data.val_max_samples",
+        takeoff_value(takeoff, env, "val_max_samples", "VAL_MAX_SAMPLES"),
+        optional=True,
     )
     append_hydra_override(
         overrides,
@@ -402,13 +638,7 @@ def build_grpo_hydra_overrides(
         rollout_max_num_batched_tokens,
         optional=True,
     )
-    append_hydra_override(overrides, "rollout.n_gpus_per_node", rollout_n_gpus_per_node, optional=True)
     for config_key, env_key, hydra_key in (
-        (
-            "rollout_n_gpus_per_node",
-            "ROLLOUT_NGPUS_PER_NODE",
-            "actor_rollout_ref.rollout.n_gpus_per_node",
-        ),
         ("rollout_mode", "ROLLOUT_MODE", "actor_rollout_ref.rollout.mode"),
         ("rollout_data_parallel_size", "ROLLOUT_DP", "actor_rollout_ref.rollout.data_parallel_size"),
         (
@@ -416,28 +646,24 @@ def build_grpo_hydra_overrides(
             "ROLLOUT_PP",
             "actor_rollout_ref.rollout.pipeline_model_parallel_size",
         ),
-        (
-            "rollout_checkpoint_engine_backend",
-            "ROLLOUT_CHECKPOINT_ENGINE_BACKEND",
-            "actor_rollout_ref.rollout.checkpoint_engine.backend",
-        ),
-        (
-            "rollout_correction_bypass_mode",
-            "ROLLOUT_CORRECTION_BYPASS_MODE",
-            "algorithm.rollout_correction.bypass_mode",
-        ),
     ):
         append_hydra_override(
             overrides,
             hydra_key,
-            takeoff_value(takeoff, env, config_key, env_key),
+            takeoff_value(
+                takeoff,
+                env,
+                config_key,
+                env_key,
+                1 if config_key in {"rollout_data_parallel_size", "rollout_pipeline_parallel_size"} else None,
+            ),
             optional=True,
         )
 
     overrides.extend(
         [
             "critic.enable=False",
-            'trainer.logger=["console","wandb"]',
+            f"trainer.logger={format_hydra_value(trainer_loggers)}",
             f"trainer.project_name={format_hydra_value(takeoff_value(takeoff, env, 'project_name', 'PROJECT_NAME', 'verl_rwkv_grpo'))}",
             f"trainer.experiment_name={format_hydra_value(takeoff_value(takeoff, env, 'experiment_name', 'EXPERIMENT_NAME', 'rwkv7_grpo_vllm'))}",
             f"trainer.nnodes={format_hydra_value(num_nodes)}",
@@ -460,6 +686,24 @@ def build_grpo_hydra_overrides(
         takeoff_value(takeoff, env, "total_training_steps", "TOTAL_TRAINING_STEPS"),
         optional=True,
     )
+    profiler_tool = takeoff_value(takeoff, env, "profiler_tool", "PROFILER_TOOL")
+    profiler_steps = takeoff_value(takeoff, env, "profiler_steps", "PROFILER_STEPS")
+    if profiler_tool is not None or profiler_steps is not None:
+        if profiler_tool != "nsys" or not isinstance(profiler_steps, list) or not profiler_steps:
+            raise SystemExit("strict profiling requires profiler_tool='nsys' and a non-empty profiler_steps list")
+        overrides.extend(
+            [
+                "global_profiler.tool=nsys",
+                f"global_profiler.steps={format_hydra_value(profiler_steps)}",
+                "global_profiler.profile_continuous_steps=False",
+                "actor_rollout_ref.actor.profiler.enable=True",
+                "actor_rollout_ref.actor.profiler.all_ranks=True",
+                "actor_rollout_ref.ref.profiler.enable=True",
+                "actor_rollout_ref.ref.profiler.all_ranks=True",
+                "actor_rollout_ref.rollout.profiler.enable=True",
+                "actor_rollout_ref.rollout.profiler.all_ranks=True",
+            ]
+        )
     return overrides
 
 
@@ -487,6 +731,20 @@ def build_infer_plan(
         infer.get("emb_device"),
     )
     emb_device = str(emb_device_value) if emb_device_value is not None else None
+    allow_fp16_accumulation_value = pick(
+        args.allow_fp16_accumulation,
+        env_value(
+            env,
+            "HELICOPTER_INFER_ALLOW_FP16_ACCUMULATION",
+            "VLLM_RWKV7_ALLOW_FP16_ACCUMULATION",
+        ),
+        infer.get("allow_fp16_accumulation"),
+    )
+    allow_fp16_accumulation = resolve_fp16_accumulation(
+        allow_fp16_accumulation_value,
+        wkv_mode=wkv_mode,
+        name="HELICOPTER_INFER_ALLOW_FP16_ACCUMULATION",
+    )
     host = str(pick(args.host, runtime.get("host"), default="0.0.0.0"))
     port = str(pick(args.port, runtime.get("port"), default="8000"))
     served_model_name = str(
@@ -551,7 +809,12 @@ def build_infer_plan(
         command.append("--enable-auto-tool-choice")
 
     shown_env: dict[str, str] = {}
-    apply_rwkv_env(shown_env, wkv_mode=wkv_mode, emb_device=emb_device)
+    apply_rwkv_env(
+        shown_env,
+        wkv_mode=wkv_mode,
+        emb_device=emb_device,
+        allow_fp16_accumulation=allow_fp16_accumulation,
+    )
     plan_env = strip_vllm_env(env)
     plan_env.update(shown_env)
     return CommandPlan(command=command, cwd=root, shown_env=shown_env, env=plan_env)
@@ -568,9 +831,16 @@ def build_takeoff_plan(
         raise SystemExit("only grpo takeoff is supported for RWKV right now")
 
     model_path, _ = resolve_model_path(config, args.model, root=root, env=env)
-    data_root = dataset_root(config, args.dataset, root=root, env=env)
     datasets = table(config, "datasets")
-    dataset_value = datasets.get(args.dataset, {})
+    dataset_name = args.dataset
+    if dataset_name is None:
+        if not is_grouped_config(config):
+            raise SystemExit("--dataset is required for legacy config files")
+        dataset_name = SELECTED_DATASET_KEY
+    data_root = dataset_root(config, dataset_name, root=root, env=env)
+    dataset_value = datasets.get(dataset_name, {})
+    if (not isinstance(dataset_value, dict) or not dataset_value) and is_grouped_config(config):
+        dataset_value = datasets.get(SELECTED_DATASET_KEY, {})
     dataset = dataset_value if isinstance(dataset_value, dict) else {}
 
     paths = table(config, "paths")
@@ -626,6 +896,20 @@ def build_takeoff_plan(
         default="gpu",
     )
     emb_device = str(emb_device_value) if emb_device_value is not None else None
+    allow_fp16_accumulation_value = pick(
+        args.allow_fp16_accumulation,
+        env_value(
+            env,
+            "HELICOPTER_TAKEOFF_ALLOW_FP16_ACCUMULATION",
+            "VLLM_RWKV7_ALLOW_FP16_ACCUMULATION",
+        ),
+        takeoff.get("allow_fp16_accumulation"),
+    )
+    allow_fp16_accumulation = resolve_fp16_accumulation(
+        allow_fp16_accumulation_value,
+        wkv_mode=wkv_mode,
+        name="HELICOPTER_TAKEOFF_ALLOW_FP16_ACCUMULATION",
+    )
     num_nodes = pick(
         args.num_nodes,
         env_value(env, "HELICOPTER_NUM_NODES", "NNODES"),
@@ -643,7 +927,12 @@ def build_takeoff_plan(
 
     python = python_executable(config, root=root, env=env, require_configured=True)
     shown_env: dict[str, str] = {}
-    apply_rwkv_env(shown_env, wkv_mode=wkv_mode, emb_device=emb_device)
+    apply_rwkv_env(
+        shown_env,
+        wkv_mode=wkv_mode,
+        emb_device=emb_device,
+        allow_fp16_accumulation=allow_fp16_accumulation,
+    )
     shown_env["PYTHON"] = python
     shown_env["RWKV_MODEL_PATH"] = str(model_path)
     shown_env["RWKV_LM_PATH"] = str(rwkv_lm_path)
@@ -655,22 +944,30 @@ def build_takeoff_plan(
     )
     shown_env["PYTHONPATH"] = plan_env["PYTHONPATH"]
 
+    overrides = build_grpo_hydra_overrides(
+        model_path=model_path,
+        data_root=data_root,
+        dataset=dataset,
+        takeoff=takeoff,
+        env=env,
+        root=root,
+        verl_path=verl_path,
+        rwkv_lm_path=rwkv_lm_path,
+        num_nodes=num_nodes,
+        num_devices=num_devices,
+    )
+    overrides.extend(args.override or [])
+    validate_strict_on_policy_overrides(
+        overrides,
+        env=env,
+        train_prompt_key=str(dataset.get("train_prompt_key", "prompt")).strip(),
+        val_prompt_key=str(dataset.get("val_prompt_key", "prompt")).strip(),
+    )
+
     command = [
         python,
         "-m",
-        "verl.experimental.one_step_off_policy.main_ppo",
-        *build_grpo_hydra_overrides(
-            model_path=model_path,
-            data_root=data_root,
-            dataset=dataset,
-            takeoff=takeoff,
-            env=env,
-            root=root,
-            verl_path=verl_path,
-            rwkv_lm_path=rwkv_lm_path,
-            num_nodes=num_nodes,
-            num_devices=num_devices,
-        ),
-        *(args.override or []),
+        "verl.trainer.main_ppo",
+        *overrides,
     ]
     return CommandPlan(command=command, cwd=verl_path, shown_env=shown_env, env=plan_env)

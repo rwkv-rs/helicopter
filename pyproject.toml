@@ -63,10 +63,11 @@ verl-rwkv = [
   "dill",
   "fastapi",
   "hydra-core",
-  "latex2sympy2-extended",
-  "math-verify",
-  "numpy>=2.0.0",
-  "nvtx==0.2.15",
+    "latex2sympy2-extended",
+    "math-verify",
+    "numpy>=2.0.0",
+    "nvidia-ml-py>=12.560.30",
+    "nvtx==0.2.15",
   "packaging>=20.0",
   "pandas",
   "peft",
@@ -96,6 +97,12 @@ dev = [
   "pre-commit",
   "pytest",
   "pytest-asyncio",
+]
+
+test = [
+  { include-group = "dev" },
+  "datasets",
+  "pyarrow>=19.0.0",
 ]
 
 verl-liger = [

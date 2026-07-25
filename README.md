@@ -9,8 +9,10 @@ The current focus is RWKV7:
 - `infer`: start a vLLM server for an RWKV checkpoint.
 - `takeoff`: start verl training for an RWKV checkpoint. The supported takeoff
   path is GRPO.
-- `scripts/install_remote.sh`: prepare the BBT DevPod GPU workspace, sync this
+- `scripts/install_remote.sh`: prepare the configured SSH remote host, sync this
   repository, and run the local installer remotely.
+- `scripts/run_remote.sh`: prepare the remote host, run a command there, and copy
+  configured result paths back.
 - `scripts/install_local.sh`: create/update the project `.venv`, install the
   selected capability dependency groups, and install the corresponding local
   editable `vllm`, `rwkv-lm`, and `verl` packages.
@@ -23,7 +25,8 @@ configs/
   local/*.toml              # machine-local experiment configs
 scripts/
   install_local.sh          # prepare the current machine/workspace
-  install_remote.sh         # sync and prepare the remote DevPod workspace
+  install_remote.sh         # sync and prepare the remote SSH host
+  run_remote.sh             # prepare, run a remote command, and collect results
 src/cli/helicopter_cli/     # Python CLI package
 src/infer/vllm-rwkv/        # vLLM RWKV implementation
 src/train/rwkv-lm/          # RWKV training code
@@ -42,7 +45,7 @@ Copy `.env.example` to a private env file before running commands:
 cp .env.example .env.local
 ```
 
-For remote DevPod use, keep the private remote values in `.env.remote`.
+For remote SSH use, keep the private remote values in `.env.remote`.
 
 The env files use simple dotenv syntax:
 
@@ -56,19 +59,51 @@ already present in the command environment override values from `.env.local` or
 `.env.remote`, which makes command-scoped overrides predictable:
 
 ```bash
-WEIGHT_PATH=/workspace/Weights/RWKV helicopter infer g1g-1.5b
+WEIGHT_PATH=/home/caizus/Weights/RWKV helicopter infer g1g-1.5b
 ```
 
 Experiment settings live in TOML files. If `--config` is omitted, the CLI uses
 the newest `configs/local/*.toml`; otherwise it falls back to
-`configs/example.toml`.
+`configs/example.toml`. Each TOML is one complete experiment: the CLI does not
+load a second runtime profile, inherit another TOML, or merge a model/dataset
+catalog into it. Machine-local paths remain in `.env.local` or `.env.remote`.
 
 Important config sections:
 
-- `[models.<name>]`: maps a CLI model alias to a checkpoint file or path.
-- `[datasets.<name>]`: maps a dataset alias to a dataset root.
-- `[infer]`: vLLM serving defaults.
-- `[takeoff.grpo]`: verl GRPO training defaults.
+- `[experiment]`: run identity, seed, and optimizer-step count.
+- `[model]`: the selected checkpoint and prompt mode. The context limit is
+  parsed from the checkpoint filename's `ctxN` suffix.
+- `[data.train]` and `[[data.validation.suites]]`: concrete training and
+  validation inputs. `prompt_field` maps a source dataset's conversation
+  column when it is not named `prompt`.
+- `[algorithm]`, `[reward]`, and `[optimizer]`: learning semantics.
+- `[generation.train]` and `[generation.validation]`: sampling semantics.
+- `[execution]` and `[execution.rollout]`: hardware topology and capacity
+  limits; these remain in the same TOML rather than a separate runtime file.
+- `[evaluation]`, `[checkpoint]`, and `[logging]`: lifecycle and observability.
+
+The public names describe their units and scope. For example,
+`prompts_per_step` is the number of prompts in one optimizer round,
+`responses_per_prompt` is the MaxRL/GRPO group size, and
+`generation_token_budget_per_replica` is the rollout scheduler's aggregate
+serving budget.
+
+Prompt and response limits are not configuration knobs. Before GPU workers
+start, the dataset loader measures every selected train and validation prompt
+after applying its corresponding chat template. The maximum response length is
+then derived as `ctxN - maximum_templated_prompt_length`. A prompt that leaves
+no response capacity fails closed. Training always stops at EOS and uses one
+response per fixed microbatch slot; dynamic token microbatching is disabled.
+
+The tracked MaxRL DAPO experiment uses the deduplicated
+`open-r1/DAPO-Math-17k-Processed` `all/train` split. Its conversation column is
+`source_prompt`; all 17,398 unique rows are used directly, without repeating
+the source parquet or applying a random `max_records` subsample.
+
+Strict implementation details such as one PPO epoch, mini-batch equality,
+native reference enablement, token-level rollout correction, V1 sync mode, and
+colocated weight transport are derived and validated by the CLI rather than
+repeated as user-facing switches.
 
 ## Prepare the environment
 
@@ -80,16 +115,27 @@ scripts/install_remote.sh
 
 The remote installer:
 
-- validates the target DevPod Pod and node;
-- checks that the running container uses the required runtime image;
+- checks that the configured SSH host has the expected build tools and shared roots;
 - syncs this repository with `rsync`;
 - preserves the remote `.venv`;
 - runs `scripts/install_local.sh` inside the remote repo path.
+- builds `vllm-rwkv` with its reduced `VLLM_BUILD_PROFILE=rwkv` native target set.
+
+Use `scripts/run_remote.sh` when you want one command to prepare the host, run
+code on `rwkv-sha-pro6000x8`, and copy results back:
+
+```bash
+scripts/run_remote.sh -- helicopter takeoff --dataset gsm8k g1g-1.5b grpo
+```
+
+The run wrapper calls `scripts/install_remote.sh` first by default. Use
+`--no-install` to only sync before running, or `--no-prepare` when the remote
+tree is already current.
 
 For local or already-synced workspace preparation:
 
 ```bash
-scripts/install_local.sh
+INSTALL_COMPONENTS=rwkv-lm,vllm-rwkv,verl-rwkv,dev scripts/install_local.sh
 ```
 
 Useful install overrides:
@@ -105,6 +151,11 @@ INSTALL_COMPONENTS=verl-rwkv,verl-liger,dev scripts/install_local.sh
 `rwkv-lm` runtime groups. `dev` contains `pre-commit` and test tooling;
 `verl-liger` is an explicit optional accelerator. `full` is not a dependency
 group and is rejected before synchronization or native builds.
+
+Both local and remote installation use the RWKV-only vLLM build profile. The
+profile compiles `rwkv7_ops` without the generic stable/MoE extensions or vLLM
+external CUDA projects; `VLLM_BUILD_PROFILE=full` is intentionally rejected by
+the root installer.
 
 Use `DRY_RUN=1` to print installer actions without executing them:
 
@@ -169,7 +220,6 @@ Dry-run a GSM8K GRPO run:
 helicopter takeoff \
   --config configs/example.toml \
   --dry-run \
-  --dataset gsm8k \
   g1g-1.5b grpo
 ```
 
@@ -178,7 +228,6 @@ Start the run:
 ```bash
 helicopter takeoff \
   --config configs/example.toml \
-  --dataset gsm8k \
   g1g-1.5b grpo
 ```
 
@@ -186,7 +235,6 @@ Pass extra Hydra overrides to the underlying verl entrypoint:
 
 ```bash
 helicopter takeoff g1g-1.5b grpo \
-  --dataset gsm8k \
   --override trainer.total_epochs=1 \
   --override trainer.save_freq=10
 ```
@@ -196,15 +244,15 @@ the configured `.venv/bin/python`; set `HELICOPTER_PYTHON` or `paths.python` onl
 when an explicit override is intended:
 
 ```bash
-HELICOPTER_PYTHON=/workspace/Projects/MachineLearning/helicopter/.venv/bin/python \
+HELICOPTER_PYTHON=/home/caizus/Projects/MachineLearning/helicopter/.venv/bin/python \
 helicopter takeoff --dataset gsm8k g1g-1.5b grpo
 ```
 
 ## Common command-scoped overrides
 
 ```bash
-WEIGHT_PATH=/workspace/Weights/RWKV
-DATASETS_PATH=/workspace/Datasets
+WEIGHT_PATH=/home/caizus/Weights/RWKV
+DATASETS_PATH=/home/caizus/Datasets
 HELICOPTER_NUM_NODES=1
 HELICOPTER_NUM_DEVICES=8
 HELICOPTER_TAKEOFF_WKV_MODE=fp32io16
@@ -222,5 +270,5 @@ dependency group:
 ```bash
 PYTHONPATH=src/cli python3 -m unittest tests.test_cli
 PYTHONPATH=src/cli python3 -m compileall -q src/cli/helicopter_cli tests
-bash -n scripts/install_local.sh scripts/install_remote.sh
+bash -n scripts/install_local.sh scripts/install_remote.sh scripts/run_remote.sh
 ```

@@ -24,7 +24,6 @@ build/
 dist/
 *.egg-info/
 
-configs/local/
 
 /logs/
 /runs/
