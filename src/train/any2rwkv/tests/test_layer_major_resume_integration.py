@@ -32,6 +32,7 @@ from any2rwkv.recipes.qwen35_to_rwkv7.layer_major_runner import (
     _retain_gate_fit_candidate,
     _resolve_best_generation,
     _write_generation_integrity,
+    prepare_performance_profile_caches,
     run_suffix_free_layer_major,
 )
 from any2rwkv.recipes.qwen35_to_rwkv7 import (
@@ -207,6 +208,71 @@ def _plan() -> SimpleNamespace:
         ),
         global_loss_weights=SimpleNamespace(token_kl=1.0, shifted_ce=0.25),
     )
+
+
+def test_profile_cache_preparation_closes_pre_evidence_cycle(
+    tmp_path: Path,
+) -> None:
+    source, zero_step, trainable = _prepare_fixture(tmp_path, layers=4)
+    training_config = tmp_path / "profile-plan.json"
+    dataset_manifest = tmp_path / "data-splits.json"
+    training_config.write_text('{"schema_version": 3}\n', encoding="utf-8")
+    dataset_manifest.write_text('{"schema_version": 1}\n', encoding="utf-8")
+    plan = SimpleNamespace(
+        distributed_world_size=1,
+        cache_shard_rows=2,
+        max_layer_input_cache_bytes=100_000_000,
+        max_cached_layer_input_bytes_per_rank=10_000_000,
+    )
+    rows = (
+        (1, 2, 3, 4),
+        (2, 3, 4, 5),
+        (3, 4, 5, 6),
+        (4, 5, 6, 7),
+    )
+
+    result = prepare_performance_profile_caches(
+        source_manifest=source,
+        run_dir=zero_step,
+        zero_step_dir=zero_step,
+        token_rows=rows,
+        validation_rows=rows[:2],
+        plan=plan,
+        initial_trainable=trainable,
+        training_config=training_config,
+        dataset_manifest=dataset_manifest,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+
+    assert result["status"] == "prepared"
+    assert [
+        case["representative_layer"] for case in result["cases"]
+    ] == [0, 1, 3]
+    cache_root = zero_step / "performance-profile-cache"
+    for layer_index in range(4):
+        train_manifest = json.loads(
+            (
+                cache_root
+                / f"layer-{layer_index:03d}"
+                / "distill_train"
+                / "manifest.json"
+            ).read_text(encoding="utf-8")
+        )
+        validation_manifest = json.loads(
+            (
+                cache_root
+                / f"layer-{layer_index:03d}"
+                / "validation"
+                / "manifest.json"
+            ).read_text(encoding="utf-8")
+        )
+        assert train_manifest["has_shared_states"] is (layer_index > 0)
+        assert validation_manifest["has_shared_states"] is (layer_index > 0)
+        assert (
+            train_manifest["binding"]["training_config_sha256"]
+            == file_sha256(training_config)
+        )
 
 
 def test_local_stage_rejects_any_frozen_parameter_drift(tmp_path: Path) -> None:

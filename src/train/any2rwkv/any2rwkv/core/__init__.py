@@ -4,6 +4,7 @@ from .contracts import (
     ArchitectureInspection,
     DistillationExecutionRequest,
     DistillationRecipe,
+    PerformanceProfileCacheRequest,
     SourceArchitectureAdapter,
     TargetArchitectureAdapter,
 )
@@ -27,6 +28,7 @@ __all__ = [
     "DistillationExecutionRequest",
     "ExperimentTracker",
     "DistillationRecipe",
+    "PerformanceProfileCacheRequest",
     "LayerInputBatch",
     "LayerInputCacheEstimate",
     "LayerInputCacheReader",

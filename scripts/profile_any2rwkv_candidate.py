@@ -35,6 +35,7 @@ from any2rwkv.core.experiment_tracking import (
 )
 from any2rwkv.distributed import DistributedContext
 from any2rwkv.distill_runner import read_distillation_plan
+from any2rwkv.errors import ContractError
 from any2rwkv.layer_schedule import epoch_permutation
 from any2rwkv.mixer_store import RWKV7MixerLayerStore
 from any2rwkv.recipes.qwen35_to_rwkv7.layer_major_runner import (
@@ -43,6 +44,7 @@ from any2rwkv.recipes.qwen35_to_rwkv7.layer_major_runner import (
     _ensure_next_layer_caches,
     _local_loss,
     _validate,
+    performance_profile_cases,
 )
 from any2rwkv.streamed_teacher import (
     StreamedQwen35HybridExecutor,
@@ -158,44 +160,20 @@ def _module_parameter_signature(module: torch.nn.Module) -> str:
 def _source_profile_case(
     source_config: dict[str, object], layer: int
 ) -> dict[str, object]:
-    text = source_config.get("text_config", source_config)
-    if not isinstance(text, dict):
-        raise SystemExit("source config text_config must be an object")
-    layer_types = text.get("layer_types")
-    layer_count = int(text.get("num_hidden_layers", 0))
-    if (
-        not isinstance(layer_types, list)
-        or layer_count <= 0
-        or len(layer_types) != layer_count
-        or not 0 <= layer < layer_count
-        or not all(isinstance(value, str) and value for value in layer_types)
-    ):
-        raise SystemExit(
-            "profile source requires one mixer kind for every source layer"
-        )
-    input_boundary = "embedding-output" if layer == 0 else "recurrent-prefix"
-    mixer_kind = str(layer_types[layer])
-    matching_layers = [
-        index
-        for index, value in enumerate(layer_types)
-        if str(value) == mixer_kind
-        and ("embedding-output" if index == 0 else "recurrent-prefix")
-        == input_boundary
-    ]
-    representative = min(matching_layers)
-    if layer != representative:
-        raise SystemExit(
-            "profile candidate must use the earliest representative layer for its case: "
-            f"expected={representative} actual={layer}"
-        )
-    return {
-        "profile_case_id": f"{input_boundary}:{mixer_kind}",
-        "source_mixer_kind": mixer_kind,
-        "input_boundary": input_boundary,
-        "representative_layer": representative,
-        "layer_count": len(matching_layers),
-        "transition_count": sum(index + 1 < layer_count for index in matching_layers),
+    try:
+        cases = performance_profile_cases(source_config)
+    except ContractError as error:
+        raise SystemExit(str(error)) from error
+    by_layer = {
+        int(case["representative_layer"]): case
+        for case in cases
     }
+    if layer in by_layer:
+        return by_layer[layer]
+    raise SystemExit(
+        "profile candidate must use the earliest representative layer for its case: "
+        f"expected one of {sorted(by_layer)} actual={layer}"
+    )
 
 
 def _cache_has_shared_states(path: Path) -> bool:

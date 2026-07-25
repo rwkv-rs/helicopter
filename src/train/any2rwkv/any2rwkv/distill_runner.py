@@ -16,6 +16,7 @@ from .recipes import resolve_recipe
 from .core import (
     DistillationExecutionRequest,
     ExperimentTracker,
+    PerformanceProfileCacheRequest,
     write_experiment_report,
 )
 from .core.training_control_calibration import validate_training_control_artifact
@@ -988,6 +989,68 @@ def run_distillation(
         exit_code=0,
     )
     return result
+
+
+def prepare_performance_profile_caches(
+    *,
+    source: Path,
+    run_dir: Path,
+    dataset_manifest: Path,
+    training_config: Path,
+    recipe_id: str,
+    allow_proxy_layers: bool,
+) -> dict[str, object]:
+    resolved = resolve_recipe(recipe_id)
+    if not torch.cuda.is_available():
+        raise ContractError("performance profile cache preparation requires CUDA")
+    plan = read_distillation_plan(training_config)
+    token_rows = read_packed_token_rows(
+        dataset_manifest,
+        split="distill_train",
+        burn_in_tokens=plan.burn_in_tokens,
+        supervised_tokens=plan.supervised_tokens,
+    )
+    validation_rows = read_packed_token_rows(
+        dataset_manifest,
+        split="validation",
+        burn_in_tokens=plan.burn_in_tokens,
+        supervised_tokens=plan.supervised_tokens,
+    )
+    validate_distributed_row_capacity(plan, token_rows, validation_rows)
+    torch.manual_seed(plan.seed)
+    source_manifest = resolved.source.load_checkpoint(
+        source, require_final_layout=not allow_proxy_layers
+    )
+    inspection = resolved.source.inspect_checkpoint(
+        source, require_final_layout=not allow_proxy_layers
+    )
+    resolved.recipe.validate_source(inspection)
+    expected_target = resolved.target.build_target_config(
+        source_manifest, require_final_layout=not allow_proxy_layers
+    )
+    resolved.target.validate_training_environment(
+        head_size=int(expected_target["head_size"])
+    )
+    zero_step = run_dir / "checkpoint-zero-step"
+    if not zero_step.is_dir():
+        raise ContractError("zero-step checkpoint is missing; run convert first")
+    _validate_initialized_run_binding(
+        run_dir=run_dir,
+        source_manifest=source_manifest,
+        zero_step=zero_step,
+    )
+    return resolved.recipe.prepare_performance_profile_caches(
+        PerformanceProfileCacheRequest(
+            source_checkpoint=source_manifest,
+            run_dir=run_dir,
+            zero_step_dir=zero_step,
+            token_rows=token_rows,
+            validation_rows=validation_rows,
+            plan=plan,
+            training_config=training_config,
+            dataset_manifest=dataset_manifest,
+        )
+    )
 
 
 def run_corrective_continuation(args) -> int:

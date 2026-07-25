@@ -27,6 +27,18 @@ class DistillationExecutionRequest:
     progress_callback: Callable[[str, Path], None] | None = None
 
 
+@dataclass(frozen=True)
+class PerformanceProfileCacheRequest:
+    source_checkpoint: object
+    run_dir: Path
+    zero_step_dir: Path
+    token_rows: tuple[tuple[int, ...], ...]
+    validation_rows: tuple[tuple[int, ...], ...]
+    plan: object
+    training_config: Path
+    dataset_manifest: Path
+
+
 @runtime_checkable
 class SourceArchitectureAdapter(Protocol):
     adapter_id: str
@@ -76,4 +88,8 @@ class DistillationRecipe(Protocol):
 
     def run_corrective_distillation(
         self, request: DistillationExecutionRequest
+    ) -> dict[str, object]: ...
+
+    def prepare_performance_profile_caches(
+        self, request: PerformanceProfileCacheRequest
     ) -> dict[str, object]: ...

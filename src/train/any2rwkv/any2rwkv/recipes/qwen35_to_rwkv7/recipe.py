@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import json
 
-from ...core import ArchitectureInspection, DistillationExecutionRequest
+from ...core import (
+    ArchitectureInspection,
+    DistillationExecutionRequest,
+    PerformanceProfileCacheRequest,
+)
 from ...errors import ContractError
 from ...mapping import is_locally_trainable
 
@@ -80,6 +84,26 @@ class Qwen35ToRWKV7Recipe:
             training_config=request.training_config,
             dataset_manifest=request.dataset_manifest,
             progress_callback=request.progress_callback,
+        )
+
+    def prepare_performance_profile_caches(
+        self, request: PerformanceProfileCacheRequest
+    ) -> dict[str, object]:
+        from .layer_major_runner import prepare_performance_profile_caches
+
+        layer_count = request.source_checkpoint.contract.num_hidden_layers
+        return prepare_performance_profile_caches(
+            source_manifest=request.source_checkpoint,
+            run_dir=request.run_dir,
+            zero_step_dir=request.zero_step_dir,
+            token_rows=request.token_rows,
+            validation_rows=request.validation_rows,
+            plan=request.plan,
+            initial_trainable=self._initial_trainable_names(
+                request.run_dir, layer_count
+            ),
+            training_config=request.training_config,
+            dataset_manifest=request.dataset_manifest,
         )
 
     @staticmethod

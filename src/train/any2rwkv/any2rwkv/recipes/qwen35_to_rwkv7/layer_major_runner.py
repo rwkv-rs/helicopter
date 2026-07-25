@@ -16,6 +16,7 @@ import torch
 from ...artifacts import file_sha256, write_json
 from ...core import (
     LayerInputBatch,
+    LayerInputCacheEstimate,
     LayerInputCacheReader,
     estimate_layer_input_cache_bytes,
     prepare_distributed_layer_input_cache,
@@ -41,6 +42,249 @@ from ...migration import (
 from ...mixer_store import RWKV7MixerLayerStore
 from ...streamed_teacher import StreamedQwen35HybridExecutor, StreamedQwen35Teacher
 from ...streaming_training import ActiveLayerOptimizer, ActiveLayerOptimizerSnapshot
+
+
+def performance_profile_cases(
+    source_config: dict[str, object],
+) -> tuple[dict[str, object], ...]:
+    text_config = source_config.get("text_config", source_config)
+    if not isinstance(text_config, dict):
+        raise ContractError("source config text_config must be an object")
+    layer_types = text_config.get("layer_types")
+    layer_count = int(text_config.get("num_hidden_layers", 0))
+    if (
+        not isinstance(layer_types, list)
+        or layer_count <= 0
+        or len(layer_types) != layer_count
+        or not all(isinstance(value, str) and value for value in layer_types)
+    ):
+        raise ContractError(
+            "performance profile requires one mixer kind for every source layer"
+        )
+    cases: list[dict[str, object]] = []
+    seen: set[tuple[str, str]] = set()
+    for layer_index, mixer_kind in enumerate(layer_types):
+        input_boundary = (
+            "embedding-output" if layer_index == 0 else "recurrent-prefix"
+        )
+        identity = (input_boundary, mixer_kind)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        matching_layers = [
+            index
+            for index, value in enumerate(layer_types)
+            if value == mixer_kind
+            and ("embedding-output" if index == 0 else "recurrent-prefix")
+            == input_boundary
+        ]
+        cases.append(
+            {
+                "profile_case_id": f"{input_boundary}:{mixer_kind}",
+                "source_mixer_kind": mixer_kind,
+                "input_boundary": input_boundary,
+                "representative_layer": layer_index,
+                "layer_count": len(matching_layers),
+                "transition_count": sum(
+                    index + 1 < layer_count for index in matching_layers
+                ),
+            }
+        )
+    return tuple(cases)
+
+
+def prepare_performance_profile_caches(
+    *,
+    source_manifest,
+    run_dir: Path,
+    zero_step_dir: Path,
+    token_rows: tuple[tuple[int, ...], ...],
+    validation_rows: tuple[tuple[int, ...], ...],
+    plan,
+    initial_trainable: list[set[str]],
+    training_config: Path,
+    dataset_manifest: Path,
+    device: torch.device | None = None,
+    dtype: torch.dtype | None = None,
+) -> dict[str, object]:
+    distributed = DistributedContext.initialize()
+    planned_world_size = int(getattr(plan, "distributed_world_size", 1))
+    if planned_world_size != distributed.world_size:
+        raise ContractError(
+            "profile-cache plan world size differs from torchrun: "
+            f"plan={planned_world_size} runtime={distributed.world_size}"
+        )
+    device = distributed.device if device is None else torch.device(device)
+    if distributed.world_size > 1 and device.type != "cuda":
+        raise ContractError("distributed profile-cache preparation requires CUDA")
+    dtype = (
+        (torch.bfloat16 if device.type == "cuda" else torch.float32)
+        if dtype is None
+        else dtype
+    )
+    cases = performance_profile_cases(source_manifest.config)
+    representative_layers = tuple(
+        int(case["representative_layer"]) for case in cases
+    )
+    max_layer = max(representative_layers)
+    if len(initial_trainable) != source_manifest.contract.num_hidden_layers:
+        raise ContractError(
+            "profile-cache trainable sets must cover every source layer"
+        )
+    all_rows = (*token_rows, *validation_rows)
+    if not all_rows or any(len(row) != len(all_rows[0]) for row in all_rows):
+        raise ContractError(
+            "profile-cache preparation requires nonempty fixed-length packed rows"
+        )
+    cache_root = run_dir / "performance-profile-cache"
+    base_binding = _run_binding(
+        source_manifest=source_manifest,
+        run_dir=run_dir,
+        zero_step_dir=zero_step_dir,
+        initial_trainable=initial_trainable,
+        training_config=training_config,
+        dataset_manifest=dataset_manifest,
+    )
+    row_count = len(token_rows) + len(validation_rows)
+    sequence_length = len(all_rows[0])
+    base_bytes = (
+        row_count
+        * sequence_length
+        * source_manifest.contract.hidden_size
+        * 2
+    )
+    retained_cache_bytes = base_bytes + max_layer * base_bytes * 2
+    required_free_bytes = math.ceil(retained_cache_bytes * 1.10)
+    max_cache_bytes = getattr(plan, "max_layer_input_cache_bytes", None)
+    if max_cache_bytes is not None and required_free_bytes > int(max_cache_bytes):
+        raise ContractError(
+            "performance profile caches exceed frozen run limit: "
+            f"required={required_free_bytes} limit={max_cache_bytes}"
+        )
+    if distributed.is_primary:
+        capacity = require_layer_input_cache_capacity(
+            cache_root,
+            LayerInputCacheEstimate(
+                current_cache_bytes=retained_cache_bytes,
+                next_cache_bytes=0,
+                required_free_bytes=required_free_bytes,
+            ),
+        )
+        write_json(run_dir / "performance-profile-cache-capacity.json", capacity)
+    distributed.barrier()
+
+    teacher = StreamedQwen35Teacher(
+        source_manifest,
+        device=device,
+        dtype=dtype,
+        cache_layers=False,
+        load_output_head=False,
+    )
+    executor = StreamedQwen35HybridExecutor(teacher)
+    store = RWKV7MixerLayerStore(zero_step_dir, run_dir / "mixer-overlays")
+    prefix_fingerprint = _sha256_json(
+        {
+            "recipe": "qwen35_to_rwkv7",
+            "source_files": source_manifest.file_hashes,
+            "boundary": "embedding-output",
+        }
+    )
+    _ensure_embedding_caches(
+        teacher=teacher,
+        cache_root=cache_root,
+        token_rows=token_rows,
+        validation_rows=validation_rows,
+        shard_rows=plan.cache_shard_rows,
+        hidden_size=source_manifest.contract.hidden_size,
+        base_binding=base_binding,
+        prefix_fingerprint=prefix_fingerprint,
+        distributed=distributed,
+    )
+    for layer_index in range(max_layer):
+        train_reader = _open_cache(
+            cache_root,
+            layer_index,
+            "distill_train",
+            base_binding,
+            prefix_fingerprint,
+            max_cached_bytes=int(plan.max_cached_layer_input_bytes_per_rank),
+        )
+        validation_reader = _open_cache(
+            cache_root,
+            layer_index,
+            "validation",
+            base_binding,
+            prefix_fingerprint,
+            max_cached_bytes=int(plan.max_cached_layer_input_bytes_per_rank),
+        )
+        loaded_layer = teacher.loader.load_layer(
+            layer_index, device=device, dtype=dtype
+        )
+        mixer = store.load_mixer(layer_index, device=device, dtype=dtype)
+        next_prefix_fingerprint = _sha256_json(
+            {
+                "previous_prefix_fingerprint": prefix_fingerprint,
+                "zero_step_checkpoint_sha256": (
+                    base_binding["zero_step_checkpoint_sha256"]
+                ),
+                "layer_index": layer_index,
+                "mixer_state_sha256": _sha256_json(
+                    {
+                        name: _tensor_sha256(tensor)
+                        for name, tensor in sorted(mixer.state_dict().items())
+                    }
+                ),
+            }
+        )
+        _ensure_next_layer_caches(
+            executor=executor,
+            cache_root=cache_root,
+            current_layer=layer_index,
+            train_reader=train_reader,
+            validation_reader=validation_reader,
+            mixer=mixer,
+            loaded_layer=loaded_layer,
+            shard_rows=plan.cache_shard_rows,
+            hidden_size=source_manifest.contract.hidden_size,
+            base_binding=base_binding,
+            next_prefix_fingerprint=next_prefix_fingerprint,
+            distributed=distributed,
+        )
+        del train_reader, validation_reader, loaded_layer, mixer
+        gc.collect()
+        prefix_fingerprint = next_prefix_fingerprint
+
+    result = {
+        "schema_version": 1,
+        "status": "prepared",
+        "world_size": distributed.world_size,
+        "training_config_sha256": file_sha256(training_config),
+        "dataset_manifest_sha256": file_sha256(dataset_manifest),
+        "cases": [
+            {
+                **case,
+                "train_cache": str(
+                    _split_cache_dir(
+                        cache_root,
+                        int(case["representative_layer"]),
+                        "distill_train",
+                    )
+                ),
+                "validation_cache": str(
+                    _split_cache_dir(
+                        cache_root,
+                        int(case["representative_layer"]),
+                        "validation",
+                    )
+                ),
+            }
+            for case in cases
+        ],
+    }
+    if distributed.is_primary:
+        write_json(run_dir / "performance-profile-caches.json", result)
+    distributed.barrier()
+    return result
 
 
 def run_suffix_free_layer_major(
