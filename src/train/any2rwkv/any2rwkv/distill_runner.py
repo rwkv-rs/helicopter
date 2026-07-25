@@ -16,6 +16,7 @@ from .recipes import resolve_recipe
 from .core import (
     DistillationExecutionRequest,
     ExperimentTracker,
+    GQAZeroStepValidationRequest,
     PerformanceProfileCacheRequest,
     write_experiment_report,
 )
@@ -787,6 +788,103 @@ def read_packed_token_rows(
     return tuple(rows)
 
 
+def read_packed_token_row_provenance(
+    path: Path,
+    *,
+    split: str,
+    burn_in_tokens: int,
+    supervised_tokens: int,
+) -> tuple[tuple[str, ...], ...]:
+    """Read hash-bound source-sample ownership for every packed row."""
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("schema_version") != 1 or payload.get("status") != "prepared":
+        raise ContractError(
+            "packed dataset manifest must use schema_version=1 and status=prepared"
+        )
+    splits = payload.get("splits")
+    entry = splits.get(split) if isinstance(splits, dict) else None
+    if not isinstance(entry, dict):
+        raise ContractError(f"packed dataset manifest has no split: {split}")
+    data_file = Path(str(entry.get("path", "")))
+    if not data_file.is_absolute():
+        data_file = (path.parent / data_file).resolve()
+    expected_sha = str(entry.get("sha256", ""))
+    actual_sha = file_sha256(data_file)
+    if actual_sha != expected_sha:
+        raise ContractError(
+            f"packed {split} SHA-256 mismatch: expected {expected_sha}, found {actual_sha}"
+        )
+    expected_length = burn_in_tokens + supervised_tokens
+    provenance: list[tuple[str, ...]] = []
+    row_ids: set[str] = set()
+    with data_file.open(encoding="utf-8") as handle:
+        for line in handle:
+            row = json.loads(line)
+            row_id = str(row.get("row_id", ""))
+            values = row.get("input_ids")
+            source_sample_ids = row.get("source_sample_ids")
+            source_token_spans = row.get("source_token_spans")
+            if (
+                row.get("split") != split
+                or not row_id
+                or row_id in row_ids
+                or not isinstance(values, list)
+                or len(values) != expected_length
+                or not all(type(value) is int and value >= 0 for value in values)
+                or row.get("burn_in_tokens") != burn_in_tokens
+                or row.get("supervised_tokens") != supervised_tokens
+                or not isinstance(source_sample_ids, list)
+                or not source_sample_ids
+                or any(
+                    not isinstance(sample_id, str) or not sample_id
+                    for sample_id in source_sample_ids
+                )
+                or len(set(source_sample_ids)) != len(source_sample_ids)
+                or not isinstance(source_token_spans, list)
+                or not source_token_spans
+            ):
+                raise ContractError(
+                    f"invalid packed token provenance in split {split}: {row_id}"
+                )
+            cursor = 0
+            observed_ids: list[str] = []
+            for span in source_token_spans:
+                if not isinstance(span, dict):
+                    raise ContractError(
+                        f"invalid packed token span in split {split}: {row_id}"
+                    )
+                sample_id = span.get("sample_id")
+                start = span.get("start")
+                end = span.get("end")
+                if (
+                    not isinstance(sample_id, str)
+                    or sample_id not in source_sample_ids
+                    or sample_id in observed_ids
+                    or type(start) is not int
+                    or type(end) is not int
+                    or start != cursor
+                    or end <= start
+                    or end > expected_length
+                ):
+                    raise ContractError(
+                        f"invalid packed token span in split {split}: {row_id}"
+                    )
+                observed_ids.append(sample_id)
+                cursor = end
+            if cursor != expected_length or observed_ids != source_sample_ids:
+                raise ContractError(
+                    f"packed token spans do not cover row {row_id}"
+                )
+            row_ids.add(row_id)
+            provenance.append(tuple(source_sample_ids))
+    if len(provenance) != int(entry.get("row_count", -1)) or not provenance:
+        raise ContractError(
+            f"packed {split} provenance row_count does not match the file"
+        )
+    return tuple(provenance)
+
+
 def _finalize_experiment_tracking(
     tracker: ExperimentTracker,
     *,
@@ -855,6 +953,18 @@ def run_distillation(
         supervised_tokens=plan.supervised_tokens,
     )
     validation_rows = read_packed_token_rows(
+        dataset_manifest,
+        split="validation",
+        burn_in_tokens=plan.burn_in_tokens,
+        supervised_tokens=plan.supervised_tokens,
+    )
+    train_row_source_sample_ids = read_packed_token_row_provenance(
+        dataset_manifest,
+        split="distill_train",
+        burn_in_tokens=plan.burn_in_tokens,
+        supervised_tokens=plan.supervised_tokens,
+    )
+    validation_row_source_sample_ids = read_packed_token_row_provenance(
         dataset_manifest,
         split="validation",
         burn_in_tokens=plan.burn_in_tokens,
@@ -942,6 +1052,10 @@ def run_distillation(
                 zero_step_dir=zero_step,
                 token_rows=token_rows,
                 validation_rows=validation_rows,
+                train_row_source_sample_ids=train_row_source_sample_ids,
+                validation_row_source_sample_ids=(
+                    validation_row_source_sample_ids
+                ),
                 plan=plan,
                 training_config=training_config,
                 dataset_manifest=dataset_manifest,
@@ -1034,6 +1148,84 @@ def prepare_performance_profile_caches(
     )
 
 
+def run_gqa_zero_step_validation(
+    *,
+    source: Path,
+    run_dir: Path,
+    evidence_dir: Path,
+    dataset_manifest: Path,
+    training_config: Path,
+    recipe_id: str,
+    allow_proxy_layers: bool,
+    layer_index: int,
+) -> dict[str, object]:
+    resolved = resolve_recipe(recipe_id)
+    plan = read_distillation_plan(training_config)
+    token_rows = read_packed_token_rows(
+        dataset_manifest,
+        split="distill_train",
+        burn_in_tokens=plan.burn_in_tokens,
+        supervised_tokens=plan.supervised_tokens,
+    )
+    validation_rows = read_packed_token_rows(
+        dataset_manifest,
+        split="validation",
+        burn_in_tokens=plan.burn_in_tokens,
+        supervised_tokens=plan.supervised_tokens,
+    )
+    train_row_source_sample_ids = read_packed_token_row_provenance(
+        dataset_manifest,
+        split="distill_train",
+        burn_in_tokens=plan.burn_in_tokens,
+        supervised_tokens=plan.supervised_tokens,
+    )
+    validation_row_source_sample_ids = read_packed_token_row_provenance(
+        dataset_manifest,
+        split="validation",
+        burn_in_tokens=plan.burn_in_tokens,
+        supervised_tokens=plan.supervised_tokens,
+    )
+    validate_distributed_row_capacity(plan, token_rows, validation_rows)
+    torch.manual_seed(plan.seed)
+    source_manifest = resolved.source.load_checkpoint(
+        source, require_final_layout=not allow_proxy_layers
+    )
+    inspection = resolved.source.inspect_checkpoint(
+        source, require_final_layout=not allow_proxy_layers
+    )
+    resolved.recipe.validate_source(inspection)
+    expected_target = resolved.target.build_target_config(
+        source_manifest, require_final_layout=not allow_proxy_layers
+    )
+    resolved.target.validate_training_environment(
+        head_size=int(expected_target["head_size"])
+    )
+    zero_step = run_dir / "checkpoint-zero-step"
+    if not zero_step.is_dir():
+        raise ContractError("zero-step checkpoint is missing; run convert first")
+    _validate_initialized_run_binding(
+        run_dir=run_dir,
+        source_manifest=source_manifest,
+        zero_step=zero_step,
+    )
+    return resolved.recipe.run_gqa_zero_step_validation(
+        GQAZeroStepValidationRequest(
+            source_checkpoint=source_manifest,
+            run_dir=run_dir,
+            evidence_dir=evidence_dir,
+            zero_step_dir=zero_step,
+            plan=plan,
+            training_config=training_config,
+            dataset_manifest=dataset_manifest,
+            layer_index=layer_index,
+            train_row_source_sample_ids=train_row_source_sample_ids,
+            validation_row_source_sample_ids=(
+                validation_row_source_sample_ids
+            ),
+        )
+    )
+
+
 def run_corrective_continuation(args) -> int:
     """Fork a completed recurrent checkpoint into an independent corrective-only run."""
     from .distributed import DistributedContext
@@ -1071,6 +1263,18 @@ def run_corrective_continuation(args) -> int:
             supervised_tokens=plan.supervised_tokens,
         )
         validation_rows = read_packed_token_rows(
+            Path(args.dataset_manifest),
+            split="validation",
+            burn_in_tokens=plan.burn_in_tokens,
+            supervised_tokens=plan.supervised_tokens,
+        )
+        train_row_source_sample_ids = read_packed_token_row_provenance(
+            Path(args.dataset_manifest),
+            split="distill_train",
+            burn_in_tokens=plan.burn_in_tokens,
+            supervised_tokens=plan.supervised_tokens,
+        )
+        validation_row_source_sample_ids = read_packed_token_row_provenance(
             Path(args.dataset_manifest),
             split="validation",
             burn_in_tokens=plan.burn_in_tokens,
@@ -1154,6 +1358,12 @@ def run_corrective_continuation(args) -> int:
                 zero_step_dir=parent_checkpoint,
                 token_rows=token_rows,
                 validation_rows=validation_rows,
+                train_row_source_sample_ids=(
+                    train_row_source_sample_ids
+                ),
+                validation_row_source_sample_ids=(
+                    validation_row_source_sample_ids
+                ),
                 plan=plan,
                 training_config=Path(args.training_config),
                 dataset_manifest=Path(args.dataset_manifest),

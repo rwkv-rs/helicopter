@@ -6,6 +6,7 @@ import json
 import math
 import os
 import shutil
+import subprocess
 import time
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -191,13 +192,7 @@ def prepare_performance_profile_caches(
     )
     executor = StreamedQwen35HybridExecutor(teacher)
     store = RWKV7MixerLayerStore(zero_step_dir, run_dir / "mixer-overlays")
-    prefix_fingerprint = _sha256_json(
-        {
-            "recipe": "qwen35_to_rwkv7",
-            "source_files": source_manifest.file_hashes,
-            "boundary": "embedding-output",
-        }
-    )
+    prefix_fingerprint = _profile_initial_prefix_fingerprint(source_manifest)
     _ensure_embedding_caches(
         teacher=teacher,
         cache_root=cache_root,
@@ -230,20 +225,13 @@ def prepare_performance_profile_caches(
             layer_index, device=device, dtype=dtype
         )
         mixer = store.load_mixer(layer_index, device=device, dtype=dtype)
-        next_prefix_fingerprint = _sha256_json(
-            {
-                "previous_prefix_fingerprint": prefix_fingerprint,
-                "zero_step_checkpoint_sha256": (
-                    base_binding["zero_step_checkpoint_sha256"]
-                ),
-                "layer_index": layer_index,
-                "mixer_state_sha256": _sha256_json(
-                    {
-                        name: _tensor_sha256(tensor)
-                        for name, tensor in sorted(mixer.state_dict().items())
-                    }
-                ),
-            }
+        next_prefix_fingerprint = _profile_advance_prefix_fingerprint(
+            prefix_fingerprint,
+            zero_step_checkpoint_sha256=base_binding[
+                "zero_step_checkpoint_sha256"
+            ],
+            layer_index=layer_index,
+            mixer=mixer,
         )
         _ensure_next_layer_caches(
             executor=executor,
@@ -296,6 +284,487 @@ def prepare_performance_profile_caches(
     return result
 
 
+def run_gqa_zero_step_validation(
+    *,
+    source_manifest,
+    run_dir: Path,
+    evidence_dir: Path,
+    zero_step_dir: Path,
+    plan,
+    initial_trainable: list[set[str]],
+    training_config: Path,
+    dataset_manifest: Path,
+    layer_index: int,
+    train_row_source_sample_ids: tuple[tuple[str, ...], ...],
+    validation_row_source_sample_ids: tuple[tuple[str, ...], ...],
+    device: torch.device | None = None,
+    dtype: torch.dtype | None = None,
+) -> dict[str, object]:
+    """Validate the formal GQA solver without entering an optimizer epoch."""
+
+    distributed = DistributedContext.initialize()
+    planned_world_size = int(getattr(plan, "distributed_world_size", 1))
+    if planned_world_size != distributed.world_size:
+        raise ContractError(
+            "GQA validation plan world size differs from torchrun: "
+            f"plan={planned_world_size} runtime={distributed.world_size}"
+        )
+    device = distributed.device if device is None else torch.device(device)
+    if distributed.world_size > 1 and device.type != "cuda":
+        raise ContractError("distributed GQA validation requires CUDA")
+    dtype = (
+        (torch.bfloat16 if device.type == "cuda" else torch.float32)
+        if dtype is None
+        else dtype
+    )
+    if device.type == "cuda" and dtype != torch.bfloat16:
+        raise ContractError("formal CUDA GQA validation requires BF16 modules")
+    if getattr(plan, "evidence_tier", "fixture") != "fixture" and (
+        distributed.world_size != 8 or device.type != "cuda"
+    ):
+        raise ContractError(
+            "non-fixture GQA validation requires an 8-rank CUDA launch"
+        )
+
+    layer_count = int(source_manifest.contract.num_hidden_layers)
+    if len(initial_trainable) != layer_count:
+        raise ContractError(
+            "GQA validation trainable sets must cover every source layer"
+        )
+    if not 0 <= int(layer_index) < layer_count:
+        raise ContractError("GQA validation layer index is out of range")
+    source_text_config = source_manifest.config.get(
+        "text_config", source_manifest.config
+    )
+    source_layer_types = tuple(source_text_config.get("layer_types", ()))
+    if (
+        len(source_layer_types) != layer_count
+        or source_layer_types[layer_index] != "full_attention"
+    ):
+        raise ContractError(
+            "GQA validation requires a declared full_attention source layer"
+        )
+
+    evidence_dir = evidence_dir.resolve()
+    source_root = source_manifest.path.resolve()
+    if (
+        evidence_dir == source_root
+        or source_root in evidence_dir.parents
+        or evidence_dir in source_root.parents
+    ):
+        raise ContractError(
+            "GQA evidence output must be disjoint from the source checkpoint"
+        )
+    if evidence_dir.exists():
+        raise ContractError("GQA evidence output already exists")
+
+    product_root = Path(__file__).resolve().parents[6]
+    code_binding = _formal_gqa_code_binding(
+        product_root,
+        require_clean=(
+            getattr(plan, "evidence_tier", "fixture") != "fixture"
+        ),
+    )
+    base_binding = _run_binding(
+        source_manifest=source_manifest,
+        run_dir=run_dir,
+        zero_step_dir=zero_step_dir,
+        initial_trainable=initial_trainable,
+        training_config=training_config,
+        dataset_manifest=dataset_manifest,
+    )
+    cache_root = run_dir / "performance-profile-cache"
+    profile_manifest_path = run_dir / "performance-profile-caches.json"
+    if not profile_manifest_path.is_file():
+        raise ContractError(
+            "GQA validation requires prepared performance-profile caches"
+        )
+    profile_manifest = json.loads(
+        profile_manifest_path.read_text(encoding="utf-8")
+    )
+    if (
+        profile_manifest.get("status") != "prepared"
+        or profile_manifest.get("world_size") != distributed.world_size
+        or profile_manifest.get("training_config_sha256")
+        != file_sha256(training_config)
+        or profile_manifest.get("dataset_manifest_sha256")
+        != file_sha256(dataset_manifest)
+    ):
+        raise ContractError(
+            "performance-profile cache manifest differs from the GQA run"
+        )
+
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+        torch.cuda.reset_peak_memory_stats(device)
+    distributed.barrier()
+    action_started = time.perf_counter()
+    teacher = StreamedQwen35Teacher(
+        source_manifest,
+        device=device,
+        dtype=dtype,
+        cache_layers=False,
+        load_output_head=False,
+    )
+    executor = StreamedQwen35HybridExecutor(teacher)
+    store = RWKV7MixerLayerStore(zero_step_dir, run_dir / "mixer-overlays")
+    prefix_fingerprint = _profile_initial_prefix_fingerprint(source_manifest)
+    for prefix_layer in range(layer_index):
+        prefix_mixer = store.load_mixer(
+            prefix_layer,
+            device=device,
+            dtype=dtype,
+        )
+        prefix_fingerprint = _profile_advance_prefix_fingerprint(
+            prefix_fingerprint,
+            zero_step_checkpoint_sha256=base_binding[
+                "zero_step_checkpoint_sha256"
+            ],
+            layer_index=prefix_layer,
+            mixer=prefix_mixer,
+        )
+        del prefix_mixer
+        gc.collect()
+
+    maximum_cached_bytes = int(
+        getattr(plan, "max_cached_layer_input_bytes_per_rank", None)
+        or 1024**3
+    )
+    train_reader = _open_cache(
+        cache_root,
+        layer_index,
+        "distill_train",
+        base_binding,
+        prefix_fingerprint,
+        max_cached_bytes=maximum_cached_bytes,
+    )
+    full_validation_reader = _open_cache(
+        cache_root,
+        layer_index,
+        "validation",
+        base_binding,
+        prefix_fingerprint,
+        max_cached_bytes=maximum_cached_bytes,
+    )
+    fit_reader, installation_reader, epoch_reader = (
+        _split_gqa_validation_protocol(
+            train_reader,
+            full_validation_reader,
+            world_size=distributed.world_size,
+            train_row_source_sample_ids=train_row_source_sample_ids,
+            validation_row_source_sample_ids=(
+                validation_row_source_sample_ids
+            ),
+        )
+    )
+    loaded_layer = teacher.loader.load_layer(
+        layer_index, device=device, dtype=dtype
+    )
+    mixer = store.load_base_mixer(layer_index, device=device, dtype=dtype)
+    geometry = _gqa_native_zero_step_geometry(
+        mixer=mixer,
+        loaded_layer=loaded_layer,
+    )
+    if geometry is None:
+        raise ContractError(
+            "selected full_attention layer does not have supported GQA geometry"
+        )
+
+    _rank0_filesystem_step(
+        distributed,
+        "create GQA validation evidence directory",
+        lambda: evidence_dir.mkdir(parents=True, exist_ok=False),
+    )
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    distributed.barrier()
+    transaction_started = time.perf_counter()
+    outcome = _activation_fit_gqa_native_zero_step_transaction(
+        executor=executor,
+        train_reader=fit_reader,
+        validation_reader=installation_reader,
+        mixer=mixer,
+        loaded_layer=loaded_layer,
+        layer_index=layer_index,
+        burn_in_tokens=int(plan.burn_in_tokens),
+        fit_rows=int(plan.activation_fit_rows),
+        micro_batch_size=int(plan.micro_batch_size),
+        loss_weights=plan.local_loss_weights,
+        max_trace_bytes_per_rank=maximum_cached_bytes,
+        run_dir=evidence_dir,
+        distributed=distributed,
+    )
+    if outcome is None:
+        raise ContractError("formal GQA transaction was not attempted")
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    distributed.barrier()
+    transaction_wall_seconds = time.perf_counter() - transaction_started
+
+    selected_state_sha256 = str(
+        outcome["selected_module_state_sha256"]
+    )
+    report_path = evidence_dir / str(outcome["report"])
+    split_protocol = {
+        "fit": fit_reader.manifest["binding"],
+        "installation": installation_reader.manifest["binding"],
+        "epoch_selection": epoch_reader.manifest["binding"],
+    }
+    source_sample_protocol_sha256 = _sha256_json(
+        {
+            role: binding["row_subset_source_sample_ids_sha256"]
+            for role, binding in split_protocol.items()
+        }
+    )
+    cursor = {
+        "schema_version": 1,
+        "action": "formal-gqa-zero-step-validation",
+        "layer_index": layer_index,
+        "report_sha256": file_sha256(report_path),
+        "selected_module_state_sha256": selected_state_sha256,
+        "code_tree_sha256": code_binding["code_tree_sha256"],
+        "source_sample_protocol_sha256": (
+            source_sample_protocol_sha256
+        ),
+        "train_cache_manifest_sha256": file_sha256(
+            train_reader.cache_dir / "manifest.json"
+        ),
+        "installation_cache_manifest_sha256": file_sha256(
+            full_validation_reader.cache_dir / "manifest.json"
+        ),
+    }
+    generation_dir = evidence_dir / "immutable-generation"
+
+    def publish_generation() -> None:
+        temporary = generation_dir.with_name(generation_dir.name + ".tmp")
+        if generation_dir.exists() or temporary.exists():
+            raise ContractError(
+                "GQA validation generation destination already exists"
+            )
+        store.save_generation(
+            temporary,
+            layer_index,
+            mixer,
+            cursor=cursor,
+        )
+        tensor_path = temporary / f"layer-{layer_index:03d}.safetensors"
+        recomputed = _generation_mixer_state_sha256(
+            tensor_path,
+            layer_index=layer_index,
+        )
+        if recomputed != selected_state_sha256:
+            raise ContractError(
+                "immutable GQA generation differs from the selected module state"
+            )
+        write_json(
+            temporary / "validation-binding.json",
+            {
+                **cursor,
+                "tensor_sha256": file_sha256(tensor_path),
+                "recomputed_module_state_sha256": recomputed,
+            },
+        )
+        _write_generation_integrity(temporary)
+        _fsync_tree(temporary)
+        temporary.rename(generation_dir)
+        _fsync_directory(generation_dir.parent)
+
+    _rank0_filesystem_step(
+        distributed,
+        "publish immutable GQA validation generation",
+        publish_generation,
+    )
+    generation_tensor = generation_dir / f"layer-{layer_index:03d}.safetensors"
+    local_generation_status: dict[str, object] = {
+        "rank": distributed.rank,
+        "error": None,
+    }
+    try:
+        local_generation_status.update(
+            {
+                "module_state_sha256": _generation_mixer_state_sha256(
+                    generation_tensor,
+                    layer_index=layer_index,
+                ),
+                "tensor_sha256": file_sha256(generation_tensor),
+                "integrity_sha256": file_sha256(
+                    generation_dir / "integrity.json"
+                ),
+            }
+        )
+    except BaseException as error:
+        local_generation_status["error"] = (
+            f"{type(error).__name__}: {error}"
+        )
+    generation_statuses = distributed.all_gather_objects(
+        local_generation_status
+    )
+    generation_errors = [
+        status for status in generation_statuses if status["error"] is not None
+    ]
+    if generation_errors:
+        raise ContractError(
+            "published GQA generation could not be verified on every rank: "
+            + "; ".join(
+                f"rank {status['rank']}: {status['error']}"
+                for status in generation_errors
+            )
+        )
+    published_state_hashes = {
+        str(status["module_state_sha256"])
+        for status in generation_statuses
+    }
+    published_tensor_hashes = {
+        str(status["tensor_sha256"]) for status in generation_statuses
+    }
+    published_integrity_hashes = {
+        str(status["integrity_sha256"]) for status in generation_statuses
+    }
+    if (
+        published_state_hashes != {selected_state_sha256}
+        or len(published_tensor_hashes) != 1
+        or len(published_integrity_hashes) != 1
+    ):
+        raise ContractError(
+            "published GQA generation differs across validation ranks"
+        )
+    published_tensor_sha256 = published_tensor_hashes.pop()
+    published_integrity_sha256 = published_integrity_hashes.pop()
+
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    distributed.barrier()
+    action_wall_seconds = time.perf_counter() - action_started
+    if device.type == "cuda":
+        properties = torch.cuda.get_device_properties(device)
+        local_telemetry = {
+            "rank": distributed.rank,
+            "device": properties.name,
+            "compute_capability": f"{properties.major}.{properties.minor}",
+            "total_memory_bytes": int(properties.total_memory),
+            "peak_allocated_bytes": int(
+                torch.cuda.max_memory_allocated(device)
+            ),
+            "peak_reserved_bytes": int(
+                torch.cuda.max_memory_reserved(device)
+            ),
+            "action_wall_seconds": action_wall_seconds,
+            "transaction_wall_seconds": transaction_wall_seconds,
+        }
+    else:
+        local_telemetry = {
+            "rank": distributed.rank,
+            "device": "cpu-fixture",
+            "compute_capability": None,
+            "total_memory_bytes": None,
+            "peak_allocated_bytes": None,
+            "peak_reserved_bytes": None,
+            "action_wall_seconds": action_wall_seconds,
+            "transaction_wall_seconds": transaction_wall_seconds,
+        }
+    rank_telemetry = distributed.all_gather_objects(local_telemetry)
+    execution_report = {
+        "schema_version": 1,
+        "status": "accepted" if outcome["accepted"] else "rejected",
+        "action": "formal-gqa-zero-step-validation",
+        "code_commit": code_binding["commit"],
+        "code_binding": code_binding,
+        "layer_index": layer_index,
+        "world_size": distributed.world_size,
+        "module_dtype": str(dtype).removeprefix("torch."),
+        "source_geometry": geometry,
+        "run_binding": base_binding,
+        "profile_cache_manifest": {
+            "path": str(profile_manifest_path.resolve()),
+            "sha256": file_sha256(profile_manifest_path),
+        },
+        "split_protocol": split_protocol,
+        "source_sample_protocol_sha256": (
+            source_sample_protocol_sha256
+        ),
+        "cache_manifests": {
+            "fit_sha256": file_sha256(
+                train_reader.cache_dir / "manifest.json"
+            ),
+            "validation_parent_sha256": file_sha256(
+                full_validation_reader.cache_dir / "manifest.json"
+            ),
+        },
+        "fit_report": {
+            "path": str(report_path.relative_to(evidence_dir)),
+            "sha256": file_sha256(report_path),
+        },
+        "immutable_generation": {
+            "path": str(generation_dir.relative_to(evidence_dir)),
+            "integrity_sha256": published_integrity_sha256,
+            "tensor_sha256": published_tensor_sha256,
+            "selected_module_state_sha256": selected_state_sha256,
+            "recomputed_module_state_sha256": (
+                next(iter(published_state_hashes))
+            ),
+        },
+        "runtime": {
+            "measurement_scope": {
+                "action_wall_and_cuda_peak": (
+                    "teacher/mixer load, cache verification, formal "
+                    "transaction, and immutable generation publication"
+                ),
+                "transaction_wall": (
+                    "formal fit, held-out native validation, ablations, "
+                    "commit-or-rollback, and report publication"
+                ),
+                "cuda_peak_kind": (
+                    "PyTorch caching-allocator allocated/reserved bytes"
+                ),
+            },
+            "precision_contract": {
+                "RWKV_FLOAT_MODE": os.environ.get("RWKV_FLOAT_MODE"),
+                "WKV_MODE": os.environ.get("WKV_MODE"),
+            },
+            "ranks": list(rank_telemetry),
+            "maximum_action_wall_seconds": max(
+                float(row["action_wall_seconds"])
+                for row in rank_telemetry
+            ),
+            "maximum_transaction_wall_seconds": max(
+                float(row["transaction_wall_seconds"])
+                for row in rank_telemetry
+            ),
+            "maximum_peak_allocated_bytes": max(
+                (
+                    int(row["peak_allocated_bytes"])
+                    for row in rank_telemetry
+                    if row["peak_allocated_bytes"] is not None
+                ),
+                default=None,
+            ),
+            "maximum_peak_reserved_bytes": max(
+                (
+                    int(row["peak_reserved_bytes"])
+                    for row in rank_telemetry
+                    if row["peak_reserved_bytes"] is not None
+                ),
+                default=None,
+            ),
+        },
+    }
+    execution_path = evidence_dir / "execution.json"
+    _rank0_filesystem_step(
+        distributed,
+        "publish GQA validation execution report",
+        lambda: write_json(execution_path, execution_report),
+    )
+    distributed.barrier()
+    return {
+        "status": execution_report["status"],
+        "layer_index": layer_index,
+        "evidence_dir": str(evidence_dir),
+        "execution_report": str(execution_path),
+        "execution_report_sha256": file_sha256(execution_path),
+        "selected_module_state_sha256": selected_state_sha256,
+    }
+
+
 def run_suffix_free_layer_major(
     *,
     source_manifest,
@@ -303,6 +772,12 @@ def run_suffix_free_layer_major(
     zero_step_dir: Path,
     token_rows: tuple[tuple[int, ...], ...],
     validation_rows: tuple[tuple[int, ...], ...],
+    train_row_source_sample_ids: (
+        tuple[tuple[str, ...], ...] | None
+    ) = None,
+    validation_row_source_sample_ids: (
+        tuple[tuple[str, ...], ...] | None
+    ) = None,
     plan,
     initial_trainable: list[set[str]],
     training_config: Path,
@@ -581,12 +1056,21 @@ def run_suffix_free_layer_major(
         )
         gqa_installation_reader = None
         if gqa_native_geometry is not None:
-            gqa_installation_reader, validation_reader = (
+            gqa_fit_reader, gqa_installation_reader, validation_reader = (
                 _split_gqa_validation_protocol(
+                    train_reader,
                     validation_reader,
                     world_size=distributed.world_size,
+                    train_row_source_sample_ids=(
+                        train_row_source_sample_ids
+                    ),
+                    validation_row_source_sample_ids=(
+                        validation_row_source_sample_ids
+                    ),
                 )
             )
+        else:
+            gqa_fit_reader = None
         configured_learning_rate = learning_rate_profiles.get(
             source_layer_type, plan.learning_rate
         )
@@ -687,7 +1171,7 @@ def run_suffix_free_layer_major(
                     gqa_native_geometry=gqa_native_geometry,
                     gqa_installation_reader=gqa_installation_reader,
                     executor=executor,
-                    train_reader=train_reader,
+                    train_reader=gqa_fit_reader or train_reader,
                     validation_reader=validation_reader,
                     mixer=mixer,
                     loaded_layer=loaded_layer,
@@ -2003,6 +2487,131 @@ def _advance_prefix_fingerprint(prefix_fingerprint: str, mixer_path: Path) -> st
     )
 
 
+def _profile_initial_prefix_fingerprint(source_manifest) -> str:
+    return _sha256_json(
+        {
+            "recipe": "qwen35_to_rwkv7",
+            "source_files": source_manifest.file_hashes,
+            "boundary": "embedding-output",
+        }
+    )
+
+
+def _profile_advance_prefix_fingerprint(
+    prefix_fingerprint: str,
+    *,
+    zero_step_checkpoint_sha256: str,
+    layer_index: int,
+    mixer: torch.nn.Module,
+) -> str:
+    return _sha256_json(
+        {
+            "previous_prefix_fingerprint": prefix_fingerprint,
+            "zero_step_checkpoint_sha256": zero_step_checkpoint_sha256,
+            "layer_index": layer_index,
+            "mixer_state_sha256": _sha256_json(
+                {
+                    name: _tensor_sha256(tensor)
+                    for name, tensor in sorted(mixer.state_dict().items())
+                }
+            ),
+        }
+    )
+
+
+def _formal_gqa_code_binding(
+    product_root: Path,
+    *,
+    require_clean: bool,
+) -> dict[str, object]:
+    """Bind formal evidence to the exact committed any2rwkv code tree."""
+
+    product_root = product_root.resolve()
+    scope = Path("src/train/any2rwkv/any2rwkv")
+    if not (product_root / scope).is_dir():
+        raise ContractError(
+            f"formal GQA code scope is missing: {product_root / scope}"
+        )
+
+    def git_text(*arguments: str) -> str:
+        try:
+            return subprocess.run(
+                ["git", "-C", str(product_root), *arguments],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+        except (OSError, subprocess.CalledProcessError) as error:
+            raise ContractError(
+                "formal GQA validation cannot inspect its Git code binding: "
+                f"{error}"
+            ) from error
+
+    status_lines = tuple(
+        line
+        for line in git_text(
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--",
+            scope.as_posix(),
+        ).splitlines()
+        if line
+    )
+    if require_clean and status_lines:
+        raise ContractError(
+            "formal GQA validation requires a clean any2rwkv code scope: "
+            + "; ".join(status_lines[:8])
+        )
+    try:
+        tracked_output = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(product_root),
+                "ls-files",
+                "-z",
+                "--",
+                scope.as_posix(),
+            ],
+            check=True,
+            capture_output=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise ContractError(
+            "formal GQA validation cannot enumerate its tracked code: "
+            f"{error}"
+        ) from error
+    tracked_paths = tuple(
+        Path(value.decode())
+        for value in tracked_output.split(b"\0")
+        if value
+    )
+    if not tracked_paths:
+        raise ContractError("formal GQA validation code scope is not tracked")
+    tree_entries = []
+    for relative_path in tracked_paths:
+        absolute_path = product_root / relative_path
+        tree_entries.append(
+            {
+                "path": relative_path.as_posix(),
+                "sha256": (
+                    file_sha256(absolute_path)
+                    if absolute_path.is_file()
+                    else None
+                ),
+            }
+        )
+    return {
+        "commit": git_text("rev-parse", "HEAD").strip(),
+        "scope": scope.as_posix(),
+        "clean": not status_lines,
+        "status_porcelain_sha256": _sha256_json(list(status_lines)),
+        "tracked_file_count": len(tree_entries),
+        "code_tree_sha256": _sha256_json(tree_entries),
+    }
+
+
 def _sha256_json(value: object) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
@@ -2157,7 +2766,15 @@ def _validate_gdn_head_geometry(*, mixer, loaded_layer) -> None:
 class _LayerInputReaderView:
     """A deterministic row-local view over an immutable layer-input cache."""
 
-    def __init__(self, parent, row_indices, *, role: str) -> None:
+    def __init__(
+        self,
+        parent,
+        row_indices,
+        *,
+        role: str,
+        source_sample_ids: tuple[str, ...] | None = None,
+        excluded_parent_rows: tuple[int, ...] = (),
+    ) -> None:
         self._parent = parent
         self._row_indices = tuple(int(value) for value in row_indices)
         if not self._row_indices:
@@ -2194,6 +2811,31 @@ class _LayerInputReaderView:
                 ),
             }
         )
+        if source_sample_ids is not None:
+            if (
+                not source_sample_ids
+                or len(set(source_sample_ids)) != len(source_sample_ids)
+            ):
+                raise ContractError(
+                    "layer-input reader view source samples are invalid"
+                )
+            binding.update(
+                {
+                    "row_subset_source_sample_ids": list(
+                        source_sample_ids
+                    ),
+                    "row_subset_source_sample_ids_sha256": _sha256_json(
+                        list(source_sample_ids)
+                    ),
+                    "row_subset_source_sample_count": len(
+                        source_sample_ids
+                    ),
+                    "excluded_parent_rows": list(excluded_parent_rows),
+                    "excluded_parent_rows_sha256": _sha256_json(
+                        list(excluded_parent_rows)
+                    ),
+                }
+            )
         self.manifest.update(
             {
                 "row_count": len(self._row_indices),
@@ -2229,40 +2871,192 @@ class _LayerInputReaderView:
         )
 
 
-def _split_gqa_validation_protocol(reader, *, world_size: int):
-    """Reserve disjoint installation and epoch-validation row identities."""
-    binding = reader.manifest.get("binding")
+def _split_gqa_validation_protocol(
+    train_reader,
+    validation_reader,
+    *,
+    world_size: int,
+    train_row_source_sample_ids: tuple[tuple[str, ...], ...] | None = None,
+    validation_row_source_sample_ids: (
+        tuple[tuple[str, ...], ...] | None
+    ) = None,
+):
+    """Reserve source-sample-disjoint fit, installation, and epoch subsets."""
+
+    def require_bound_cache(reader, *, split: str) -> None:
+        binding = reader.manifest.get("binding")
+        if (
+            not isinstance(binding, dict)
+            or binding.get("split") != split
+            or not isinstance(binding.get("dataset_manifest_sha256"), str)
+            or not isinstance(binding.get("source_sample_ids_sha256"), str)
+            or len(binding["source_sample_ids_sha256"]) != 64
+        ):
+            raise ContractError(
+                "GQA validation protocol requires sample-identity-bound "
+                f"{split} cache"
+            )
+
+    def require_row_provenance(
+        rows: tuple[tuple[str, ...], ...] | None,
+        *,
+        row_count: int,
+        split: str,
+    ) -> tuple[tuple[str, ...], ...]:
+        if (
+            rows is None
+            or len(rows) != row_count
+            or any(
+                not sample_ids
+                or len(set(sample_ids)) != len(sample_ids)
+                or any(
+                    not isinstance(sample_id, str) or not sample_id
+                    for sample_id in sample_ids
+                )
+                for sample_ids in rows
+            )
+        ):
+            raise ContractError(
+                "GQA validation protocol requires verified per-row source "
+                f"provenance for {split}"
+            )
+        return rows
+
+    require_bound_cache(train_reader, split="distill_train")
+    require_bound_cache(validation_reader, split="validation")
+    train_row_source_sample_ids = require_row_provenance(
+        train_row_source_sample_ids,
+        row_count=train_reader.row_count,
+        split="distill_train",
+    )
+    validation_row_source_sample_ids = require_row_provenance(
+        validation_row_source_sample_ids,
+        row_count=validation_reader.row_count,
+        split="validation",
+    )
+    fit_sample_ids = tuple(
+        sorted(
+            {
+                sample_id
+                for row in train_row_source_sample_ids
+                for sample_id in row
+            }
+        )
+    )
+    validation_sample_ids = {
+        sample_id
+        for row in validation_row_source_sample_ids
+        for sample_id in row
+    }
+    if set(fit_sample_ids) & validation_sample_ids:
+        raise ContractError(
+            "GQA fit and validation source samples overlap"
+        )
     if (
-        not isinstance(binding, dict)
-        or binding.get("split") != "validation"
-        or not isinstance(binding.get("dataset_manifest_sha256"), str)
-        or not isinstance(binding.get("source_sample_ids_sha256"), str)
-        or len(binding["source_sample_ids_sha256"]) != 64
+        world_size <= 0
+        or train_reader.row_count < world_size
+        or validation_reader.row_count < 2 * world_size
     ):
         raise ContractError(
-            "GQA validation protocol requires a sample-identity-bound "
-            "validation cache"
+            "GQA validation protocol requires at least one fit row and two "
+            "validation rows per rank"
         )
-    if world_size <= 0 or reader.row_count < 2 * world_size:
+
+    best = None
+    all_rows = set(range(validation_reader.row_count))
+    for cut in range(1, validation_reader.row_count):
+        left_ids = {
+            sample_id
+            for row in validation_row_source_sample_ids[:cut]
+            for sample_id in row
+        }
+        right_ids = {
+            sample_id
+            for row in validation_row_source_sample_ids[cut:]
+            for sample_id in row
+        }
+        shared_ids = left_ids & right_ids
+        installation_rows = tuple(
+            row
+            for row in range(cut)
+            if shared_ids.isdisjoint(
+                validation_row_source_sample_ids[row]
+            )
+        )
+        epoch_rows = tuple(
+            row
+            for row in range(cut, validation_reader.row_count)
+            if shared_ids.isdisjoint(
+                validation_row_source_sample_ids[row]
+            )
+        )
+        if min(len(installation_rows), len(epoch_rows)) < world_size:
+            continue
+        score = (
+            min(len(installation_rows), len(epoch_rows)),
+            len(installation_rows) + len(epoch_rows),
+            -abs(len(installation_rows) - len(epoch_rows)),
+            -abs(2 * cut - validation_reader.row_count),
+            -cut,
+        )
+        if best is None or score > best[0]:
+            best = (
+                score,
+                installation_rows,
+                epoch_rows,
+            )
+    if best is None:
         raise ContractError(
-            "GQA validation protocol requires at least two rows per rank"
+            "GQA validation provenance cannot produce two source-disjoint "
+            "distributed row subsets"
         )
-    installation_rows = tuple(range(0, reader.row_count, 2))
-    epoch_rows = tuple(range(1, reader.row_count, 2))
-    if min(len(installation_rows), len(epoch_rows)) < world_size:
+    _, installation_rows, epoch_rows = best
+    installation_sample_ids = tuple(
+        sorted(
+            {
+                sample_id
+                for row in installation_rows
+                for sample_id in validation_row_source_sample_ids[row]
+            }
+        )
+    )
+    epoch_sample_ids = tuple(
+        sorted(
+            {
+                sample_id
+                for row in epoch_rows
+                for sample_id in validation_row_source_sample_ids[row]
+            }
+        )
+    )
+    if set(installation_sample_ids) & set(epoch_sample_ids):
         raise ContractError(
-            "GQA validation protocol produced an undersized distributed split"
+            "GQA validation protocol source-sample subsets overlap"
         )
+    excluded_parent_rows = tuple(
+        sorted(all_rows - set(installation_rows) - set(epoch_rows))
+    )
     return (
         _LayerInputReaderView(
-            reader,
-            installation_rows,
-            role="gqa-native-zero-step-installation",
+            train_reader,
+            tuple(range(train_reader.row_count)),
+            role="gqa-native-zero-step-fit",
+            source_sample_ids=fit_sample_ids,
+            excluded_parent_rows=(),
         ),
         _LayerInputReaderView(
-            reader,
+            validation_reader,
+            installation_rows,
+            role="gqa-native-zero-step-installation",
+            source_sample_ids=installation_sample_ids,
+            excluded_parent_rows=excluded_parent_rows,
+        ),
+        _LayerInputReaderView(
+            validation_reader,
             epoch_rows,
             role="layerwise-epoch-selection",
+            source_sample_ids=epoch_sample_ids,
+            excluded_parent_rows=excluded_parent_rows,
         ),
     )
 
@@ -5628,7 +6422,8 @@ def _activation_fit_gqa_native_zero_step_transaction(
                 ),
                 "acceptance_rule": (
                     "finite and strictly lower frozen-validation BF16 native "
-                    "free-running mixer normalized MSE"
+                    "free-running mixer normalized MSE, with block normalized "
+                    "MSE non-regression"
                 ),
                 "validation_baseline": baseline,
                 "validation_candidate": candidate_validation,
@@ -5662,17 +6457,24 @@ def _activation_fit_gqa_native_zero_step_transaction(
 
 
 def _gqa_native_validation_improves(baseline, candidate) -> bool:
-    numeric = [
-        float(value)
-        for metrics in (baseline, candidate)
-        for value in metrics.values()
-        if isinstance(value, (int, float))
-    ]
-    return bool(
-        numeric
-        and all(math.isfinite(value) for value in numeric)
-        and float(candidate["mixer_normalized_mse"])
+    required = (
+        "loss",
+        "mixer_normalized_mse",
+        "block_normalized_mse",
+    )
+    if not all(
+        key in baseline
+        and key in candidate
+        and math.isfinite(float(baseline[key]))
+        and math.isfinite(float(candidate[key]))
+        for key in required
+    ):
+        return False
+    return (
+        float(candidate["mixer_normalized_mse"])
         < float(baseline["mixer_normalized_mse"])
+        and float(candidate["block_normalized_mse"])
+        <= float(baseline["block_normalized_mse"])
     )
 
 

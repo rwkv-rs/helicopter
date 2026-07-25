@@ -14,6 +14,7 @@ from .distill_runner import (
     _zero_step_checkpoint_binding,
     run_corrective_continuation,
     run_distillation,
+    run_gqa_zero_step_validation,
 )
 from .distributed import DistributedContext
 from .errors import ContractError
@@ -45,6 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
         "preflight",
         "convert",
         "distill",
+        "validate-gqa-zero-step",
         "corrective",
         "validate-p0",
         "evaluate",
@@ -63,6 +65,18 @@ def build_parser() -> argparse.ArgumentParser:
     commands["distill"].add_argument("--dataset-manifest", required=True)
     commands["distill"].add_argument("--training-config", required=True)
     commands["distill"].add_argument("--resume")
+    commands["validate-gqa-zero-step"].add_argument(
+        "--dataset-manifest", required=True
+    )
+    commands["validate-gqa-zero-step"].add_argument(
+        "--training-config", required=True
+    )
+    commands["validate-gqa-zero-step"].add_argument(
+        "--evidence-output", required=True
+    )
+    commands["validate-gqa-zero-step"].add_argument(
+        "--layer", required=True, type=int
+    )
     commands["corrective"].add_argument("--parent-run", required=True)
     commands["corrective"].add_argument(
         "--parent-checkpoint-sha256", required=True
@@ -297,6 +311,49 @@ def run_existing_stage(args: argparse.Namespace) -> int:
                 write_json(output / "metadata.json", metadata)
                 print(json.dumps(result, sort_keys=True))
             distributed.barrier()
+            return 0
+        finally:
+            if distributed is not None:
+                distributed.close()
+            elif dist.is_initialized():
+                DistributedContext.initialize().close()
+    if args.action == "validate-gqa-zero-step":
+        if args.precision != "bf16" or metadata.get("precision") != "bf16":
+            raise ContractError(
+                "formal GQA zero-step validation requires a BF16 initialized run"
+            )
+        distributed: DistributedContext | None = None
+        try:
+            result = run_gqa_zero_step_validation(
+                source=Path(args.source),
+                run_dir=output,
+                evidence_dir=Path(args.evidence_output),
+                dataset_manifest=Path(args.dataset_manifest),
+                training_config=Path(args.training_config),
+                recipe_id=resolved.recipe.recipe_id,
+                allow_proxy_layers=args.allow_proxy_layers,
+                layer_index=args.layer,
+            )
+            distributed = DistributedContext.initialize()
+            publish_status = None
+            if distributed.is_primary:
+                try:
+                    metadata["gqa_zero_step_validation"] = result
+                    write_json(output / "metadata.json", metadata)
+                    publish_status = {"status": "ok"}
+                except BaseException as error:
+                    publish_status = {
+                        "status": "error",
+                        "error": repr(error),
+                    }
+            publish_status = distributed.broadcast_object(publish_status)
+            if publish_status["status"] != "ok":
+                raise ContractError(
+                    "GQA validation metadata publish failed: "
+                    + publish_status["error"]
+                )
+            if distributed.is_primary:
+                print(json.dumps(result, sort_keys=True))
             return 0
         finally:
             if distributed is not None:

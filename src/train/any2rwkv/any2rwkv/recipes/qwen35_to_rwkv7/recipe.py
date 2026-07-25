@@ -5,6 +5,7 @@ import json
 from ...core import (
     ArchitectureInspection,
     DistillationExecutionRequest,
+    GQAZeroStepValidationRequest,
     PerformanceProfileCacheRequest,
 )
 from ...errors import ContractError
@@ -42,6 +43,12 @@ class Qwen35ToRWKV7Recipe:
             zero_step_dir=request.zero_step_dir,
             token_rows=request.token_rows,
             validation_rows=request.validation_rows,
+            train_row_source_sample_ids=(
+                request.train_row_source_sample_ids
+            ),
+            validation_row_source_sample_ids=(
+                request.validation_row_source_sample_ids
+            ),
             plan=request.plan,
             initial_trainable=self._initial_trainable_names(
                 request.run_dir, layer_count
@@ -104,6 +111,32 @@ class Qwen35ToRWKV7Recipe:
             ),
             training_config=request.training_config,
             dataset_manifest=request.dataset_manifest,
+        )
+
+    def run_gqa_zero_step_validation(
+        self, request: GQAZeroStepValidationRequest
+    ) -> dict[str, object]:
+        from .layer_major_runner import run_gqa_zero_step_validation
+
+        layer_count = request.source_checkpoint.contract.num_hidden_layers
+        return run_gqa_zero_step_validation(
+            source_manifest=request.source_checkpoint,
+            run_dir=request.run_dir,
+            evidence_dir=request.evidence_dir,
+            zero_step_dir=request.zero_step_dir,
+            plan=request.plan,
+            initial_trainable=self._initial_trainable_names(
+                request.run_dir, layer_count
+            ),
+            training_config=request.training_config,
+            dataset_manifest=request.dataset_manifest,
+            layer_index=request.layer_index,
+            train_row_source_sample_ids=(
+                request.train_row_source_sample_ids
+            ),
+            validation_row_source_sample_ids=(
+                request.validation_row_source_sample_ids
+            ),
         )
 
     @staticmethod

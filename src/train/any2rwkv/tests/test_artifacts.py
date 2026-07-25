@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from any2rwkv import artifacts
+from any2rwkv import cli as cli_module
 from any2rwkv.artifacts import (
     default_contract_lock,
     git_sha,
@@ -13,6 +15,7 @@ from any2rwkv.artifacts import (
     verify_scale_gate,
 )
 from any2rwkv.cli import build_parser
+from any2rwkv.errors import ContractError
 
 
 def test_contract_uses_transformers_without_serving_or_quantization() -> None:
@@ -28,6 +31,115 @@ def test_cli_exposes_only_bf16_conversion_training_and_evaluation() -> None:
     help_text = parser.format_help().lower()
     assert "quantize" not in help_text
     assert "vllm" not in help_text
+
+
+def test_cli_exposes_formal_gqa_validation_as_an_explicit_stage() -> None:
+    args = build_parser().parse_args(
+        [
+            "validate-gqa-zero-step",
+            "--source",
+            "/weights/source",
+            "--recipe",
+            "qwen35_to_rwkv7",
+            "--output",
+            "/runs/converted",
+            "--evidence-output",
+            "/runs/gqa-evidence",
+            "--dataset-manifest",
+            "/data/splits.json",
+            "--training-config",
+            "/plans/gqa.json",
+            "--layer",
+            "3",
+            "--precision",
+            "bf16",
+            "--rwkv-hf-sha",
+            "a" * 40,
+            "--rwkv-lm-sha",
+            "b" * 40,
+        ]
+    )
+
+    assert args.action == "validate-gqa-zero-step"
+    assert args.layer == 3
+    assert args.evidence_output == "/runs/gqa-evidence"
+
+
+def test_gqa_metadata_publish_failure_propagates_without_barrier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "run"
+    output.mkdir()
+    metadata = {
+        "precision": "bf16",
+        "submodules": {
+            "rwkv-hf": "a" * 40,
+            "rwkv-lm": "b" * 40,
+        },
+        "recipe": {"id": "qwen35_to_rwkv7"},
+    }
+    (output / "metadata.json").write_text(
+        json.dumps(metadata),
+        encoding="utf-8",
+    )
+
+    class FakeDistributed:
+        is_primary = True
+
+        def broadcast_object(self, value):
+            return value
+
+        def barrier(self):
+            raise AssertionError("metadata failure must not enter a barrier")
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        cli_module,
+        "resolve_recipe",
+        lambda _recipe: SimpleNamespace(
+            recipe=SimpleNamespace(recipe_id="qwen35_to_rwkv7")
+        ),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "run_gqa_zero_step_validation",
+        lambda **_kwargs: {"status": "accepted"},
+    )
+    monkeypatch.setattr(
+        cli_module.DistributedContext,
+        "initialize",
+        lambda: FakeDistributed(),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "write_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("injected metadata failure")
+        ),
+    )
+    args = SimpleNamespace(
+        action="validate-gqa-zero-step",
+        recipe="qwen35_to_rwkv7",
+        output=str(output),
+        source="/weights/source",
+        evidence_output="/runs/evidence",
+        dataset_manifest="/data/splits.json",
+        training_config="/plans/gqa.json",
+        layer=3,
+        precision="bf16",
+        rwkv_hf_sha="a" * 40,
+        rwkv_lm_sha="b" * 40,
+        allow_proxy_layers=False,
+    )
+
+    with pytest.raises(
+        ContractError,
+        match="GQA validation metadata publish failed",
+    ):
+        cli_module.run_existing_stage(args)
 
 
 def test_product_contract_has_no_serving_reference() -> None:

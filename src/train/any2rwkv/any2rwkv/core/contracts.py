@@ -20,6 +20,8 @@ class DistillationExecutionRequest:
     zero_step_dir: Path
     token_rows: tuple[tuple[int, ...], ...]
     validation_rows: tuple[tuple[int, ...], ...]
+    train_row_source_sample_ids: tuple[tuple[str, ...], ...]
+    validation_row_source_sample_ids: tuple[tuple[str, ...], ...]
     plan: object
     training_config: Path
     dataset_manifest: Path
@@ -37,6 +39,20 @@ class PerformanceProfileCacheRequest:
     plan: object
     training_config: Path
     dataset_manifest: Path
+
+
+@dataclass(frozen=True)
+class GQAZeroStepValidationRequest:
+    source_checkpoint: object
+    run_dir: Path
+    evidence_dir: Path
+    zero_step_dir: Path
+    plan: object
+    training_config: Path
+    dataset_manifest: Path
+    layer_index: int
+    train_row_source_sample_ids: tuple[tuple[str, ...], ...]
+    validation_row_source_sample_ids: tuple[tuple[str, ...], ...]
 
 
 @runtime_checkable
@@ -92,4 +108,8 @@ class DistillationRecipe(Protocol):
 
     def prepare_performance_profile_caches(
         self, request: PerformanceProfileCacheRequest
+    ) -> dict[str, object]: ...
+
+    def run_gqa_zero_step_validation(
+        self, request: GQAZeroStepValidationRequest
     ) -> dict[str, object]: ...

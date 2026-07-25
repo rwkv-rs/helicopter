@@ -4,6 +4,7 @@ import json
 import math
 import shutil
 import gc
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 import weakref
@@ -30,7 +31,9 @@ from any2rwkv.recipes.qwen35_to_rwkv7.layer_major_runner import (
     _commit_distributed_generation,
     _dependency_transaction_improves,
     _frozen_parameter_sha256,
+    _formal_gqa_code_binding,
     _generation_mixer_state_sha256,
+    _gqa_native_validation_improves,
     _module_state_hashes,
     _load_generation_state,
     _require_independent_activation_fit_caches,
@@ -41,6 +44,7 @@ from any2rwkv.recipes.qwen35_to_rwkv7.layer_major_runner import (
     _sha256_json,
     _write_generation_integrity,
     prepare_performance_profile_caches,
+    run_gqa_zero_step_validation,
     run_suffix_free_layer_major,
 )
 from any2rwkv.recipes.qwen35_to_rwkv7 import (
@@ -53,14 +57,9 @@ from any2rwkv.recipes.qwen35_to_rwkv7.global_corrective_runner import (
     run_global_corrective,
 )
 from any2rwkv.distributed import DistributedContext
-from any2rwkv.core import LayerInputCacheReader
 from any2rwkv.streaming_training import ActiveLayerOptimizerSnapshot
 from any2rwkv.streaming_training import ActiveLayerOptimizer
-from any2rwkv.streamed_teacher import (
-    Qwen35TeacherLayerLoader,
-    StreamedQwen35HybridExecutor,
-    StreamedQwen35Teacher,
-)
+from any2rwkv.streamed_teacher import Qwen35TeacherLayerLoader
 from any2rwkv.target import build_zero_step_ledger, rwkv7_mixer_specs
 from any2rwkv.distill_runner import (
     _binding_sha256,
@@ -523,49 +522,38 @@ def test_gqa_native_zero_step_runs_in_formal_layer_transaction(
         device=torch.device("cpu"),
         dtype=torch.float32,
     )
-    cache_root = zero_step / "performance-profile-cache" / "layer-003"
-    train_reader = LayerInputCacheReader(
-        cache_root / "distill_train",
-        pin_memory=False,
-    )
-    validation_reader = LayerInputCacheReader(
-        cache_root / "validation",
-        pin_memory=False,
-    )
-    installation_reader, epoch_reader = _split_gqa_validation_protocol(
-        validation_reader,
-        world_size=1,
-    )
-    store = RWKV7MixerLayerStore(zero_step, tmp_path / "gqa-overlay")
-    mixer = store.load_base_mixer(3, device="cpu", dtype=torch.float32)
-    teacher = StreamedQwen35Teacher(
-        source,
-        device="cpu",
-        dtype=torch.float32,
-        load_output_head=False,
-    )
-    loaded = teacher.loader.load_layer(3, device="cpu", dtype=torch.float32)
     run_dir = tmp_path / "gqa-fit-run"
-    run_dir.mkdir()
-
-    outcome = _activation_fit_gqa_native_zero_step_transaction(
-        executor=StreamedQwen35HybridExecutor(teacher),
-        train_reader=train_reader,
-        validation_reader=installation_reader,
-        mixer=mixer,
-        loaded_layer=loaded,
-        layer_index=3,
-        burn_in_tokens=0,
-        fit_rows=9,
-        micro_batch_size=1,
-        loss_weights=SimpleNamespace(
-            mixer_mse=1.0,
-            block_mse=1.0,
-            cosine=0.1,
+    outcome = run_gqa_zero_step_validation(
+        source_manifest=source,
+        run_dir=zero_step,
+        evidence_dir=run_dir,
+        zero_step_dir=zero_step,
+        plan=SimpleNamespace(
+            evidence_tier="fixture",
+            distributed_world_size=1,
+            burn_in_tokens=0,
+            activation_fit_rows=9,
+            micro_batch_size=1,
+            local_loss_weights=SimpleNamespace(
+                mixer_mse=1.0,
+                block_mse=1.0,
+                cosine=0.1,
+            ),
+            max_cached_layer_input_bytes_per_rank=10_000_000,
         ),
-        max_trace_bytes_per_rank=10_000_000,
-        run_dir=run_dir,
-        distributed=DistributedContext.initialize(),
+        initial_trainable=trainable,
+        training_config=training_config,
+        dataset_manifest=dataset_manifest,
+        layer_index=3,
+        train_row_source_sample_ids=tuple(
+            (f"train-{row}",) for row in range(len(rows))
+        ),
+        validation_row_source_sample_ids=tuple(
+            (f"validation-{row}",)
+            for row in range(len(validation_rows))
+        ),
+        device=torch.device("cpu"),
+        dtype=torch.float32,
     )
 
     report = json.loads(
@@ -632,32 +620,248 @@ def test_gqa_native_zero_step_runs_in_formal_layer_transaction(
         == "gqa-native-zero-step-installation"
     )
     assert (
-        epoch_reader.manifest["binding"]["row_subset_role"]
+        json.loads(
+            (run_dir / "execution.json").read_text(encoding="utf-8")
+        )["split_protocol"]["epoch_selection"]["row_subset_role"]
         == "layerwise-epoch-selection"
     )
+    execution = json.loads(
+        (run_dir / "execution.json").read_text(encoding="utf-8")
+    )
+    epoch_binding = execution["split_protocol"]["epoch_selection"]
     assert (
         report["validation_cache_binding"]["parent_row_indices_sha256"]
-        != epoch_reader.manifest["binding"]["parent_row_indices_sha256"]
+        != epoch_binding["parent_row_indices_sha256"]
     )
     assert set(
         report["validation_cache_binding"]["parent_row_indices"]
     ).isdisjoint(
-        epoch_reader.manifest["binding"]["parent_row_indices"]
+        epoch_binding["parent_row_indices"]
     )
     assert (
         report["train_cache_binding"]["source_sample_ids_sha256"]
         != report["validation_cache_binding"]["source_sample_ids_sha256"]
     )
     assert (
+        report["train_cache_binding"]["row_subset_role"]
+        == "gqa-native-zero-step-fit"
+    )
+    fit_source_ids = set(
+        report["train_cache_binding"]["row_subset_source_sample_ids"]
+    )
+    installation_source_ids = set(
+        report["validation_cache_binding"][
+            "row_subset_source_sample_ids"
+        ]
+    )
+    epoch_source_ids = set(
+        epoch_binding["row_subset_source_sample_ids"]
+    )
+    assert fit_source_ids.isdisjoint(installation_source_ids)
+    assert fit_source_ids.isdisjoint(epoch_source_ids)
+    assert installation_source_ids.isdisjoint(epoch_source_ids)
+    assert (
         report["validation_cache_binding"]["parent_row_identity_sha256"]
-        != epoch_reader.manifest["binding"]["parent_row_identity_sha256"]
+        != epoch_binding["parent_row_identity_sha256"]
     )
-    assert outcome["report_sha256"] == file_sha256(
-        run_dir
-        / "activation-fit"
-        / "gqa-native-zero-step-layer-003.json"
+    assert outcome["execution_report_sha256"] == file_sha256(
+        run_dir / "execution.json"
     )
-    assert outcome["accepted"] is (report["status"] == "accepted")
+    assert outcome["status"] == report["status"]
+    assert (
+        execution["immutable_generation"][
+            "selected_module_state_sha256"
+        ]
+        == execution["immutable_generation"][
+            "recomputed_module_state_sha256"
+        ]
+        == outcome["selected_module_state_sha256"]
+    )
+    assert (
+        execution["runtime"]["ranks"][0]["device"] == "cpu-fixture"
+        and execution["module_dtype"] == "float32"
+    )
+    assert (
+        execution["runtime"]["maximum_action_wall_seconds"]
+        >= execution["runtime"]["maximum_transaction_wall_seconds"]
+        > 0
+    )
+    assert (
+        execution["runtime"]["measurement_scope"]["cuda_peak_kind"]
+        == "PyTorch caching-allocator allocated/reserved bytes"
+    )
+    assert len(execution["source_sample_protocol_sha256"]) == 64
+    assert (
+        execution["code_commit"]
+        == execution["code_binding"]["commit"]
+    )
+    assert len(execution["code_binding"]["code_tree_sha256"]) == 64
+
+
+def test_formal_gqa_code_binding_rejects_dirty_code_scope(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "checkout"
+    package = repo / "src/train/any2rwkv/any2rwkv"
+    package.mkdir(parents=True)
+    module = package / "solver.py"
+    module.write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "test"],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "config",
+            "user.email",
+            "test@example.com",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "add", module.relative_to(repo)],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-qm", "fixture"],
+        check=True,
+    )
+
+    clean = _formal_gqa_code_binding(repo, require_clean=True)
+    assert clean["clean"] is True
+    assert clean["tracked_file_count"] == 1
+    module.write_text("VALUE = 2\n", encoding="utf-8")
+    with pytest.raises(
+        ContractError,
+        match="requires a clean any2rwkv code scope",
+    ):
+        _formal_gqa_code_binding(repo, require_clean=True)
+    dirty = _formal_gqa_code_binding(repo, require_clean=False)
+    assert dirty["clean"] is False
+    assert dirty["code_tree_sha256"] != clean["code_tree_sha256"]
+
+
+def _provenance_cache_reader(
+    tmp_path: Path,
+    *,
+    split: str,
+    row_count: int,
+):
+    return SimpleNamespace(
+        row_count=row_count,
+        cache_dir=tmp_path / split,
+        manifest={
+            "binding": {
+                "split": split,
+                "dataset_manifest_sha256": "d" * 64,
+                "source_sample_ids_sha256": (
+                    "a" * 64 if split == "distill_train" else "b" * 64
+                ),
+            }
+        },
+    )
+
+
+def test_gqa_validation_protocol_drops_rows_that_bridge_its_cut(
+    tmp_path: Path,
+) -> None:
+    train_reader = _provenance_cache_reader(
+        tmp_path,
+        split="distill_train",
+        row_count=2,
+    )
+    validation_reader = _provenance_cache_reader(
+        tmp_path,
+        split="validation",
+        row_count=4,
+    )
+    fit, installation, epoch = _split_gqa_validation_protocol(
+        train_reader,
+        validation_reader,
+        world_size=1,
+        train_row_source_sample_ids=(("fit-a",), ("fit-b",)),
+        validation_row_source_sample_ids=(
+            ("left",),
+            ("left", "bridge"),
+            ("bridge", "right"),
+            ("right",),
+        ),
+    )
+
+    fit_ids = set(
+        fit.manifest["binding"]["row_subset_source_sample_ids"]
+    )
+    installation_ids = set(
+        installation.manifest["binding"][
+            "row_subset_source_sample_ids"
+        ]
+    )
+    epoch_ids = set(
+        epoch.manifest["binding"]["row_subset_source_sample_ids"]
+    )
+    assert fit_ids == {"fit-a", "fit-b"}
+    assert installation_ids.isdisjoint(epoch_ids)
+    assert fit_ids.isdisjoint(installation_ids)
+    assert fit_ids.isdisjoint(epoch_ids)
+    assert installation_ids.isdisjoint(epoch_ids)
+    assert set(
+        installation.manifest["binding"]["excluded_parent_rows"]
+    ) == {1, 2}
+
+
+def test_gqa_validation_protocol_rejects_fit_validation_sample_overlap(
+    tmp_path: Path,
+) -> None:
+    train_reader = _provenance_cache_reader(
+        tmp_path,
+        split="distill_train",
+        row_count=1,
+    )
+    validation_reader = _provenance_cache_reader(
+        tmp_path,
+        split="validation",
+        row_count=2,
+    )
+    with pytest.raises(
+        ContractError,
+        match="fit and validation source samples overlap",
+    ):
+        _split_gqa_validation_protocol(
+            train_reader,
+            validation_reader,
+            world_size=1,
+            train_row_source_sample_ids=(("shared",),),
+            validation_row_source_sample_ids=(("shared",), ("held-out",)),
+        )
+
+
+def test_gqa_validation_protocol_fails_closed_without_row_provenance(
+    tmp_path: Path,
+) -> None:
+    train_reader = _provenance_cache_reader(
+        tmp_path,
+        split="distill_train",
+        row_count=1,
+    )
+    validation_reader = _provenance_cache_reader(
+        tmp_path,
+        split="validation",
+        row_count=2,
+    )
+    with pytest.raises(
+        ContractError,
+        match="per-row source provenance for distill_train",
+    ):
+        _split_gqa_validation_protocol(
+            train_reader,
+            validation_reader,
+            world_size=1,
+            validation_row_source_sample_ids=(("a",), ("b",)),
+        )
 
 
 def test_local_stage_rejects_any_frozen_parameter_drift(tmp_path: Path) -> None:
@@ -1311,6 +1515,56 @@ def test_dependency_transaction_requires_joint_held_out_improvement(
     }
 
     assert _dependency_transaction_improves(baseline, candidate) is expected
+
+
+@pytest.mark.parametrize(
+    ("candidate", "expected"),
+    (
+        (
+            {
+                "loss": 0.9,
+                "mixer_normalized_mse": 0.9,
+                "block_normalized_mse": 1.0,
+            },
+            True,
+        ),
+        (
+            {
+                "loss": 0.9,
+                "mixer_normalized_mse": 0.9,
+                "block_normalized_mse": 1.01,
+            },
+            False,
+        ),
+        (
+            {
+                "loss": 0.9,
+                "mixer_normalized_mse": 1.0,
+                "block_normalized_mse": 0.9,
+            },
+            False,
+        ),
+        (
+            {
+                "loss": math.nan,
+                "mixer_normalized_mse": 0.9,
+                "block_normalized_mse": 0.9,
+            },
+            False,
+        ),
+    ),
+)
+def test_gqa_native_installation_requires_block_non_regression(
+    candidate: dict[str, float],
+    expected: bool,
+) -> None:
+    baseline = {
+        "loss": 1.0,
+        "mixer_normalized_mse": 1.0,
+        "block_normalized_mse": 1.0,
+    }
+
+    assert _gqa_native_validation_improves(baseline, candidate) is expected
 
 
 @pytest.mark.parametrize(

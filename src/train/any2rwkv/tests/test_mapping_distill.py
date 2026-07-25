@@ -26,6 +26,7 @@ from any2rwkv.artifacts import file_sha256
 from any2rwkv.distill_runner import (
     read_distillation_plan,
     read_distillation_texts,
+    read_packed_token_row_provenance,
     read_packed_token_rows,
     validate_distributed_row_capacity,
     validate_training_control_evidence,
@@ -509,6 +510,19 @@ class DistillationInvariantTests(unittest.TestCase):
                         "input_ids": [1, 2, 3, 4, 5, 6],
                         "burn_in_tokens": 2,
                         "supervised_tokens": 4,
+                        "source_sample_ids": ["sample-a", "sample-b"],
+                        "source_token_spans": [
+                            {
+                                "sample_id": "sample-a",
+                                "start": 0,
+                                "end": 2,
+                            },
+                            {
+                                "sample_id": "sample-b",
+                                "start": 2,
+                                "end": 6,
+                            },
+                        ],
                     }
                 )
                 + "\n",
@@ -541,6 +555,39 @@ class DistillationInvariantTests(unittest.TestCase):
                 ),
                 ((1, 2, 3, 4, 5, 6),),
             )
+            self.assertEqual(
+                read_packed_token_row_provenance(
+                    packed_manifest,
+                    split="validation",
+                    burn_in_tokens=2,
+                    supervised_tokens=4,
+                ),
+                (("sample-a", "sample-b"),),
+            )
+
+            malformed = json.loads(packed.read_text(encoding="utf-8"))
+            malformed["source_token_spans"][1]["start"] = 3
+            packed.write_text(json.dumps(malformed) + "\n", encoding="utf-8")
+            packed_payload = json.loads(
+                packed_manifest.read_text(encoding="utf-8")
+            )
+            packed_payload["splits"]["validation"]["sha256"] = file_sha256(
+                packed
+            )
+            packed_manifest.write_text(
+                json.dumps(packed_payload),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                ContractError,
+                "invalid packed token span",
+            ):
+                read_packed_token_row_provenance(
+                    packed_manifest,
+                    split="validation",
+                    burn_in_tokens=2,
+                    supervised_tokens=4,
+                )
 
     def test_resume_preserves_mid_accumulation_gradient_and_sweep_cursor(self) -> None:
         initial = self.make_layers()
