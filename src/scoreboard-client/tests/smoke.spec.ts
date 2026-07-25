@@ -10,6 +10,11 @@ test("shows every parameter scale for each comparison option", async ({ page }) 
   await expect(page.getByRole("columnheader", { name: "2.9B" })).toBeVisible();
   await expect(page.getByRole("columnheader", { name: "7.2B" })).toBeVisible();
   await expect(page.getByRole("columnheader", { name: "13.3B" })).toBeVisible();
+  await expect(page.getByRole("columnheader", { name: "G1G" }).first()).toBeVisible();
+  await expect(page.getByRole("columnheader", { name: "G1H" }).first()).toBeVisible();
+  await expect(page.getByRole("button", { name: "G1G vs G1H" })).toBeVisible();
+  await expect(page.getByText("前代", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("当代", { exact: true })).toHaveCount(0);
   await expect(page.getByText("分数范围")).toHaveCount(0);
   await expect(page.getByRole("link", { name: "管理面板" })).toHaveCount(0);
 
@@ -31,7 +36,7 @@ test("shows a fixed answer panel with ten samples for every outcome", async ({ p
 
   await page
     .getByRole("button", {
-      name: /AIME24 1\.5B 前代 .* 作答详情/,
+      name: /AIME24 1\.5B G1G .* 作答详情/,
     })
     .click();
 

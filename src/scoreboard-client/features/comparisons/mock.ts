@@ -15,11 +15,11 @@ import type {
 const COMPARISONS: ComparisonOption[] = [
   {
     id: "generation",
-    label: "前代 vs 当代",
+    label: "G1G vs G1H",
     shortLabel: "代际",
-    aLabel: "前代",
-    bLabel: "当代",
-    contract: "仅改变模型代际；prompt、precision、sampling 与输出边界保持一致。",
+    aLabel: "G1G",
+    bLabel: "G1H",
+    contract: "G1G → G1H；prompt、precision、sampling 与输出边界保持一致。",
   },
   {
     id: "prompt_template",
