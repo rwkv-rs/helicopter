@@ -139,10 +139,58 @@ export function ScoreMatrix() {
                   const delta = score.b - score.a;
                   return [
                     <td className="score-value score-a" key={`${group.id}-a`}>
-                      {percent(score.a)}
+                      <button
+                        aria-label={`${row.benchmark} ${group.label} ${comparison.aLabel} ${percent(score.a)} 作答详情`}
+                        className="score-detail-trigger"
+                        onClick={() =>
+                          dispatch({
+                            type: "select-score-cell",
+                            selection: {
+                              comparisonId: state.comparisonId,
+                              comparisonLabel: comparison.label,
+                              parameterGroupId: group.id,
+                              parameterLabel: group.label,
+                              benchmark: row.benchmark,
+                              metric: row.metric,
+                              samples: row.samples,
+                              arm: "a",
+                              armLabel: comparison.aLabel,
+                              model: group.aModel,
+                              score: score.a,
+                            },
+                          })
+                        }
+                        type="button"
+                      >
+                        {percent(score.a)}
+                      </button>
                     </td>,
                     <td className="score-value score-b" key={`${group.id}-b`}>
-                      {percent(score.b)}
+                      <button
+                        aria-label={`${row.benchmark} ${group.label} ${comparison.bLabel} ${percent(score.b)} 作答详情`}
+                        className="score-detail-trigger"
+                        onClick={() =>
+                          dispatch({
+                            type: "select-score-cell",
+                            selection: {
+                              comparisonId: state.comparisonId,
+                              comparisonLabel: comparison.label,
+                              parameterGroupId: group.id,
+                              parameterLabel: group.label,
+                              benchmark: row.benchmark,
+                              metric: row.metric,
+                              samples: row.samples,
+                              arm: "b",
+                              armLabel: comparison.bLabel,
+                              model: group.bModel,
+                              score: score.b,
+                            },
+                          })
+                        }
+                        type="button"
+                      >
+                        {percent(score.b)}
+                      </button>
                     </td>,
                     <td
                       className={`delta-cell ${delta > 0.05 ? "up" : delta < -0.05 ? "down" : "flat"}`}

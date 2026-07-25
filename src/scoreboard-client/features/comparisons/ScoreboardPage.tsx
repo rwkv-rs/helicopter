@@ -1,5 +1,6 @@
 "use client";
 
+import { AnswerDetailsDialog } from "./AnswerDetailsDialog";
 import { ComparisonTabs } from "./ComparisonTabs";
 import { ScoreMatrix } from "./ScoreMatrix";
 import { useComparisonStore } from "./store";
@@ -12,6 +13,7 @@ export function ScoreboardPage() {
     <div className="scoreboard-page">
       <ComparisonTabs />
       <ScoreMatrix />
+      <AnswerDetailsDialog />
     </div>
   );
 }

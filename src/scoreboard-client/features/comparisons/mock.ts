@@ -1,4 +1,7 @@
 import type {
+  AnswerOutcome,
+  AnswerSample,
+  AnswerSampleGroups,
   BenchmarkScore,
   ComparisonDataSource,
   ComparisonDataset,
@@ -6,6 +9,7 @@ import type {
   ComparisonOption,
   HistoryPoint,
   ParameterGroup,
+  ScoreCellSelection,
 } from "./types";
 
 const COMPARISONS: ComparisonOption[] = [
@@ -72,8 +76,109 @@ function seededRandom(seed: number): () => number {
   };
 }
 
+function stringSeed(value: string): number {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
 function clamp(value: number): number {
   return Math.max(0, Math.min(100, value));
+}
+
+function sampleProblem(benchmark: string, sampleIndex: number): string {
+  const ordinal = sampleIndex + 1;
+  if (benchmark.startsWith("AIME")) {
+    return `设正整数 x、y 满足 x² + y² = ${125 + ordinal}，求题目要求的余数。`;
+  }
+  if (benchmark === "MATH-500") {
+    return `求方程 3x² - ${ordinal + 2}x - 2 = 0 的全部实数解，并给出化简过程。`;
+  }
+  if (benchmark === "GSM8K") {
+    return `一家商店上午售出 ${18 + ordinal} 件商品，下午比上午多售出 40%，全天共售出多少件？`;
+  }
+  if (benchmark === "MMLU") {
+    return `关于样本 ${ordinal} 所涉及的基础概念，下列四个选项中哪一项最准确？`;
+  }
+  if (benchmark === "IFEval") {
+    return `用恰好三句话解释评测样本 ${ordinal}，每句话以同一个动词开头。`;
+  }
+  if (benchmark === "LiveCodeBench") {
+    return `实现 solve()：读取长度为 n 的数组，返回第 ${ordinal} 个测试条件下的最长递增子序列长度。`;
+  }
+  return `分析 ${benchmark} 的第 ${ordinal} 个任务，并给出可验证的最终结论。`;
+}
+
+function referenceAnswer(benchmark: string, sampleIndex: number): string {
+  if (benchmark === "MMLU") return ["A", "B", "C", "D"][sampleIndex % 4];
+  if (benchmark === "IFEval") return "满足三句话、相同动词开头及内容约束。";
+  if (benchmark === "LiveCodeBench") return "通过动态规划或 patience sorting 得到正确长度。";
+  return String((sampleIndex * 17 + benchmark.length * 11) % 997);
+}
+
+function buildAnswerSample(
+  selection: ScoreCellSelection,
+  outcome: AnswerOutcome,
+  index: number,
+  random: () => number,
+): AnswerSample {
+  const problem = sampleProblem(selection.benchmark, index);
+  const reference = referenceAnswer(selection.benchmark, index);
+  const incorrectAnswer = String((Number.parseInt(reference, 10) || index + 7) + 1);
+  const unansweredReasons = [
+    "empty_completion",
+    "max_tokens_before_final_answer",
+    "generation_timeout",
+  ];
+  return {
+    id: `${selection.comparisonId}-${selection.parameterGroupId}-${selection.arm}-${outcome}-${index}`,
+    sampleIndex: index,
+    problem,
+    prompt: `User: ${problem}\n\nAssistant: <think>`,
+    answer:
+      outcome === "correct"
+        ? `推理过程已省略。最终答案：${reference}`
+        : outcome === "incorrect"
+          ? `推理中采用了错误假设。最终答案：${incorrectAnswer}`
+          : "",
+    referenceAnswer: reference,
+    failReason:
+      outcome === "correct"
+        ? null
+        : outcome === "incorrect"
+          ? "answer_mismatch"
+          : unansweredReasons[index % unansweredReasons.length],
+    generatedTokens:
+      outcome === "unanswered"
+        ? Math.round(4 + random() * 28)
+        : Math.round(80 + random() * 420),
+    latencyMs: Math.round(450 + random() * 3800),
+    runId: `mock-${selection.comparisonId}-${selection.parameterGroupId}-${selection.arm}`,
+  };
+}
+
+function buildAnswerSampleGroups(
+  selection: ScoreCellSelection,
+  limit: number,
+): AnswerSampleGroups {
+  const outcomes: AnswerOutcome[] = ["correct", "incorrect", "unanswered"];
+  return Object.fromEntries(
+    outcomes.map((outcome, outcomeIndex) => {
+      const random = seededRandom(
+        stringSeed(
+          `${selection.benchmark}:${selection.comparisonId}:${selection.parameterGroupId}:${selection.arm}:${outcome}`,
+        ),
+      );
+      const total = 18 + outcomeIndex * 7 + Math.floor(random() * 23);
+      const items = Array.from({ length: Math.min(limit, total) }, (_, index) =>
+        buildAnswerSample(selection, outcome, index, random),
+      );
+      return [outcome, { outcome, total, items }];
+    }),
+  ) as AnswerSampleGroups;
 }
 
 function parameterGroups(comparisonId: ComparisonId): ParameterGroup[] {
@@ -165,5 +270,12 @@ export class MockComparisonDataSource implements ComparisonDataSource {
       generatedAt: "2026-07-24T12:00:00.000Z",
       source: "mock",
     };
+  }
+
+  async loadAnswerSamples(
+    selection: ScoreCellSelection,
+    limit: number,
+  ): Promise<AnswerSampleGroups> {
+    return buildAnswerSampleGroups(selection, limit);
   }
 }

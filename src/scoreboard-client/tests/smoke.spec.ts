@@ -21,6 +21,34 @@ test("shows every parameter scale for each comparison option", async ({ page }) 
   await expect(page.getByText(/User✿\{task\.problem\}✿/)).toBeVisible();
 });
 
+test("opens ten sampled answers for every outcome tab", async ({ page }) => {
+  await page.goto("/?page=dashboard");
+
+  await page
+    .getByRole("button", {
+      name: /AIME24 1\.5B 前代 .* 作答详情/,
+    })
+    .click();
+
+  const dialog = page.getByRole("dialog", { name: "AIME24 作答详情" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("tab", { name: /正确作答 10/ })).toBeVisible();
+  await expect(dialog.getByRole("tab", { name: /错误作答 10/ })).toBeVisible();
+  await expect(dialog.getByRole("tab", { name: /未能作答 10/ })).toBeVisible();
+  await expect(dialog.locator(".answer-sample-card.correct")).toHaveCount(10);
+
+  await dialog.getByRole("tab", { name: /错误作答/ }).click();
+  await expect(dialog.locator(".answer-sample-card.incorrect")).toHaveCount(10);
+  await expect(dialog.getByText("answer_mismatch").first()).toBeVisible();
+
+  await dialog.getByRole("tab", { name: /未能作答/ }).click();
+  await expect(dialog.locator(".answer-sample-card.unanswered")).toHaveCount(10);
+  await expect(dialog.getByText("无有效输出").first()).toBeVisible();
+
+  await dialog.getByRole("button", { name: "关闭" }).click();
+  await expect(dialog).toHaveCount(0);
+});
+
 test("renders score history and opens point provenance", async ({ page }) => {
   await page.goto("/?page=history");
 

@@ -4,6 +4,7 @@ import {
   createContext,
   type Dispatch,
   type ReactNode,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -17,7 +18,9 @@ import type {
   ComparisonId,
   DomainId,
   HistoryPoint,
+  ScoreCellSelection,
 } from "./types";
+import type { AnswerSampleGroups } from "./types";
 
 interface ComparisonState {
   status: "loading" | "ready" | "error";
@@ -26,6 +29,7 @@ interface ComparisonState {
   comparisonId: ComparisonId;
   domainId: DomainId;
   selectedHistoryPointId: string | null;
+  selectedScoreCell: ScoreCellSelection | null;
 }
 
 type ComparisonAction =
@@ -33,7 +37,8 @@ type ComparisonAction =
   | { type: "failed"; error: string }
   | { type: "select-comparison"; comparisonId: ComparisonId }
   | { type: "select-domain"; domainId: DomainId }
-  | { type: "select-history-point"; pointId: string | null };
+  | { type: "select-history-point"; pointId: string | null }
+  | { type: "select-score-cell"; selection: ScoreCellSelection | null };
 
 const initialState: ComparisonState = {
   status: "loading",
@@ -42,6 +47,7 @@ const initialState: ComparisonState = {
   comparisonId: "generation",
   domainId: "regular",
   selectedHistoryPointId: null,
+  selectedScoreCell: null,
 };
 
 function comparisonReducer(
@@ -58,11 +64,14 @@ function comparisonReducer(
         ...state,
         comparisonId: action.comparisonId,
         selectedHistoryPointId: null,
+        selectedScoreCell: null,
       };
     case "select-domain":
-      return { ...state, domainId: action.domainId };
+      return { ...state, domainId: action.domainId, selectedScoreCell: null };
     case "select-history-point":
       return { ...state, selectedHistoryPointId: action.pointId };
+    case "select-score-cell":
+      return { ...state, selectedScoreCell: action.selection };
   }
 }
 
@@ -70,6 +79,10 @@ interface ComparisonContextValue {
   state: ComparisonState;
   dispatch: Dispatch<ComparisonAction>;
   selectedHistoryPoint: HistoryPoint | null;
+  loadAnswerSamples: (
+    selection: ScoreCellSelection,
+    limit?: number,
+  ) => Promise<AnswerSampleGroups>;
 }
 
 const ComparisonContext = createContext<ComparisonContextValue | null>(null);
@@ -106,9 +119,14 @@ export function ComparisonProvider({
 
   const selectedHistoryPoint =
     state.data?.history.find((point) => point.id === state.selectedHistoryPointId) ?? null;
+  const loadAnswerSamples = useCallback(
+    (selection: ScoreCellSelection, limit = 10) =>
+      dataSource.loadAnswerSamples(selection, limit),
+    [dataSource],
+  );
   const value = useMemo(
-    () => ({ state, dispatch, selectedHistoryPoint }),
-    [selectedHistoryPoint, state],
+    () => ({ state, dispatch, selectedHistoryPoint, loadAnswerSamples }),
+    [loadAnswerSamples, selectedHistoryPoint, state],
   );
 
   return <ComparisonContext.Provider value={value}>{children}</ComparisonContext.Provider>;

@@ -56,6 +56,44 @@ export interface HistoryPoint {
   runId: string;
 }
 
+export type ScoreArm = "a" | "b";
+export type AnswerOutcome = "correct" | "incorrect" | "unanswered";
+
+export interface ScoreCellSelection {
+  comparisonId: ComparisonId;
+  comparisonLabel: string;
+  parameterGroupId: string;
+  parameterLabel: string;
+  benchmark: string;
+  metric: string;
+  samples: number;
+  arm: ScoreArm;
+  armLabel: string;
+  model: string;
+  score: number;
+}
+
+export interface AnswerSample {
+  id: string;
+  sampleIndex: number;
+  problem: string;
+  prompt: string;
+  answer: string;
+  referenceAnswer: string;
+  failReason: string | null;
+  generatedTokens: number;
+  latencyMs: number;
+  runId: string;
+}
+
+export interface AnswerSampleGroup {
+  outcome: AnswerOutcome;
+  total: number;
+  items: AnswerSample[];
+}
+
+export type AnswerSampleGroups = Record<AnswerOutcome, AnswerSampleGroup>;
+
 export interface ComparisonDataset {
   comparisons: ComparisonOption[];
   parameterGroups: Record<ComparisonId, ParameterGroup[]>;
@@ -67,4 +105,8 @@ export interface ComparisonDataset {
 
 export interface ComparisonDataSource {
   load(): Promise<ComparisonDataset>;
+  loadAnswerSamples(
+    selection: ScoreCellSelection,
+    limit: number,
+  ): Promise<AnswerSampleGroups>;
 }
