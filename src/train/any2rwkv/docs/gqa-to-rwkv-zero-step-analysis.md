@@ -1,124 +1,165 @@
-# 从 GQA 到 RWKV7：Softmax 递推的 Zero-Step 线性化
+# 从 GQA 到 RWKV7：从有界 Softmax Hazard 到可观测状态
 
-参考：[Linearizing Softmax Attention into Gated DeltaNet](https://spaces.ac.cn/archives/11823)
+参考：[将 Softmax Attention 线性化为 Gated DeltaNet](https://spaces.ac.cn/archives/11823)
 
-将一个已经训练好的 GQA 层迁移为 RWKV7，可以表述成一个很干净的问题：在给定的校准分布和固定的矩阵状态预算下，寻找最接近原 Softmax Attention 的递推算子。
+将一个已经训练好的 GQA 层迁移为 RWKV7，关键不在于逐个复制 Q、K、V 权重，而在于先找出 Softmax Attention 真正递推的量，再把它投影到 RWKV7 的有限状态中。
 
-这里的“最接近”专指 held-out mixer output NMSE，“zero-step”则表示整个过程只使用精确回放、加权最小二乘、矩阵分解和 inverse link，不进行反向传播、LM loss 优化或逐层蒸馏。如果初始化已经把递推算子投影得足够准确，那么转换完成后就可以直接导出模型。
+这里把“zero-step”定义为第一次 optimizer step 之前的初始化：精确回放 source、解析构造 oracle、闭式求解状态和参数，最后得到逐层蒸馏的起点。初始化越接近 source，逐层蒸馏需要修正的距离就越短。
 
-下面从 Softmax 的精确递推开始。
+## 1. Softmax 本来就有递推式
 
-## 1. GQA 的查询索引递推
+考虑一个 GQA group。它共享
 
-考虑一个 GQA group。它有一组共享的 Key、Value：
+$$k_i,v_i\in\mathbb R^d,$$
 
-\[
-k_i,v_i\in\mathbb R^d
-\]
+并有若干个 Query heads。对任意查询 \(q\)，定义长度为 \(t\) 的 prefix attention：
 
-以及若干个 Query heads。对其中一个 Query head 的任意查询 \(q\)，定义长度为 \(t\) 的 prefix attention：
+$$o_t(q)=\frac{\sum_{i\le t}\exp(q^\top k_i/\sqrt d)v_i}{\sum_{i\le t}\exp(q^\top k_i/\sqrt d)}.$$
 
-\[
-o_t(q)
+再定义第 \(t\) 个 token 在当前 prefix 中的 hazard：
+
+$$p_t(q)=\frac{\exp(q^\top k_t/\sqrt d)}{\sum_{i\le t}\exp(q^\top k_i/\sqrt d)}.$$
+
+直接整理分子、分母可得
+
+$$o_t(q)=(1-p_t(q))o_{t-1}(q)+p_t(q)v_t.\tag{1}$$
+
+式 \((1)\) 是精确恒等式。它已经具有 Gated DeltaNet 的含义：\(p_t(q)\) 同时决定保留多少旧输出、写入多少新 Value。
+
+实际序列中每个位置有不同查询。对未来位置 \(\tau\) 的真实查询 \(q_{\tau,h}\)，离线回放
+
+$$o_1(q_{\tau,h}),o_2(q_{\tau,h}),\ldots,o_\tau(q_{\tau,h})$$
+
+即可得到 Softmax oracle trajectory。同一 GQA group 的 Query heads 共用 Key、Value 和状态目标，只使用不同的 future-query 探针。
+
+## 2. 应在线性化 logit 后保留 sigmoid
+
+直接把 \(p_t(q)\) 展开成无界仿射函数，会丢掉 \(p_t(q)\in[0,1]\) 这一最重要的性质。更自然的变量是 hazard logit。对 \(t\ge2\)，有
+
+$$
+\operatorname{logit}p_t(q)
 =
-\frac{
-\sum_{i\le t}\exp(q^\top k_i)v_i
-}{
-\sum_{i\le t}\exp(q^\top k_i)
-}.
-\]
-
-缩放因子和 RoPE 都可以预先吸收到 \(q,k_i\) 中，所以这里不再单独书写。再定义第 \(t\) 个 token 在当前 prefix 中的 Softmax 概率：
-
-\[
-p_t(q)
+\frac{q^\top k_t}{\sqrt d}
+-
+L_{t-1}(q),
+\qquad
+L_{t-1}(q)
 =
-\frac{
-\exp(q^\top k_t)
-}{
-\sum_{i\le t}\exp(q^\top k_i)
-}.
-\]
-
-直接整理分子、分母，就得到精确恒等式：
-
-\[
-o_t(q)
-=
-(1-p_t(q))o_{t-1}(q)+p_t(q)v_t.
-\tag{1}
-\]
-
-这个式子很重要。它说明 Softmax Attention 本来就可以看成一种递推：\(p_t(q)\) 同时控制旧输出的保留量和新 Value 的写入量。
-
-实际序列中每个位置的查询都不一样，但式 \((1)\) 仍然可用。对未来位置 \(\tau\) 的查询 \(q_{\tau,h}\)，只要离线计算
-
-\[
-o_1(q_{\tau,h}),o_2(q_{\tau,h}),\ldots,o_\tau(q_{\tau,h}),
-\]
-
-就得到一条以真实 future query 为探针的 Softmax oracle trajectory。GQA 的共享性也自然保留下来：同一个 group 的所有 Query heads 共用 \(k_i,v_i\)，只是探针分布不同。
-
-## 2. 在真实查询分布上投影 Softmax hazard
-
-为了得到矩阵递推，需要把 \(p_t(q)\) 化成 \(q\) 的简单函数。对固定的 Query head \(h\)，最自然的一阶形式是
-
-\[
-p_t(q)\approx \theta_{t,h}+\ell_{t,h}^\top q.
+\log\sum_{i<t}\exp(q^\top k_i/\sqrt d).
 \tag{2}
-\]
+$$
 
-在 \(q=0\) 处做 Taylor 展开，会得到
+对 Query head \(h\)，先在 calibration queries 上求中心 \(\mu_h\)。定义
 
-\[
-\theta_{t,h}=\frac1t,\qquad
-\ell_{t,h}=\frac{k_t-\bar k_t}{t}.
-\]
+$$
+\pi_{t-1,i}(\mu_h)
+=
+\frac{\exp(\mu_h^\top k_i/\sqrt d)}
+{\sum_{j<t}\exp(\mu_h^\top k_j/\sqrt d)},
+\qquad
+\bar k_{t-1}(\mu_h)
+=
+\sum_{i<t}\pi_{t-1,i}(\mu_h)k_i.
+$$
 
-这是一个很好的解析起点。模型转换还知道真实 Query 的分布，因此可以把式 \((2)\) 直接投影到校准集上。令
+在 \(\mu_h\) 处对 \(L_{t-1}\) 做一阶展开：
 
-\[
+$$
+L_{t-1}(q)
+\approx
+L_{t-1}(\mu_h)
++
+\frac{\bar k_{t-1}(\mu_h)^\top(q-\mu_h)}{\sqrt d}.
+$$
+
+于是得到有界 hazard：
+
+$$
+\widehat p_t(q)
+=
+\sigma\left(
+c_{t,h}
++
+\ell_{t,h}^\top(q-\mu_h)
+\right),
+\tag{3}
+$$
+
+其中
+
+$$
+c_{t,h}
+=
+\frac{\mu_h^\top k_t}{\sqrt d}
+-
+L_{t-1}(\mu_h),
+\qquad
+\ell_{t,h}
+=
+\frac{k_t-\bar k_{t-1}(\mu_h)}{\sqrt d}.
+\tag{4}
+$$
+
+式 \((3)\) 在展开中心处与真实 hazard 的数值和一阶导数都相同，同时始终落在 \([0,1]\)。当 \(\mu_h=0\) 时，它退化为零点 Taylor 的有界版本；使用真实 Query 均值则进一步适配已经训练好的 head。
+
+把 \(\widehat p_t(q)\) 代回式 \((1)\)，可直接生成 bounded oracle trajectory：
+
+$$
+\widehat o_t(q)
+=
+(1-\widehat p_t(q))\widehat o_{t-1}(q)
++
+\widehat p_t(q)v_t.
+\tag{5}
+$$
+
+这个轨迹保留 sigmoid，不急于把二阶乘积压成某个人工闭包。它既是 zero-step 状态投影的目标，也是后续逐层蒸馏的辅助 teacher。
+
+## 3. 两个 `128×128` 状态应直接拟合可观测轨迹
+
+Qwen3.5-2B 的 GQA head dimension 是 256，而 target RWKV7 head dimension 是 128。每个 source Query head 分到两个 target states，状态总容量为
+
+$$2\times128\times128=32768.$$
+
+它小于任意 \(256\times256\) 算子的 65536 个自由度，因此两个状态不负责保存任意完整矩阵；它们只保存真实 future-query 分布能够读到的部分。
+
+先为 Query head \(h\) 选择 127 维读出子空间 \(R_h\)，再显式保留一个常数通道：
+
+$$
 x_{\tau,h}
 =
 \begin{bmatrix}
-1\\q_{\tau,h}
-\end{bmatrix},
-\qquad
-\gamma_{t,h}
-=
-\begin{bmatrix}
-\theta_{t,h}\\\ell_{t,h}
-\end{bmatrix},
-\]
+1\\
+R_h(q_{\tau,h}-\mu_h)
+\end{bmatrix}
+\in\mathbb R^{128}.
+\tag{6}
+$$
 
-则加权 ridge 解为
+常数通道保存 Value 的 DC 模式。其余 127 个方向由 calibration queries 的 PCA 给出解析初值，再用 source gate 与 `o_proj` 诱导的度量做广义特征分解。
 
-\[
-\gamma_{t,h}^*
+对 value space 选择一个固定正交基 \(U_h\)，并把 \(U_ho_t(q)\) 分成两个 128 维部分 \(y_{t,h,1},y_{t,h,2}\)。每个 prefix 的 oracle state 直接由加权 ridge 得到：
+
+$$
+S_{t,h,a}^{*}
 =
-\left(
+\arg\min_{S\in\mathbb R^{128\times128}}
 \sum_{\tau\ge t}
-w_{t,\tau,h}x_{\tau,h}x_{\tau,h}^\top
-+\lambda I
-\right)^{-1}
+w_{t,\tau,h}
+\left\|
+C_{\tau,h,a}
 \left(
-\sum_{\tau\ge t}
-w_{t,\tau,h}x_{\tau,h}p_t(q_{\tau,h})
-\right).
-\tag{3}
-\]
+y_{t,h,a}(q_{\tau,h})-Sx_{\tau,h}
+\right)
+\right\|_2^2
++
+\lambda\|S\|_F^2.
+\tag{7}
+$$
 
-权重应该对应最终可观测的 mixer error。先定义从更新位置 \(t\) 传播到读取位置 \(\tau\) 的 survival：
+这里 \(a\in\{1,2\}\)，\(C_{\tau,h,a}\) 合并 source gate、value basis 和 `o_proj` 的可观测度量。权重取最终输出敏感度：
 
-\[
-s_{t\rightarrow\tau}(q)
-=
-\prod_{j=t+1}^{\tau}(1-p_j(q)).
-\]
-
-再把 source gate 和 output projection 合成读出度量 \(C_{\tau,h}\)，便可以取
-
-\[
+$$
 w_{t,\tau,h}
 =
 s_{t\rightarrow\tau}(q_{\tau,h})^2
@@ -127,360 +168,124 @@ C_{\tau,h}
 \left(
 v_t-o_{t-1}(q_{\tau,h})
 \right)
-\right\|_2^2.
-\tag{4}
-\]
-
-式 \((4)\) 给传播更远、输出影响更大的误差更高权重。因此，式 \((3)\) 拟合的不是孤立的 attention probability，而是它对最终 mixer output 的贡献。
-
-对不同 Query head 分别求式 \((3)\)，可以让同一个 KV group 的每个 Query head 都获得适合自身查询协方差的 \(\theta_{t,h},\ell_{t,h}\)。源 K/V 仍然共享，递推状态则针对读取它的查询分布优化。下文聚焦一个固定的 Query head，并省略下标 \(h\)。
-
-## 3. 从 affine hazard 得到 RWKV7 形式
-
-设 prefix 输出已经近似为
-
-\[
-o_{t-1}(q)\approx A_{t-1}q+b_{t-1}.
-\tag{5}
-\]
-
-把式 \((2)\)、式 \((5)\) 代入式 \((1)\)，可得
-
-\[
-\begin{aligned}
-o_t(q)
-\approx\;&
-(1-\theta_t)b_{t-1}+\theta_t v_t\\
-&+
-\left[
-(1-\theta_t)A_{t-1}
-+(v_t-b_{t-1})\ell_t^\top
-\right]q\\
-&-
-(\ell_t^\top q)A_{t-1}q.
-\end{aligned}
-\tag{6}
-\]
-
-最后一项是唯一的二次项。令
-
-\[
-n_t=\frac{\ell_t}{\|\ell_t\|_2},
-\]
-
-并在校准分布上做下面的 rank-1 closure：
-
-\[
-(\ell_t^\top q)A_{t-1}q
-\approx
-\zeta_t\|\ell_t\|_2
-(A_{t-1}n_t)n_t^\top q.
-\tag{7}
-\]
-
-\(\zeta_t\) 也有闭式解。记
-
-\[
-M_{t,\tau,h}
+\right\|_2^2,
+\qquad
+s_{t\rightarrow\tau}(q)
 =
-A_{t-1}^\top
-C_{\tau,h}^\top C_{\tau,h}
-A_{t-1},
-\]
-
-则对应式 \((7)\) 的加权最小二乘解为
-
-\[
-\zeta_t^*
-=
-\frac{
-\sum_{\tau}
-w_{t,\tau,h}
-(\ell_t^\top q_{\tau,h})^2
-n_t^\top M_{t,\tau,h}q_{\tau,h}
-}{
-\sum_{\tau}
-w_{t,\tau,h}
-(\ell_t^\top q_{\tau,h})^2
-n_t^\top M_{t,\tau,h}n_t
-}.
+\prod_{j=t+1}^{\tau}(1-p_j(q)).
 \tag{8}
-\]
+$$
 
-于是 affine state 的递推变成
+式 \((7)\) 从 exact Softmax trajectory 或式 \((5)\) 的 bounded trajectory 直接求状态快照，不需要先构造一个完整 \(256\times256\) 算子。这样，状态预算、DC 通道和最终可见误差从一开始就在同一个目标里。
 
-\[
-b_t
-=
-(1-\theta_t)b_{t-1}+\theta_t v_t,
-\tag{9}
-\]
+若允许每个 Query head 使用四个 `128×128` states，则矩阵部分可以按 \(2\times2\) block 完全重构；若实现 grouped multi-read state，还可以复用同一 KV group 的状态内容。标准两个-state 初始化则以式 \((7)\) 的 observable loss 为准。
 
-\[
-\begin{aligned}
-A_t
-=\;&
-(1-\theta_t)A_{t-1}\\
-&-
-\zeta_t\|\ell_t\|_2
-(A_{t-1}n_t)n_t^\top\\
-&+
-(v_t-b_{t-1})\ell_t^\top.
-\end{aligned}
-\tag{10}
-\]
+## 4. 从状态快照投影到 native RWKV7
 
-式 \((10)\) 已经具有 RWKV7 的三个组成部分：
+得到 \(S_{t,h,a}^{*}\) 后，再拟合 native RWKV7 单步更新：
 
-\[
-\underbrace{(1-\theta_t)A_{t-1}}_{\text{decay}}
--
-\underbrace{
-\zeta_t\|\ell_t\|_2(A_{t-1}n_t)n_t^\top
-}_{\text{rank-1 erase}}
-+
-\underbrace{
-(v_t-b_{t-1})\ell_t^\top
-}_{\text{rank-1 write}}.
-\]
-
-因此，一组自然的 oracle signals 是
-
-\[
-\begin{aligned}
-d_t &= 1-\theta_t,\\
-\text{erase direction} &= n_t,\\
-\text{erase strength} &= \zeta_t\|\ell_t\|_2,\\
-\text{write key} &= \ell_t,\\
-\text{write value} &= v_t-b_{t-1}.
-\end{aligned}
-\tag{11}
-\]
-
-这里的 decay、erase 和 write 都来自同一个 Softmax hazard，而不是彼此独立的经验初始化。
-
-## 4. 把 affine bias 放入矩阵状态
-
-式 \((9)\) 中的 \(b_t\) 保存了 Value 的均值模式。为了在不改变 RWKV7 推理接口的前提下保留它，可以在真实 Query 分布上寻找一个近似常数方向：
-
-\[
-r_{0,h}
-=
-\arg\min_r
-\sum_{\tau}
-w_{\tau,h}
-\left(r^\top q_{\tau,h}-1\right)^2
-+\lambda\|r\|_2^2.
-\]
-
-它的闭式解为
-
-\[
-r_{0,h}
-=
-\left(
-\sum_\tau w_{\tau,h}q_{\tau,h}q_{\tau,h}^\top+\lambda I
-\right)^{-1}
-\left(
-\sum_\tau w_{\tau,h}q_{\tau,h}
-\right).
-\tag{12}
-\]
-
-于是有
-
-\[
-A_tq+b_t
-\approx
-\left(A_t+b_t r_{0,h}^\top\right)q.
-\]
-
-定义
-
-\[
-\widetilde A_{t,h}
-=
-A_{t,h}+b_{t,h}r_{0,h}^\top,
-\tag{13}
-\]
-
-就把 affine oracle 重新写成了纯矩阵状态。式 \((12)\) 的 held-out 常数拟合残差可以直接衡量 DC 模式是否被充分保存；需要更高精度时，可以在后面的两个 state sketches 中显式保留一个低维常数子空间。
-
-## 5. 用两个 `128×128` 状态表示一个 `256×256` 算子
-
-对一个 256 维 source Query head，分配两个 128 维 target RWKV heads。两个 target states 不做坐标切片，而是共同近似同一个 observable operator。
-
-对 \(a\in\{1,2\}\)，定义
-
-\[
-S_{t,h,a}
-=
-U_{h,a}\widetilde A_{t,h}T_{h,a}^\top
-\in\mathbb R^{128\times128},
-\tag{14}
-\]
-
-并用
-
-\[
-\widehat o_{t,h}
-=
-\sum_{a=1}^{2}
-D_{h,a}S_{t,h,a}R_{h,a}q_{t,h}
-\tag{15}
-\]
-
-恢复 256 维输出。所有投影由下面的 held-out-aligned 目标确定：
-
-\[
-\min_{U,T,D,R}
-\sum_{t,h}
-\left\|
-C_{t,h}
-\left[
-\widetilde A_{t,h}q_{t,h}
--
-\sum_{a=1}^{2}
-D_{h,a}S_{t,h,a}R_{h,a}q_{t,h}
-\right]
-\right\|_2^2.
-\tag{16}
-\]
-
-式 \((16)\) 可以先用 output-weighted covariance 和 Kronecker SVD 得到解析初值，再做一轮分块闭式最小二乘，依次更新 \(U,T,D,R\)。每个子问题都是 ridge solve，不需要梯度。
-
-这种分解恰好利用了 GQA 的结构：
-
-- 同一 KV group 的 Query heads 共享原始 \(k_t,v_t\) 和 Softmax oracle；
-- 每个 Query head 拥有自己的两份 state sketches；
-- 两份 sketches 分别保留该 Query head 在 gate、`o_proj` 和 query covariance 下最可观测的算子子空间；
-- 两个 128 维输出在 output projection 前重新组合。
-
-所有 covariance 和 operator factorization 都在 post-RoPE 坐标中计算。这样，位置旋转已经包含在被分解的实际查询、键和读出算子里。
-
-## 6. 投影到 native RWKV7 recurrence
-
-对每条 reduced-state trajectory，native RWKV7 的单步更新写成
-
-\[
+$$
 S_t
 =
 S_{t-1}\operatorname{Diag}(d_t)
 -
 (S_{t-1}n_t)(n_t\odot a_t)^\top
 +
-u_t\kappa_t^\top,
-\tag{17}
-\]
+u_t\kappa_t^\top.
+\tag{9}
+$$
 
-其中 native 参数化把 erase direction 和 write key 绑定到同一个 raw key \(\widetilde k_t\)：
+状态误差不使用无权 Frobenius norm，而使用 future reads 的 Gram：
 
-\[
-n_t
+$$
+G_{t,h,a}
 =
-\operatorname{normalize}(\widetilde k_t\odot k_k),
-\qquad
-\kappa_t
-=
-\widetilde k_t\odot
-\left[1+(a_t-1)\odot k_a\right].
-\]
+\sum_{\tau\ge t}
+w_{t,\tau,h}
+x_{\tau,h}x_{\tau,h}^\top.
+\tag{10}
+$$
 
-读出为
+令 \(\Delta S_t=S_t^*-F_{\mathrm{RWKV}}(S_{t-1}^*)\)，求解
 
-\[
-y_t=S_t r_t.
-\tag{18}
-\]
+$$
+\min_{d,n,a,u,\kappa}
+\operatorname{Tr}
+\left(
+\Delta S_tG_{t,h,a}\Delta S_t^\top
+\right).
+\tag{11}
+$$
 
-式 \((11)\) 给出第一组解析 signals；式 \((14)\) 则给出每个 target head 的 oracle state。接着把式 \((17)\) 看成一个受约束的矩阵投影问题：
-
-\[
-\min_{d,\widetilde k,a,u}
-\sum_t
-\left\|
-\mathcal W_t^{1/2}
-\left[
-S_{t}^{*}
--
-S_{t-1}^{*}\operatorname{Diag}(d_t)
-+
-(S_{t-1}^{*}n_t)(n_t\odot a_t)^\top
--
-u_t\kappa_t^\top
-\right]
-\right\|_F^2.
-\tag{19}
-\]
-
-\(\mathcal W_t\) 由 future queries 和式 \((16)\) 的读出度量诱导。求解时依次使用：
+一个稳定的闭式顺序是：
 
 1. bounded diagonal regression 求 \(d_t\)；
-2. 加权 rank-1 projection 求 erase direction 和 strength；
-3. 对剩余矩阵做加权 rank-1 SVD，求 \(u_t,\kappa_t\)；
-4. 按 native 约束归一化 \(n_t\)，并把尺度重新分配到 \(a_t,u_t,\kappa_t\)。
+2. 对旧状态残差做加权 rank-1 SVD，求 erase direction 和 strength；
+3. 对剩余残差做第二次加权 rank-1 SVD，求 write value 与 write key；
+4. 按 native key normalization 重新分配尺度；
+5. 运行真实 recurrent rollout，以 free-running residual 重算一次式 \((11)\)。
 
-由于每一步都是低秩分解或线性最小二乘，得到的是 zero-step recurrence projection。将这些 signals 做一次真实 recurrent rollout，再以 rollout residual 重算式 \((19)\)，可以消除 teacher-forced state 与自由递推 state 之间的一阶偏差。
+GQA 的共享性在这里继续保留：同组 Query heads 共用 source Key、Value 和 transition statistics，各自只保留与本 head 查询协方差对齐的两个 observable states。
 
-## 7. 从 oracle signals 回归到模型参数
+## 5. 从 oracle signals 得到模型参数
 
-到这里，每个 token 已经有了目标 \(r_t,d_t,n_t,a_t,u_t,\kappa_t\)。最后一步是让 RWKV7 的参数化从当前 token hidden state 产生这些 signals。
+每个 token 现在都有目标 read、decay、erase、write 和 gate signals。参数初始化按可逆性从内向外进行：
 
-线性投影使用 ridge 或 reduced-rank regression；LoRA 路径使用目标回归矩阵的截断 SVD；有界变量则先做 inverse link。例如 native decay
-
-\[
-d_t=\exp\left(-\frac12\sigma(w_t)\right)
-\]
-
-对应
-
-\[
-w_t
-=
-\operatorname{logit}\left(-2\log d_t\right).
-\tag{20}
-\]
-
-erase gate 同理先映射到 logit 空间，再拟合 `a_lora`。归一化 key 只决定方向，因此它的幅度可以在 write key、write value 和 erase strength 之间解析地重新分配。最后，用真实 recurrent rollout 的输出闭式重算 `g_norm`、gate projection 和 `o_proj`。
-
-完整参数回归顺序为：
-
-1. 拟合 target query/read projections；
-2. 拟合 write key、write value projections；
-3. 对 decay 和 erase 做 inverse-link regression；
+1. 用 ridge 拟合 read、write key 和 write value；
+2. 用 reduced-rank regression 初始化各 LoRA control subspace；
+3. 对有界 decay、erase 先做 inverse link，再拟合 logits；
 4. 回放 native recurrence；
-5. 在实际 state output 上重算 `g_norm`、gate 和 `o_proj`；
-6. 用一次 rollout residual 做闭式修正。
+5. 在实际 recurrent output 上闭式重算 `g_norm`、gate 和 `o_proj`。
 
-整个过程只处理 activation、state 和算子，不引入 next-token loss。
+zero-step checkpoint 随后进入逐层蒸馏。训练时冻结其余层，使用真实 layer input，完整 free-running rollout 当前 mixer，并联合最小化：
 
-## 8. Zero-Step 转换算法
+$$
+\mathcal L_{\mathrm{layer}}
+=
+\mathcal L_{\mathrm{mixer}}
++
+\lambda_{\mathrm{block}}\mathcal L_{\mathrm{block}}
++
+\lambda_{\mathrm{oracle}}\mathcal L_{\mathrm{bounded\ oracle}}.
+\tag{12}
+$$
 
-将上面的推导合起来，可以得到以下转换流程：
+主项始终是 source mixer output；bounded oracle 只约束优化方向，不替代真实 Softmax teacher。完成一层后再推进下一层，避免把前层尚未校正的输入漂移同时传给所有层。
 
-1. 收集 post-RMSNorm hidden state、post-RoPE Q/K、V、source gate 和 `o_proj` 读出。
-2. 对每个 GQA group 和 future Query head 精确回放 causal Softmax，得到 \(p_t(q)\) 与 \(o_t(q)\)。
-3. 用式 \((3)\)、式 \((4)\) 求分布加权的 \(\theta_t,\ell_t\)。
-4. 用式 \((8)\) 求最优 rank-1 closure，并按式 \((9)\)、式 \((10)\) 生成 256 维 affine oracle state。
-5. 用式 \((12)\)、式 \((13)\) 吸收 Value 的 DC 模式。
-6. 用式 \((14)\) 至式 \((16)\) 为每个 Query head 求两份 `128×128` observable state sketches。
-7. 用式 \((19)\) 将 reduced trajectories 投影到 native RWKV7 recurrence。
-8. 用 reduced-rank ridge、截断 SVD 和 inverse link 回归全部模型参数。
-9. 运行一次 native recurrent rollout，闭式修正 recurrence signals、`g_norm`、gate 和 `o_proj`。
-10. 在完全独立的 held-out context 上计算 mixer output NMSE，并直接导出最优 zero-step checkpoint。
+## 6. 真实单层验证
 
-校准集只负责求投影，held-out 集只负责选择 ridge、rank、closure 和 factorization 配置。主指标始终是 native recurrent rollout 后的 mixer output NMSE。
+实验读取 Qwen3.5-2B 的真实 checkpoint：
 
-## 9. 最小验证序列
+- GQA：第 3 层，8 Query heads、2 KV heads、head dimension 256；
+- 数据：8 条 FineWeb-Edu 文本，每条 64 tokens；
+- 划分：前 4 条 calibration，后 4 条 held-out；
+- 设备：DGX Spark 的 NVIDIA GB10；
+- 前向与指标：FP32；
+- checkpoint shard SHA-256：`aa33250c4fc64891ddfaba3a314fd9542ea371843c387178b425fbcc5ed680b1`。
 
-为了知道每个数学部件实际贡献了多少，可以按下面的顺序记录 held-out NMSE：
+关键 held-out 结果如下：
 
-1. 零点 Taylor hazard：\(\theta_t=1/t,\ \ell_t=(k_t-\bar k_t)/t\)；
-2. 分布加权 hazard：式 \((3)\)、式 \((4)\)；
-3. 最优 rank-1 closure：式 \((8)\)；
-4. affine bias / DC 模式：式 \((12)\)、式 \((13)\)；
-5. two-block observable factorization：式 \((14)\) 至式 \((16)\)；
-6. native recurrence projection：式 \((19)\)；
-7. 参数化 recurrent rollout：式 \((20)\) 及最终读出重算。
+| 验证项 | mixer/output NMSE | 说明 |
+| --- | ---: | --- |
+| exact hazard recurrence → Softmax output | \(4.96\times10^{-14}\) | 式 \((1)\) 的数值自检 |
+| calibration-mean logit Taylor | 0.07344 | 保留 sigmoid 的 bounded oracle |
+| 两状态：1 DC + 127 query-PCA，相对完整 affine state | 0.01221 | 严格计入两个 `128×128` state 的增量损失 |
+| 四状态矩阵分块，相对完整矩阵 | \(9.79\times10^{-15}\) | matrix-only exact control |
 
-这条序列从文章的一阶线性化出发，逐步加入 GQA 的真实查询分布、RWKV7 的状态约束和 `256→2×128` 的容量分配。每一步都有独立的闭式目标和 held-out NMSE，因此最终得到的是一条可计算、可归因、无需蒸馏的 GQA → RWKV7 zero-step 迁移路径。
+两状态实验还给出：矩阵可观测分量 NMSE 为 0.09933；加入 DC 后，相对完整 affine output 的 NMSE 为 0.01221。四状态结果说明额外损失来自两个-state 的可观测压缩，而不是分块代数本身。
+
+FP32 与 BF16 两次独立运行的关键排序和量级一致。完整原始结果见 [`evidence/qwen35-2b-gqa-gdn-zero-step-probe.json`](evidence/qwen35-2b-gqa-gdn-zero-step-probe.json)，可复现实验入口为 [`../scripts/probe_gqa_gdn_zero_step.py`](../scripts/probe_gqa_gdn_zero_step.py)。
+
+## 7. 完整迁移顺序
+
+最终流程可以压缩为七步：
+
+1. 精确回放 post-RoPE Q/K、V、source gate 与 mixer output。
+2. 按式 \((2)\) 至式 \((5)\) 构造 calibration-centered bounded hazard oracle。
+3. 用 exact Softmax future-query trajectories 求式 \((7)\) 的两个 observable states。
+4. 用式 \((10)\)、式 \((11)\) 投影 native decay、erase 和 write。
+5. 用 ridge、截断 SVD 和 inverse link 初始化全部模型参数。
+6. 运行一次 native free-running rollout，闭式重算 norm、gate 与 `o_proj`。
+7. 以该 checkpoint 开始逐层蒸馏，只用独立 held-out mixer NMSE 选择配置。
+
+这条路线把三类误差分开了：Softmax hazard 近似、有限状态可观测压缩、native recurrence 参数化。每一层都有独立指标，因此既能把 zero-step NMSE 尽量压低，也能让后续逐层蒸馏只修正真正剩下的部分。

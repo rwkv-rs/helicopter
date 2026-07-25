@@ -1,0 +1,645 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import importlib
+import json
+from pathlib import Path
+
+import torch
+import torch.nn.functional as functional
+from torch import Tensor
+from transformers import AutoTokenizer
+from transformers.masking_utils import create_causal_mask
+
+from any2rwkv.checkpoint import read_checkpoint, sha256_file
+from any2rwkv.streamed_teacher import StreamedQwen35Teacher
+from any2rwkv.zero_step_probe import (
+    affine_state_rollout,
+    causal_attention,
+    four_state_block_output,
+    gdn_reference_scan,
+    hazard_metrics,
+    logit_taylor_hazards,
+    normalized_mse,
+    operator_input_bases,
+    probability_taylor_hazards,
+    query_input_bases,
+    qwen35_l2_normalize,
+    rollout_hazards,
+    tensor_metrics,
+    two_state_outputs,
+    verify_gdn_mapping,
+)
+
+
+def parse_dtype(name: str) -> torch.dtype:
+    try:
+        return {
+            "float32": torch.float32,
+            "float16": torch.float16,
+            "bfloat16": torch.bfloat16,
+        }[name]
+    except KeyError as error:
+        raise ValueError(f"unsupported dtype: {name}") from error
+
+
+def load_calibration_rows(path: Path, rows: int) -> tuple[list[str], list[str]]:
+    sample_ids: list[str] = []
+    texts: list[str] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            payload = json.loads(line)
+            sample_id = payload.get("sample_id")
+            text = payload.get("text")
+            if not isinstance(sample_id, str) or not isinstance(text, str):
+                raise ValueError("FineWeb row must contain string sample_id and text")
+            sample_ids.append(sample_id)
+            texts.append(text)
+            if len(texts) == rows:
+                break
+    if len(texts) != rows:
+        raise ValueError(f"requested {rows} rows but dataset only yielded {len(texts)}")
+    return sample_ids, texts
+
+
+def source_positions(
+    teacher: StreamedQwen35Teacher,
+    hidden_states: Tensor,
+    attention_mask: Tensor,
+) -> tuple[Tensor, tuple[Tensor, Tensor], Tensor]:
+    position_ids = torch.arange(
+        hidden_states.shape[1],
+        device=hidden_states.device,
+        dtype=torch.long,
+    ).unsqueeze(0).expand(hidden_states.shape[0], -1)
+    position_embeddings = teacher.rotary(hidden_states, position_ids)
+    causal_mask = create_causal_mask(
+        teacher.loader.config,
+        hidden_states,
+        attention_mask,
+        None,
+        position_ids,
+    )
+    return position_ids, position_embeddings, causal_mask
+
+
+def trace_gdn(module: torch.nn.Module, hidden_states: Tensor) -> dict[str, Tensor]:
+    mixer = module.linear_attn
+    normalized = module.input_layernorm(hidden_states)
+    projected = mixer.in_proj_qkv(normalized).transpose(1, 2)
+    projected = functional.conv1d(
+        projected,
+        mixer.conv1d.weight,
+        mixer.conv1d.bias,
+        padding=mixer.conv_kernel_size - 1,
+        groups=mixer.conv_dim,
+    )[:, :, : hidden_states.shape[1]]
+    projected = functional.silu(projected).transpose(1, 2)
+    query, key, value = torch.split(
+        projected,
+        [mixer.key_dim, mixer.key_dim, mixer.value_dim],
+        dim=-1,
+    )
+    query = query.view(
+        *query.shape[:2], mixer.num_k_heads, mixer.head_k_dim
+    )
+    key = key.view(*key.shape[:2], mixer.num_k_heads, mixer.head_k_dim)
+    value = value.view(
+        *value.shape[:2], mixer.num_v_heads, mixer.head_v_dim
+    )
+    repeat = mixer.num_v_heads // mixer.num_k_heads
+    if repeat > 1:
+        query = query.repeat_interleave(repeat, dim=2)
+        key = key.repeat_interleave(repeat, dim=2)
+    beta = torch.sigmoid(mixer.in_proj_b(normalized).float())
+    decay = torch.exp(
+        -mixer.A_log.float().exp()
+        * functional.softplus(
+            mixer.in_proj_a(normalized).float() + mixer.dt_bias.float()
+        )
+    )
+    return {
+        "query": query.float(),
+        "key": key.float(),
+        "value": value.float(),
+        "beta": beta,
+        "decay": decay,
+    }
+
+
+def trace_gqa(
+    module: torch.nn.Module,
+    hidden_states: Tensor,
+    position_embeddings: tuple[Tensor, Tensor],
+    causal_mask: Tensor,
+) -> dict[str, Tensor]:
+    mixer = module.self_attn
+    normalized = module.input_layernorm(hidden_states)
+    input_shape = normalized.shape[:-1]
+    head_dim = int(mixer.head_dim)
+    query, gate = torch.chunk(
+        mixer.q_proj(normalized).view(
+            *input_shape, -1, head_dim * 2
+        ),
+        2,
+        dim=-1,
+    )
+    query = mixer.q_norm(query).transpose(1, 2)
+    grouped_key = mixer.k_norm(
+        mixer.k_proj(normalized).view(*input_shape, -1, head_dim)
+    ).transpose(1, 2)
+    grouped_value = mixer.v_proj(normalized).view(
+        *input_shape, -1, head_dim
+    ).transpose(1, 2)
+    modeling = importlib.import_module(mixer.__class__.__module__)
+    query, grouped_key = modeling.apply_rotary_pos_emb(
+        query, grouped_key, *position_embeddings
+    )
+    groups = int(mixer.num_key_value_groups)
+    repeated_key = grouped_key.repeat_interleave(groups, dim=1)
+    repeated_value = grouped_value.repeat_interleave(groups, dim=1)
+    with torch.inference_mode():
+        actual_mixer_output = mixer(
+            normalized,
+            position_embeddings=position_embeddings,
+            attention_mask=causal_mask,
+            use_cache=False,
+        )[0]
+    return {
+        "query": query.transpose(1, 2).float(),
+        "key": repeated_key.transpose(1, 2).float(),
+        "value": repeated_value.transpose(1, 2).float(),
+        "grouped_key": grouped_key.transpose(1, 2).float(),
+        "grouped_value": grouped_value.transpose(1, 2).float(),
+        "gate": torch.sigmoid(gate).float(),
+        "output_weight": mixer.o_proj.weight.float(),
+        "output_bias": (
+            None if mixer.o_proj.bias is None else mixer.o_proj.bias.float()
+        ),
+        "actual_mixer_output": actual_mixer_output.float(),
+    }
+
+
+def project_gqa_mixer(head_output: Tensor, signals: dict[str, Tensor]) -> Tensor:
+    gated = head_output.float() * signals["gate"]
+    return functional.linear(
+        gated.flatten(2),
+        signals["output_weight"],
+        signals["output_bias"],
+    )
+
+
+def heldout_metrics(
+    prediction: Tensor,
+    target: Tensor,
+    calibration_rows: int,
+) -> dict[str, float]:
+    return tensor_metrics(
+        prediction[calibration_rows:],
+        target[calibration_rows:],
+    )
+
+
+def gqa_diagnostics(
+    signals: dict[str, Tensor],
+    *,
+    calibration_rows: int,
+) -> dict[str, object]:
+    query = signals["query"]
+    key = signals["key"]
+    value = signals["value"]
+    exact = causal_attention(query, key, value)
+    exact_recurrent_output = rollout_hazards(exact.hazards, value)
+    exact_mixer_output = project_gqa_mixer(exact.output, signals)
+    head_center = query[:calibration_rows].mean(dim=(0, 1))
+    zero_center = torch.zeros_like(head_center)
+
+    probability_taylor = probability_taylor_hazards(query, key)
+    probability_clipped = probability_taylor.clamp(0, 1)
+    probability_clipped[..., 0] = 1
+    hazard_candidates = {
+        "probability_taylor_at_zero": probability_taylor,
+        "probability_taylor_at_zero_clipped": probability_clipped,
+        "logit_taylor_at_zero": logit_taylor_hazards(
+            query, key, zero_center
+        ),
+        "logit_taylor_at_calibration_mean": logit_taylor_hazards(
+            query, key, head_center
+        ),
+    }
+    hazard_results: dict[str, object] = {}
+    for name, predicted_hazards in hazard_candidates.items():
+        predicted_output = rollout_hazards(predicted_hazards, value)
+        predicted_mixer_output = project_gqa_mixer(predicted_output, signals)
+        hazard_results[name] = {
+            "hazard": hazard_metrics(
+                predicted_hazards[calibration_rows:],
+                exact.hazards[calibration_rows:],
+                exact.valid_hazards,
+            ),
+            "attention_output": heldout_metrics(
+                predicted_output,
+                exact.output,
+                calibration_rows,
+            ),
+            "mixer_output": heldout_metrics(
+                predicted_mixer_output,
+                exact_mixer_output,
+                calibration_rows,
+            ),
+        }
+
+    grouped_key = signals["grouped_key"]
+    grouped_value = signals["grouped_value"]
+    groups = grouped_key.shape[2]
+    group_width = query.shape[2] // groups
+    group_center = torch.stack(
+        [
+            query[
+                :calibration_rows,
+                :,
+                group * group_width : (group + 1) * group_width,
+            ].mean(dim=(0, 1, 2))
+            for group in range(groups)
+        ]
+    )
+    affine_without_closure = affine_state_rollout(
+        query,
+        grouped_key,
+        grouped_value,
+        group_center,
+        calibration_batches=calibration_rows,
+        fit_rank_one_closure=False,
+    )
+    affine_without_closure_output = affine_without_closure.output
+    without_closure_metrics = {
+        "attention_output": heldout_metrics(
+            affine_without_closure_output,
+            exact.output,
+            calibration_rows,
+        ),
+        "mixer_output": heldout_metrics(
+            project_gqa_mixer(affine_without_closure_output, signals),
+            exact_mixer_output,
+            calibration_rows,
+        ),
+    }
+    del affine_without_closure
+
+    affine = affine_state_rollout(
+        query,
+        grouped_key,
+        grouped_value,
+        group_center,
+        calibration_batches=calibration_rows,
+        fit_rank_one_closure=True,
+    )
+    affine_mixer_output = project_gqa_mixer(affine.output, signals)
+    affine_results: dict[str, object] = {
+        "without_rank_one_closure": without_closure_metrics,
+        "with_calibrated_rank_one_closure": {
+            "attention_output": heldout_metrics(
+                affine.output,
+                exact.output,
+                calibration_rows,
+            ),
+            "mixer_output": heldout_metrics(
+                affine_mixer_output,
+                exact_mixer_output,
+                calibration_rows,
+            ),
+        },
+        "closure_scale": {
+            "minimum": float(affine.closure_scale.min()),
+            "median": float(affine.closure_scale.median()),
+            "maximum": float(affine.closure_scale.max()),
+        },
+    }
+
+    query_subspace_rank = query.shape[-1] // 2 - 1
+    operator_basis_by_group = operator_input_bases(
+        affine.states,
+        calibration_batches=calibration_rows,
+        rank=query_subspace_rank,
+    )
+    head_to_group = torch.arange(query.shape[2], device=query.device) // group_width
+    operator_basis = operator_basis_by_group[head_to_group]
+    query_basis = query_input_bases(
+        affine.centered_query,
+        calibration_batches=calibration_rows,
+        rank=query_subspace_rank,
+    )
+    coordinate_basis = torch.eye(
+        query.shape[-1], device=query.device, dtype=torch.float32
+    )[:, :query_subspace_rank].expand(query.shape[2], -1, -1)
+    bias_by_head = affine.bias[:, :, head_to_group]
+    sketch_results: dict[str, object] = {}
+    full_matrix_output: Tensor | None = None
+    for name, basis in {
+        "first_127_coordinates_plus_dc": coordinate_basis,
+        "query_pca_127_plus_dc": query_basis,
+        "operator_svd_127_plus_dc": operator_basis,
+    }.items():
+        full_matrix, sketch_matrix = two_state_outputs(
+            affine.states,
+            affine.centered_query,
+            basis,
+        )
+        if full_matrix_output is None:
+            full_matrix_output = full_matrix
+        full_affine = full_matrix + bias_by_head
+        sketch_affine = sketch_matrix + bias_by_head
+        sketch_results[name] = {
+            "matrix_observable_loss_vs_full_affine_state": heldout_metrics(
+                sketch_matrix,
+                full_matrix,
+                calibration_rows,
+            ),
+            "total_loss_vs_full_affine_state": heldout_metrics(
+                sketch_affine,
+                full_affine,
+                calibration_rows,
+            ),
+            "attention_output_vs_exact_softmax": heldout_metrics(
+                sketch_affine,
+                exact.output,
+                calibration_rows,
+            ),
+            "mixer_output_vs_exact_softmax": heldout_metrics(
+                project_gqa_mixer(sketch_affine, signals),
+                exact_mixer_output,
+                calibration_rows,
+            ),
+        }
+    if full_matrix_output is None:
+        raise AssertionError("GQA sketch loop produced no matrix output")
+
+    four_state_outputs = []
+    for head in range(query.shape[2]):
+        group = head // group_width
+        four_state_outputs.append(
+            four_state_block_output(
+                affine.states[:, :, group],
+                affine.centered_query[:, :, head],
+            )
+        )
+    four_state_matrix = torch.stack(four_state_outputs, dim=2)
+    compression_results = {
+        "two_state_128x128": {
+            "feature_budget": {
+                "constant_channels": 1,
+                "query_subspace_channels": query_subspace_rank,
+            },
+            "bases": sketch_results,
+        },
+        "four_state_128x128_exact_block_control_matrix_only": (
+            heldout_metrics(
+                four_state_matrix,
+                full_matrix_output,
+                calibration_rows,
+            )
+        ),
+    }
+
+    return {
+        "exactness_checks": {
+            "hazard_recurrence_vs_softmax_attention": heldout_metrics(
+                exact_recurrent_output,
+                exact.output,
+                calibration_rows,
+            ),
+            "manual_attention_vs_qwen_mixer": heldout_metrics(
+                exact_mixer_output,
+                signals["actual_mixer_output"],
+                calibration_rows,
+            ),
+        },
+        "hazard_linearization": hazard_results,
+        "affine_state": affine_results,
+        "state_compression": compression_results,
+    }
+
+
+def gdn_diagnostics(
+    signals: dict[str, Tensor],
+    *,
+    calibration_rows: int,
+) -> dict[str, object]:
+    query = signals["query"][calibration_rows:]
+    key = qwen35_l2_normalize(signals["key"][calibration_rows:])
+    value = signals["value"][calibration_rows:]
+    beta = signals["beta"][calibration_rows:].unsqueeze(-1)
+    decay = signals["decay"][calibration_rows:].unsqueeze(-1)
+    exact_mapping = verify_gdn_mapping(
+        decay.double(),
+        beta.double(),
+        query.double(),
+        key.double(),
+        value.double(),
+    )
+    native_minimum = float(torch.exp(-torch.exp(torch.tensor(-0.5))))
+    clipped_decay = decay.clamp_min(native_minimum)
+    state = torch.zeros(
+        query.shape[0],
+        query.shape[2],
+        value.shape[-1],
+        key.shape[-1],
+        dtype=torch.float32,
+        device=query.device,
+    )
+    normalized_query = qwen35_l2_normalize(query)
+    exact_output, _ = gdn_reference_scan(
+        state,
+        decay,
+        beta,
+        normalized_query,
+        key,
+        value,
+    )
+    clipped_output, _ = gdn_reference_scan(
+        state,
+        clipped_decay,
+        beta,
+        normalized_query,
+        key,
+        value,
+    )
+    all_decay = signals["decay"].float().flatten()
+    quantile_levels = torch.tensor(
+        [0, 0.01, 0.05, 0.5, 0.95, 0.99, 1],
+        device=all_decay.device,
+    )
+    quantiles = torch.quantile(all_decay, quantile_levels)
+    return {
+        "canonical_recurrence_mapping": exact_mapping,
+        "native_decay_link": {
+            "minimum_reachable_decay": native_minimum,
+            "fraction_below_minimum": float(
+                (all_decay < native_minimum).float().mean()
+            ),
+            "decay_quantiles": {
+                f"q{int(level * 100):02d}": float(value)
+                for level, value in zip(quantile_levels, quantiles, strict=True)
+            },
+            "clipped_core_output_vs_exact": tensor_metrics(
+                clipped_output,
+                exact_output,
+            ),
+        },
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Probe Qwen3.5 GQA/GDN zero-step assumptions on real layers."
+    )
+    parser.add_argument("--source", required=True, type=Path)
+    parser.add_argument("--dataset", required=True, type=Path)
+    parser.add_argument("--rows", type=int, default=8)
+    parser.add_argument("--calibration-rows", type=int, default=4)
+    parser.add_argument("--sequence-length", type=int, default=64)
+    parser.add_argument("--gdn-layer", type=int, default=0)
+    parser.add_argument("--gqa-layer", type=int, default=3)
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="Optional path for the exact JSON payload printed by this probe.",
+    )
+    parser.add_argument(
+        "--dtype",
+        choices=("float32", "float16", "bfloat16"),
+        default="bfloat16",
+    )
+    args = parser.parse_args()
+    if args.rows < 2 or not 0 < args.calibration_rows < args.rows:
+        raise SystemExit("rows must exceed a positive calibration-row prefix")
+    if args.sequence_length < 2:
+        raise SystemExit("sequence length must be at least two")
+    device = torch.device(args.device)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise SystemExit("CUDA was requested but is unavailable")
+    dtype = parse_dtype(args.dtype)
+
+    checkpoint = read_checkpoint(args.source, require_final_layers=False)
+    sample_ids, texts = load_calibration_rows(args.dataset, args.rows)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.source,
+        local_files_only=True,
+    )
+    encoded = tokenizer(
+        texts,
+        add_special_tokens=False,
+        truncation=True,
+        padding="max_length",
+        max_length=args.sequence_length,
+        return_tensors="pt",
+    )
+    input_ids = encoded["input_ids"].to(device)
+    attention_mask = encoded["attention_mask"].to(device)
+    if not bool(attention_mask.all()):
+        raise SystemExit("selected FineWeb rows must fill the fixed sequence length")
+
+    teacher = StreamedQwen35Teacher(
+        checkpoint,
+        device=device,
+        dtype=dtype,
+        cache_layers=False,
+    )
+    hidden_states = functional.embedding(input_ids, teacher.embedding_weight)
+    position_ids, position_embeddings, causal_mask = source_positions(
+        teacher,
+        hidden_states,
+        attention_mask,
+    )
+    gdn_signals: dict[str, Tensor] | None = None
+    loaded_layer_bytes: dict[str, int] = {}
+    with torch.inference_mode():
+        for layer_index in range(args.gqa_layer):
+            with teacher.loader.layer_lease(layer_index):
+                loaded = teacher.loader.load_layer(
+                    layer_index,
+                    device=device,
+                    dtype=dtype,
+                )
+                loaded_layer_bytes[str(layer_index)] = loaded.source_tensor_bytes
+                if layer_index == args.gdn_layer:
+                    gdn_signals = trace_gdn(loaded.module, hidden_states)
+                hidden_states = loaded.module(
+                    hidden_states,
+                    position_embeddings=position_embeddings,
+                    attention_mask=causal_mask,
+                    position_ids=position_ids,
+                    past_key_values=None,
+                    use_cache=False,
+                )
+                if isinstance(hidden_states, tuple):
+                    hidden_states = hidden_states[0]
+            del loaded
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+        with teacher.loader.layer_lease(args.gqa_layer):
+            loaded = teacher.loader.load_layer(
+                args.gqa_layer,
+                device=device,
+                dtype=dtype,
+            )
+            loaded_layer_bytes[str(args.gqa_layer)] = loaded.source_tensor_bytes
+            gqa_signals = trace_gqa(
+                loaded.module,
+                hidden_states,
+                position_embeddings,
+                causal_mask,
+            )
+    if gdn_signals is None:
+        raise SystemExit("requested GDN layer was not traversed before the GQA layer")
+
+    result = {
+        "schema_version": 1,
+        "experiment": "qwen35-2b-real-layer-gqa-gdn-zero-step-probe",
+        "provenance": {
+            "source": str(args.source.resolve()),
+            "source_shards": {
+                shard.name: checkpoint.file_hashes[shard.name]
+                for shard in checkpoint.shards
+            },
+            "dataset": str(args.dataset.resolve()),
+            "dataset_sha256": sha256_file(args.dataset),
+            "sample_ids": sample_ids,
+            "calibration_rows": args.calibration_rows,
+            "heldout_rows": args.rows - args.calibration_rows,
+            "sequence_length": args.sequence_length,
+            "gdn_layer": args.gdn_layer,
+            "gqa_layer": args.gqa_layer,
+            "loaded_layer_source_bytes": loaded_layer_bytes,
+            "torch_version": torch.__version__,
+            "device": str(device),
+            "device_name": (
+                torch.cuda.get_device_name(device)
+                if device.type == "cuda"
+                else "cpu"
+            ),
+            "activation_dtype": str(dtype),
+            "metric_dtype": "torch.float32",
+            "mapping_check_dtype": "torch.float64",
+        },
+        "gqa": gqa_diagnostics(
+            gqa_signals,
+            calibration_rows=args.calibration_rows,
+        ),
+        "gdn": gdn_diagnostics(
+            gdn_signals,
+            calibration_rows=args.calibration_rows,
+        ),
+    }
+    payload = json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True)
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(f"{payload}\n", encoding="utf-8")
+    print(payload)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

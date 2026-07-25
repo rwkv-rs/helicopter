@@ -1,157 +1,281 @@
-# 从 GDN 到 RWKV7：可观测等价类上的 Zero-Step 编译
+# 从 GDN 到 RWKV7：先保持递推，再编译信号
 
 参考：
 
 - [将 Softmax Attention 线性化为 Gated DeltaNet](https://spaces.ac.cn/archives/11823)
 - [Qwen3.5 GDN 与 RWKV7 逐项参考实现](https://github.com/BlinkDL/RWKV-LM/blob/main/RWKV-v7/run_rwkv7_qwen35.py)
 
-将已经训练好的 Gated DeltaNet 迁移为 RWKV7，可以先分成两个问题：记忆递推是否能逐项嵌入，以及产生这些递推信号的有限维参数化是否能在真实数据分布上编译出来。
+Gated DeltaNet 与 RWKV7 的关系，比 GQA 与 RWKV7 更直接：两者的状态更新本来就属于同一个 DPLR 家族。因此迁移时最重要的不是重新发明一套记忆，而是先把 GDN 的真实 activation 编译成一个逐项相等的 RWKV oracle，再处理生成这些 activation 的参数化差异。
 
-第一个问题有精确答案。GDN 的记忆递推本身就是 RWKV7 DPLR 递推的一个子空间。第二个问题则适合利用不改变最终输出的 gauge freedom，把动态归一化、卷积历史和归一化差异搬到更容易拟合的位置，再用加权最小二乘、低秩分解和一次闭式轨迹修正完成 zero-step 编译。
+这里把“zero-step”定义为第一次 optimizer step 之前的初始化。它包括精确 oracle、闭式投影和一次 native free-running 校正；随后仍然进行逐层蒸馏。这样，蒸馏只需要修正 native decay、time-mix、低秩控制和归一化留下的误差，而不必重新学习状态递推。
 
-## 1. 将 GDN 递推精确嵌入 RWKV7
+## 1. GDN 递推可以逐项写成 RWKV7
 
-以 `[value, key]` 为状态坐标，GDN 的单步更新写成
+以 `[value, key]` 为状态坐标，GDN 的单步更新为
 
-$$S_t=d_tS_{t-1}-d_t\beta_t(S_{t-1}k_t)k_t^{\top}+\beta_tv_tk_t^{\top},\qquad y_t=S_t\frac{q_t}{\sqrt N}.$$
+$$
+S_t
+=
+d_tS_{t-1}
+-d_t\beta_t(S_{t-1}k_t)k_t^\top
++\beta_tv_tk_t^\top,
+\qquad
+y_t=S_t\frac{q_t}{\sqrt N}.
+\tag{1}
+$$
 
-native RWKV7 写成
+native RWKV7 的更新为
 
-$$\widehat S_t=\widehat S_{t-1}\operatorname{Diag}(\delta_t)-(\widehat S_{t-1}n_t)(n_t\odot a_t)^{\top}+u_t\kappa_t^{\top},\qquad \widehat y_t=\widehat S_tr_t.$$
+$$
+\widehat S_t
+=
+\widehat S_{t-1}\operatorname{Diag}(\delta_t)
+-(\widehat S_{t-1}n_t)(n_t\odot a_t)^\top
++u_t\kappa_t^\top,
+\qquad
+\widehat y_t=\widehat S_tr_t.
+\tag{2}
+$$
 
-考虑 Qwen 的带 epsilon L2 normalization：
+Qwen 的带 epsilon L2 normalization 并不保证归一化后的 Key 恰好是单位向量。记
 
-$$k_t=\frac{\bar k_t}{c_{k,t}},\qquad c_{k,t}=\sqrt{\|\bar k_t\|^2+\epsilon},\qquad m_{k,t}=\|k_t\|.$$
+$$
+k_t=\frac{\bar k_t}{\sqrt{\|\bar k_t\|^2+\epsilon}},
+\qquad
+m_t=\|k_t\|.
+$$
 
-对任意正数 $$\mu_t>0$$，取
+对任意正数 $\mu_t>0$，取
 
-$$\delta_t=d_t\mathbf1,\qquad n_t=\frac{k_t}{m_{k,t}},\qquad a_t=d_t\beta_tm_{k,t}^{2}\mathbf1,\qquad \kappa_t=\mu_tk_t,\qquad u_t=\frac{\beta_tv_t}{\mu_t}.$$
+$$
+\delta_t=d_t\mathbf 1,
+\qquad
+n_t=\frac{k_t}{m_t},
+\qquad
+a_t=d_t\beta_tm_t^2\mathbf 1,
+\qquad
+\kappa_t=\mu_tk_t,
+\qquad
+u_t=\frac{\beta_tv_t}{\mu_t},
+\qquad
+r_t=\frac{q_t}{\sqrt N}.
+\tag{3}
+$$
 
-代入后同时得到
+代入式 $(2)$，有
 
-$$-(S_{t-1}n_t)(n_t\odot a_t)^{\top}=-d_t\beta_t(S_{t-1}k_t)k_t^{\top},\qquad u_t\kappa_t^{\top}=\beta_tv_tk_t^{\top}.$$
+$$
+-(S_{t-1}n_t)(n_t\odot a_t)^\top
+=
+-d_t\beta_t(S_{t-1}k_t)k_t^\top,
+$$
 
-所以两边的状态递推逐项相等。这里的 $$\mu_t$$ 是 rank-one write 的尺度 gauge：它可以在 key 和 value 之间搬运任意正标量，而不改变状态更新。
+以及
 
-一个特别有用的选择是 $$\mu_t=c_{k,t}$$，此时 $$\kappa_t=\bar k_t,\ u_t=\beta_tv_t/c_{k,t}$$。若再取 native 静态参数 $$k_k=\mathbf1,\ k_a=\mathbf0$$，RWKV 的 raw key 就可以直接拟合 GDN 卷积后的未归一化 key；RWKV 自身的 key normalization 恢复 erase direction，动态 L2 范数则被搬到 value 侧。
+$$
+u_t\kappa_t^\top=\beta_tv_tk_t^\top.
+$$
 
-query 也有同样的自由度。令 $$q_t=\bar q_t/c_{q,t}$$，并取 $$r_t=\lambda_tq_t/\sqrt N$$，便有 $$\widehat y_t=\lambda_ty_t$$。后续逐头归一化会消除正的逐头尺度，因此选择 $$\lambda_t=c_{q,t}\sqrt N$$ 就得到 $$r_t=\bar q_t$$。
+因此，只要直接使用式 $(3)$ 中的 activation，状态和 readout 都与 GDN 逐项相等。$\mu_t$ 是 write 的尺度 gauge：它只在 Key 与 Value 之间搬运尺度，不改变 rank-one 写入。
 
-这样，target 可以直接拟合未归一化 query，不需要用线性投影逼近动态 L2 normalization。
+这个恒等式给出了迁移的锚点。后续所有误差都应相对于这个 oracle 测量，而不是混入“GDN 与 RWKV7 的递推是否兼容”这一已经解决的问题。
 
-这组带 key-norm 修正和任意 write gauge 的恒等式经过 FP64 动态序列验证，relative L2 为 $$2.36\times10^{-16}$$，最大绝对误差为 $$1.39\times10^{-16}$$。canonical oracle 的 32 组长度与 chunk 组合也全部通过，最大 relative L2 为 $$2.14\times10^{-16}$$。
+## 2. native decay 应按可观测误差投影
 
-## 2. Zero-step 应优化可观测状态算子
+式 $(3)$ 中的 DPLR 算子允许任意 $d_t\in(0,1]$，但 native RWKV7 的 decay link 为
 
-定义 GDN 的单步状态算子
+$$
+d_t^R
+=
+\exp[-c_w\sigma(z_{w,t})],
+\qquad
+c_w=e^{-1/2}.
+\tag{4}
+$$
 
-$$A_t^G=d_t(I-\beta_tk_tk_t^{\top}),\qquad B_t^G=\beta_tv_tk_t^{\top}.$$
+所以它的可达域是
 
-RWKV 对应为
+$$
+d_t^R\in[\exp(-e^{-1/2}),1)
+\approx[0.54524,1).
+\tag{5}
+$$
 
-$$A_t^R=\operatorname{Diag}(\delta_t)-n_t(n_t\odot a_t)^{\top},\qquad B_t^R=u_t\kappa_t^{\top}.$$
+域内 target 可以先做 inverse link：
 
-真正需要拟合的是 $$(A_t,B_t,r_t)$$ 产生的完整可观测轨迹。令状态误差为 $$E_t$$，则一阶误差满足
+$$
+z_{w,t}^{*}
+=
+\operatorname{logit}
+\left(
+\frac{-\log d_t}{c_w}
+\right).
+\tag{6}
+$$
 
-$$E_t=E_{t-1}A_t^G+S_{t-1}^G\Delta A_t+\Delta B_t,\qquad \Delta y_t=E_tr_t+S_t^G\Delta r_t.$$
+域外值则不能仅凭逐元素距离决定如何修正，因为 decay、erase 和 write 会共同影响最终读出。定义
 
-将归一化、gate 和 output projection 的局部 Jacobian 记为 $$C_t$$，直接求解
+$$
+A_t^G=d_tI-d_t\beta_tk_tk_t^\top,
+\qquad
+B_t^G=\beta_tv_tk_t^\top,
+\tag{7}
+$$
 
-$$\min_{\Delta\theta}\sum_t\left\|C_t\left(E_tr_t+S_t^G\Delta r_t\right)\right\|^2+\lambda\|\Delta\theta\|^2.$$
+以及 native 算子
 
-这是基于 recurrence sufficient statistics 的线性正规方程。Gram 与 RHS 可以流式累计后闭式求解，不需要 LM loss、反向传播或优化器。
+$$
+A_t^R
+=
+\operatorname{Diag}(\delta_t)
+-n_t(n_t\odot a_t)^\top,
+\qquad
+B_t^R=u_t\kappa_t^\top.
+\tag{8}
+$$
 
-由于逐头归一化会消除正尺度，内部轨迹使用 projective loss：
+由未来 read vectors 构造 Gram
 
-$$\min_{\rho_{t,h}>0}\left(\widehat y_{t,h}-\rho_{t,h}y_{t,h}\right)^{\top}M_{t,h}\left(\widehat y_{t,h}-\rho_{t,h}y_{t,h}\right),$$
+$$
+G_t
+=
+\sum_{\tau\ge t}
+w_{t,\tau}r_\tau r_\tau^\top.
+\tag{9}
+$$
 
-其中
+正确的 projection 是在 native 可达域内联合求解 decay、erase 和 write，使
 
-$$\rho_{t,h}^{*}=\frac{y_{t,h}^{\top}M_{t,h}\widehat y_{t,h}}{y_{t,h}^{\top}M_{t,h}y_{t,h}+\varepsilon}.$$
+$$
+\sum_t
+\operatorname{Tr}
+\left[
+(A_t^G-A_t^R)G_t(A_t^G-A_t^R)^\top
+\right]
++
+\lambda_B
+\left\|
+(B_t^G-B_t^R)G_t^{1/2}
+\right\|_F^2
+\tag{10}
+$$
 
-最终模型选择仍然只看独立 held-out 文本上的 full-mixer NMSE。这样 decay、erase、write 和 read 之间能够按照最终可见误差自动补偿。
+最小。把式 $(6)$ 的 clipped inverse link 当作初值，再用完整 recurrence rollout 修正式 $(10)$，就能把 native decay 的不可达部分优先放到真实 Query 看不见或不敏感的方向。
 
-## 3. 将四阶卷积投影为最优 time-mix
+## 3. 先生成 activation oracle，再拟合有限维参数
 
-GDN 的 q/k/v 信号与 RWKV time-mix 分别写成
+式 $(3)$ 给出的信号随 token 变化，而 target 只能用 time-mix、静态投影和低秩 control subspace 生成它们。因而参数编译分成两层：
 
-$$s_t=\operatorname{SiLU}\left(\sum_{j=0}^{3}D_jWx_{t-j}\right),\qquad \widehat s_t=W_R\big((1-\alpha)\odot x_t+\alpha\odot x_{t-1}\big).$$
+1. 从 source 真实前向中保存 $\bar q_t,\bar k_t,v_t,d_t,\beta_t$、gate、state read 和 mixer output；
+2. 用式 $(3)$ 生成精确的 $r_t,\kappa_t,u_t,\delta_t,n_t,a_t$ activation oracle；
+3. 再把 oracle 投影到 native 参数化。
 
-正确的初始化顺序是：
+write gauge $\mu_t$ 不应预先固定。对每个 head，在 calibration set 上交替求解
 
-1. 用 $$[x_t,x_{t-1}]$$ 对 gauge 调整后的 $$r_t,\kappa_t,u_t$$ 做 output-weighted Wiener regression。
-2. 得到无约束的两组 lag 系数 $$B_0,B_1$$。
-3. 对每个输入通道，将两组输出系数投影到共享方向，即对相应的 $$2\times d_{\mathrm{out}}$$ 矩阵做 covariance-weighted rank-1 SVD。
-4. 从 rank-one 因子恢复 $$W_R,\alpha$$。
-5. 交替更新 write gauge $$\mu_t$$，使 key 与 value 两侧的结构化回归总残差最小。
+$$
+\min_{\mu_t>0}
+\mathcal E_{\kappa}(\mu_tk_t)
++
+\mathcal E_u(\beta_tv_t/\mu_t),
+\tag{11}
+$$
 
-source 的第三、第四阶历史由此按照真实语料的时序协方差，最优地边缘化到 native one-step time-mix 中。
+其中两项分别是 native Key 与 Value signal compiler 的 output-weighted 回归残差。这样，动态 normalization 的尺度会被放到更容易拟合的一侧。
 
-## 4. 解析编译 decay、erase 和 gate
+GDN 的四阶 causal convolution 与 RWKV7 的 one-step time-mix 不必逐项相等。对每类 oracle signal，先做
 
-GDN 的控制信号为
+$$
+\min_{B_0,B_1}
+\sum_t
+\left\|
+s_t^*-(B_0x_t+B_1x_{t-1})
+\right\|_{M_t}^2,
+\tag{12}
+$$
 
-$$d_h(x)=\exp\left[-e^{A_{\log,h}}\operatorname{softplus}(p_h(x))\right],\qquad \beta_h(x)=\sigma(b_h(x)).$$
+再把 $(B_0,B_1)$ 按 native 的共享 mixing 结构做 covariance-weighted rank-one projection，从而恢复 time-mix ratio 与静态 projection。decay、erase 和 gate 的 control subspace 则用 weighted reduced-rank regression 初始化；保留多少方向由 held-out full-mixer NMSE 决定，而不是只根据 driver 数量作维数推断。
 
-native RWKV7 decay link 为 $$d_h^R=\exp[-c_w\sigma(z_{w,h})]$$，其中 $$c_w=e^{-1/2}$$。
+## 4. 用完整轨迹联合校正 readout
 
-因此 inverse-link target 应写成
+teacher-forced 的单步 activation 拟合只能生成初值，最终校正必须在 free-running recurrence 上进行。令状态误差为 $E_t=\widehat S_t-S_t$，一阶传播满足
 
-$$z_{w,h}^{*}=\operatorname{logit}\left(\operatorname{clip}\left(\frac{-\log d_h}{c_w},\varepsilon,1-\varepsilon\right)\right)=\operatorname{logit}\left(\operatorname{clip}\left(e^{1/2}[-\log d_h],\varepsilon,1-\varepsilon\right)\right).$$
+$$
+E_t
+\approx
+E_{t-1}A_t^G
++S_{t-1}\Delta A_t
++\Delta B_t,
+\qquad
+\Delta y_t
+=
+E_tr_t
++S_t\Delta r_t.
+\tag{13}
+$$
 
-这一区分了两层事实：DPLR 状态算子允许令 $$\delta_t=d_t\mathbf1$$ 并精确嵌入；native decay link 的可达域是 $$d_h^R\in[\exp(-e^{-1/2}),1)$$，域外信号需要按最终可观测误差做 bounded projection。
+将 source normalization、gate 和 `o_proj` 的局部可观测度量记为 $C_t$，闭式校正求解
 
-erase gate 的 target 为
+$$
+\min_{\Delta\theta}
+\sum_t
+\left\|
+C_t
+\left(
+E_tr_t+S_t\Delta r_t
+\right)
+\right\|_2^2
++
+\lambda\|\Delta\theta\|_2^2.
+\tag{14}
+$$
 
-$$z_{a,h}^{*}=\operatorname{logit}\left(\operatorname{clip}\left(d_h\beta_hm_{k,h}^2,\varepsilon,1-\varepsilon\right)\right).$$
+随后在真实 native rollout 上联合重算：
 
-`w_lora` 的 down basis 由 source decay projection 的行空间及其 Jacobian 加权主方向构造；不同 tanh scale 用来逼近每个 head 的一维标量函数。
-
-`a_lora` 的 basis 应包含
-
-$$\operatorname{rowspan}(W_{\mathrm{decay}})+\operatorname{rowspan}(W_\beta)+\mathcal K_{\mathrm{norm}}.$$
-
-这里 $$\mathcal K_{\mathrm{norm}}$$ 表示 key-norm Jacobian 的主要方向。
-
-Qwen3.5 每层只有 $$H$$ 个 decay driver 和 $$H$$ 个 beta driver。以 $$H=16$$ 为例，主要控制子空间至多约 $$2H=32$$ 维，可以自然装入 RWKV 的 rank-64 control subspace；up projection 通过加权 reduced-rank ridge 求出。
-
-gate 则从 $$g^G=\operatorname{SiLU}(W_zx)$$ 编译成 $$g^R=U_g\,\sigma(D_gx)$$。
-
-先对 source gate 的 output-weighted Jacobian 做广义 SVD，保留最影响 mixer output 的 128 个方向作为 $$D_g$$，再闭式求解 $$U_g$$。
-
-## 5. 联合解决 RMSNorm 到 GroupNorm
-
-状态递推对静态 value-space 变换等变：
-
-$$\widetilde S_t=U_hS_t,\qquad \widetilde v_t=U_hv_t,\qquad \widetilde y_t=U_hy_t.$$
-
-令 $$e=\mathbf1/\sqrt N$$。GroupNorm 会丢掉 $$e$$ 方向，因此选择 $$U_h$$，使这个方向对应 source 中最不重要的 value direction：
-
-$$u_{\star}=\arg\min_{u^{\top}\Sigma_hu=1}u^{\top}H_hu,\qquad U_hu_{\star}=e,$$
-
-其中 $$\Sigma_h$$ 是 readout covariance，$$H_h=\mathbb E[J_{t,h}^{\top}J_{t,h}]$$ 是最终 mixer 的可观测度量。
-
-随后联合求解：
-
-- value-space gauge $$U_h$$；
 - `g_norm.weight/bias`；
 - gate up projection；
 - `o_proj`；
-- `r_k`。
+- `r_k`；
+- read/write gauge 的静态近似。
 
-native bonus 为 $$b_t=((r_t\odot\kappa_t)^{\top}r_k)u_t$$。固定 recurrence signals 后，它关于 $$r_k$$ 是线性的，可以通过 ridge 解出，用来恢复 GroupNorm 丢失方向中可由当前写入解释的部分。
+RMSNorm 与 GroupNorm 的差异也在这个最终可见目标中处理。可以用 value-space 正交变换选择更有利的初始坐标，但模型选择必须看独立 held-out 文本上的 full-mixer output，而不能仅看归一化前的状态 NMSE。
 
-## 6. 完整 zero-step 转换流程
+## 5. 真实单层验证
 
-1. 保持 GDN 的 head 数和 state head dimension。
-2. 收集 source normalized layer input、raw conv q/k/v、$$d,\beta$$、gate、state read 和最终 mixer output。
-3. 构造带 read/write gauge 的精确 RWKV activation oracle。
-4. 做两阶结构化 Wiener/time-mix 投影。
-5. 以 $$(A_t,B_t,r_t)$$ 为单位求解 projective、output-weighted trajectory projection。
-6. 构造 decay、erase、gate 的低秩解析 basis。
-7. 选择 value-space gauge，联合求解 GroupNorm、`r_k` 和 output projection。
-8. 在完整 native recurrence rollout 上做一次闭式 Gauss–Newton correction。
-9. 只用独立 held-out 文本上的 full-mixer NMSE 与 cosine 选择结果。
-10. 达标后直接导出；全程没有 optimizer step、LM loss 或蒸馏。
+实验直接读取 Qwen3.5-2B 的真实 checkpoint：
 
-GDN→RWKV7 比 GQA→RWKV7 更有机会直接跳过蒸馏。记忆递推的代数误差可以压到机器精度，剩余 zero-step NMSE 集中在有限维 signal compiler、native decay link、norm、gate 和 readout 投影上。预期收益最大的三个自由度依次是 read/write gauge、联合 trajectory projection，以及 value-space gauge 与 `r_k` 的联合读出。
+- GDN：第 0 层，16 heads、head dimension 128；
+- 数据：8 条 FineWeb-Edu 文本，每条 64 tokens；
+- 划分：前 4 条 calibration，后 4 条 held-out；
+- 设备：DGX Spark 的 NVIDIA GB10；
+- 前向与指标：FP32，恒等式自检使用 FP64；
+- checkpoint shard SHA-256：`aa33250c4fc64891ddfaba3a314fd9542ea371843c387178b425fbcc5ed680b1`。
+
+结果如下：
+
+| 验证项 | 结果 | 含义 |
+| --- | ---: | --- |
+| 式 $(3)$ canonical recurrence output relative L2 | $2.45\times10^{-16}$ | GDN recurrence 可精确嵌入 |
+| canonical recurrence output max abs | $1.67\times10^{-16}$ | FP64 机器精度 |
+| native 最小可达 decay | 0.54524 | 式 $(5)$ 的参数域 |
+| source decay 低于该下界的比例 | 24.28% | 确有域外 activation |
+| 仅 clamp decay 的 core output NMSE | 0.001216 | native 不可达域的直接可见影响较小 |
+| 仅 clamp decay 的 core output cosine | 0.999402 | 为逐层蒸馏留下了较近的起点 |
+
+这里的 0.001216 是只替换 decay 后、归一化与 output projection 之前的 core recurrence 指标，不等同于完整迁移后的 mixer NMSE。它说明 native decay mismatch 真实存在，但在该层、该 held-out sample 上的可见影响约为千分之一；式 $(10)$ 的联合投影和逐层蒸馏仍然是完整方案的一部分。
+
+FP32 与 BF16 两次独立运行的关键排序和量级一致。完整原始结果见 [`evidence/qwen35-2b-gqa-gdn-zero-step-probe.json`](evidence/qwen35-2b-gqa-gdn-zero-step-probe.json)，可复现实验入口为 [`../scripts/probe_gqa_gdn_zero_step.py`](../scripts/probe_gqa_gdn_zero_step.py)。
+
+## 6. 完整迁移顺序
+
+最终流程可以写成八步：
+
+1. 在真实 layer input 上回放 GDN，保存归一化前后的 Q/K/V、$d$、$\beta$、gate、state read 和 mixer output。
+2. 按式 $(3)$ 构造逐项相等的 RWKV activation oracle，并用它校验状态坐标与实现方向。
+3. 交替选择 write gauge，按式 $(12)$ 初始化 time-mix 与静态 Q/K/V projection。
+4. 对 decay、erase 和 gate 做 weighted reduced-rank regression；decay 先用式 $(6)$ 初始化。
+5. 按式 $(9)$、式 $(10)$ 将域外 decay 与结构化残差投影到 native recurrence。
+6. 运行 native free-running rollout，按式 $(14)$ 联合重算 norm、gate、`r_k` 与 `o_proj`。
+7. 只用独立 held-out full-mixer NMSE、cosine 和长序列 drift 选择 zero-step checkpoint。
+8. 冻结其余层，以真实 layer input 开始逐层蒸馏；完成当前层后再推进下一层。
+
+GDN→RWKV7 的核心优势不是“无需训练”，而是状态递推已经有机器精度的解析锚点。zero-step 的任务因此非常明确：把 native 参数化留下的偏差压到尽可能小，再让逐层蒸馏修正最后的 signal compiler、decay 可达域和 readout 差异。

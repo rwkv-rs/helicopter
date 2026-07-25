@@ -1,0 +1,267 @@
+{
+  "experiment": "qwen35-2b-real-layer-gqa-gdn-zero-step-probe",
+  "gdn": {
+    "canonical_recurrence_mapping": {
+      "output_max_abs": 1.6653345369377348e-16,
+      "output_relative_l2": 2.445699935254236e-16
+    },
+    "native_decay_link": {
+      "clipped_core_output_vs_exact": {
+        "cosine": 0.9994019865989685,
+        "nmse": 0.0012164079817011952,
+        "relative_l2": 0.03487704321742058
+      },
+      "decay_quantiles": {
+        "q00": 0.003038319991901517,
+        "q01": 0.009911042638123035,
+        "q05": 0.031009189784526825,
+        "q100": 1.0,
+        "q50": 0.9991765022277832,
+        "q95": 1.0,
+        "q99": 1.0
+      },
+      "fraction_below_minimum": 0.2427978515625,
+      "minimum_reachable_decay": 0.5452392101287842
+    }
+  },
+  "gqa": {
+    "affine_state": {
+      "closure_scale": {
+        "maximum": 5.460529327392578,
+        "median": 2.297670841217041,
+        "minimum": -1.4303597211837769
+      },
+      "with_calibrated_rank_one_closure": {
+        "attention_output": {
+          "cosine": 0.948945164680481,
+          "nmse": 0.09965259581804276,
+          "relative_l2": 0.3156780004501343
+        },
+        "mixer_output": {
+          "cosine": 0.8874356150627136,
+          "nmse": 0.21432119607925415,
+          "relative_l2": 0.46294841170310974
+        }
+      },
+      "without_rank_one_closure": {
+        "attention_output": {
+          "cosine": 0.9482066035270691,
+          "nmse": 0.10140065848827362,
+          "relative_l2": 0.3184347152709961
+        },
+        "mixer_output": {
+          "cosine": 0.8901082873344421,
+          "nmse": 0.21183595061302185,
+          "relative_l2": 0.4602563977241516
+        }
+      }
+    },
+    "exactness_checks": {
+      "hazard_recurrence_vs_softmax_attention": {
+        "cosine": 1.0000001192092896,
+        "nmse": 4.959176312332482e-14,
+        "relative_l2": 2.2269207988756534e-07
+      },
+      "manual_attention_vs_qwen_mixer": {
+        "cosine": 1.0000001192092896,
+        "nmse": 0.0,
+        "relative_l2": 0.0
+      }
+    },
+    "hazard_linearization": {
+      "logit_taylor_at_calibration_mean": {
+        "attention_output": {
+          "cosine": 0.9868261218070984,
+          "nmse": 0.027169087901711464,
+          "relative_l2": 0.16483047604560852
+        },
+        "hazard": {
+          "cosine": 0.9828444719314575,
+          "mae": 0.02455000765621662,
+          "nmse": 0.04553091526031494,
+          "outside_unit_interval_fraction": 0.0,
+          "relative_l2": 0.21337975561618805
+        },
+        "mixer_output": {
+          "cosine": 0.9657119512557983,
+          "nmse": 0.07344327867031097,
+          "relative_l2": 0.27100422978401184
+        }
+      },
+      "logit_taylor_at_zero": {
+        "attention_output": {
+          "cosine": 0.9782127737998962,
+          "nmse": 0.0458330437541008,
+          "relative_l2": 0.21408653259277344
+        },
+        "hazard": {
+          "cosine": 0.9634998440742493,
+          "mae": 0.04661991447210312,
+          "nmse": 0.11554204672574997,
+          "outside_unit_interval_fraction": 0.0,
+          "relative_l2": 0.33991479873657227
+        },
+        "mixer_output": {
+          "cosine": 0.9470832943916321,
+          "nmse": 0.1188245415687561,
+          "relative_l2": 0.3447093665599823
+        }
+      },
+      "probability_taylor_at_zero": {
+        "attention_output": {
+          "cosine": 0.9545910954475403,
+          "nmse": 0.0901462584733963,
+          "relative_l2": 0.30024367570877075
+        },
+        "hazard": {
+          "cosine": 0.9458109736442566,
+          "mae": 0.04222940653562546,
+          "nmse": 0.10878478735685349,
+          "outside_unit_interval_fraction": 0.20222355425357819,
+          "relative_l2": 0.32982537150382996
+        },
+        "mixer_output": {
+          "cosine": 0.9014301896095276,
+          "nmse": 0.19848814606666565,
+          "relative_l2": 0.4455201029777527
+        }
+      },
+      "probability_taylor_at_zero_clipped": {
+        "attention_output": {
+          "cosine": 0.9702433943748474,
+          "nmse": 0.05917444825172424,
+          "relative_l2": 0.24325799942016602
+        },
+        "hazard": {
+          "cosine": 0.9691271781921387,
+          "mae": 0.03008032962679863,
+          "nmse": 0.060913972556591034,
+          "outside_unit_interval_fraction": 0.0,
+          "relative_l2": 0.24680757522583008
+        },
+        "mixer_output": {
+          "cosine": 0.9349806308746338,
+          "nmse": 0.12827739119529724,
+          "relative_l2": 0.3581583499908447
+        }
+      }
+    },
+    "state_compression": {
+      "four_state_128x128_exact_block_control_matrix_only": {
+        "cosine": 1.0,
+        "nmse": 9.792544515075177e-15,
+        "relative_l2": 9.895728680930915e-08
+      },
+      "two_state_128x128": {
+        "bases": {
+          "first_127_coordinates_plus_dc": {
+            "attention_output_vs_exact_softmax": {
+              "cosine": 0.9194148182868958,
+              "nmse": 0.15486212074756622,
+              "relative_l2": 0.39352527260780334
+            },
+            "matrix_observable_loss_vs_full_affine_state": {
+              "cosine": 0.8681954741477966,
+              "nmse": 0.29600790143013,
+              "relative_l2": 0.5440660715103149
+            },
+            "mixer_output_vs_exact_softmax": {
+              "cosine": 0.821930468082428,
+              "nmse": 0.32618245482444763,
+              "relative_l2": 0.5711238384246826
+            },
+            "total_loss_vs_full_affine_state": {
+              "cosine": 0.9816944003105164,
+              "nmse": 0.036396145820617676,
+              "relative_l2": 0.1907777339220047
+            }
+          },
+          "operator_svd_127_plus_dc": {
+            "attention_output_vs_exact_softmax": {
+              "cosine": 0.9357331395149231,
+              "nmse": 0.12448860704898834,
+              "relative_l2": 0.3528294265270233
+            },
+            "matrix_observable_loss_vs_full_affine_state": {
+              "cosine": 0.9448400139808655,
+              "nmse": 0.12418963760137558,
+              "relative_l2": 0.35240548849105835
+            },
+            "mixer_output_vs_exact_softmax": {
+              "cosine": 0.8547161221504211,
+              "nmse": 0.27128034830093384,
+              "relative_l2": 0.5208458304405212
+            },
+            "total_loss_vs_full_affine_state": {
+              "cosine": 0.9923787713050842,
+              "nmse": 0.01526994351297617,
+              "relative_l2": 0.12357162684202194
+            }
+          },
+          "query_pca_127_plus_dc": {
+            "attention_output_vs_exact_softmax": {
+              "cosine": 0.9374371767044067,
+              "nmse": 0.12131637334823608,
+              "relative_l2": 0.34830501675605774
+            },
+            "matrix_observable_loss_vs_full_affine_state": {
+              "cosine": 0.9540859460830688,
+              "nmse": 0.09933104366064072,
+              "relative_l2": 0.3151682913303375
+            },
+            "mixer_output_vs_exact_softmax": {
+              "cosine": 0.8553134799003601,
+              "nmse": 0.2709102928638458,
+              "relative_l2": 0.5204904675483704
+            },
+            "total_loss_vs_full_affine_state": {
+              "cosine": 0.9939063787460327,
+              "nmse": 0.01221341360360384,
+              "relative_l2": 0.1105143204331398
+            }
+          }
+        },
+        "feature_budget": {
+          "constant_channels": 1,
+          "query_subspace_channels": 127
+        }
+      }
+    }
+  },
+  "provenance": {
+    "activation_dtype": "torch.float32",
+    "calibration_rows": 4,
+    "dataset": "/home/caizus/Datasets/fineweb-edu/87f09149ef4734204d70ed1d046ddc9ca3f2b8f9/qwen35-2b-70m.jsonl",
+    "dataset_sha256": "302189332fce81c74bf7bfc01ec01d5518a214c77d84ceb33f756b9be11060a5",
+    "device": "cuda",
+    "device_name": "NVIDIA GB10",
+    "gdn_layer": 0,
+    "gqa_layer": 3,
+    "heldout_rows": 4,
+    "loaded_layer_source_bytes": {
+      "0": 117629536,
+      "1": 117629536,
+      "2": 117629536,
+      "3": 104866816
+    },
+    "mapping_check_dtype": "torch.float64",
+    "metric_dtype": "torch.float32",
+    "sample_ids": [
+      "fineweb-edu:<urn:uuid:0d8a309d-25c5-405d-a08a-c11239f0d717>",
+      "fineweb-edu:<urn:uuid:316c7af5-14e1-4d0b-9576-753e17ef2cc5>",
+      "fineweb-edu:<urn:uuid:a3e140cd-7f25-48c9-a2f0-a7d0b1954e0d>",
+      "fineweb-edu:<urn:uuid:c337bcd8-6aa1-4f2d-8c48-b916442ebbee>",
+      "fineweb-edu:<urn:uuid:c0b175bb-65fb-420e-a881-a80b91d00ecd>",
+      "fineweb-edu:<urn:uuid:373cc951-d17e-4d57-b0f5-122effe3a054>",
+      "fineweb-edu:<urn:uuid:78cbe1bd-1849-4138-b59a-5521e93122a3>",
+      "fineweb-edu:<urn:uuid:a63f6870-f496-4355-adfd-f3296c1577e5>"
+    ],
+    "sequence_length": 64,
+    "source": "/home/caizus/Weights/Qwen/Qwen3.5-2B",
+    "source_shards": {
+      "model.safetensors-00001-of-00001.safetensors": "aa33250c4fc64891ddfaba3a314fd9542ea371843c387178b425fbcc5ed680b1"
+    },
+    "torch_version": "2.11.0+cu130"
+  },
+  "schema_version": 1
+}
