@@ -23,7 +23,21 @@ class Any2RWKVConfigBase(PretrainedConfig):
         self.num_hidden_layers = int(kwargs.get("num_hidden_layers", 60))
         self.head_dim = int(kwargs.get("head_dim", 64))
         self.head_size = int(kwargs.get("head_size", self.head_dim))
-        self.num_heads = int(kwargs.get("num_heads", self.hidden_size // self.head_dim))
+        requested_attention_width = int(
+            kwargs.get("attention_hidden_size", self.hidden_size)
+        )
+        if requested_attention_width <= 0 or requested_attention_width % self.head_dim:
+            raise ValueError(
+                "attention_hidden_size must be positive and divisible by head_dim"
+            )
+        self.num_heads = int(
+            kwargs.get("num_heads", requested_attention_width // self.head_dim)
+        )
+        self.attention_hidden_size = requested_attention_width
+        if self.num_heads * self.head_dim != self.attention_hidden_size:
+            raise ValueError(
+                "attention_hidden_size must equal num_heads * head_dim"
+            )
         self.num_attention_heads = self.num_heads
         self.layer_types = list(requested_layers or ["rwkv7"] * self.num_hidden_layers)
         self.decay_low_rank_dim = int(kwargs.get("decay_low_rank_dim", 64))

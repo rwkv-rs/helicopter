@@ -34,11 +34,44 @@ def apply_partial_rope(x: Tensor, positions: Tensor, *, rotary_dim: int, theta: 
 class ProjectionBoundaryRWKV7Attention(NativeRWKV7Attention):
     """Native RWKV7 recurrence with optional source RoPE before state access."""
 
-    def __init__(self, config, layer_idx: int, *, source_used_rope: bool, rotary_dim: int, rope_theta: float):
+    def __init__(
+        self,
+        config,
+        layer_idx: int,
+        *,
+        source_used_rope: bool,
+        rotary_dim: int,
+        rope_theta: float,
+        rope_num_heads: int | None = None,
+        rope_head_dim: int | None = None,
+    ):
         super().__init__(config, layer_idx)
         self.source_used_rope = bool(source_used_rope)
         self.rotary_dim = int(rotary_dim)
         self.rope_theta = float(rope_theta)
+        self.rope_num_heads = int(
+            self.num_heads if rope_num_heads is None else rope_num_heads
+        )
+        self.rope_head_dim = int(
+            self.head_dim if rope_head_dim is None else rope_head_dim
+        )
+        if self.rope_num_heads * self.rope_head_dim != self.attention_hidden_size:
+            raise ValueError(
+                "source RoPE head geometry must exactly cover the recurrent width"
+            )
+        if self.rotary_dim < 0 or self.rotary_dim > self.rope_head_dim:
+            raise ValueError(
+                "source rotary_dim must fit the source RoPE head geometry"
+            )
+
+    def _apply_source_rope(self, value: Tensor, positions: Tensor) -> Tensor:
+        shape = value.shape
+        return apply_partial_rope(
+            value.view(*shape[:-1], self.rope_num_heads, self.rope_head_dim),
+            positions,
+            rotary_dim=self.rotary_dim,
+            theta=self.rope_theta,
+        ).reshape(shape)
 
     def forward(
         self,
@@ -51,30 +84,32 @@ class ProjectionBoundaryRWKV7Attention(NativeRWKV7Attention):
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, dict[str, Tensor]]:
         batch = int(x.shape[0])
         heads, head_dim = self.num_heads, self.head_dim
-        hidden = heads * head_dim
+        hidden = self.hidden_size
+        recurrent_width = heads * head_dim
         delta = x_prev - x
         mixed = {
             name: x + delta * getattr(self, f"x_{name}").reshape(1, hidden)
             for name in ("r", "w", "k", "v", "a", "g")
         }
         r = self.r_proj(mixed["r"])
-        w = self.w_lora.lora[2](torch.tanh(self.w_lora.lora[0](mixed["w"])))
+        w_features = torch.tanh(self.w_lora.lora[0](mixed["w"]))
+        w = self.w_lora.lora[2](w_features)
         k = self.k_proj(mixed["k"])
         v = self.v_proj(mixed["v"])
-        a = torch.sigmoid(self.a_lora.lora[2](self.a_lora.lora[0](mixed["a"])))
-        g = self.g_lora.lora[2](torch.sigmoid(self.g_lora.lora[0](mixed["g"])))
+        projected_r, projected_k, projected_v = r, k, v
+        a_features = self.a_lora.lora[0](mixed["a"])
+        a = torch.sigmoid(self.a_lora.lora[2](a_features))
+        g_features = torch.sigmoid(self.g_lora.lora[0](mixed["g"]))
+        g = self.g_lora.lora[2](g_features)
         if self.source_used_rope:
-            r = apply_partial_rope(
-                r.view(batch, heads, head_dim), positions, rotary_dim=self.rotary_dim, theta=self.rope_theta
-            ).reshape(batch, hidden)
-            k = apply_partial_rope(
-                k.view(batch, heads, head_dim), positions, rotary_dim=self.rotary_dim, theta=self.rope_theta
-            ).reshape(batch, hidden)
+            r = self._apply_source_rope(r, positions)
+            k = self._apply_source_rope(k, positions)
 
+        write_key_base = k
         normalized_key = F.normalize(
-            (k * self.k_k.reshape(1, hidden)).view(batch, heads, head_dim), dim=-1, p=2
-        ).view(batch, hidden)
-        k = k * (1 + (a - 1) * self.k_a.reshape(1, hidden))
+            (k * self.k_k.reshape(1, recurrent_width)).view(batch, heads, head_dim), dim=-1, p=2
+        ).view(batch, recurrent_width)
+        k = k * (1 + (a - 1) * self.k_a.reshape(1, recurrent_width))
         if self.layer_idx == 0:
             v_first = v
         else:
@@ -87,22 +122,48 @@ class ProjectionBoundaryRWKV7Attention(NativeRWKV7Attention):
             normalized_key * a
         ).view(batch, heads, 1, head_dim)
         state = state * decay.view(batch, heads, 1, head_dim) + state @ erase.float() + write.float()
-        output = (state.to(x.dtype) @ r.view(batch, heads, head_dim, 1)).view(batch, hidden)
-        output = F.group_norm(
+        output = (state.to(x.dtype) @ r.view(batch, heads, head_dim, 1)).view(batch, recurrent_width)
+        norm_base = F.group_norm(
             output,
             num_groups=heads,
-            weight=self.g_norm.weight,
-            bias=self.g_norm.bias,
+            weight=None,
+            bias=None,
             eps=head_dim * 1e-5,
         )
+        output = norm_base * self.g_norm.weight + self.g_norm.bias
         bonus = (
             r.view(batch, heads, head_dim)
             * k.view(batch, heads, head_dim)
             * self.r_k.reshape(1, heads, head_dim)
         ).sum(dim=-1, keepdim=True)
-        output = output + (bonus * v.view(batch, heads, head_dim)).view(batch, hidden)
-        output = self.o_proj(output * g)
-        signals = {"r": r, "decay": decay, "k": k, "v": v, "a": normalized_key, "erase": a}
+        norm_offset = (bonus * v.view(batch, heads, head_dim)).view(batch, recurrent_width)
+        output = output + norm_offset
+        pre_output = output * g
+        output = self.o_proj(pre_output)
+        signals = {
+            "r": r,
+            "projected_r": projected_r,
+            "mixed_r": mixed["r"],
+            "w_features": w_features,
+            "decay": decay,
+            "k": k,
+            "projected_k": projected_k,
+            "write_key_base": write_key_base,
+            "mixed_k": mixed["k"],
+            "v": v,
+            "projected_v": projected_v,
+            "mixed_v": mixed["v"],
+            "a": normalized_key,
+            "erase": a,
+            "a_features": a_features,
+            "mixed_a": mixed["a"],
+            "gate": g,
+            "norm_base": norm_base,
+            "norm_offset": norm_offset,
+            "pre_output": pre_output,
+            "g_features": g_features,
+            "mixed_g": mixed["g"],
+        }
         return output, x, state, v_first, signals
 
     def project_v_first_sequence(self, x: Tensor) -> Tensor:
@@ -125,6 +186,7 @@ class ProjectionBoundaryRWKV7Attention(NativeRWKV7Attention):
         if x.ndim != 3 or positions.shape != x.shape[:2]:
             raise ValueError("sequence mixer expects x=[B,T,C] and aligned positions=[B,T]")
         batch, tokens, hidden = x.shape
+        recurrent_width = self.num_heads * self.head_dim
         previous = torch.cat((torch.zeros_like(x[:, :1]), x[:, :-1]), dim=1)
         delta = previous - x
         mixed = {
@@ -132,36 +194,27 @@ class ProjectionBoundaryRWKV7Attention(NativeRWKV7Attention):
             for name in ("r", "w", "k", "v", "a", "g")
         }
         r = self.r_proj(mixed["r"])
-        w = self.w_lora.lora[2](torch.tanh(self.w_lora.lora[0](mixed["w"])))
+        w_features = torch.tanh(self.w_lora.lora[0](mixed["w"]))
+        w = self.w_lora.lora[2](w_features)
         k = self.k_proj(mixed["k"])
         v = self.v_proj(mixed["v"])
-        erase = torch.sigmoid(
-            self.a_lora.lora[2](self.a_lora.lora[0](mixed["a"]))
-        )
-        gate = self.g_lora.lora[2](
-            torch.sigmoid(self.g_lora.lora[0](mixed["g"]))
-        )
+        projected_r, projected_k, projected_v = r, k, v
+        a_features = self.a_lora.lora[0](mixed["a"])
+        erase = torch.sigmoid(self.a_lora.lora[2](a_features))
+        g_features = torch.sigmoid(self.g_lora.lora[0](mixed["g"]))
+        gate = self.g_lora.lora[2](g_features)
         if self.source_used_rope:
-            r = apply_partial_rope(
-                r.view(batch, tokens, self.num_heads, self.head_dim),
-                positions,
-                rotary_dim=self.rotary_dim,
-                theta=self.rope_theta,
-            ).reshape(batch, tokens, hidden)
-            k = apply_partial_rope(
-                k.view(batch, tokens, self.num_heads, self.head_dim),
-                positions,
-                rotary_dim=self.rotary_dim,
-                theta=self.rope_theta,
-            ).reshape(batch, tokens, hidden)
+            r = self._apply_source_rope(r, positions)
+            k = self._apply_source_rope(k, positions)
+        write_key_base = k
         normalized_key = F.normalize(
-            (k * self.k_k.reshape(1, 1, hidden)).view(
+            (k * self.k_k.reshape(1, 1, recurrent_width)).view(
                 batch, tokens, self.num_heads, self.head_dim
             ),
             dim=-1,
             p=2,
-        ).view(batch, tokens, hidden)
-        k = k * (1 + (erase - 1) * self.k_a.reshape(1, 1, hidden))
+        ).view(batch, tokens, recurrent_width)
+        k = k * (1 + (erase - 1) * self.k_a.reshape(1, 1, recurrent_width))
         if self.layer_idx == 0:
             v_first = v
         else:
@@ -187,28 +240,51 @@ class ProjectionBoundaryRWKV7Attention(NativeRWKV7Attention):
         )
         recurrent, final_state = kernel(state, *(value.to(torch.bfloat16) for value in vectors))
         recurrent = recurrent[:, :tokens].to(x.dtype)
-        recurrent = F.group_norm(
-            recurrent.reshape(batch * tokens, hidden),
+        norm_base = F.group_norm(
+            recurrent.reshape(batch * tokens, recurrent_width),
             num_groups=self.num_heads,
-            weight=self.g_norm.weight,
-            bias=self.g_norm.bias,
+            weight=None,
+            bias=None,
             eps=self.head_dim * 1e-5,
-        ).view(batch, tokens, hidden)
+        ).view(batch, tokens, recurrent_width)
+        recurrent = (
+            norm_base * self.g_norm.weight.reshape(1, 1, recurrent_width)
+            + self.g_norm.bias.reshape(1, 1, recurrent_width)
+        )
         bonus = (
             r.view(batch, tokens, self.num_heads, self.head_dim)
             * k.view(batch, tokens, self.num_heads, self.head_dim)
             * self.r_k.reshape(1, 1, self.num_heads, self.head_dim)
         ).sum(dim=-1, keepdim=True)
-        recurrent = recurrent + (
+        norm_offset = (
             bonus * v.view(batch, tokens, self.num_heads, self.head_dim)
-        ).reshape(batch, tokens, hidden)
-        output = self.o_proj(recurrent * gate)
+        ).reshape(batch, tokens, recurrent_width)
+        recurrent = recurrent + norm_offset
+        pre_output = recurrent * gate
+        output = self.o_proj(pre_output)
         signals = {
             "r": r,
+            "projected_r": projected_r,
+            "mixed_r": mixed["r"],
+            "w_features": w_features,
             "w": w,
+            "decay": torch.exp(-EXP_HALF * torch.sigmoid(w.float())),
             "k": k,
+            "projected_k": projected_k,
+            "write_key_base": write_key_base,
+            "mixed_k": mixed["k"],
             "v": v,
+            "projected_v": projected_v,
+            "mixed_v": mixed["v"],
             "a": normalized_key,
             "erase": erase,
+            "a_features": a_features,
+            "mixed_a": mixed["a"],
+            "gate": gate,
+            "norm_base": norm_base,
+            "norm_offset": norm_offset,
+            "pre_output": pre_output,
+            "g_features": g_features,
+            "mixed_g": mixed["g"],
         }
         return output, v_first, final_state, signals

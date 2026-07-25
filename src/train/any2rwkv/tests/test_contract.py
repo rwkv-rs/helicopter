@@ -29,6 +29,64 @@ from any2rwkv.target import build_zero_step_ledger
 
 
 class ContractTests(unittest.TestCase):
+    def test_target_preserves_source_gdn_head_and_state_geometry(self) -> None:
+        source = tiny_qwen35_config(layers=24, moe=False)
+        source.update(
+            {
+                "hidden_size": 2048,
+                "num_attention_heads": 8,
+                "num_key_value_heads": 2,
+                "head_dim": 256,
+                "linear_num_key_heads": 16,
+                "linear_num_value_heads": 16,
+                "linear_key_head_dim": 128,
+                "linear_value_head_dim": 128,
+            }
+        )
+        target = build_target_config(source, require_final_layers=False)
+        self.assertEqual(target["head_size"], 128)
+        self.assertEqual(target["num_heads"], 16)
+        self.assertEqual(
+            target["any2rwkv"]["recurrent_head_geometry"],
+            {
+                "num_heads": 16,
+                "head_size": 128,
+                "recurrent_width": 2048,
+                "source": "linear_attention_value_state",
+                "gdn_state_geometry_preserved": True,
+            },
+        )
+
+    def test_397b_preserves_8192_recurrent_width_over_4096_hidden(self) -> None:
+        source = tiny_qwen35_config(layers=60, moe=True)
+        source.update(
+            {
+                "hidden_size": 4096,
+                "num_attention_heads": 32,
+                "num_key_value_heads": 2,
+                "head_dim": 256,
+                "linear_num_key_heads": 16,
+                "linear_num_value_heads": 64,
+                "linear_key_head_dim": 128,
+                "linear_value_head_dim": 128,
+            }
+        )
+        target = build_target_config(source)
+        self.assertEqual(target["hidden_size"], 4096)
+        self.assertEqual(target["attention_hidden_size"], 8192)
+        self.assertEqual(target["num_heads"], 64)
+        self.assertEqual(target["head_size"], 128)
+        self.assertEqual(
+            target["any2rwkv"]["recurrent_head_geometry"]["recurrent_width"],
+            8192,
+        )
+
+    def test_target_rejects_lossy_gdn_head_repartition(self) -> None:
+        source = tiny_qwen35_config(layers=4, moe=False)
+        source["linear_value_head_dim"] = 32
+        with self.assertRaisesRegex(ContractError, "equal key/value head size"):
+            build_target_config(source, require_final_layers=False)
+
     def test_tied_source_restores_lm_head_from_preserved_embedding(self) -> None:
         source = tiny_qwen35_config(layers=4)
         source["tie_word_embeddings"] = True
@@ -77,9 +135,14 @@ class ContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "expected 60"):
             validate_source_config(tiny_qwen35_config(layers=4))
 
-    def test_nested_real_qwen_rope_parameters_are_preserved(self) -> None:
+    def test_text_rope_is_active_while_multimodal_fields_are_metadata_only(self) -> None:
         text = tiny_qwen35_config()
-        text["rope_parameters"] = {"rope_theta": 10_000_000, "partial_rotary_factor": 0.25}
+        text["rope_parameters"] = {
+            "rope_theta": 10_000_000,
+            "partial_rotary_factor": 0.25,
+            "mrope_section": [11, 11, 10],
+            "mrope_interleaved": True,
+        }
         source = {
             "model_type": "qwen3_5_moe",
             "architectures": ["Qwen3_5MoeForConditionalGeneration"],
@@ -90,7 +153,18 @@ class ContractTests(unittest.TestCase):
         target = build_target_config(source)
         self.assertEqual(contract.rope_theta, 10_000_000)
         self.assertEqual(contract.partial_rotary_factor, 0.25)
-        self.assertEqual(target["rope_parameters"], text["rope_parameters"])
+        self.assertEqual(
+            target["rope_parameters"],
+            {"rope_theta": 10_000_000, "partial_rotary_factor": 0.25},
+        )
+        self.assertEqual(
+            target["any2rwkv"]["source_text_config"]["rope_parameters"],
+            text["rope_parameters"],
+        )
+        self.assertEqual(
+            target["any2rwkv"]["ignored_multimodal_rope_fields"],
+            ["mrope_section", "mrope_interleaved"],
+        )
 
     def test_real_proxy_can_be_fully_recurrent_but_never_marked_final(self) -> None:
         target = build_target_config(tiny_qwen35_config(layers=24), require_final_layers=False)
@@ -122,6 +196,7 @@ class ContractTests(unittest.TestCase):
                 source_names,
                 layer_count=60,
                 hidden_size=64,
+                head_dim=16,
                 source_shard_hashes=tuple(source.file_hashes[path.name] for path in source.shards),
             )
             manifest = export_hf_checkpoint(
@@ -173,6 +248,7 @@ class ContractTests(unittest.TestCase):
                 tuple(source.tensor_names()),
                 layer_count=4,
                 hidden_size=64,
+                head_dim=16,
                 source_shard_hashes=tuple(
                     source.file_hashes[path.name] for path in source.shards
                 ),
@@ -316,6 +392,7 @@ class ContractTests(unittest.TestCase):
                 tuple(source.tensor_names()),
                 layer_count=4,
                 hidden_size=64,
+                head_dim=16,
                 source_shard_hashes=tuple(
                     source.file_hashes[path.name] for path in source.shards
                 ),

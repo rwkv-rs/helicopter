@@ -5,7 +5,6 @@ from functools import lru_cache
 from pathlib import Path
 import importlib
 import os
-import sys
 import threading
 
 import torch
@@ -20,7 +19,13 @@ _RWKV_LM_IMPORT_LOCK = threading.Lock()
 class NativeRwkv7Kernel:
     """Single adapter boundary for rwkv-lm's state-passing CUDA contract."""
 
-    def __init__(self, operation: Callable[..., tuple[Tensor, Tensor]], *, head_size: int = 64, chunk_size: int = 16) -> None:
+    def __init__(
+        self,
+        operation: Callable[..., tuple[Tensor, Tensor]],
+        *,
+        head_size: int,
+        chunk_size: int = 16,
+    ) -> None:
         self.operation = operation
         self.head_size = head_size
         self.chunk_size = chunk_size
@@ -45,39 +50,36 @@ class NativeRwkv7Kernel:
         return self.operation(state.contiguous(), *(value.contiguous() for value in vectors))
 
 
-@lru_cache(maxsize=1)
-def load_rwkv_lm_kernel() -> NativeRwkv7Kernel:
+@lru_cache(maxsize=4)
+def load_rwkv_lm_kernel(head_size: int) -> NativeRwkv7Kernel:
     """Load the pinned rwkv-lm kernel from this product checkout only."""
+    configured_head_size = int(os.environ.get("RWKV_HEAD_SIZE", "0"))
+    expected_head_size = int(head_size)
+    if expected_head_size <= 0:
+        raise ContractError("RWKV_HEAD_SIZE must select a positive native head size")
+    if configured_head_size not in {0, expected_head_size}:
+        raise ContractError(
+            "requested RWKV7 head size differs from RWKV_HEAD_SIZE: "
+            f"requested={expected_head_size} configured={configured_head_size}"
+        )
     product_root = Path(__file__).resolve().parents[4]
     checkout = product_root / "src/train/rwkv-lm"
-    model_file = checkout / "src/model.py"
-    if not model_file.is_file():
-        raise ContractError(f"pinned rwkv-lm kernel source is missing: {model_file}")
-    existing = sys.modules.get("src.model")
-    if existing is not None:
-        resolved = Path(str(getattr(existing, "__file__", ""))).resolve()
-        if resolved != model_file.resolve():
+    loader_file = checkout / "src/infctx_kernel.py"
+    if not loader_file.is_file():
+        raise ContractError(f"pinned rwkv-lm kernel source is missing: {loader_file}")
+    module_name = f"_any2rwkv_rwkv_lm_infctx_kernel_n{expected_head_size}"
+    with _RWKV_LM_IMPORT_LOCK:
+        spec = importlib.util.spec_from_file_location(module_name, loader_file)
+        if spec is None or spec.loader is None:
             raise ContractError(
-                f"Python module src.model already resolves outside pinned rwkv-lm: {resolved}"
+                f"could not create pinned RWKV7 loader spec: {loader_file}"
             )
-        operation = existing.RWKV7_STATEPASSING_CLAMPW_CUDA
-    else:
-        # RWKV-LM's pinned model module passes relative ``cuda/...`` source
-        # paths to torch's extension loader.  Resolve those paths from the
-        # checkout without leaking a changed process cwd after import.
-        with _RWKV_LM_IMPORT_LOCK:
-            previous_cwd = Path.cwd()
-            sys.path.insert(0, str(checkout))
-            try:
-                os.chdir(checkout)
-                module = importlib.import_module("src.model")
-            finally:
-                os.chdir(previous_cwd)
-                sys.path.remove(str(checkout))
-        resolved = Path(str(module.__file__)).resolve()
-        if resolved != model_file.resolve():
-            raise ContractError(
-                f"loaded RWKV7 kernel from unexpected checkout: {resolved}"
-            )
-        operation = module.RWKV7_STATEPASSING_CLAMPW_CUDA
-    return NativeRwkv7Kernel(operation)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    resolved = Path(str(getattr(module, "__file__", ""))).resolve()
+    if resolved != loader_file.resolve():
+        raise ContractError(
+            f"loaded RWKV7 kernel from unexpected checkout: {resolved}"
+        )
+    operation = module.load_statepassing_kernel(expected_head_size)
+    return NativeRwkv7Kernel(operation, head_size=expected_head_size)

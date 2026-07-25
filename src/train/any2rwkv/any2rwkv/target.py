@@ -20,35 +20,47 @@ def rwkv7_mixer_specs(
     *,
     hidden_size: int,
     head_dim: int = 64,
+    attention_hidden_size: int | None = None,
     decay_rank: int = 64,
     a_rank: int = 64,
     gate_rank: int = 128,
     value_rank: int = 32,
 ) -> tuple[TensorSpec, ...]:
-    heads = hidden_size // head_dim
+    recurrent_width = (
+        hidden_size
+        if attention_hidden_size is None
+        else int(attention_hidden_size)
+    )
+    if head_dim <= 0 or recurrent_width <= 0 or recurrent_width % head_dim:
+        raise ContractError(
+            "RWKV7 head_dim must divide attention_hidden_size; "
+            f"got {head_dim} and {recurrent_width}"
+        )
+    heads = recurrent_width // head_dim
     prefix = f"model.layers.{layer_index}.attn"
     specs = [
         *(TensorSpec(f"{prefix}.{name}", (1, 1, hidden_size), "bfloat16", "source-statistical-time-mix-v1") for name in ("x_r", "x_w", "x_k", "x_v", "x_a", "x_g")),
-        TensorSpec(f"{prefix}.k_k", (hidden_size,), "bfloat16", "normalized-key-scale-v1"),
-        TensorSpec(f"{prefix}.k_a", (hidden_size,), "bfloat16", "erase-interpolation-v1"),
+        TensorSpec(f"{prefix}.k_k", (recurrent_width,), "bfloat16", "normalized-key-scale-v1"),
+        TensorSpec(f"{prefix}.k_a", (recurrent_width,), "bfloat16", "erase-interpolation-v1"),
         TensorSpec(f"{prefix}.r_k", (heads, head_dim), "bfloat16", "zero-bonus-v1"),
-        *(TensorSpec(f"{prefix}.{name}_proj.weight", (hidden_size, hidden_size), "bfloat16", "teacher-trace-ridge-v1") for name in ("r", "k", "v", "o")),
+        *(TensorSpec(f"{prefix}.{name}_proj.weight", (recurrent_width, hidden_size), "bfloat16", "teacher-trace-ridge-v1") for name in ("r", "k", "v")),
+        TensorSpec(f"{prefix}.o_proj.weight", (hidden_size, recurrent_width), "bfloat16", "teacher-trace-ridge-v1"),
         TensorSpec(f"{prefix}.w_lora.lora.0.weight", (decay_rank, hidden_size), "bfloat16", "teacher-trace-ridge-v1"),
-        TensorSpec(f"{prefix}.w_lora.lora.2.weight", (hidden_size, decay_rank), "bfloat16", "teacher-trace-ridge-v1"),
-        TensorSpec(f"{prefix}.w_lora.lora.2.bias", (hidden_size,), "bfloat16", "native-decay-inverse-v1"),
+        TensorSpec(f"{prefix}.w_lora.lora.2.weight", (recurrent_width, decay_rank), "bfloat16", "teacher-trace-ridge-v1"),
+        TensorSpec(f"{prefix}.w_lora.lora.2.bias", (recurrent_width,), "bfloat16", "native-decay-inverse-v1"),
         TensorSpec(f"{prefix}.a_lora.lora.0.weight", (a_rank, hidden_size), "bfloat16", "teacher-trace-ridge-v1"),
-        TensorSpec(f"{prefix}.a_lora.lora.2.weight", (hidden_size, a_rank), "bfloat16", "teacher-trace-ridge-v1"),
-        TensorSpec(f"{prefix}.a_lora.lora.2.bias", (hidden_size,), "bfloat16", "erase-gate-v1"),
+        TensorSpec(f"{prefix}.a_lora.lora.2.weight", (recurrent_width, a_rank), "bfloat16", "teacher-trace-ridge-v1"),
+        TensorSpec(f"{prefix}.a_lora.lora.2.bias", (recurrent_width,), "bfloat16", "erase-gate-v1"),
         TensorSpec(f"{prefix}.g_lora.lora.0.weight", (gate_rank, hidden_size), "bfloat16", "teacher-trace-ridge-v1"),
-        TensorSpec(f"{prefix}.g_lora.lora.2.weight", (hidden_size, gate_rank), "bfloat16", "teacher-trace-ridge-v1"),
-        TensorSpec(f"{prefix}.g_norm.weight", (hidden_size,), "bfloat16", "source-output-statistics-v1"),
-        TensorSpec(f"{prefix}.g_norm.bias", (hidden_size,), "bfloat16", "zero-v1"),
+        TensorSpec(f"{prefix}.g_lora.lora.2.weight", (recurrent_width, gate_rank), "bfloat16", "teacher-trace-ridge-v1"),
+        TensorSpec(f"{prefix}.g_norm.weight", (recurrent_width,), "bfloat16", "source-output-statistics-v1"),
+        TensorSpec(f"{prefix}.g_norm.bias", (recurrent_width,), "bfloat16", "zero-v1"),
     ]
     if layer_index:
         specs.extend((
-            TensorSpec(f"{prefix}.v_lora.lora.0.weight", (value_rank, hidden_size), "bfloat16", "teacher-trace-ridge-v1"),
-            TensorSpec(f"{prefix}.v_lora.lora.2.weight", (hidden_size, value_rank), "bfloat16", "teacher-trace-ridge-v1"),
-            TensorSpec(f"{prefix}.v_lora.lora.2.bias", (hidden_size,), "bfloat16", "zero-v1"),
+            TensorSpec(f"{prefix}.v_lora.lora.0.weight", (value_rank, hidden_size), "bfloat16", "inactive-value-residual-feature-v1"),
+            TensorSpec(f"{prefix}.v_lora.lora.2.weight", (recurrent_width, value_rank), "bfloat16", "zero-value-residual-v1"),
+            TensorSpec(f"{prefix}.v_lora.lora.2.bias", (recurrent_width,), "bfloat16", "disabled-value-residual-logit-v1"),
         ))
     return tuple(specs)
 
@@ -99,13 +111,20 @@ def build_zero_step_ledger(
     *,
     layer_count: int,
     hidden_size: int,
+    head_dim: int,
+    attention_hidden_size: int | None = None,
     source_shard_hashes: tuple[str, ...],
 ) -> tuple[MappingLedger, tuple[TensorSpec, ...], tuple[str, ...]]:
     source_names = tuple(sorted(source_names))
     specs = tuple(
         spec
         for index in range(layer_count)
-        for spec in rwkv7_mixer_specs(index, hidden_size=hidden_size)
+        for spec in rwkv7_mixer_specs(
+            index,
+            hidden_size=hidden_size,
+            head_dim=head_dim,
+            attention_hidden_size=attention_hidden_size,
+        )
     )
     target_names = {spec.name for spec in specs}
     preserved_pairs = tuple(

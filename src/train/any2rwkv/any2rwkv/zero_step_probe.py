@@ -360,8 +360,14 @@ def affine_state_rollout(
     *,
     calibration_batches: int,
     fit_rank_one_closure: bool,
+    fixed_closure_scale: Tensor | None = None,
 ) -> AffineRollout:
-    """Roll out the centered affine state and an optional calibrated closure."""
+    """Roll out the centered affine state and an optional calibrated closure.
+
+    ``fixed_closure_scale`` replays parameters selected on an earlier split.
+    It is mutually exclusive with fitting so a frozen final split cannot
+    silently influence the rank-one closure.
+    """
     if query.ndim != 4 or grouped_key.ndim != 4 or grouped_value.ndim != 4:
         raise ValueError("query, key, and value must be rank four")
     if grouped_key.shape != grouped_value.shape:
@@ -376,6 +382,17 @@ def affine_state_rollout(
         raise ValueError("GQA head dimensions or center do not align")
     if not 0 < calibration_batches <= batch:
         raise ValueError("calibration_batches must select a non-empty prefix")
+    if fit_rank_one_closure and fixed_closure_scale is not None:
+        raise ValueError(
+            "cannot fit and replay a fixed rank-one closure simultaneously"
+        )
+    if fixed_closure_scale is not None:
+        if fixed_closure_scale.shape != (groups, sequence_length):
+            raise ValueError(
+                "fixed closure scale must align with group and sequence dimensions"
+            )
+        if not bool(torch.isfinite(fixed_closure_scale).all()):
+            raise ValueError("fixed closure scale must be finite")
 
     group_width = heads // groups
     head_to_group = torch.arange(heads, device=query.device) // group_width
@@ -397,8 +414,13 @@ def affine_state_rollout(
     biases = query.new_empty(
         (batch, sequence_length, groups, head_dim), dtype=torch.float32
     )
-    closure_scale = query.new_zeros(
-        (groups, sequence_length), dtype=torch.float32
+    closure_scale = (
+        query.new_zeros((groups, sequence_length), dtype=torch.float32)
+        if fixed_closure_scale is None
+        else fixed_closure_scale.detach().to(
+            device=query.device,
+            dtype=torch.float32,
+        ).clone()
     )
 
     for index in range(sequence_length):
@@ -459,7 +481,7 @@ def affine_state_rollout(
         write = (
             grouped_value[:, index].float() - old_bias
         ).unsqueeze(-1) * current_slope.unsqueeze(-2)
-        if fit_rank_one_closure:
+        if fit_rank_one_closure or fixed_closure_scale is not None:
             state_direction = torch.einsum(
                 "bgod,bgd->bgo", state, direction
             )

@@ -70,6 +70,30 @@ class NativeWeightProjectionFit:
     output: SelectedBiasFreeProjection
 
 
+@dataclass(frozen=True)
+class FrozenGqaOracle:
+    """Calibration-selected dynamic oracle parameters for final-only replay."""
+
+    group_center: Tensor
+    closure_scale: Tensor
+    query_basis: Tensor
+    dc_indices: tuple[int, int]
+
+
+@dataclass(frozen=True)
+class NativeCounterfactualTargets:
+    """Per-token oracle targets evaluated without fitting on the final split."""
+
+    read: Tensor
+    decay: Tensor
+    key: Tensor
+    value: Tensor
+    erase: Tensor
+    gate: Tensor
+    output_weight: Tensor
+    output_bias: Tensor | None
+
+
 def parse_dtype(name: str) -> torch.dtype:
     try:
         return {
@@ -798,9 +822,363 @@ def frozen_mapped_baseline_tensors(
     }
 
 
+def replay_frozen_gqa_oracle(
+    signals: dict[str, Tensor],
+    oracle: FrozenGqaOracle,
+) -> NativeCounterfactualTargets:
+    """Evaluate calibration-selected oracle targets on untouched final rows."""
+    affine = affine_state_rollout(
+        signals["query"],
+        signals["grouped_key"],
+        signals["grouped_value"],
+        oracle.group_center,
+        calibration_batches=1,
+        fit_rank_one_closure=False,
+        fixed_closure_scale=oracle.closure_scale,
+    )
+    uncentered_bias = affine.bias - torch.einsum(
+        "btgod,gd->btgo",
+        affine.states,
+        oracle.group_center,
+    )
+    projection = two_state_projection(
+        affine.states,
+        uncentered_bias,
+        signals["query"],
+        oracle.query_basis,
+        dc_indices=oracle.dc_indices,
+    )
+    tangent_probability, tangent_slope = probability_tangent_parameters(
+        signals["grouped_key"],
+        oracle.group_center,
+    )
+    transition = native_two_state_rollout(
+        projection,
+        tangent_probability,
+        tangent_slope,
+    )
+    return NativeCounterfactualTargets(
+        read=projection.read.flatten(2, 3),
+        decay=transition.decay,
+        key=transition.key,
+        value=transition.value,
+        erase=transition.erase,
+        gate=signals["gate"].flatten(2),
+        output_weight=signals["output_weight"],
+        output_bias=signals["output_bias"],
+    )
+
+
+def native_decay_logits(decay: Tensor, *, head_dim: int) -> Tensor:
+    """Invert the native RWKV7 decay link into channel-wise kernel logits."""
+    if decay.ndim != 3:
+        raise ValueError("native decay must be [batch,time,head]")
+    probability = (-torch.log(decay.float()) / math.exp(-0.5)).clamp(
+        torch.finfo(torch.float32).eps,
+        1 - torch.finfo(torch.float32).eps,
+    )
+    return torch.logit(probability).unsqueeze(-1).expand(
+        *decay.shape,
+        head_dim,
+    ).flatten(2)
+
+
+def replay_native_signals(
+    *,
+    module: ProjectionBoundaryRWKV7Attention,
+    kernel,
+    module_input: Tensor,
+    read: Tensor,
+    decay_logits: Tensor,
+    key: Tensor,
+    value: Tensor,
+    erase: Tensor,
+    gate: Tensor,
+    output_weight: Tensor,
+    output_bias: Tensor | None,
+) -> tuple[Tensor, Tensor]:
+    """Replay one signal combination through the real native BF16 kernel."""
+    batch, tokens, _ = module_input.shape
+    recurrent_width = module.num_heads * module.head_dim
+    expected_vector_shape = (batch, tokens, recurrent_width)
+    flattened = {
+        "read": read.flatten(2),
+        "decay_logits": decay_logits.flatten(2),
+        "key": key.flatten(2),
+        "value": value.flatten(2),
+        "erase": erase.flatten(2),
+        "gate": gate.flatten(2),
+    }
+    for name, tensor in flattened.items():
+        if tuple(tensor.shape) != expected_vector_shape:
+            raise ValueError(
+                f"{name} counterfactual has shape {tuple(tensor.shape)}, "
+                f"expected {expected_vector_shape}"
+            )
+    normalized_key = functional.normalize(
+        flattened["key"].view(
+            batch,
+            tokens,
+            module.num_heads,
+            module.head_dim,
+        ),
+        dim=-1,
+        p=2,
+    ).view(batch, tokens, recurrent_width)
+    vectors = (
+        flattened["read"],
+        flattened["decay_logits"],
+        flattened["key"],
+        flattened["value"],
+        -normalized_key,
+        normalized_key * flattened["erase"],
+    )
+    padding = (-tokens) % kernel.chunk_size
+    if padding:
+        vectors = tuple(
+            functional.pad(vector, (0, 0, 0, padding))
+            for vector in vectors
+        )
+    state = torch.zeros(
+        batch,
+        module.num_heads,
+        module.head_dim,
+        module.head_dim,
+        device=module_input.device,
+        dtype=torch.float32,
+    )
+    recurrent, final_state = kernel(
+        state,
+        *(vector.to(torch.bfloat16) for vector in vectors),
+    )
+    recurrent = recurrent[:, :tokens].to(module_input.dtype)
+    norm_base = functional.group_norm(
+        recurrent.reshape(batch * tokens, recurrent_width),
+        num_groups=module.num_heads,
+        weight=None,
+        bias=None,
+        eps=module.head_dim * 1e-5,
+    ).view(batch, tokens, recurrent_width)
+    recurrent = (
+        norm_base * module.g_norm.weight.reshape(1, 1, recurrent_width)
+        + module.g_norm.bias.reshape(1, 1, recurrent_width)
+    )
+    bonus = (
+        flattened["read"].view(
+            batch,
+            tokens,
+            module.num_heads,
+            module.head_dim,
+        )
+        * flattened["key"].view(
+            batch,
+            tokens,
+            module.num_heads,
+            module.head_dim,
+        )
+        * module.r_k.reshape(1, 1, module.num_heads, module.head_dim)
+    ).sum(dim=-1, keepdim=True)
+    recurrent = recurrent + (
+        bonus
+        * flattened["value"].view(
+            batch,
+            tokens,
+            module.num_heads,
+            module.head_dim,
+        )
+    ).reshape(batch, tokens, recurrent_width)
+    pre_output = recurrent * flattened["gate"].to(recurrent.dtype)
+    output = functional.linear(
+        pre_output,
+        output_weight.to(device=pre_output.device, dtype=pre_output.dtype),
+        (
+            None
+            if output_bias is None
+            else output_bias.to(
+                device=pre_output.device,
+                dtype=pre_output.dtype,
+            )
+        ),
+    )
+    return output, final_state
+
+
+def exact_component_counterfactuals(
+    *,
+    module: ProjectionBoundaryRWKV7Attention,
+    kernel,
+    module_input: Tensor,
+    candidate_output: Tensor,
+    candidate_signals: dict[str, Tensor],
+    target: Tensor,
+    oracle_targets: NativeCounterfactualTargets,
+) -> dict[str, object]:
+    """Replace exactly one fitted component group on the frozen final split."""
+    candidate = {
+        "read": candidate_signals["r"],
+        "decay_logits": candidate_signals["w"],
+        "key": candidate_signals["k"],
+        "value": candidate_signals["v"],
+        "erase": candidate_signals["erase"],
+        "gate": candidate_signals["gate"],
+        "output_weight": module.o_proj.weight,
+        "output_bias": None,
+    }
+    exact_decay_logits = native_decay_logits(
+        oracle_targets.decay,
+        head_dim=module.head_dim,
+    )
+    replacements = {
+        "exact_r_k_v_dynamic_oracle": {
+            "read": oracle_targets.read,
+            "key": oracle_targets.key,
+            "value": oracle_targets.value,
+        },
+        "exact_w_a_dynamic_oracle": {
+            "decay_logits": exact_decay_logits,
+            "erase": oracle_targets.erase,
+        },
+        "exact_source_gate": {
+            "gate": oracle_targets.gate,
+        },
+        "exact_source_o_proj": {
+            "output_weight": oracle_targets.output_weight,
+            "output_bias": oracle_targets.output_bias,
+        },
+    }
+
+    replay_output, replay_state = replay_native_signals(
+        module=module,
+        kernel=kernel,
+        module_input=module_input,
+        **candidate,
+    )
+    replay_parity = tensor_metrics(replay_output, candidate_output)
+    if replay_parity["relative_l2"] > 1e-6:
+        raise RuntimeError(
+            "candidate signal replay does not reproduce the installed module"
+        )
+
+    candidate_nmse = normalized_mse(candidate_output, target)
+    results: dict[str, object] = {}
+    for name, replacement in replacements.items():
+        arguments = {**candidate, **replacement}
+        output, final_state = replay_native_signals(
+            module=module,
+            kernel=kernel,
+            module_input=module_input,
+            **arguments,
+        )
+        metrics = tensor_metrics(output, target)
+        results[name] = {
+            "replaced_components": sorted(replacement),
+            "all_other_components": "installed-bf16-candidate",
+            "output_vs_exact_qwen_mixer": metrics,
+            "nmse_delta_from_candidate": metrics["nmse"] - candidate_nmse,
+            "output_sha256": tensor_sha256(output),
+            "final_state_sha256": tensor_sha256(final_state),
+        }
+    return {
+        "scope": (
+            "frozen-final one-group-at-a-time diagnostic; oracle center, "
+            "closure and query basis were frozen before final rows"
+        ),
+        "selection_effect": "none-diagnostic-only",
+        "candidate_signal_replay": {
+            "output_vs_installed_module": replay_parity,
+            "output_sha256": tensor_sha256(replay_output),
+            "final_state_sha256": tensor_sha256(replay_state),
+        },
+        "ablations": results,
+    }
+
+
+def real_bf16_backward_check(
+    *,
+    module: ProjectionBoundaryRWKV7Attention,
+    kernel,
+    module_input: Tensor,
+    positions: Tensor,
+    v_first: Tensor,
+    target: Tensor,
+) -> dict[str, object]:
+    """Exercise output and final-state backward through the native CUDA kernel."""
+    module.zero_grad(set_to_none=True)
+    backward_input = module_input.detach().clone().requires_grad_(True)
+    output, _, final_state, _ = module.forward_sequence(
+        backward_input,
+        positions=positions,
+        kernel=kernel,
+        v_first=v_first,
+    )
+    output_loss = functional.mse_loss(output.float(), target.float())
+    state_loss = final_state.float().square().mean()
+    state_loss_coefficient = 1e-6
+    loss = output_loss + state_loss * state_loss_coefficient
+    loss.backward()
+
+    parameter_gradients: dict[str, object] = {}
+    nonzero_parameter_gradients = 0
+    finite = True
+    for name, parameter in module.named_parameters():
+        gradient = parameter.grad
+        if gradient is None:
+            parameter_gradients[name] = {"status": "none"}
+            continue
+        gradient_float = gradient.float()
+        gradient_finite = bool(torch.isfinite(gradient_float).all())
+        gradient_l2 = float(torch.linalg.vector_norm(gradient_float))
+        finite = finite and gradient_finite
+        if gradient_l2 > 0:
+            nonzero_parameter_gradients += 1
+        parameter_gradients[name] = {
+            "status": "present",
+            "finite": gradient_finite,
+            "l2": gradient_l2,
+        }
+    input_gradient = backward_input.grad
+    input_gradient_finite = (
+        input_gradient is not None
+        and bool(torch.isfinite(input_gradient.float()).all())
+    )
+    input_gradient_l2 = (
+        0.0
+        if input_gradient is None
+        else float(torch.linalg.vector_norm(input_gradient.float()))
+    )
+    accepted = (
+        bool(torch.isfinite(loss))
+        and bool(torch.isfinite(output.float()).all())
+        and bool(torch.isfinite(final_state).all())
+        and final_state.requires_grad
+        and input_gradient_finite
+        and input_gradient_l2 > 0
+        and finite
+        and nonzero_parameter_gradients > 0
+    )
+    return {
+        "status": "accepted" if accepted else "rejected",
+        "head_size": module.head_dim,
+        "kernel_vectors": "torch.bfloat16",
+        "recurrent_state": str(final_state.dtype),
+        "output_loss": float(output_loss.detach()),
+        "state_loss": float(state_loss.detach()),
+        "state_loss_coefficient": state_loss_coefficient,
+        "combined_loss": float(loss.detach()),
+        "final_state_requires_grad": final_state.requires_grad,
+        "input_gradient": {
+            "finite": input_gradient_finite,
+            "l2": input_gradient_l2,
+        },
+        "nonzero_parameter_gradient_count": nonzero_parameter_gradients,
+        "parameter_gradients": parameter_gradients,
+    }
+
+
 def run_materialized_native_gate(
     *,
     fit: NativeWeightProjectionFit,
+    oracle: FrozenGqaOracle,
     baseline_tensors: dict[str, Tensor],
     signals: dict[str, Tensor],
     positions: Tensor,
@@ -842,7 +1220,12 @@ def run_materialized_native_gate(
         baseline_tensors,
     )
     kernel = load_rwkv_lm_kernel(target_config.head_dim)
-    module_input = signals["mixer_input"].to(torch.bfloat16)
+    module_input = (
+        signals["mixer_input"]
+        .detach()
+        .to(torch.bfloat16)
+        .clone()
+    )
     expected_v_first_shape = (
         *module_input.shape[:2],
         target_config.attention_hidden_size,
@@ -852,7 +1235,11 @@ def run_materialized_native_gate(
             "layer-0 value proxy must align with the nonfirst native layer; "
             f"got={tuple(v_first.shape)} expected={expected_v_first_shape}"
         )
-    v_first = v_first.to(device=module_input.device, dtype=torch.bfloat16)
+    v_first = (
+        v_first.detach()
+        .to(device=module_input.device, dtype=torch.bfloat16)
+        .clone()
+    )
     zero_v_first = torch.zeros_like(v_first)
     with torch.inference_mode():
         candidate_output, _, candidate_state, candidate_signals = (
@@ -875,7 +1262,25 @@ def run_materialized_native_gate(
             kernel=kernel,
             v_first=v_first,
         )
-    target = signals["actual_mixer_output"]
+        oracle_targets = replay_frozen_gqa_oracle(signals, oracle)
+        component_counterfactuals = exact_component_counterfactuals(
+            module=candidate,
+            kernel=kernel,
+            module_input=module_input,
+            candidate_output=candidate_output,
+            candidate_signals=candidate_signals,
+            target=signals["actual_mixer_output"],
+            oracle_targets=oracle_targets,
+        )
+    target = signals["actual_mixer_output"].detach().clone()
+    backward_check = real_bf16_backward_check(
+        module=candidate,
+        kernel=kernel,
+        module_input=module_input,
+        positions=positions,
+        v_first=v_first,
+        target=target,
+    )
     candidate_metrics = tensor_metrics(candidate_output, target)
     baseline_metrics = tensor_metrics(baseline_output, target)
     accepted = (
@@ -924,6 +1329,8 @@ def run_materialized_native_gate(
             candidate_signals["gate"],
             signals["gate"].flatten(2),
         ),
+        "exact_component_counterfactuals": component_counterfactuals,
+        "real_bf16_forward_state_backward": backward_check,
         "candidate_materialization": materialization_report(
             candidate_materialization
         ),
@@ -941,7 +1348,7 @@ def gqa_diagnostics(
     source_head_dim: int,
     rotary_dim: int,
     rope_theta: float,
-) -> tuple[dict[str, object], NativeWeightProjectionFit]:
+) -> tuple[dict[str, object], NativeWeightProjectionFit, FrozenGqaOracle]:
     query = signals["query"]
     key = signals["key"]
     value = signals["value"]
@@ -1563,7 +1970,13 @@ def gqa_diagnostics(
     }
     if selected_native_fit is None:
         raise RuntimeError("native GQA candidate did not produce a weight fit")
-    return report, selected_native_fit
+    oracle = FrozenGqaOracle(
+        group_center=group_center.detach().clone(),
+        closure_scale=affine.closure_scale.detach().clone(),
+        query_basis=rope_observable_basis.detach().clone(),
+        dc_indices=(native_dim - 1, native_dim - 1),
+    )
+    return report, selected_native_fit, oracle
 
 
 def gdn_diagnostics(
@@ -1797,7 +2210,7 @@ def main() -> int:
         * checkpoint.contract.partial_rotary_factor
     )
     fit_gqa_signals = slice_gqa_rows(gqa_signals, 0, fit_rows)
-    gqa_report, native_fit = gqa_diagnostics(
+    gqa_report, native_fit, frozen_gqa_oracle = gqa_diagnostics(
         fit_gqa_signals,
         calibration_rows=args.calibration_rows,
         positions=position_ids[:fit_rows],
@@ -1823,6 +2236,7 @@ def main() -> int:
         )
         real_module_gate = run_materialized_native_gate(
             fit=native_fit,
+            oracle=frozen_gqa_oracle,
             baseline_tensors=frozen_mapped_baseline_tensors(
                 checkpoint,
                 target_config,
@@ -1844,7 +2258,7 @@ def main() -> int:
     gqa_report["real_bf16_module_gate"] = real_module_gate
 
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "experiment": "qwen35-2b-real-layer-gqa-gdn-zero-step-probe",
         "provenance": {
             "source": str(args.source.resolve()),
@@ -1875,6 +2289,12 @@ def main() -> int:
                 "final sample IDs are selected by a pre-fit row offset and "
                 "excluded from every solver and method-selection metric; an "
                 "optional gap retires previously exposed final rows"
+            ),
+            "counterfactual_policy": (
+                "GQA group center, rank-one closure, RoPE-aligned query basis "
+                "and native weights are frozen on calibration/development; "
+                "fresh final rows only replay one-group-at-a-time exact "
+                "component diagnostics and cannot alter installation"
             ),
             "sequence_length": args.sequence_length,
             "gdn_layer": args.gdn_layer,

@@ -29,13 +29,32 @@ class TargetMappingTests(unittest.TestCase):
         ):
             self.assertIn(required, names)
 
+    def test_target_specs_keep_recurrent_width_separate_from_hidden_size(self) -> None:
+        specs = {
+            spec.name: spec
+            for spec in rwkv7_mixer_specs(
+                1,
+                hidden_size=8,
+                attention_hidden_size=16,
+                head_dim=4,
+            )
+        }
+        prefix = "model.layers.1.attn"
+        self.assertEqual(specs[f"{prefix}.x_r"].shape, (1, 1, 8))
+        self.assertEqual(specs[f"{prefix}.r_proj.weight"].shape, (16, 8))
+        self.assertEqual(specs[f"{prefix}.v_proj.weight"].shape, (16, 8))
+        self.assertEqual(specs[f"{prefix}.o_proj.weight"].shape, (8, 16))
+        self.assertEqual(specs[f"{prefix}.g_norm.weight"].shape, (16,))
+        self.assertEqual(specs[f"{prefix}.r_k"].shape, (4, 4))
+
     def test_mtp_attention_is_preserved_not_converted_as_backbone(self) -> None:
         backbone = "model.language_model.layers.0.self_attn.q_proj.weight"
         mtp = "model.language_model.mtp.layers.0.self_attn.q_proj.weight"
         self.assertTrue(is_sequence_mixer(backbone))
         self.assertFalse(is_sequence_mixer(mtp))
         ledger, _, targets = build_zero_step_ledger(
-            (backbone, mtp), layer_count=1, hidden_size=64, source_shard_hashes=("abc",)
+            (backbone, mtp), layer_count=1, hidden_size=64, head_dim=16,
+            source_shard_hashes=("abc",)
         )
         self.assertEqual(ledger.sources[mtp].disposition, "preserved")
         self.assertIn("mtp.layers.0.self_attn.q_proj.weight", targets)
@@ -48,7 +67,8 @@ class TargetMappingTests(unittest.TestCase):
             "visual.patch_embed.weight",
         )
         ledger, specs, targets = build_zero_step_ledger(
-            source, layer_count=1, hidden_size=64, source_shard_hashes=("abc",)
+            source, layer_count=1, hidden_size=64, head_dim=16,
+            source_shard_hashes=("abc",)
         )
         self.assertEqual(ledger.sources["visual.patch_embed.weight"].disposition, "intentionally-unmapped")
         self.assertEqual(ledger.targets["model.embed_tokens.weight"].provenance, "copied")

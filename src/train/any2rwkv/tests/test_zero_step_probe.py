@@ -12,6 +12,7 @@ from any2rwkv.recurrent import rwkv7_step
 from any2rwkv.zero_step_probe import (
     RWKV7_MINIMUM_DECAY,
     TwoStateProjection,
+    affine_state_rollout,
     causal_attention,
     fit_bias_free_projection,
     fit_low_rank_projection,
@@ -68,6 +69,51 @@ def test_exact_hazard_rollout_recovers_causal_attention() -> None:
     recurrent = rollout_hazards(exact.hazards, value)
 
     torch.testing.assert_close(recurrent, exact.output, rtol=1e-5, atol=1e-6)
+
+
+def test_affine_oracle_replays_frozen_closure_without_final_refit() -> None:
+    generator = torch.Generator().manual_seed(20260725)
+    query = torch.randn(4, 6, 2, 8, generator=generator)
+    grouped_key = torch.randn(4, 6, 1, 8, generator=generator)
+    grouped_value = torch.randn(4, 6, 1, 8, generator=generator)
+    center = query[:2].mean(dim=(0, 1, 2), keepdim=False).unsqueeze(0)
+
+    fitted = affine_state_rollout(
+        query,
+        grouped_key,
+        grouped_value,
+        center,
+        calibration_batches=2,
+        fit_rank_one_closure=True,
+    )
+    replayed = affine_state_rollout(
+        query[2:],
+        grouped_key[2:],
+        grouped_value[2:],
+        center,
+        calibration_batches=1,
+        fit_rank_one_closure=False,
+        fixed_closure_scale=fitted.closure_scale,
+    )
+
+    torch.testing.assert_close(replayed.output, fitted.output[2:])
+    torch.testing.assert_close(replayed.states, fitted.states[2:])
+    torch.testing.assert_close(
+        replayed.closure_scale,
+        fitted.closure_scale,
+        rtol=0,
+        atol=0,
+    )
+    with pytest.raises(ValueError, match="cannot fit and replay"):
+        affine_state_rollout(
+            query[2:],
+            grouped_key[2:],
+            grouped_value[2:],
+            center,
+            calibration_batches=1,
+            fit_rank_one_closure=True,
+            fixed_closure_scale=fitted.closure_scale,
+        )
 
 
 def test_probability_and_logit_tangents_agree_at_zero() -> None:

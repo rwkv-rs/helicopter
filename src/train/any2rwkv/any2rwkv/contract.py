@@ -51,6 +51,81 @@ class TargetContract:
         )
 
 
+@dataclass(frozen=True)
+class RecurrentHeadGeometry:
+    num_heads: int
+    head_size: int
+    recurrent_width: int
+    source: str
+    gdn_state_geometry_preserved: bool
+
+
+def derive_recurrent_head_geometry(
+    source_config: Mapping[str, Any],
+) -> RecurrentHeadGeometry:
+    """Preserve the source GDN state partition whenever one is present."""
+    text = _text_config(source_config)
+    hidden_size = int(text.get("hidden_size", 0))
+    layer_types = tuple(str(value) for value in text.get("layer_types", ()))
+    if hidden_size <= 0:
+        raise ContractError("source hidden_size must be positive")
+    if "linear_attention" in layer_types:
+        key_heads = int(text.get("linear_num_key_heads", 0))
+        value_heads = int(text.get("linear_num_value_heads", 0))
+        key_head_size = int(text.get("linear_key_head_dim", 0))
+        value_head_size = int(text.get("linear_value_head_dim", 0))
+        if (
+            key_heads <= 0
+            or value_heads <= 0
+            or key_head_size <= 0
+            or value_head_size <= 0
+        ):
+            raise ContractError(
+                "linear-attention source must declare positive key/value head geometry"
+            )
+        if key_head_size != value_head_size or value_heads % key_heads:
+            raise ContractError(
+                "native RWKV7 exact GDN migration requires equal key/value head "
+                "size and an integral key-to-value head repeat"
+            )
+        recurrent_width = value_heads * value_head_size
+        attention_heads = int(text.get("num_attention_heads", 0))
+        attention_head_size = int(text.get("head_dim", 0))
+        if (
+            attention_heads <= 0
+            or attention_head_size <= 0
+            or attention_heads * attention_head_size != recurrent_width
+        ):
+            raise ContractError(
+                "source GDN width (value width) and full-attention query width must match "
+                "so every mixer preserves one recurrent width"
+            )
+        return RecurrentHeadGeometry(
+            num_heads=value_heads,
+            head_size=value_head_size,
+            recurrent_width=recurrent_width,
+            source="linear_attention_value_state",
+            gdn_state_geometry_preserved=True,
+        )
+
+    attention_heads = int(text.get("num_attention_heads", 0))
+    attention_head_size = int(text.get("head_dim", 0))
+    if (
+        attention_heads <= 0
+        or attention_head_size <= 0
+    ):
+        raise ContractError(
+            "attention-only source must declare a positive query-head geometry"
+        )
+    return RecurrentHeadGeometry(
+        num_heads=attention_heads,
+        head_size=attention_head_size,
+        recurrent_width=attention_heads * attention_head_size,
+        source="full_attention_query_layout",
+        gdn_state_geometry_preserved=False,
+    )
+
+
 def validate_source_config(
     config: Mapping[str, Any],
     *,
@@ -122,6 +197,7 @@ def build_target_config(
     final = converted == source.num_hidden_layers == FINAL_LAYER_COUNT
     layout = ["rwkv7" if index < converted else source.layer_types[index] for index in range(source.num_hidden_layers)]
     source_text = _text_config(source_config)
+    recurrent_geometry = derive_recurrent_head_geometry(source_config)
     target = dict(source_text)
     fully_recurrent_proxy = converted == source.num_hidden_layers and not final
     target["model_type"] = "any2rwkv_qwen35_rwkv7" if final else ("any2rwkv_proxy" if fully_recurrent_proxy else "any2rwkv_hybrid")
@@ -146,14 +222,20 @@ def build_target_config(
     }
     target["num_hidden_layers"] = source.num_hidden_layers
     target["layer_types"] = layout
-    target["head_dim"] = 64
-    target["head_size"] = 64
-    if source.hidden_size % 64:
-        raise ContractError(f"native RWKV7 requires hidden_size divisible by 64, found {source.hidden_size}")
-    target["num_heads"] = source.hidden_size // 64
-    target["num_attention_heads"] = source.hidden_size // 64
+    target["head_dim"] = recurrent_geometry.head_size
+    target["head_size"] = recurrent_geometry.head_size
+    target["num_heads"] = recurrent_geometry.num_heads
+    target["num_attention_heads"] = recurrent_geometry.num_heads
+    target["attention_hidden_size"] = recurrent_geometry.recurrent_width
     target["rope_theta"] = source.rope_theta
     target["partial_rotary_factor"] = source.partial_rotary_factor
+    raw_rope_parameters = source_text.get("rope_parameters", {})
+    if isinstance(raw_rope_parameters, Mapping):
+        target["rope_parameters"] = {
+            key: value
+            for key, value in raw_rope_parameters.items()
+            if key not in {"mrope_section", "mrope_interleaved"}
+        }
     target["source_config_metadata"] = {
         "model_type": source_config.get("model_type"),
         "architectures": source_config.get("architectures"),
@@ -170,7 +252,22 @@ def build_target_config(
         "preserved": ["moe", "mtp", "embedding", "norm", "rope", "lm_head", "tokenizer"],
         "rope_boundary": "source_projection_then_native_rwkv7_mixer",
         "recurrence": "native_rwkv7",
+        "recurrent_head_geometry": {
+            "num_heads": recurrent_geometry.num_heads,
+            "head_size": recurrent_geometry.head_size,
+            "recurrent_width": recurrent_geometry.recurrent_width,
+            "source": recurrent_geometry.source,
+            "gdn_state_geometry_preserved": (
+                recurrent_geometry.gdn_state_geometry_preserved
+            ),
+        },
         "source_text_config": dict(source_text),
+        "ignored_multimodal_rope_fields": [
+            key
+            for key in ("mrope_section", "mrope_interleaved")
+            if isinstance(raw_rope_parameters, Mapping)
+            and key in raw_rope_parameters
+        ],
     }
     if final and not TargetContract(source.num_hidden_layers, tuple(layout)).final:
         raise ContractError("final export requires all 60 layers to be recurrent RWKV7")
