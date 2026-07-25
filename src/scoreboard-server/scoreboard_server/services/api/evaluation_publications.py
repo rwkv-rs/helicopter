@@ -79,7 +79,9 @@ class EvaluationPublicationService:
         try:
             publication = EvaluationPublication.model_validate(raw)
         except ValidationError as error:
-            raise PublicationPayloadError(error.errors()) from error
+            raise PublicationPayloadError(
+                error.errors(include_context=False, include_input=False)
+            ) from error
         return await self.repository.publish(
             publication_id=publication_id,
             digest=digest,

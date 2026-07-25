@@ -199,6 +199,27 @@ async def test_publication_is_atomic_idempotent_and_queryable(
                 )
             ).status_code == 401
 
+            invalid = _payload()
+            invalid["diagnostics"]["samples"] = 1
+            invalid_digest = content_digest(invalid)
+            rejected = await client.put(
+                "/api/v1/evaluation-publications/run%3Agsm8k",
+                content=gzip.compress(
+                    json.dumps(invalid, separators=(",", ":")).encode()
+                ),
+                headers={
+                    **headers,
+                    "Idempotency-Key": f"publish:{invalid_digest}",
+                },
+            )
+            assert rejected.status_code == 422
+            assert (
+                await app.state.database.require_pool().fetchval(
+                    "SELECT count(*) FROM evaluation_result"
+                )
+                == 0
+            )
+
             created = await client.put(
                 "/api/v1/evaluation-publications/run%3Agsm8k",
                 content=body,

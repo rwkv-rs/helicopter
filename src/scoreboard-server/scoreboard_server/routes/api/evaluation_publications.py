@@ -74,7 +74,7 @@ async def _publication_json(request: Request) -> dict:
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid JSON body") from error
     if not isinstance(value, dict):
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "body must be an object")
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "body must be an object")
     return value
 
 
@@ -99,7 +99,7 @@ def register(app: FastAPI, service: EvaluationPublicationService) -> None:
             ) from error
         except PublicationPayloadError as error:
             raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_ENTITY, error.detail
+                status.HTTP_422_UNPROCESSABLE_CONTENT, error.detail
             ) from error
         except PublicationConflictError as error:
             raise HTTPException(
