@@ -153,7 +153,9 @@ state/FP32 accumulation；数据库会校验 mode 与 GEMM policy 一致。
 checkpoint 文件名的 `ctx<N>` 是 prompt context 上限，不是 prompt 与 completion
 共用的总预算。评估固定保留 8192 个输出 token，因此传给 recurrent RWKV7 的
 `max_model_len` 为 `N + 8192`；例如 `ctx8192` 使用总长度 16384，但 prompt 仍最多
-保留 8192 token。该规则固定在产品中，不能通过 TOML 覆盖。
+保留 8192 token。adapter 只在单个 RWKV evaluation unit 的进程作用域内设置
+`VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`，绕过只适用于位置编码模型的通用长度保护；
+退出该 unit 后恢复原环境。该规则固定在产品中，不能通过 TOML 覆盖。
 
 默认 registry 也包含 Wikitext 等原生 `PERPLEXITY` task。这类 task 不是对话生成：
 adapter 直接对 task 给出的原始 document query 做滚动 log-likelihood，不添加

@@ -851,6 +851,11 @@ def evaluate_unit(
             "VLLM_USE_RAPID_SAMPLER": "1",
             "VLLM_USE_V2_MODEL_RUNNER": "1",
             "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
+            # RWKV is recurrent and has no positional encoding ceiling. The
+            # total LightEval length includes the checkpoint prompt context
+            # plus the fixed generation budget, so vLLM's generic positional
+            # model guard must be disabled only for this scoped model unit.
+            "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
             "RKV_MODE": "off",
             "CMIX_SPARSE": "no-fc",
             "LOW_RANK_WEIGHT": "both",

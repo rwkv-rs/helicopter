@@ -29,6 +29,34 @@ def test_runtime_environment_is_restored_after_failure(
     assert "VLLM_USE_V2_MODEL_RUNNER" not in os.environ
 
 
+def test_evaluation_scopes_recurrent_total_length_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, str] = {}
+    unit = SimpleNamespace(weight=object(), wkv_mode="fp16")
+    monkeypatch.setenv("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "before")
+    monkeypatch.setattr(
+        lighteval_adapter, "verify_weight_identity", lambda _weight: None
+    )
+
+    def fake_evaluate_unit(**_kwargs):
+        observed["allow_long_max_model_len"] = os.environ[
+            "VLLM_ALLOW_LONG_MAX_MODEL_LEN"
+        ]
+        return [], []
+
+    monkeypatch.setattr(lighteval_adapter, "_evaluate_unit", fake_evaluate_unit)
+
+    lighteval_adapter.evaluate_unit(
+        unit=unit,
+        shards=(),
+        campaign_dir=Path("/unused"),
+    )
+
+    assert observed == {"allow_long_max_model_len": "1"}
+    assert os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] == "before"
+
+
 def test_task_failure_record_uses_only_exception_type() -> None:
     error = RuntimeError("credential=do-not-record")
 
