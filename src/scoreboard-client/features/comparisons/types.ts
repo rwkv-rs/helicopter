@@ -75,15 +75,22 @@ export interface ScoreCellSelection {
 
 export interface AnswerSample {
   id: string;
-  sampleIndex: number;
-  problem: string;
-  prompt: string;
-  answer: string;
-  referenceAnswer: string;
-  failReason: string | null;
-  generatedTokens: number;
-  latencyMs: number;
-  runId: string;
+  problemId: string;
+  repeatId: number;
+  groundTruth: string;
+  extractedAnswer: string;
+  isPassed: boolean | null;
+  context: {
+    problem: string;
+    assembledPrompt: string;
+    rawCompletion: string;
+    failReason: string | null;
+    generatedTokens: number;
+    latencyMs: number;
+    runId: string;
+    model: string;
+    metric: string;
+  };
 }
 
 export interface AnswerSampleGroup {

@@ -1607,100 +1607,150 @@ table.pivot.bench-table tbody tr:hover .axis-kmetric {
 .answer-sample-note strong {
   color: var(--text);
 }
-.answer-sample-list {
-  display: grid;
-  gap: 9px;
+.answer-records-wrap {
+  overflow-x: auto;
+  border: 1px solid #3b485d;
+  border-radius: 7px;
+  scrollbar-color: #60708c #0b111a;
+  scrollbar-width: thin;
 }
-.answer-sample-card {
-  overflow: hidden;
-  border: 1px solid #344258;
-  border-left-width: 3px;
-  border-radius: 8px;
-  background: #111a27;
-}
-.answer-sample-card.correct {
-  border-left-color: #4eb98c;
-}
-.answer-sample-card.incorrect {
-  border-left-color: #d86d82;
-}
-.answer-sample-card.unanswered {
-  border-left-color: #d5ad55;
-}
-.answer-sample-card > header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-height: 34px;
-  padding: 6px 10px;
-  border-bottom: 1px solid #344258;
-  background: #172131;
-  color: var(--text-muted);
-  font-family: var(--mono);
-  font-size: 11px;
-}
-.answer-sample-card > header strong {
-  margin-right: auto;
+.answer-records-table {
+  width: 100%;
+  min-width: 880px;
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: fixed;
   color: var(--text);
-  font-size: 12px;
+  font-family: var(--mono);
+  font-size: 13px;
 }
-.answer-sample-card > header code {
-  color: var(--text-dim);
+.answer-records-table .answer-problem-col {
+  width: 160px;
 }
-.answer-sample-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr) minmax(180px, 0.7fr);
+.answer-records-table .answer-repeat-col {
+  width: 88px;
 }
-.answer-sample-grid section {
-  min-width: 0;
-  padding: 9px 11px 10px;
-  border-right: 1px solid #344258;
+.answer-records-table .answer-ground-col {
+  width: 210px;
 }
-.answer-sample-grid section:last-child {
+.answer-records-table .answer-model-col {
+  width: 300px;
+}
+.answer-records-table .answer-passed-col {
+  width: 105px;
+}
+.answer-records-table .answer-detail-col {
+  width: 90px;
+}
+.answer-records-table th,
+.answer-records-table td {
+  height: 38px;
+  padding: 7px 10px;
+  border-right: 1px solid #3b485d;
+  border-bottom: 1px solid #3b485d;
+  overflow: hidden;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.answer-records-table th:last-child,
+.answer-records-table td:last-child {
   border-right: 0;
 }
-.answer-sample-grid h3 {
-  margin: 0 0 5px;
-  color: var(--text-muted);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+.answer-records-table tbody tr:last-child td {
+  border-bottom: 0;
 }
-.answer-sample-grid p {
+.answer-records-table thead th {
+  background: #182235;
+  color: #f4f7fc;
+  font-weight: 750;
+}
+.answer-records-table tbody tr:nth-child(4n + 1) {
+  background: #101a26;
+}
+.answer-records-table tbody tr:nth-child(4n + 2) {
+  background: #181725;
+}
+.answer-records-table tbody tr:nth-child(4n + 3) {
+  background: #10201d;
+}
+.answer-records-table tbody tr:nth-child(4n) {
+  background: #211b16;
+}
+.answer-records-table tbody tr:hover {
+  background: #22324a;
+}
+.answer-records-table .answer-problem-id,
+.answer-records-table .answer-record-value {
+  text-align: left;
+}
+.answer-records-table .answer-problem-id {
+  color: #ffffff;
+  font-weight: 750;
+}
+.answer-records-table .answer-record-value {
+  color: var(--text-dim);
+}
+.answer-records-table .answer-record-value.empty {
+  color: var(--text-muted);
+}
+.answer-pass-badge {
+  display: inline-block;
+  min-width: 48px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 750;
+  text-align: center;
+}
+.answer-pass-badge.passed {
+  background: rgba(101, 230, 170, 0.14);
+  color: var(--good);
+}
+.answer-pass-badge.failed {
+  background: rgba(255, 129, 151, 0.14);
+  color: var(--bad);
+}
+.answer-pass-badge.unanswered {
+  background: rgba(255, 209, 102, 0.13);
+  color: var(--warn);
+}
+.answer-detail-button {
+  padding: 4px 9px;
+  color: #b9d1ff;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.answer-context-backdrop {
+  z-index: 80;
+}
+.answer-context-modal {
+  width: min(1180px, 96vw);
+}
+.answer-context-body {
+  min-height: 0;
+}
+.answer-context-body .stage pre {
+  max-height: 300px;
+  overflow: auto;
+}
+.answer-context-meta {
+  display: grid;
+  grid-template-columns: 132px minmax(0, 1fr);
+  gap: 8px 10px;
   margin: 0;
-  color: #edf2fa;
   font-family: var(--mono);
   font-size: 12px;
-  line-height: 1.5;
+}
+.answer-context-meta dt {
+  color: var(--text-muted);
+}
+.answer-context-meta dd {
+  margin: 0;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
   white-space: pre-wrap;
-}
-.answer-sample-grid .empty-answer {
-  color: var(--warn);
-  font-style: italic;
-}
-.answer-sample-card > footer {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 5px 10px;
-  border-top: 1px solid #2d394c;
-  color: #8290a6;
-  font-family: var(--mono);
-  font-size: 10px;
-}
-
-@media (max-width: 900px) {
-  .answer-sample-grid {
-    grid-template-columns: 1fr 1fr;
-  }
-  .answer-sample-grid section:last-child {
-    grid-column: 1 / -1;
-    border-top: 1px solid #344258;
-  }
-  .answer-sample-grid section:nth-child(2) {
-    border-right: 0;
-  }
 }
 
 @media (max-width: 600px) {
@@ -1736,31 +1786,19 @@ table.pivot.bench-table tbody tr:hover .axis-kmetric {
     font-size: 10px;
   }
   .answer-detail-content {
-    padding: 10px;
+    padding: 10px 0 0;
   }
-  .answer-sample-card > header {
-    gap: 7px;
-    flex-wrap: wrap;
+  .answer-records-table {
+    min-width: 820px;
   }
-  .answer-sample-card > header strong {
-    width: 100%;
+  .answer-context-modal {
+    width: 100vw;
+    max-height: 100dvh;
+    height: 100dvh;
+    border: 0;
+    border-radius: 0;
   }
-  .answer-sample-grid {
-    grid-template-columns: 1fr;
-  }
-  .answer-sample-grid section,
-  .answer-sample-grid section:nth-child(2),
-  .answer-sample-grid section:last-child {
-    grid-column: auto;
-    border-top: 1px solid #344258;
-    border-right: 0;
-  }
-  .answer-sample-grid section:first-child {
-    border-top: 0;
-  }
-  .answer-sample-card > footer {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 2px;
+  .answer-context-meta {
+    grid-template-columns: 112px minmax(0, 1fr);
   }
 }

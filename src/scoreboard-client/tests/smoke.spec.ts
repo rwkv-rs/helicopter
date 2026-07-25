@@ -39,15 +39,34 @@ test("shows a fixed answer panel with ten samples for every outcome", async ({ p
   await expect(panel.getByRole("tab", { name: /正确作答 10/ })).toBeVisible();
   await expect(panel.getByRole("tab", { name: /错误作答 10/ })).toBeVisible();
   await expect(panel.getByRole("tab", { name: /未能作答 10/ })).toBeVisible();
-  await expect(panel.locator(".answer-sample-card.correct")).toHaveCount(10);
+  await expect(panel.getByRole("columnheader", { name: "题目 ID" })).toBeVisible();
+  await expect(panel.getByRole("columnheader", { name: "repeat_id" })).toBeVisible();
+  await expect(panel.getByRole("columnheader", { name: "ground_truth" })).toBeVisible();
+  await expect(
+    panel.getByRole("columnheader", { name: "模型作答（判分器提取）" }),
+  ).toBeVisible();
+  await expect(panel.getByRole("columnheader", { name: "is_passed" })).toBeVisible();
+  await expect(panel.locator(".answer-records-table tbody tr")).toHaveCount(10);
+
+  await panel.getByRole("button", { name: /查看 aime24-0001 完整上下文/ }).click();
+  let contextDialog = page.getByRole("dialog", { name: "aime24-0001 完整上下文" });
+  await expect(contextDialog.getByText("assembled prompt")).toBeVisible();
+  await expect(contextDialog.getByText("raw completion")).toBeVisible();
+  await expect(contextDialog.getByText("scoring result")).toBeVisible();
+  await contextDialog.getByRole("button", { name: "关闭" }).click();
 
   await panel.getByRole("tab", { name: /错误作答/ }).click();
-  await expect(panel.locator(".answer-sample-card.incorrect")).toHaveCount(10);
-  await expect(panel.getByText("answer_mismatch").first()).toBeVisible();
+  await expect(panel.locator(".answer-records-table tbody tr")).toHaveCount(10);
+  await expect(panel.locator(".answer-pass-badge.failed")).toHaveCount(10);
+  await panel.getByRole("button", { name: /查看 aime24-0001 完整上下文/ }).click();
+  contextDialog = page.getByRole("dialog", { name: "aime24-0001 完整上下文" });
+  await expect(contextDialog.getByText("answer_mismatch")).toBeVisible();
+  await contextDialog.getByRole("button", { name: "关闭" }).click();
 
   await panel.getByRole("tab", { name: /未能作答/ }).click();
-  await expect(panel.locator(".answer-sample-card.unanswered")).toHaveCount(10);
-  await expect(panel.getByText("无有效输出").first()).toBeVisible();
+  await expect(panel.locator(".answer-records-table tbody tr")).toHaveCount(10);
+  await expect(panel.locator(".answer-pass-badge.unanswered")).toHaveCount(10);
+  await expect(panel.locator(".answer-record-value.empty")).toHaveCount(10);
 
   await panel.getByRole("button", { name: "清除选择" }).click();
   await expect(panel.getByText("未选择 benchmark")).toBeVisible();

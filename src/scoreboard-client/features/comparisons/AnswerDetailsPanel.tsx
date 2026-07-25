@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { useComparisonStore } from "./store";
 import type {
   AnswerOutcome,
+  AnswerSample,
   AnswerSampleGroups,
   ScoreCellSelection,
 } from "./types";
@@ -27,15 +28,113 @@ function SelectionSummary({ selection }: { selection: ScoreCellSelection }) {
   );
 }
 
+function PassedBadge({ value }: { value: boolean | null }) {
+  return (
+    <span
+      className={`answer-pass-badge ${value === null ? "unanswered" : value ? "passed" : "failed"}`}
+    >
+      {value === null ? "n/a" : value ? "true" : "false"}
+    </span>
+  );
+}
+
+function ContextDetailModal({
+  sample,
+  onClose,
+}: {
+  sample: AnswerSample;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
+
+  return (
+    <div className="modal-backdrop answer-context-backdrop" onClick={onClose}>
+      <section
+        aria-label={`${sample.problemId} 完整上下文`}
+        aria-modal="true"
+        className="modal answer-context-modal"
+        onClick={(event) => event.stopPropagation()}
+        role="dialog"
+      >
+        <header className="modal-head">
+          <div>
+            <div className="card-title">完整模型上下文</div>
+            <div className="context-outcome">
+              <span>problem_id={sample.problemId}</span>
+              <span>repeat_id={sample.repeatId}</span>
+              <PassedBadge value={sample.isPassed} />
+            </div>
+          </div>
+          <button className="btn" onClick={onClose} type="button">
+            关闭
+          </button>
+        </header>
+        <div className="modal-body answer-context-body">
+          <div className="modal-col">
+            <div className="stage">
+              <div className="stage-label">assembled prompt</div>
+              <pre>{sample.context.assembledPrompt}</pre>
+            </div>
+            <div className="stage">
+              <div className="stage-label">raw completion</div>
+              <pre>{sample.context.rawCompletion || "无原始输出"}</pre>
+            </div>
+            <div className="stage">
+              <div className="stage-label">problem</div>
+              <pre>{sample.context.problem}</pre>
+            </div>
+          </div>
+          <div className="modal-col right">
+            <div className="card-title">scoring result</div>
+            <dl className="answer-context-meta">
+              <dt>ground_truth</dt>
+              <dd>{sample.groundTruth}</dd>
+              <dt>extracted_answer</dt>
+              <dd>{sample.extractedAnswer || "—"}</dd>
+              <dt>is_passed</dt>
+              <dd>
+                <PassedBadge value={sample.isPassed} />
+              </dd>
+              <dt>fail_reason</dt>
+              <dd>{sample.context.failReason || "—"}</dd>
+            </dl>
+            <div className="card-title token-title">generation metadata</div>
+            <dl className="answer-context-meta">
+              <dt>model</dt>
+              <dd>{sample.context.model}</dd>
+              <dt>run_id</dt>
+              <dd>{sample.context.runId}</dd>
+              <dt>metric</dt>
+              <dd>{sample.context.metric}</dd>
+              <dt>generated_tokens</dt>
+              <dd>{sample.context.generatedTokens}</dd>
+              <dt>latency_ms</dt>
+              <dd>{sample.context.latencyMs}</dd>
+            </dl>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 export function AnswerDetailsPanel() {
   const { state, dispatch, loadAnswerSamples } = useComparisonStore();
   const selection = state.selectedScoreCell;
   const [activeOutcome, setActiveOutcome] = useState<AnswerOutcome>("correct");
   const [data, setData] = useState<AnswerSampleGroups | null>(null);
+  const [detailSample, setDetailSample] = useState<AnswerSample | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    setDetailSample(null);
     if (!selection) {
       setData(null);
       setError(null);
@@ -99,7 +198,10 @@ export function AnswerDetailsPanel() {
               className={`answer-tab ${outcome.id}${activeOutcome === outcome.id ? " active" : ""}`}
               disabled={!selection}
               key={outcome.id}
-              onClick={() => setActiveOutcome(outcome.id)}
+              onClick={() => {
+                setActiveOutcome(outcome.id);
+                setDetailSample(null);
+              }}
               role="tab"
               type="button"
             >
@@ -129,48 +231,67 @@ export function AnswerDetailsPanel() {
               从该结果类别的 {activeGroup.total} 条记录中随机抽取{" "}
               <strong>{activeGroup.items.length}</strong> 条
             </div>
-            <div className="answer-sample-list">
-              {activeGroup.items.map((sample) => (
-                <article
-                  className={`answer-sample-card ${activeOutcome}`}
-                  key={sample.id}
-                >
-                  <header>
-                    <strong>sample #{sample.sampleIndex + 1}</strong>
-                    <span>{sample.generatedTokens} tokens</span>
-                    <span>{sample.latencyMs} ms</span>
-                    {sample.failReason ? (
-                      <code>{sample.failReason}</code>
-                    ) : (
-                      <code>passed</code>
-                    )}
-                  </header>
-                  <div className="answer-sample-grid">
-                    <section>
-                      <h3>题目</h3>
-                      <p>{sample.problem}</p>
-                    </section>
-                    <section>
-                      <h3>模型作答</h3>
-                      <p className={!sample.answer ? "empty-answer" : ""}>
-                        {sample.answer || "无有效输出"}
-                      </p>
-                    </section>
-                    <section>
-                      <h3>参考答案</h3>
-                      <p>{sample.referenceAnswer}</p>
-                    </section>
-                  </div>
-                  <footer>
-                    <span>{sample.runId}</span>
-                    <span>{selection.metric}</span>
-                  </footer>
-                </article>
-              ))}
+            <div className="answer-records-wrap">
+              <table className="answer-records-table">
+                <colgroup>
+                  <col className="answer-problem-col" />
+                  <col className="answer-repeat-col" />
+                  <col className="answer-ground-col" />
+                  <col className="answer-model-col" />
+                  <col className="answer-passed-col" />
+                  <col className="answer-detail-col" />
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th>题目 ID</th>
+                    <th>repeat_id</th>
+                    <th>ground_truth</th>
+                    <th>模型作答（判分器提取）</th>
+                    <th>is_passed</th>
+                    <th>detail</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {activeGroup.items.map((sample) => (
+                    <tr key={sample.id}>
+                      <td className="answer-problem-id">{sample.problemId}</td>
+                      <td>{sample.repeatId}</td>
+                      <td className="answer-record-value" title={sample.groundTruth}>
+                        {sample.groundTruth}
+                      </td>
+                      <td
+                        className={`answer-record-value${sample.extractedAnswer ? "" : " empty"}`}
+                        title={sample.extractedAnswer}
+                      >
+                        {sample.extractedAnswer || "—"}
+                      </td>
+                      <td>
+                        <PassedBadge value={sample.isPassed} />
+                      </td>
+                      <td>
+                        <button
+                          aria-label={`查看 ${sample.problemId} 完整上下文`}
+                          className="btn answer-detail-button"
+                          onClick={() => setDetailSample(sample)}
+                          type="button"
+                        >
+                          detail
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </>
         ) : null}
       </div>
+      {detailSample ? (
+        <ContextDetailModal
+          onClose={() => setDetailSample(null)}
+          sample={detailSample}
+        />
+      ) : null}
     </section>
   );
 }

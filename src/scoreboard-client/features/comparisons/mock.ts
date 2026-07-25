@@ -133,30 +133,48 @@ function buildAnswerSample(
     "max_tokens_before_final_answer",
     "generation_timeout",
   ];
+  const extractedAnswer =
+    outcome === "correct"
+      ? reference
+      : outcome === "incorrect"
+        ? incorrectAnswer
+        : "";
+  const rawCompletion =
+    outcome === "correct"
+      ? `<think>已完成逐步推理并校验结果。</think>\n${reference}`
+      : outcome === "incorrect"
+        ? `<think>推理中采用了错误假设，未能通过校验。</think>\n${incorrectAnswer}`
+        : index % 2 === 0
+          ? "<think>推理尚未完成，生成在最终答案前停止。"
+          : "";
+  const failReason =
+    outcome === "correct"
+      ? null
+      : outcome === "incorrect"
+        ? "answer_mismatch"
+        : unansweredReasons[index % unansweredReasons.length];
   return {
     id: `${selection.comparisonId}-${selection.parameterGroupId}-${selection.arm}-${outcome}-${index}`,
-    sampleIndex: index,
-    problem,
-    prompt: `User: ${problem}\n\nAssistant: <think>`,
-    answer:
-      outcome === "correct"
-        ? `推理过程已省略。最终答案：${reference}`
-        : outcome === "incorrect"
-          ? `推理中采用了错误假设。最终答案：${incorrectAnswer}`
-          : "",
-    referenceAnswer: reference,
-    failReason:
-      outcome === "correct"
-        ? null
-        : outcome === "incorrect"
-          ? "answer_mismatch"
-          : unansweredReasons[index % unansweredReasons.length],
-    generatedTokens:
-      outcome === "unanswered"
-        ? Math.round(4 + random() * 28)
-        : Math.round(80 + random() * 420),
-    latencyMs: Math.round(450 + random() * 3800),
-    runId: `mock-${selection.comparisonId}-${selection.parameterGroupId}-${selection.arm}`,
+    problemId: `${selection.benchmark.toLowerCase().replaceAll(" ", "-")}-${String(index + 1).padStart(4, "0")}`,
+    repeatId: index % 4,
+    groundTruth: reference,
+    extractedAnswer,
+    isPassed:
+      outcome === "correct" ? true : outcome === "incorrect" ? false : null,
+    context: {
+      problem,
+      assembledPrompt: `User: ${problem}\n\nAssistant: <think>`,
+      rawCompletion,
+      failReason,
+      generatedTokens:
+        outcome === "unanswered"
+          ? Math.round(4 + random() * 28)
+          : Math.round(80 + random() * 420),
+      latencyMs: Math.round(450 + random() * 3800),
+      runId: `mock-${selection.comparisonId}-${selection.parameterGroupId}-${selection.arm}`,
+      model: selection.model,
+      metric: selection.metric,
+    },
   };
 }
 
