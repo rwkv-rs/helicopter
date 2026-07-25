@@ -302,7 +302,7 @@ def main() -> None:
             "vllm_source": git_revision(vllm_source),
             "model": str(args.model),
             "context_length": args.context_length,
-            "tokenizer_eos_token": tokenizer.eos_token,
+            "tokenizer_eos_token": getattr(tokenizer, "eos_token", None),
             "tokenizer_eos_token_id": tokenizer.eos_token_id,
             "reward_scorer_source": str(scorer_source),
             "reward_scorer_source_sha256": subprocess.run(
