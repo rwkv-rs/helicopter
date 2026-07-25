@@ -75,15 +75,11 @@ export type AnswerOutcome = "correct" | "incorrect" | "unanswered";
 
 export interface ScoreCellSelection {
   comparisonId: ComparisonId;
-  comparisonLabel: string;
   parameterGroupId: string;
-  parameterLabel: string;
   benchmark: string;
   metric: string;
   samples: number;
   arm: ScoreArm;
-  armLabel: string;
-  model: string;
   architecture: ModelVariant["architecture"];
   generation: string;
   parameterCount: string;

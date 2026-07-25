@@ -4,9 +4,12 @@ import { useMemo } from "react";
 
 import { useComparisonStore } from "./store";
 import type {
+  BenchmarkScore,
   ComparisonId,
+  ComparisonOption,
+  ComparisonScore,
   DomainId,
-  ModelVariant,
+  ParameterGroup,
   ScoreArm,
   ScoreCellSelection,
 } from "./types";
@@ -55,50 +58,28 @@ function promptTemplateFor(comparisonId: ComparisonId, arm: ScoreArm): string {
   return "User✿{task.problem}✿\\nBot✿<think";
 }
 
-function scoreSelection({
-  comparisonId,
-  comparisonLabel,
-  parameterGroupId,
-  parameterLabel,
-  benchmark,
-  metric,
-  samples,
-  arm,
-  armLabel,
-  model,
-  score,
-  truncationRate,
-}: {
-  comparisonId: ComparisonId;
-  comparisonLabel: string;
-  parameterGroupId: string;
-  parameterLabel: string;
-  benchmark: string;
-  metric: string;
-  samples: number;
-  arm: ScoreArm;
-  armLabel: string;
-  model: ModelVariant;
-  score: number;
-  truncationRate: number;
-}): ScoreCellSelection {
+function scoreSelection(
+  comparison: ComparisonOption,
+  group: ParameterGroup,
+  row: BenchmarkScore,
+  score: ComparisonScore,
+  arm: ScoreArm,
+): ScoreCellSelection {
+  const model = arm === "a" ? group.aModel : group.bModel;
   return {
-    comparisonId,
-    comparisonLabel,
-    parameterGroupId,
-    parameterLabel,
-    benchmark,
-    metric,
-    samples,
+    comparisonId: comparison.id,
+    parameterGroupId: group.id,
+    benchmark: row.benchmark,
+    metric: row.metric,
+    samples: row.samples,
     arm,
-    armLabel,
-    model: model.label,
     architecture: model.architecture,
     generation: model.generation,
     parameterCount: model.parameters,
-    score,
-    truncationRate,
-    promptTemplate: promptTemplateFor(comparisonId, arm),
+    score: score[arm],
+    truncationRate:
+      arm === "a" ? score.aTruncationRate : score.bTruncationRate,
+    promptTemplate: promptTemplateFor(comparison.id, arm),
     samplingConfig: { ...DEFAULT_SAMPLING_CONFIG },
   };
 }
@@ -222,20 +203,13 @@ export function ScoreMatrix() {
                         onClick={() =>
                           dispatch({
                             type: "select-score-cell",
-                            selection: scoreSelection({
-                              comparisonId: state.comparisonId,
-                              comparisonLabel: comparison.label,
-                              parameterGroupId: group.id,
-                              parameterLabel: group.label,
-                              benchmark: row.benchmark,
-                              metric: row.metric,
-                              samples: row.samples,
-                              arm: "a",
-                              armLabel: comparison.aLabel,
-                              model: group.aModel,
-                              score: score.a,
-                              truncationRate: score.aTruncationRate,
-                            }),
+                            selection: scoreSelection(
+                              comparison,
+                              group,
+                              row,
+                              score,
+                              "a",
+                            ),
                           })
                         }
                         type="button"
@@ -250,20 +224,13 @@ export function ScoreMatrix() {
                         onClick={() =>
                           dispatch({
                             type: "select-score-cell",
-                            selection: scoreSelection({
-                              comparisonId: state.comparisonId,
-                              comparisonLabel: comparison.label,
-                              parameterGroupId: group.id,
-                              parameterLabel: group.label,
-                              benchmark: row.benchmark,
-                              metric: row.metric,
-                              samples: row.samples,
-                              arm: "b",
-                              armLabel: comparison.bLabel,
-                              model: group.bModel,
-                              score: score.b,
-                              truncationRate: score.bTruncationRate,
-                            }),
+                            selection: scoreSelection(
+                              comparison,
+                              group,
+                              row,
+                              score,
+                              "b",
+                            ),
                           })
                         }
                         type="button"
