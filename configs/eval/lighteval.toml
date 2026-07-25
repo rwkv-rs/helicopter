@@ -4,6 +4,6 @@ schema_version = 1
 
 # 路径相对私有环境中的 WEIGHT_PATH；按这里的顺序执行。
 weights = [
-  "rwkv7/rwkv7-g1g-7.2b-20260523-ctx8192.pth",
-  "rwkv7/rwkv7-g1h-7.2b-20260710-ctx10240.pth",
+  "rwkv7/pth/rwkv7-g1g-7.2b-20260523-ctx8192.pth",
+  "rwkv7/pth/rwkv7-g1h-7.2b-20260710-ctx10240.pth",
 ]

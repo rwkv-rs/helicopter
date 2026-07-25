@@ -15,6 +15,7 @@ def test_eval_has_one_product_entrypoint_and_no_public_task_selection() -> None:
     example = (ROOT / "configs/eval/lighteval.toml").read_text(encoding="utf-8")
     assert "schema_version = 1" in example
     assert "weights = [" in example
+    assert example.count('"rwkv7/pth/') == 2
     for key in ("benchmarks =", "tasks =", "exclude =", "max_samples ="):
         assert key not in example
 
