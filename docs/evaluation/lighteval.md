@@ -148,6 +148,9 @@ shard，使 dataset/prerequisite 失败只影响对应 task。分片只控制 da
 host-memory 生命周期。同一个
 weight/mode 只加载一次模型，vLLM-RWKV 根据模型规模、GPU 显存与 WKV mode 解析
 4×4×2 active-capacity matrix；评估层不提供 capacity 参数。
+完整 registry discovery 可能在主进程先初始化 CUDA，因此 adapter 在每个 model
+unit 内固定 `VLLM_WORKER_MULTIPROC_METHOD=spawn`，避免从已经初始化 CUDA 的
+父进程 fork worker；退出 unit 后恢复原环境。
 `fp16` 记录 FP16 WKV state/FP16 accumulation，`fp32io16` 记录 FP32 WKV
 state/FP32 accumulation；数据库会校验 mode 与 GEMM policy 一致。
 checkpoint 文件名的 `ctx<N>` 是 prompt context 上限，不是 prompt 与 completion

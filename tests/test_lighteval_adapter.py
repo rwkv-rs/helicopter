@@ -35,6 +35,7 @@ def test_evaluation_scopes_recurrent_total_length_override(
     observed: dict[str, str] = {}
     unit = SimpleNamespace(weight=object(), wkv_mode="fp16")
     monkeypatch.setenv("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "before")
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
     monkeypatch.setattr(
         lighteval_adapter, "verify_weight_identity", lambda _weight: None
     )
@@ -43,6 +44,7 @@ def test_evaluation_scopes_recurrent_total_length_override(
         observed["allow_long_max_model_len"] = os.environ[
             "VLLM_ALLOW_LONG_MAX_MODEL_LEN"
         ]
+        observed["worker_multiproc_method"] = os.environ["VLLM_WORKER_MULTIPROC_METHOD"]
         return [], []
 
     monkeypatch.setattr(lighteval_adapter, "_evaluate_unit", fake_evaluate_unit)
@@ -53,8 +55,12 @@ def test_evaluation_scopes_recurrent_total_length_override(
         campaign_dir=Path("/unused"),
     )
 
-    assert observed == {"allow_long_max_model_len": "1"}
+    assert observed == {
+        "allow_long_max_model_len": "1",
+        "worker_multiproc_method": "spawn",
+    }
     assert os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] == "before"
+    assert os.environ["VLLM_WORKER_MULTIPROC_METHOD"] == "fork"
 
 
 def test_task_failure_record_uses_only_exception_type() -> None:

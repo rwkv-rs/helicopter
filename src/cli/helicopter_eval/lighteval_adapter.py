@@ -851,6 +851,10 @@ def evaluate_unit(
             "VLLM_USE_RAPID_SAMPLER": "1",
             "VLLM_USE_V2_MODEL_RUNNER": "1",
             "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
+            # Registry discovery can initialize CUDA before the model unit.
+            # A spawned worker is therefore required; forking a CUDA-initialized
+            # parent cannot safely initialize the device again.
+            "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
             # RWKV is recurrent and has no positional encoding ceiling. The
             # total LightEval length includes the checkpoint prompt context
             # plus the fixed generation budget, so vLLM's generic positional
