@@ -384,6 +384,16 @@ install_vllm_package() {
   [[ -n "$UV_INDEX_URL" ]] && pip+=(--index-url "$UV_INDEX_URL")
   pip+=(--project "$ROOT" --python "$VENV/bin/python" )
 
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    run env \
+      VLLM_TARGET_DEVICE="$VLLM_TARGET_DEVICE" \
+      VLLM_VERSION_OVERRIDE="$VLLM_VERSION_OVERRIDE" \
+      VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED:-0}" \
+      CMAKE_BUILD_TYPE="$CMAKE_BUILD_TYPE" \
+      "${pip[@]}" --no-deps --no-build-isolation -e "$VLLM" --torch-backend=auto
+    return 0
+  fi
+
   mkdir -p "$STAMP_DIR"
   local fingerprint
   fingerprint="$(vllm_native_fingerprint)"
@@ -482,7 +492,7 @@ model.data_parallel_size, model.model = 1, backend
 model._generate(inputs=[[1]], max_new_tokens=17, stop_tokens=[], num_samples=2)
 assert captured["prompts"] == [{"prompt_token_ids": [1]}]
 params = captured["params"]
-assert (params.stop, params.stop_token_ids, params.ignore_eos) == (["\nUser:"], [0], False)
+assert (params.stop, params.stop_token_ids, params.ignore_eos) == (["\nUser:", "\n### User"], [0], False)
 assert (params.n, params.max_tokens, params.temperature, params.top_p, params.top_k,
         params.presence_penalty, params.repetition_penalty, params.frequency_penalty, params.penalty_decay) == (2, 17, 0.96, 0.76, 32, 1.0, 0.1, 0.0, 0.988)
 assert Path(lighteval.__file__).is_relative_to(Path(sys.prefix))

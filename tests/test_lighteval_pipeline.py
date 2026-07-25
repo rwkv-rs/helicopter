@@ -1,8 +1,14 @@
 # ruff: noqa: E401, E501, E701, E702
 import collections, gzip, importlib, importlib.metadata, importlib.util, json
+import unittest
 from pathlib import Path
 from types import MethodType, SimpleNamespace
-import pytest
+
+try:
+    import pytest
+except ModuleNotFoundError as error:
+    raise unittest.SkipTest("requires the lighteval development environment") from error
+
 from lighteval.logging.evaluation_tracker import EvaluationTracker
 from lighteval.data import GenerativeTaskDataset
 from lighteval.metrics import apply_metric
