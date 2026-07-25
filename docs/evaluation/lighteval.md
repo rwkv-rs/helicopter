@@ -93,6 +93,10 @@ INSTALL_COMPONENTS=lighteval,scoreboard-server,scoreboard-client,dev \
   scripts/install_local.sh
 ```
 
+安装器会把固定 Bun 版本写入当前 workspace 的 `.venv/bin/bun`，并把
+Scoreboard smoke test 所需的 Chromium 写入
+`.venv/playwright-browsers`；不会依赖用户级 Bun 或 Playwright browser cache。
+
 Scoreboard 只接受空的或 contract version 1 的 PostgreSQL 数据库；发现旧
 `evaluation_result` 或未版本化 evaluation schema 时会拒绝启动，不执行隐式迁移。
 server 运行环境至少需要：

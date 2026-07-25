@@ -79,6 +79,12 @@ def test_installer_pins_workspace_bun_and_removes_the_obsolete_evaluator() -> No
         '"'
     ) in local
     assert 'install -m 0755 "$binary" "$VENV/bin/bun"' in local
+    assert '[[ -x "$VENV/bin/bun" ]]' in local
+    assert 'PLAYWRIGHT_BROWSERS_PATH="$VENV/playwright-browsers"' in local
+    assert (
+        '"$VENV/bin/bun" run --cwd "$SCOREBOARD_CLIENT" playwright install chromium'
+        in local
+    )
     assert 'obsolete="$ROOT/src/eval/lighteval"' in local
     assert 'run rm -rf -- "$obsolete"' in local
     assert local.index("remove_obsolete_lighteval_tree") < local.index("sync_uv_env")

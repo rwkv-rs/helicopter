@@ -9,7 +9,7 @@
     "start": "next start -H 0.0.0.0",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "smoke": "playwright test"
+    "smoke": "PLAYWRIGHT_BROWSERS_PATH=../../.venv/playwright-browsers playwright test"
   },
   "dependencies": {
     "next": "^16.1.0",

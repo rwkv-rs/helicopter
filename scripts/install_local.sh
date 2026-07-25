@@ -231,7 +231,8 @@ ensure_uv() {
 
 ensure_bun() {
   component_enabled scoreboard-client || return 0
-  if have bun && [[ "$(bun --version)" == "$BUN_VERSION" ]]; then
+  if [[ -x "$VENV/bin/bun" ]] &&
+    [[ "$("$VENV/bin/bun" --version)" == "$BUN_VERSION" ]]; then
     return 0
   fi
   have curl || die "curl is required to install Bun $BUN_VERSION"
@@ -422,11 +423,17 @@ sync_scoreboard_client() {
   local install_args=(install --cwd "$SCOREBOARD_CLIENT")
   [[ "$UV_UPGRADE" == "0" ]] && install_args+=(--frozen-lockfile)
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
-    print_cmd bun "${install_args[@]}"
+    print_cmd "$VENV/bin/bun" "${install_args[@]}"
+    print_cmd env \
+      PLAYWRIGHT_BROWSERS_PATH="$VENV/playwright-browsers" \
+      "$VENV/bin/bun" run --cwd "$SCOREBOARD_CLIENT" playwright install chromium
     return 0
   fi
   ensure_bun
-  run bun "${install_args[@]}"
+  run "$VENV/bin/bun" "${install_args[@]}"
+  run env \
+    PLAYWRIGHT_BROWSERS_PATH="$VENV/playwright-browsers" \
+    "$VENV/bin/bun" run --cwd "$SCOREBOARD_CLIENT" playwright install chromium
 }
 
 vllm_native_fingerprint() {
