@@ -185,6 +185,20 @@ def git_sha(path: Path) -> str:
         return revision
 
 
+def require_independent_run_output(output: Path, source: Path) -> None:
+    """Keep generated checkpoints outside the immutable source tree."""
+    output = output.resolve()
+    source = source.resolve()
+    if (
+        output == source
+        or source in output.parents
+        or output in source.parents
+    ):
+        raise ValueError(
+            "run output and source checkpoint must use independent directory trees"
+        )
+
+
 def initialize_run(
     output: Path,
     *,
@@ -196,6 +210,10 @@ def initialize_run(
     rwkv_hf_sha: str,
     rwkv_lm_sha: str,
 ) -> dict[str, Any]:
+    source_path = source.get("path")
+    if not isinstance(source_path, str) or not source_path:
+        raise ValueError("run source path is missing")
+    require_independent_run_output(output, Path(source_path))
     output.mkdir(parents=True, exist_ok=False)
     lock = default_contract_lock(product_root)
     write_json(output / "contract.lock.json", lock)
@@ -286,9 +304,14 @@ def verify_scale_gate(output: Path) -> dict[str, str]:
         or inference.get("model_sha256") != student_sha
         or inference.get("backend") != "transformers"
         or inference.get("strict_reload") is not True
+        or inference.get("single_batch_greedy") is not True
+        or inference.get("full_chunked_cache") is not True
+        or inference.get("state_reset") is not True
         or inference.get("batch_isolation") is not True
     ):
-        raise ValueError("397B scale gate requires accepted student-bound Transformers evidence")
+        raise ValueError(
+            "397B scale gate requires accepted student-bound Transformers evidence"
+        )
     smoke_path = output / "smoke-rubric.json"
     if not smoke_path.is_file():
         raise ValueError("397B scale gate requires smoke-rubric.json")

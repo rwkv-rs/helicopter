@@ -24,7 +24,6 @@ from any2rwkv.distill import (
 from any2rwkv.errors import ContractError, CoverageError
 from any2rwkv.artifacts import file_sha256
 from any2rwkv.distill_runner import (
-    _write_baseline_result,
     read_distillation_plan,
     read_distillation_texts,
     read_packed_token_rows,
@@ -104,31 +103,6 @@ class MappingTests(unittest.TestCase):
                 Qwen35ToRWKV7Recipe._initial_trainable_names(root, 1),
                 [{"r_proj.weight"}],
             )
-
-    def test_baseline_result_is_written_atomically_and_bound(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "migration-baselines.json"
-            binding = {
-                "student_sha256": "a" * 64,
-                "tokenizer_sha256": "b" * 64,
-                "dataset_sha256": "c" * 64,
-                "split": "validation",
-                "seed": 20260725,
-                "burn_in_tokens": 8,
-                "precision": "bf16-fp32-state",
-                "token_budget": 32,
-            }
-            _write_baseline_result(
-                path,
-                name="random",
-                metrics={"mean_token_kl": 1.25},
-                binding=binding,
-                token_budget=32,
-            )
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            self.assertEqual(payload["schema_version"], 2)
-            self.assertEqual(payload["binding"], binding)
-            self.assertEqual(payload["baselines"]["random"]["token_budget"], 32)
 
     def test_fitted_provenance_is_committed_only_after_training_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

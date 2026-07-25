@@ -23,6 +23,7 @@ from any2rwkv.evaluator_runner import (
     EvaluationSample,
     EvaluatorConfig,
     PairedSampleScore,
+    _merge_zero_step_sample_metrics,
     read_evaluation_manifest,
     read_migration_baselines,
     read_paired_scores,
@@ -89,6 +90,64 @@ class TinyTokenizer:
 
 
 class EvaluatorRunnerTests(unittest.TestCase):
+    def test_zero_step_overlay_is_hash_bound_and_sample_exact(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            overlay = root / "zero-step.jsonl"
+            overlay.write_text(
+                "\n".join(
+                    json.dumps(
+                        {
+                            "sample_id": f"sample-{index}",
+                            "end_to_end_zero_step_nmse": 0.1 + index,
+                            "incremental_nmse": {"hazard": 0.01 + index},
+                        }
+                    )
+                    for index in range(2)
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            rows = [
+                {
+                    "sample_id": f"sample-{index}",
+                    "token_count": 8,
+                    "token_kl_sum": 0.2,
+                }
+                for index in range(2)
+            ]
+            merged = _merge_zero_step_sample_metrics(
+                rows,
+                {
+                    "artifacts": {
+                        "zero_step_sample_metrics": {
+                            "path": str(overlay),
+                            "kind": "file",
+                            "sha256": file_sha256(overlay),
+                        }
+                    }
+                },
+            )
+            original_sha256 = file_sha256(overlay)
+            self.assertEqual(
+                merged[1]["incremental_nmse"],
+                {"hazard": 1.01},
+            )
+            overlay.write_text('{"sample_id":"sample-0"}\n', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
+                _merge_zero_step_sample_metrics(
+                    rows,
+                    {
+                        "artifacts": {
+                            "zero_step_sample_metrics": {
+                                "path": str(overlay),
+                                "kind": "file",
+                                "sha256": original_sha256,
+                            }
+                        }
+                    },
+                )
+
     def setUp(self) -> None:
         torch.manual_seed(17)
         self.teacher = TinyLM().eval()
@@ -300,7 +359,7 @@ class EvaluatorRunnerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
                 read_p0_evidence(manifest, student_sha256=student_sha)
 
-    def test_migration_matrix_is_checkpoint_bound_and_complete(self) -> None:
+    def test_legacy_aggregate_only_migration_matrix_is_rejected(self) -> None:
         student_sha = "e" * 64
         values = {
             name: 1.0 + index / 10
@@ -351,11 +410,7 @@ class EvaluatorRunnerTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            self.assertEqual(
-                read_migration_baselines(path, student_sha256=student_sha)["mapped"],
-                1.5,
-            )
-            with self.assertRaisesRegex(ValueError, "different student"):
+            with self.assertRaisesRegex(ValueError, "raw stage evidence"):
                 read_migration_baselines(path, student_sha256="f" * 64)
 
     def test_paired_score_builder_binds_suite_runner_and_checkpoints(self) -> None:

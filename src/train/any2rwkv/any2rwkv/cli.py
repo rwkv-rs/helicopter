@@ -17,7 +17,10 @@ from .distill_runner import (
 )
 from .distributed import DistributedContext
 from .errors import ContractError
-from .evaluator_runner import evaluate_hf_checkpoints
+from .evaluator_runner import (
+    evaluate_hf_checkpoints,
+    evaluate_hf_migration_stage,
+)
 from .export import export_hf_checkpoint
 from .fixture import write_fixture
 from .migration_init import (
@@ -84,6 +87,17 @@ def build_parser() -> argparse.ArgumentParser:
     oracle = subparsers.add_parser("oracle", help="run the frozen 32-case FP64 GDN/RWKV7 oracle")
     oracle.add_argument("--output", required=True)
     oracle.add_argument("--seed", type=int, default=20260714)
+    baseline = subparsers.add_parser(
+        "evaluate-baseline",
+        help="evaluate one raw migration-baseline stage without a circular quality dependency",
+    )
+    baseline.add_argument("--teacher", required=True)
+    baseline.add_argument("--candidate", required=True)
+    baseline.add_argument("--evaluation-manifest", required=True)
+    baseline.add_argument("--stage", required=True)
+    baseline.add_argument("--evidence")
+    baseline.add_argument("--precision", required=True)
+    baseline.add_argument("--output", required=True)
     for action in ("fetch-source", "verify-source"):
         source_command = subparsers.add_parser(action)
         source_command.add_argument("--manifest", required=True)
@@ -386,6 +400,26 @@ def main(argv: list[str] | None = None) -> int:
             write_json(Path(args.output), result)
             print(json.dumps({"status": "passed" if result["passed"] else "failed", "fixture_count": result["fixture_count"]}, sort_keys=True))
             return 0 if result["passed"] else 1
+        if args.action == "evaluate-baseline":
+            distributed = DistributedContext.initialize()
+            try:
+                result = evaluate_hf_migration_stage(
+                    teacher_path=Path(args.teacher).resolve(),
+                    candidate_path=Path(args.candidate).resolve(),
+                    manifest_path=Path(args.evaluation_manifest).resolve(),
+                    stage=args.stage,
+                    output_path=Path(args.output).resolve(),
+                    evidence_path=(
+                        Path(args.evidence).resolve() if args.evidence else None
+                    ),
+                    precision=args.precision,
+                    distributed=distributed,
+                )
+                if distributed.is_primary:
+                    print(json.dumps(result, sort_keys=True))
+                return 0
+            finally:
+                distributed.close()
         if args.action in {"fetch-source", "verify-source"}:
             function = fetch_source if args.action == "fetch-source" else verify_source
             kwargs = (

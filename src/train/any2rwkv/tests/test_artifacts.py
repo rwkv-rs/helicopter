@@ -3,8 +3,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from any2rwkv import artifacts
-from any2rwkv.artifacts import default_contract_lock, git_sha, verify_scale_gate
+from any2rwkv.artifacts import (
+    default_contract_lock,
+    git_sha,
+    require_independent_run_output,
+    verify_scale_gate,
+)
 from any2rwkv.cli import build_parser
 
 
@@ -49,6 +56,9 @@ def test_scale_gate_binds_transformers_inference_without_service_artifact(
             "model_sha256": student_sha,
             "backend": "transformers",
             "strict_reload": True,
+            "single_batch_greedy": True,
+            "full_chunked_cache": True,
+            "state_reset": True,
             "batch_isolation": True,
         },
         "smoke-rubric.json": {
@@ -86,3 +96,12 @@ def test_git_sha_prefers_managed_sync_manifest_for_product_and_submodule(
 
     assert git_sha(product) == "1" * 40
     assert git_sha(submodule) == "2" * 40
+
+
+def test_run_output_must_not_overlap_read_only_source_tree(tmp_path: Path) -> None:
+    source = tmp_path / "weights" / ("a" * 40)
+    source.mkdir(parents=True)
+    require_independent_run_output(tmp_path / "runs" / "scale-001", source)
+    for output in (source, source / "run", tmp_path / "weights"):
+        with pytest.raises(ValueError, match="independent directory trees"):
+            require_independent_run_output(output, source)

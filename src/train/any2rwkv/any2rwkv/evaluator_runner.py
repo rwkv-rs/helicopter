@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -24,6 +25,7 @@ from .evaluate import (
 )
 from .distributed import DistributedContext
 from .distill import MIGRATION_BASELINE_STAGES
+from .errors import ContractError
 
 
 @dataclass(frozen=True)
@@ -854,13 +856,16 @@ def read_migration_baselines(
     student_sha256: str,
 ) -> dict[str, float]:
     payload = json.loads(path.read_text(encoding="utf-8"))
-    if payload.get("schema_version") != 2:
-        raise ValueError("migration baseline schema_version must be 2")
+    if payload.get("schema_version") != 3:
+        raise ValueError(
+            "migration baseline schema_version must be 3 with raw stage evidence"
+        )
     if payload.get("student_sha256") != student_sha256:
         raise ValueError("migration baselines are bound to a different student checkpoint")
     binding = payload.get("binding")
     required_binding = {
         "student_sha256",
+        "teacher_sha256",
         "tokenizer_sha256",
         "dataset_sha256",
         "split",
@@ -868,6 +873,7 @@ def read_migration_baselines(
         "burn_in_tokens",
         "precision",
         "token_budget",
+        "sample_ids_sha256",
     }
     if (
         not isinstance(binding, dict)
@@ -891,6 +897,19 @@ def read_migration_baselines(
             or int(row.get("token_budget", -1))
             != int(binding["token_budget"])
             or not math.isfinite(float(row.get("mean_token_kl", float("nan"))))
+            or not math.isfinite(
+                float(row.get("end_to_end_zero_step_nmse", float("nan")))
+            )
+            or float(row.get("end_to_end_zero_step_nmse", -1)) < 0
+            or not isinstance(row.get("incremental_zero_step_nmse"), dict)
+            or not row["incremental_zero_step_nmse"]
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or float(value) < 0
+                for value in row["incremental_zero_step_nmse"].values()
+            )
         ):
             raise ValueError(
                 f"migration baseline row violates the shared protocol: {name}"
@@ -904,6 +923,122 @@ def read_migration_baselines(
         raise ValueError(
             "activation_fitted baseline lacks solver/materialization evidence"
         )
+    stage_manifests = payload.get("stage_manifests")
+    if (
+        not isinstance(stage_manifests, dict)
+        or set(stage_manifests) != set(rows)
+    ):
+        raise ValueError(
+            "migration baselines lack one raw stage manifest per matrix row"
+        )
+    from .core.migration_baselines import read_migration_baseline_stage
+
+    shared_stage_binding = {
+        name: binding[name]
+        for name in (
+            "teacher_sha256",
+            "tokenizer_sha256",
+            "dataset_sha256",
+            "split",
+            "seed",
+            "burn_in_tokens",
+            "precision",
+            "token_budget",
+            "sample_ids_sha256",
+        )
+    }
+    for name, reference in stage_manifests.items():
+        if not isinstance(reference, dict) or reference.get("kind") != "file":
+            raise ValueError(f"migration baseline stage reference is invalid: {name}")
+        manifest_path = _resolve_manifest_file(path, reference.get("path"))
+        expected_sha256 = str(reference.get("sha256", ""))
+        if (
+            len(expected_sha256) != 64
+            or not manifest_path.is_file()
+            or file_sha256(manifest_path) != expected_sha256
+        ):
+            raise ValueError(
+                f"migration baseline stage manifest SHA-256 mismatch: {name}"
+            )
+        try:
+            stage, sample_rows, _ = read_migration_baseline_stage(manifest_path)
+        except (ContractError, OSError, json.JSONDecodeError) as error:
+            raise ValueError(
+                f"migration baseline raw stage evidence is invalid: {name}: {error}"
+            ) from error
+        if stage.get("stage") != name or stage.get("binding") != shared_stage_binding:
+            raise ValueError(
+                f"migration baseline raw stage protocol differs: {name}"
+            )
+        token_budget = sum(int(row["token_count"]) for row in sample_rows)
+        recomputed = max(
+            0.0, sum(float(row["token_kl_sum"]) for row in sample_rows)
+        ) / token_budget
+        raw_incremental_keys = {
+            tuple(sorted(row.get("incremental_nmse", {})))
+            for row in sample_rows
+            if isinstance(row.get("incremental_nmse"), dict)
+        }
+        if (
+            len(raw_incremental_keys) != 1
+            or any(
+                row.get("end_to_end_zero_step_nmse") is None
+                or not isinstance(row.get("incremental_nmse"), dict)
+                or not row["incremental_nmse"]
+                for row in sample_rows
+            )
+        ):
+            raise ValueError(
+                f"migration baseline raw zero-step evidence is incomplete: {name}"
+            )
+        incremental_keys = next(iter(raw_incremental_keys))
+        recomputed_zero_step = sum(
+            float(row["end_to_end_zero_step_nmse"]) * int(row["token_count"])
+            for row in sample_rows
+        ) / token_budget
+        recomputed_incremental = {
+            component: sum(
+                float(row["incremental_nmse"][component])
+                * int(row["token_count"])
+                for row in sample_rows
+            )
+            / token_budget
+            for component in incremental_keys
+        }
+        if (
+            token_budget != int(rows[name]["token_budget"])
+            or not math.isclose(
+                recomputed,
+                float(rows[name]["mean_token_kl"]),
+                rel_tol=0,
+                abs_tol=1e-15,
+            )
+            or not math.isclose(
+                recomputed_zero_step,
+                float(rows[name]["end_to_end_zero_step_nmse"]),
+                rel_tol=0,
+                abs_tol=1e-15,
+            )
+            or set(recomputed_incremental)
+            != set(rows[name]["incremental_zero_step_nmse"])
+            or any(
+                not math.isclose(
+                    value,
+                    float(
+                        rows[name]["incremental_zero_step_nmse"][component]
+                    ),
+                    rel_tol=0,
+                    abs_tol=1e-15,
+                )
+                for component, value in recomputed_incremental.items()
+            )
+            or stage["candidate"]["sha256"] != rows[name]["candidate_sha256"]
+            or stage["sample_metrics"]["sha256"]
+            != rows[name]["sample_metrics_sha256"]
+        ):
+            raise ValueError(
+                f"migration baseline aggregate differs from raw stage evidence: {name}"
+            )
     return {
         name: float(rows[name]["mean_token_kl"])
         for name in MIGRATION_BASELINE_STAGES
@@ -1002,3 +1137,200 @@ def evaluate_hf_checkpoints(
         distributed=distributed,
     )
     return result
+
+
+def _migration_stage_evidence(
+    path: Path | None, *, stage: str
+) -> dict[str, object]:
+    if path is None:
+        return {"artifacts": {}}
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("schema_version") != 1 or payload.get("stage") != stage:
+        raise ValueError(
+            "migration stage evidence must use schema_version=1 and match the stage"
+        )
+    evidence = payload.get("evidence")
+    if not isinstance(evidence, dict):
+        raise ValueError("migration stage evidence object is missing")
+    artifacts = evidence.get("artifacts", {})
+    if not isinstance(artifacts, dict):
+        raise ValueError("migration stage evidence artifacts must be an object")
+    normalized: dict[str, object] = {**evidence, "artifacts": {}}
+    for name, reference in artifacts.items():
+        if not isinstance(reference, dict):
+            raise ValueError(f"migration stage evidence reference is invalid: {name}")
+        artifact = _resolve_manifest_file(path, reference.get("path"))
+        kind = str(reference.get("kind", ""))
+        expected = str(reference.get("sha256", ""))
+        actual = (
+            file_sha256(artifact)
+            if kind == "file" and artifact.is_file()
+            else (
+                checkpoint_sha256(artifact)
+                if kind == "checkpoint" and artifact.is_dir()
+                else ""
+            )
+        )
+        if len(expected) != 64 or actual != expected:
+            raise ValueError(
+                f"migration stage evidence artifact SHA-256 mismatch: {name}"
+            )
+        normalized["artifacts"][name] = {
+            "path": str(artifact),
+            "kind": kind,
+            "sha256": actual,
+        }
+    return normalized
+
+
+def _merge_zero_step_sample_metrics(
+    sample_rows: Sequence[Mapping[str, Any]],
+    evidence: Mapping[str, object],
+) -> list[dict[str, Any]]:
+    artifacts = evidence.get("artifacts")
+    reference = (
+        artifacts.get("zero_step_sample_metrics")
+        if isinstance(artifacts, Mapping)
+        else None
+    )
+    if not isinstance(reference, Mapping):
+        return [dict(row) for row in sample_rows]
+    if reference.get("kind") != "file":
+        raise ValueError("zero-step sample metrics evidence must be a file")
+    overlay_rows = _read_jsonl(
+        Path(str(reference["path"])),
+        str(reference["sha256"]),
+    )
+    overlays: dict[str, dict[str, Any]] = {}
+    for row in overlay_rows:
+        sample_id = str(row.get("sample_id", ""))
+        if not sample_id or sample_id in overlays:
+            raise ValueError("zero-step sample metrics contain invalid sample IDs")
+        if set(row) != {
+            "sample_id",
+            "end_to_end_zero_step_nmse",
+            "incremental_nmse",
+        }:
+            raise ValueError(
+                "zero-step sample metrics must contain only sample_id, "
+                "end_to_end_zero_step_nmse, and incremental_nmse"
+            )
+        overlays[sample_id] = row
+    expected_ids = [str(row["sample_id"]) for row in sample_rows]
+    if set(overlays) != set(expected_ids) or len(overlays) != len(expected_ids):
+        raise ValueError(
+            "zero-step sample metrics do not match evaluated sample IDs"
+        )
+    return [
+        {
+            **dict(row),
+            "end_to_end_zero_step_nmse": overlays[
+                str(row["sample_id"])
+            ]["end_to_end_zero_step_nmse"],
+            "incremental_nmse": overlays[
+                str(row["sample_id"])
+            ]["incremental_nmse"],
+        }
+        for row in sample_rows
+    ]
+
+
+def evaluate_hf_migration_stage(
+    *,
+    teacher_path: Path,
+    candidate_path: Path,
+    manifest_path: Path,
+    stage: str,
+    output_path: Path,
+    evidence_path: Path | None,
+    precision: str,
+    distributed: DistributedContext,
+) -> dict[str, Any]:
+    """Evaluate one matrix row without depending on the completed matrix."""
+    from transformers import AutoModelForCausalLM
+
+    from .core.migration_baselines import write_migration_baseline_stage
+
+    if stage not in MIGRATION_BASELINE_STAGES and not re.fullmatch(
+        r"corrective_sweep_[0-9]+", stage
+    ):
+        raise ValueError(f"unknown migration baseline stage: {stage}")
+    if torch.cuda.is_available() and distributed.world_size != 8:
+        raise ValueError(
+            "real CUDA migration baseline evaluation requires 8 ranks"
+        )
+    samples, _, manifest = read_evaluation_manifest(manifest_path)
+    local_samples = (
+        samples[distributed.rank :: distributed.world_size]
+        if distributed.world_size > 1
+        else samples
+    )
+    if not local_samples:
+        raise ValueError(
+            "migration baseline evaluation requires at least one sample per rank"
+        )
+    teacher_sha = checkpoint_sha256(teacher_path)
+    candidate_sha = checkpoint_sha256(candidate_path)
+    device = str(distributed.device) if torch.cuda.is_available() else "cpu"
+    dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+    teacher = AutoModelForCausalLM.from_pretrained(
+        teacher_path,
+        trust_remote_code=True,
+        torch_dtype=dtype,
+        device_map=device,
+    ).eval()
+    candidate = AutoModelForCausalLM.from_pretrained(
+        candidate_path,
+        trust_remote_code=True,
+        torch_dtype=dtype,
+        device_map=device,
+    ).eval()
+    summary, sample_rows = _evaluate_mode(
+        teacher,
+        candidate,
+        local_samples,
+        burn_in=int(manifest["burn_in_tokens"]),
+        warmed=True,
+        distributed=distributed,
+    )
+    evidence = _migration_stage_evidence(evidence_path, stage=stage)
+    evidence.update(
+        {
+            "evaluator_summary": summary,
+            "teacher_sha256": teacher_sha,
+            "candidate_sha256": candidate_sha,
+        }
+    )
+    sample_rows = _merge_zero_step_sample_metrics(sample_rows, evidence)
+    result = None
+    error = None
+    if distributed.is_primary:
+        try:
+            result = write_migration_baseline_stage(
+                output_path,
+                stage=stage,
+                protocol={
+                    "teacher_sha256": teacher_sha,
+                    "tokenizer_sha256": str(manifest["tokenizer_sha256"]),
+                    "dataset_sha256": str(manifest["data_sha256"]),
+                    "split": "validation",
+                    "seed": int(manifest["seed"]),
+                    "burn_in_tokens": int(manifest["burn_in_tokens"]),
+                    "precision": precision,
+                },
+                sample_rows=sample_rows,
+                candidate_path=candidate_path,
+                candidate_kind="checkpoint",
+                evidence=evidence,
+            )
+        except BaseException as caught:
+            error = f"{type(caught).__name__}: {caught}"
+    status = distributed.broadcast_object(
+        {"result": result, "error": error} if distributed.is_primary else None
+    )
+    if status["error"] is not None:
+        raise ContractError(
+            "migration baseline stage publish failed: " + status["error"]
+        )
+    distributed.barrier()
+    return status["result"]

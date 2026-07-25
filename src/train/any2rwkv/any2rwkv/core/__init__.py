@@ -21,6 +21,11 @@ from .layer_input_cache import (
     write_layer_input_cache,
 )
 from .experiment_tracking import ExperimentTracker, write_experiment_report
+from .migration_baselines import (
+    build_migration_baseline_matrix,
+    read_migration_baseline_stage,
+    write_migration_baseline_stage,
+)
 
 __all__ = [
     "AdapterRecipeRegistry",
@@ -42,4 +47,7 @@ __all__ = [
     "write_distributed_layer_input_cache_partition",
     "write_layer_input_cache",
     "write_experiment_report",
+    "build_migration_baseline_matrix",
+    "read_migration_baseline_stage",
+    "write_migration_baseline_stage",
 ]

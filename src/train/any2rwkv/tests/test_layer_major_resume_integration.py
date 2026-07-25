@@ -27,10 +27,12 @@ from any2rwkv.mapping import is_locally_trainable
 from any2rwkv.recipes.qwen35_to_rwkv7.layer_major_runner import (
     _activation_fit_full_attention,
     _activation_fit_gqa_native_zero_step_transaction,
+    _commit_distributed_generation,
     _dependency_transaction_improves,
     _frozen_parameter_sha256,
     _generation_mixer_state_sha256,
     _module_state_hashes,
+    _load_generation_state,
     _require_independent_activation_fit_caches,
     _require_frozen_parameter_sha256,
     _retain_gate_fit_candidate,
@@ -75,6 +77,102 @@ from any2rwkv.recipes import resolve_recipe
 
 class PlannedInterruption(RuntimeError):
     pass
+
+
+def test_new_synchronized_generation_uses_one_optimizer_copy_without_reload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, zero_step, _ = _prepare_fixture(tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    store = RWKV7MixerLayerStore(zero_step, run_dir / "mixer-overlays")
+    mixer = store.load_mixer(0, device="cpu", dtype=torch.float32)
+    optimizer = ActiveLayerOptimizer(learning_rate=1e-3)
+    optimizer.activate(0, mixer)
+    assert optimizer.backward(
+        mixer.r_proj.weight.float().square().mean(),
+        accumulation_steps=1,
+    )
+    cursor = {
+        "active_layer": 0,
+        "epoch_index": 0,
+        "next_train_row": 1,
+        "permutation_sha256": "a" * 64,
+    }
+    distributed = DistributedContext(rank=0, local_rank=0, world_size=1)
+
+    def reject_immediate_reload(*_args, **_kwargs):
+        raise AssertionError("new generation was read back immediately")
+
+    monkeypatch.setattr(store, "load_mixer", reject_immediate_reload)
+    generation = _commit_distributed_generation(
+        distributed,
+        run_dir,
+        store,
+        mixer,
+        optimizer,
+        cursor,
+    )
+
+    layout = json.loads(
+        (generation / "training-state-layout.json").read_text(encoding="utf-8")
+    )
+    assert layout["layout"] == "canonical-optimizer-with-rank-rng"
+    assert (generation / "training-state-canonical.pt").is_file()
+    assert (generation / "rng-state-rank-000.pt").is_file()
+    assert not tuple(generation.glob("training-state-rank-*.pt"))
+    snapshot = _load_generation_state(
+        generation,
+        device=torch.device("cpu"),
+        rank=0,
+        world_size=1,
+        expected_cursor=cursor,
+    )
+    assert snapshot.optimizer_step == optimizer.optimizer_step
+    for actual, expected in zip(
+        snapshot.master_parameters,
+        optimizer.snapshot().master_parameters,
+        strict=True,
+    ):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_mid_accumulation_generation_keeps_rank_local_full_state(
+    tmp_path: Path,
+) -> None:
+    _, zero_step, _ = _prepare_fixture(tmp_path)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    store = RWKV7MixerLayerStore(zero_step, run_dir / "mixer-overlays")
+    mixer = store.load_mixer(0, device="cpu", dtype=torch.float32)
+    optimizer = ActiveLayerOptimizer(learning_rate=1e-3)
+    optimizer.activate(0, mixer)
+    assert not optimizer.backward(
+        mixer.r_proj.weight.float().square().mean(),
+        accumulation_steps=2,
+    )
+    cursor = {
+        "active_layer": 0,
+        "epoch_index": 0,
+        "next_train_row": 1,
+        "permutation_sha256": "b" * 64,
+    }
+    generation = _commit_distributed_generation(
+        DistributedContext(rank=0, local_rank=0, world_size=1),
+        run_dir,
+        store,
+        mixer,
+        optimizer,
+        cursor,
+    )
+
+    layout = json.loads(
+        (generation / "training-state-layout.json").read_text(encoding="utf-8")
+    )
+    assert layout["layout"] == "rank-local-full-state"
+    assert (generation / "training-state-rank-000.pt").is_file()
+    assert not (generation / "training-state-canonical.pt").exists()
+    assert not tuple(generation.glob("rng-state-rank-*.pt"))
 
 
 def test_gqa_full_attention_fit_does_not_fall_through_to_legacy(

@@ -5639,6 +5639,9 @@ def _activation_fit_gqa_native_zero_step_transaction(
                 "baseline_parameter_sha256": baseline_hashes,
                 "proposed_parameter_sha256": proposed_hashes,
                 "selected_parameter_sha256": selected_hashes,
+                "selected_module_state_sha256": _sha256_json(
+                    selected_hashes
+                ),
                 "materialization": asdict(materialization),
                 "rank_parameter_hashes": list(rank_hashes),
             },

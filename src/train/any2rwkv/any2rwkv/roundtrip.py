@@ -68,14 +68,40 @@ def validate_sharded_checkpoint(path: Path) -> dict[str, Any]:
 
 
 def compare_fresh_process_manifests(left: dict[str, Any], right: dict[str, Any]) -> None:
-    for key in ("loading_info", "greedy_digest", "logits_digest", "ppl"):
+    deterministic_keys = (
+        "model_sha256",
+        "backend",
+        "transformers_version",
+        "prompt_count",
+        "new_tokens",
+        "loading_info",
+        "greedy_digest",
+        "single_greedy_digest",
+        "batch_greedy_digest",
+        "logits_digest",
+        "ppl",
+        "shards",
+    )
+    for key in deterministic_keys:
         if key not in left or key not in right:
             raise ContractError(f"roundtrip process manifest is missing {key}")
     if left["loading_info"] != {"missing_keys": [], "unexpected_keys": [], "mismatched_keys": [], "error_msgs": []}:
         raise ContractError(f"first strict reload is not clean: {left['loading_info']}")
-    if right["loading_info"] != left["loading_info"]:
-        raise ContractError("fresh-process loading diagnostics differ")
-    if left["greedy_digest"] != right["greedy_digest"] or left["logits_digest"] != right["logits_digest"]:
-        raise ContractError("fresh-process deterministic outputs differ")
-    if float(left["ppl"]) != float(right["ppl"]):
-        raise ContractError("fresh-process deterministic PPL differs")
+    if any(left[key] != right[key] for key in deterministic_keys):
+        raise ContractError(
+            "fresh-process Transformers version, checkpoint, loading, "
+            "or deterministic outputs differ"
+        )
+    for manifest in (left, right):
+        if (
+            manifest.get("passed") is not True
+            or manifest.get("backend") != "transformers"
+            or manifest.get("strict_reload") is not True
+            or manifest.get("single_batch_greedy_equal") is not True
+            or manifest.get("batch_isolation", {}).get("passed") is not True
+            or manifest.get("full_chunked_cache", {}).get("passed") is not True
+            or manifest.get("state_reset", {}).get("passed") is not True
+        ):
+            raise ContractError(
+                "fresh-process Transformers inference contract is incomplete"
+            )

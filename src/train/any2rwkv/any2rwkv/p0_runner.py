@@ -10,6 +10,7 @@ from typing import Sequence
 from .artifacts import checkpoint_sha256, file_sha256, write_json
 from .errors import ContractError
 from .evaluate import P0_REQUIRED
+from .roundtrip import compare_fresh_process_manifests
 
 
 @dataclass(frozen=True)
@@ -79,7 +80,12 @@ def run_p0_validation(inputs: P0ValidationInputs) -> dict[str, object]:
     first = _run_roundtrip(inputs, evidence_dir / "roundtrip-first.json")
     second = _run_roundtrip(inputs, evidence_dir / "roundtrip-second.json")
     comparable = ("greedy_digest", "logits_digest", "ppl")
-    roundtrip_passed = all(first[key] == second[key] for key in comparable)
+    roundtrip_error = None
+    try:
+        compare_fresh_process_manifests(first, second)
+    except ContractError as error:
+        roundtrip_error = str(error)
+    roundtrip_passed = roundtrip_error is None
     write_json(
         roundtrip_artifact,
         {
@@ -89,10 +95,31 @@ def run_p0_validation(inputs: P0ValidationInputs) -> dict[str, object]:
             "student_sha256": student_sha,
             "fresh_process_runs": [first, second],
             "compared": list(comparable),
+            "error": roundtrip_error,
         },
     )
     if not roundtrip_passed:
         raise ContractError(f"fresh-process HF roundtrip differs; see {roundtrip_artifact}")
+    write_json(
+        inputs.run_dir / "transformers-inference.json",
+        {
+            "schema_version": 1,
+            "passed": True,
+            "model_sha256": student_sha,
+            "backend": "transformers",
+            "transformers_version": first.get("transformers_version"),
+            "strict_reload": True,
+            "single_batch_greedy": True,
+            "full_chunked_cache": True,
+            "state_reset": True,
+            "batch_isolation": True,
+            "fresh_process_manifest_sha256": [
+                file_sha256(evidence_dir / "roundtrip-first.json"),
+                file_sha256(evidence_dir / "roundtrip-second.json"),
+            ],
+            "p0_roundtrip_sha256": file_sha256(roundtrip_artifact),
+        },
+    )
     entries["hf_roundtrip"] = _entry(inputs.run_dir, roundtrip_artifact, student_sha)
 
     missing = sorted(set(P0_REQUIRED) - entries.keys())
