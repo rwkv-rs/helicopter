@@ -56,6 +56,7 @@ class InstallPolicyTests(unittest.TestCase):
         self.assertIn("--group dev", result.stdout)
         self.assertIn("--group lighteval", result.stdout)
         self.assertIn("--project", result.stdout)
+        self.assertIn("--frozen", result.stdout)
         self.assertIn("pip uninstall", result.stdout)
         self.assertNotIn("--project src/eval/lighteval", result.stdout)
 

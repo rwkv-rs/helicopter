@@ -1,15 +1,17 @@
 # ruff: noqa: E401, E501, E701, E702
-import gzip, importlib.metadata, importlib.util, json, tomllib
+import collections, gzip, importlib, importlib.metadata, importlib.util, json
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 import pytest
 from lighteval.logging.evaluation_tracker import EvaluationTracker
+from lighteval.data import GenerativeTaskDataset
 from lighteval.metrics import apply_metric
 from lighteval.models.model_output import ModelResponse
 from lighteval.models.vllm.vllm_model import VLLMModel
-from lighteval.pipeline import ParallelismManager
+from lighteval.pipeline import ParallelismManager, Pipeline
 from lighteval.tasks.prompt_manager import PromptManager
 from lighteval.tasks.registry import Registry
+from lighteval.tasks.requests import Doc, SamplingMethod
 from lighteval.utils.imports import is_package_available
 from vllm import LLM
 from vllm.engine.arg_utils import EngineArgs
@@ -22,8 +24,8 @@ def artifacts(limit=3):
     return {"config_general": {"model_config": {"generation_parameters": {"max_new_tokens": limit}}}, "config_tasks": {"gsm8k|0": {"generation_size": 2}}, "results": {"gsm8k|0": {"exact_match": 0.5}}}, [{"doc": {"id": "0", "query": "1+1?", "task_name": "gsm8k|0"}, "model_response": {"text": ["2", "bad\nUser:"], "output_tokens": [[1, 2, 3], [4, 5]]}, "metric": {"exact_match": 1.0}}]
 def test_layout_registry_passthrough_and_generation_contract():
     component = ROOT / "src/eval/lighteval"; assert list(component.glob("*.py")) == [component / "evaluate.py"] and not (component / "pyproject.toml").exists()
-    preset = tomllib.loads((ROOT / "configs/lighteval-pro6000.toml").read_text()); assert preset == {"tasks": [{"model_size": size, "wkv_mode": mode, "batch_size": batch} for size, mode, batch in (("1.5B", "fp16", 2560), ("1.5B", "fp32io16", 2560), ("2.9B", "fp16", 2560), ("2.9B", "fp32io16", 2560), ("7.2B", "fp16", 2560), ("7.2B", "fp32io16", 1280), ("13.3B", "fp16", 1280), ("13.3B", "fp32io16", 640))]}
-    assert all(text not in (component / "evaluate.py").read_text() for text in ("Question:", "Answer:", "DAPO")) and 'kwargs.setdefault("disable_log_stats", "VLLM_LOG_STATS_INTERVAL" not in os.environ)' in (ROOT / "src/infer/vllm-rwkv/vllm/entrypoints/llm.py").read_text()
+    assert not (ROOT / "configs/lighteval-pro6000.toml").exists()
+    assert all(text not in (component / "evaluate.py").read_text() for text in ("Question:", "DAPO")) and 'kwargs.setdefault("disable_log_stats", "VLLM_LOG_STATS_INTERVAL" not in os.environ)' in (ROOT / "src/infer/vllm-rwkv/vllm/entrypoints/llm.py").read_text()
     assert Registry(tasks=evaluate.TASKS).load_tasks() and evaluate.DetectorFactory.seed == 0
     with pytest.raises(ValueError): Registry(tasks="definitely_unknown_task|0").load_tasks()
     params = evaluate._generation_parameters(); backend = params.to_vllm_dict()
@@ -31,13 +33,19 @@ def test_layout_registry_passthrough_and_generation_contract():
     assert tuple(backend[key] for key in keys) == (0.96, 0.76, 32, 1.0, 0.1, 0.0, 0.988, 8192) and backend["stop"] == ["\nUser:"]
     config = evaluate.RWKVVLLMModelConfig(model_name="model", wkv_mode="fp16", generation_parameters=params)
     logical = config.model_dump()["generation_parameters"]; assert (logical["frequency_penalty"], logical["penalty_decay"]) == (0.1, 0.988)
+    assert (config.max_num_seqs, config.max_num_batched_tokens) == (None, None)
+def test_entrypoint_does_not_shadow_hugging_face_evaluate():
+    imported = importlib.import_module("evaluate")
+    assert Path(imported.__file__).resolve() != (ROOT / "src/eval/lighteval/evaluate.py").resolve()
 def test_pipeline_receives_tasks_precision_candidate_and_remote_output(monkeypatch, tmp_path):
     captured = {}
     for name in ("EvaluationTracker", "PipelineParameters", "RWKVVLLMModelConfig"): monkeypatch.setattr(evaluate, name, lambda **kw: kw)
+    monkeypatch.setattr(evaluate, "RWKVVLLMModel", lambda config: {"config": config})
     monkeypatch.setattr(evaluate, "RWKVPipeline", lambda **kw: captured.update(kw) or kw); evaluate.build_pipeline()
     assert captured["tasks"] == evaluate.TASKS and captured["pipeline_parameters"]["launcher_type"] is ParallelismManager.VLLM
-    assert captured["model_config"]["max_num_seqs"] in evaluate.CONCURRENCY_CANDIDATES and captured["model_config"]["override_chat_template"] is True
-    assert captured["model_config"]["model_name"] == Path(evaluate.MODEL_PATH).as_uri() and (captured["model_config"]["cache_dir"], captured["model_config"]["wkv_mode"]) == (str(evaluate.CACHE_DIR), evaluate.WKV_MODE)
+    config = captured["model"]["config"]
+    assert config["max_num_seqs"] is None and config["max_num_batched_tokens"] is None and config["override_chat_template"] is True
+    assert config["model_name"] == Path(evaluate.MODEL_PATH).as_uri() and (config["cache_dir"], config["wkv_mode"]) == (str(evaluate.CACHE_DIR), evaluate.WKV_MODE)
     monkeypatch.delenv("LIGHTEVAL_OUTPUT_ROOT", raising=False); monkeypatch.setenv("REMOTE_RUN_LOG_DIR", str(tmp_path / "runs"))
     assert evaluate._output_dir("id") == tmp_path / "runs/lighteval/id"; monkeypatch.setenv("LIGHTEVAL_OUTPUT_ROOT", str(tmp_path / "explicit")); assert evaluate._output_dir("id") == tmp_path / "explicit/id"
 def test_strict_categorical_postprocessing_uses_only_closed_suffixes():
@@ -50,6 +58,53 @@ def test_strict_categorical_postprocessing_uses_only_closed_suffixes():
     assert response.text_post_processed == [" A", " B", " C", " D", "", "", "", "", "", ""] and len(response.text_post_processed) == len(raw)
     assert response.text == raw and response.output_tokens == tokens and untouched.text_post_processed is None and untouched.text == ["<think>x</think>Answer: B"]
     assert [apply_metric([ModelResponse(text_post_processed=[value])], [doc], task.metrics)[0]["em"] for value in (" B", "")] == [1, 0]
+def test_logprob_choices_become_one_generative_request_and_keep_metric_names():
+    doc = Doc(query="Which continuation?", choices=[" first", " second", " third"], gold_index=1,
+              sampling_methods=[SamplingMethod.LOGPROBS])
+    assert evaluate._is_choice_doc(doc)
+    assert evaluate._is_choice_doc(Doc(query="No labels in this prompt", choices=["red", "blue"], gold_index=0,
+                                       sampling_methods=[SamplingMethod.GENERATIVE]))
+    evaluate._convert_logprob_choice_doc(doc)
+    assert doc.sampling_methods == [SamplingMethod.GENERATIVE]
+    assert doc.query.endswith('C. third\n\nAfter reasoning, end with "Answer: <letter>".')
+    assert evaluate._choice_answer("<think>x</think>Answer: B", [1], doc.choices) == " second"
+    source = next(iter(Registry(tasks="hellaswag|0").load_tasks().values())).metrics[0]
+    converted = evaluate._generative_choice_metric(source)
+    assert converted.metric_name == source.metric_name and converted.category == SamplingMethod.GENERATIVE
+    response = ModelResponse(text_post_processed=[" second"])
+    assert converted.compute_sample(doc=doc, model_response=response)[source.metric_name] == 1
+def test_generative_choices_are_submitted_as_one_vllm_request_group():
+    docs = [Doc(query=f"Question {index}", choices=[" one", " two"], gold_index=0,
+                sampling_methods=[SamplingMethod.LOGPROBS]) for index in range(9)]
+    for doc in docs:
+        evaluate._convert_logprob_choice_doc(doc)
+        doc.generation_size = evaluate.MAX_NEW_TOKENS
+        doc.stop_sequences = ["\nUser:"]
+    dataset = GenerativeTaskDataset(requests=docs, num_dataset_splits=4)
+    assert dataset.num_dataset_splits == 1
+    assert [len(split) for split in dataset.splits_iterator()] == [len(docs)]
+def test_pipeline_rebuilds_logprob_choice_requests_and_metrics(monkeypatch):
+    doc = Doc(query="Question", choices=[" one", " two"], gold_index=1,
+              sampling_methods=[SamplingMethod.LOGPROBS])
+    source = next(iter(Registry(tasks="hellaswag|0").load_tasks().values())).metrics[0]
+    task = SimpleNamespace(full_name="choice|0", metrics=(source,),
+                           config=SimpleNamespace(metrics=(source,)),
+                           sampling_methods=[SamplingMethod.LOGPROBS])
+    logged = []
+    def initialize(self, _tasks):
+        self.tasks_dict = {"choice|0": task}
+        self.documents_dict = {"choice|0": [doc]}
+        self.sampling_docs = collections.defaultdict(list, {SamplingMethod.LOGPROBS: [doc]})
+    monkeypatch.setattr(Pipeline, "_init_tasks_and_requests", initialize)
+    pipeline = object.__new__(evaluate.RWKVPipeline)
+    pipeline.evaluation_tracker = SimpleNamespace(
+        task_config_logger=SimpleNamespace(log=lambda tasks: logged.append(tasks)))
+    pipeline._init_tasks_and_requests("choice|0")
+    assert list(pipeline.sampling_docs) == [SamplingMethod.GENERATIVE]
+    assert pipeline.sampling_docs[SamplingMethod.GENERATIVE] == [doc]
+    assert task.metrics[0].metric_name == source.metric_name
+    assert task.metrics[0].category == SamplingMethod.GENERATIVE
+    assert task.config.metrics == task.metrics and logged == [pipeline.tasks_dict]
 def test_official_vllm_init_bridge_cache_and_sampling(tmp_path, monkeypatch):
     assert is_package_available("vllm") and not getattr(VLLMModel, "is_dummy", False) and resolve_tokenizer_args(evaluate.MODEL_PATH)[0] == "rwkv" and resolve_tokenizer_args("facebook/opt-125m")[0] == "hf"
     checkpoint = tmp_path / Path(evaluate.MODEL_PATH).name; checkpoint.touch(); invalid = tmp_path / "rwkv7.pth"; invalid.touch(); monkeypatch.chdir(tmp_path)
@@ -65,6 +120,13 @@ def test_official_vllm_init_bridge_cache_and_sampling(tmp_path, monkeypatch):
     assert config.model_dump()["wkv_mode"] == "fp16" and initialized._cache.get_model_hash(config) != initialized._cache.get_model_hash(other_mode)
     assert initialized._cache.cache_dir.resolve().is_relative_to(cache_a.resolve()) and cache_a != cache_b and all(path.resolve().is_relative_to(root) for path in (cache_a, cache_b))
     assert (initialized.tokenizer.bos_token, initialized.tokenizer.eos_token, initialized.tokenizer.pad_token) == ("<|endoftext|>",) * 3
+    bridge, seen = object.__new__(evaluate.RWKVVLLMModel), {}
+    bridge._max_length = evaluate.MAX_MODEL_LENGTH
+    monkeypatch.setattr(evaluate, "LLM", lambda **kwargs: seen.update(kwargs) or SimpleNamespace())
+    assert bridge._create_auto_model(config) is not None
+    assert "max_num_seqs" not in seen and "max_num_batched_tokens" not in seen
+    seen.clear(); bridge._create_auto_model(config.model_copy(update={"max_num_seqs": 40, "max_num_batched_tokens": 10240}))
+    assert (seen["max_num_seqs"], seen["max_num_batched_tokens"]) == (40, 10240)
     backend, captured = object.__new__(LLM), {}; backend.model_config = SimpleNamespace(runner_type="generate", tokenizer_mode="rwkv", hf_config=SimpleNamespace(model_type="rwkv7"))
     backend._run_completion = MethodType(lambda self, **kwargs: captured.update(kwargs) or [], backend)
     model = object.__new__(VLLMModel); model.config = config; model.data_parallel_size, model.model = 1, backend

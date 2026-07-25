@@ -1,15 +1,27 @@
-# ruff: noqa: E401, E501, E701, E702
+# ruff: noqa: E401, E402, E501, E701, E702
 import gzip, json, os, re, sys
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.request import Request, urlopen
+
+_SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path = [
+    entry
+    for entry in sys.path
+    if Path(entry or ".").resolve() != _SCRIPT_DIR
+]
+
 import pyarrow.parquet as parquet
 from langdetect import DetectorFactory
+from pydantic import PositiveInt
 from lighteval.logging.evaluation_tracker import EvaluationTracker
 from lighteval.metrics.metrics_sample import ExactMatches
+from lighteval.metrics.utils.metric_utils import SampleLevelMetric
 from lighteval.models.model_input import GenerationParameters
-from lighteval.models.vllm.vllm_model import VLLMModelConfig
+from lighteval.models.vllm.vllm_model import VLLMModel, VLLMModelConfig
 from lighteval.pipeline import ParallelismManager, Pipeline, PipelineParameters
+from lighteval.tasks.requests import SamplingMethod
+from vllm import LLM
 from vllm.transformers_utils.configs.rwkv7 import build_rwkv7_config_from_pth
 DetectorFactory.seed = 0
 # Edit these ordinary constants for an evaluation. Every run gets a unique directory.
@@ -25,8 +37,14 @@ MAX_NEW_TOKENS = int(os.environ.get("LIGHTEVAL_MAX_NEW_TOKENS", "8192"))
 MAX_MODEL_LENGTH = build_rwkv7_config_from_pth(MODEL_PATH).max_position_embeddings
 WKV_MODE = os.environ.get("VLLM_RWKV7_WKV_MODE", "fp16")
 os.environ["VLLM_USE_RAPID_SAMPLER"] = "1"
-CONCURRENCY_CANDIDATES = (40, 80, 160, 320, 640, 1280, 2560)
-TARGET_CONCURRENCY = int(os.environ.get("LIGHTEVAL_TARGET_CONCURRENCY", "40"))
+def _optional_positive_int(name: str) -> int | None:
+    value = os.environ.get(name)
+    if value is None: return None
+    parsed = int(value)
+    if parsed <= 0: raise ValueError(f"{name} must be a positive integer")
+    return parsed
+MAX_NUM_SEQS = _optional_positive_int("LIGHTEVAL_MAX_NUM_SEQS")
+MAX_NUM_BATCHED_TOKENS = _optional_positive_int("LIGHTEVAL_MAX_NUM_BATCHED_TOKENS")
 GENERATION_PARAMETERS = {
     "temperature": 0.96, "top_p": 0.76, "top_k": 32,
     "presence_penalty": 1.0, "frequency_penalty": 0.1, "penalty_decay": 0.988,
@@ -43,8 +61,56 @@ class RWKVGenerationParameters(GenerationParameters):
         backend.update(repetition_penalty=self.frequency_penalty,
                        frequency_penalty=0.0, penalty_decay=self.penalty_decay)
         return backend
-class RWKVVLLMModelConfig(VLLMModelConfig): generation_parameters: RWKVGenerationParameters; wkv_mode: str
+class RWKVVLLMModelConfig(VLLMModelConfig):
+    generation_parameters: RWKVGenerationParameters
+    wkv_mode: str
+    max_num_seqs: PositiveInt | None = None
+    max_num_batched_tokens: PositiveInt | None = None
+class RWKVVLLMModel(VLLMModel):
+    def _create_auto_model(self, config: RWKVVLLMModelConfig):
+        self.model_args = {
+            "model": config.model_name,
+            "gpu_memory_utilization": config.gpu_memory_utilization,
+            "enable_prefix_caching": config.enable_prefix_caching,
+            "revision": config.revision + (f"/{config.subfolder}" if config.subfolder is not None else ""),
+            "dtype": config.dtype,
+            "trust_remote_code": config.trust_remote_code,
+            "tensor_parallel_size": config.tensor_parallel_size,
+            "pipeline_parallel_size": config.pipeline_parallel_size,
+            "max_model_len": self._max_length,
+            "swap_space": config.swap_space,
+            "seed": int(config.seed),
+            "enforce_eager": True,
+        }
+        if config.max_num_seqs is not None: self.model_args["max_num_seqs"] = int(config.max_num_seqs)
+        if config.max_num_batched_tokens is not None: self.model_args["max_num_batched_tokens"] = int(config.max_num_batched_tokens)
+        if config.quantization is not None: self.model_args["quantization"] = config.quantization
+        if config.load_format is not None: self.model_args["load_format"] = config.load_format
+        if config.data_parallel_size > 1:
+            self.model_args["distributed_executor_backend"] = "ray"
+            self._batch_size = "auto"
+            return None
+        model = LLM(**self.model_args)
+        if self._max_length is None: self._max_length = model.llm_engine.model_config.max_seq_len_to_capture
+        return model
 def _generation_parameters() -> RWKVGenerationParameters: return RWKVGenerationParameters(**GENERATION_PARAMETERS)
+def _is_choice_doc(doc) -> bool:
+    choices = doc.choices
+    if not isinstance(choices, list) or not 2 <= len(choices) <= 26 or not all(isinstance(choice, str) for choice in choices): return False
+    return not isinstance(doc.gold_index, bool) and isinstance(doc.gold_index, int) and 0 <= doc.gold_index < len(choices)
+def _convert_logprob_choice_doc(doc) -> None:
+    labels = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ"[:len(doc.choices)])
+    options = "\n".join(f"{label}. {choice.strip()}" for label, choice in zip(labels, doc.choices))
+    doc.query = f'{doc.query.rstrip()}\n\n{options}\n\nAfter reasoning, end with "Answer: <letter>".'
+    doc.sampling_methods = [SamplingMethod.GENERATIVE if method == SamplingMethod.LOGPROBS else method for method in doc.sampling_methods]
+    doc.sampling_methods = list(dict.fromkeys(doc.sampling_methods))
+    doc.specific = dict(doc.specific or {}, rwkv_generative_choice=True)
+def _generative_choice_metric(metric) -> SampleLevelMetric:
+    if not isinstance(metric.metric_name, str): raise ValueError("grouped log-probability choice metrics are unsupported")
+    return SampleLevelMetric(metric_name=metric.metric_name, sample_level_fn=ExactMatches(),
+                             category=SamplingMethod.GENERATIVE,
+                             corpus_level_fn=metric.corpus_level_fn,
+                             higher_is_better=metric.higher_is_better)
 def _choice_answer(raw, tokens, choices) -> str:
     if not isinstance(raw, str) or not isinstance(tokens, list) or not tokens or len(tokens) >= MAX_NEW_TOKENS or raw.count("</think>") != 1: return ""
     suffix = _MARKUP.sub("", raw.split("</think>", 1)[1])
@@ -53,20 +119,36 @@ def _choice_answer(raw, tokens, choices) -> str:
     if match := _BARE.fullmatch(suffix): matches += [value.upper() for value in match.groups() if value]
     unique = set(matches)
     if len(unique) != 1: return ""
-    label = unique.pop(); labels = [choice.strip() for choice in choices]
+    label = unique.pop(); labels = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ"[:len(choices)])
     return choices[labels.index(label)] if label in labels else ""
 class RWKVPipeline(Pipeline):
+    def _init_tasks_and_requests(self, tasks: str):
+        super()._init_tasks_and_requests(tasks)
+        for task in self.tasks_dict.values():
+            docs = self.documents_dict[task.full_name]
+            if not any(_is_choice_doc(doc) and SamplingMethod.LOGPROBS in doc.sampling_methods for doc in docs): continue
+            for doc in docs:
+                if _is_choice_doc(doc) and SamplingMethod.LOGPROBS in doc.sampling_methods: _convert_logprob_choice_doc(doc)
+            task.metrics = tuple(_generative_choice_metric(metric) if metric.category == SamplingMethod.LOGPROBS else metric for metric in task.metrics)
+            task.config.metrics = task.metrics
+            task.sampling_methods = list({metric.category for metric in task.metrics})
+        self.sampling_docs.clear()
+        for docs in self.documents_dict.values():
+            for doc in docs:
+                if SamplingMethod.GENERATIVE in doc.sampling_methods:
+                    doc.generation_size = MAX_NEW_TOKENS
+                    doc.stop_sequences = ["\nUser:"]
+                for method in doc.sampling_methods: self.sampling_docs[method].append(doc)
+        self.evaluation_tracker.task_config_logger.log(self.tasks_dict)
     def _post_process_outputs(self, sampling_method_responses):
         super()._post_process_outputs(sampling_method_responses)
         for method, responses in sampling_method_responses.items():
             for doc, response in zip(self.sampling_docs[method], responses):
-                choices = doc.choices; labels = [choice.strip() for choice in choices] if isinstance(choices, list) and all(isinstance(choice, str) for choice in choices) else []
-                metrics = [metric for metric in self.tasks_dict[doc.task_name].metrics if metric.category == method]
-                if len(labels) <= 1 or labels != list("ABCDEFGHIJKLMNOPQRSTUVWXYZ"[:len(labels)]) or not metrics or not all(type(metric.sample_level_fn) is ExactMatches and metric.sample_level_fn.normalize_pred is None and metric.sample_level_fn.type_exact_match == "full" for metric in metrics): continue
+                choices = doc.choices
+                if method != SamplingMethod.GENERATIVE or not _is_choice_doc(doc): continue
                 response.text_post_processed = [_choice_answer(raw, response.output_tokens[i] if isinstance(response.output_tokens, list) and i < len(response.output_tokens) else None, choices) for i, raw in enumerate(response.text)]
 def build_pipeline() -> Pipeline:
     if WKV_MODE not in ("fp16", "fp32io16"): raise ValueError("WKV_MODE must be fp16 or fp32io16")
-    if TARGET_CONCURRENCY not in CONCURRENCY_CANDIDATES: raise ValueError("invalid concurrency candidate")
     os.environ["VLLM_RWKV7_WKV_MODE"] = WKV_MODE
     tracker = EvaluationTracker(output_dir=str(OUTPUT_DIR), save_details=True)
     parameters = PipelineParameters(launcher_type=ParallelismManager.VLLM,
@@ -74,12 +156,13 @@ def build_pipeline() -> Pipeline:
     model = RWKVVLLMModelConfig(
         model_name=Path(MODEL_PATH).as_uri(), cache_dir=str(CACHE_DIR), wkv_mode=WKV_MODE,
         dtype="float16", max_model_length=MAX_MODEL_LENGTH,
-        max_num_seqs=TARGET_CONCURRENCY,
-        max_num_batched_tokens=max(MAX_MODEL_LENGTH, TARGET_CONCURRENCY * 128),
+        max_num_seqs=MAX_NUM_SEQS,
+        max_num_batched_tokens=MAX_NUM_BATCHED_TOKENS,
         enable_prefix_caching=False, override_chat_template=True,
         generation_parameters=_generation_parameters())
+    backend = RWKVVLLMModel(model)
     return RWKVPipeline(tasks=TASKS, pipeline_parameters=parameters,
-                        evaluation_tracker=tracker, model_config=model)
+                        evaluation_tracker=tracker, model=backend)
 def read_standard_artifacts(output_dir: Path) -> tuple[dict, list[dict]]:
     result_files = list(output_dir.glob("results/**/results_*.json"))
     if len(result_files) != 1: raise ValueError("expected one standard results JSON")

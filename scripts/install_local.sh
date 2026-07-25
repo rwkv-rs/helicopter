@@ -8,7 +8,7 @@ UV="${UV:-uv}"
 INSTALL_COMPONENTS="${INSTALL_COMPONENTS:-lighteval,dev}"
 INSTALL_SYSTEM_DEPS="${INSTALL_SYSTEM_DEPS:-0}"
 UPDATE_UV="${UPDATE_UV:-1}"
-UV_UPGRADE="${UV_UPGRADE:-1}"
+UV_UPGRADE="${UV_UPGRADE:-0}"
 RUN_PIP_CHECK="${RUN_PIP_CHECK:-1}"
 UV_SYNC_INEXACT="${UV_SYNC_INEXACT:-1}"
 CLEAN_SUBMODULE_VENVS="${CLEAN_SUBMODULE_VENVS:-1}"
@@ -276,7 +276,11 @@ sync_uv_env() {
   [[ -n "$UV_INDEX_URL" ]] && sync_args+=(--index-url "$UV_INDEX_URL")
   [[ "$UV_SYNC_INEXACT" == "1" ]] && sync_args+=(--inexact)
   sync_args+=(--project "$ROOT" --python "$PYTHON_VERSION" --no-default-groups)
-  [[ "$UV_UPGRADE" == "1" ]] && sync_args+=(--upgrade)
+  if [[ "$UV_UPGRADE" == "1" ]]; then
+    sync_args+=(--upgrade)
+  else
+    sync_args+=(--frozen)
+  fi
 
   local component
   local -a components=()
@@ -307,7 +311,7 @@ sync_scoreboard_server_component() {
   if [[ "$UV_UPGRADE" == "1" ]]; then
     sync_args+=(--upgrade)
   else
-    sync_args+=(--locked)
+    sync_args+=(--frozen)
   fi
   [[ -n "$UV_INDEX_URL" ]] && sync_args+=(--index-url "$UV_INDEX_URL")
   run "$UV" "${sync_args[@]}"
