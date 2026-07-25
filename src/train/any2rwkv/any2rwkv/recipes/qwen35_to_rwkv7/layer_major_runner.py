@@ -47,7 +47,9 @@ from ...zero_step_probe import materialize_native_projection
 from .gqa_zero_step import (
     GQANativeFitConfig,
     GQANativeFitTrace,
+    estimate_gqa_native_streamed_peak_bytes,
     fit_gqa_native_zero_step,
+    validate_gqa_native_fit_trace,
 )
 
 
@@ -5087,7 +5089,7 @@ def _activation_fit_gqa_native_zero_step_transaction(
     fit_rows = int(fit_rows)
     if (
         fit_rows > train_reader.row_count
-        or fit_rows < max(3, distributed.world_size)
+        or fit_rows < max(3, 2 * distributed.world_size)
     ):
         raise ContractError("GQA native zero-step rows violate fit capacity")
 
@@ -5113,30 +5115,36 @@ def _activation_fit_gqa_native_zero_step_transaction(
         for length in requested_context_lengths
         if length - int(burn_in_tokens) >= 2
     )
+    if not context_lengths:
+        raise ContractError("GQA native zero-step has no eligible causal context")
+    selected_context_length = max(context_lengths)
     hidden_size = int(train_reader.manifest["hidden_size"])
     trace_width = 2 * hidden_size + 4 * query_heads * source_head_dim
+    maximum_local_fit_rows = (
+        fit_rows + distributed.world_size - 1
+    ) // distributed.world_size
     estimated_primary_trace_bytes = (
-        2 * fit_rows * sum(context_lengths) * trace_width
+        2
+        * maximum_local_fit_rows
+        * selected_context_length
+        * trace_width
     )
     native_head_dim = int(mixer.head_dim)
-    estimated_solver_peak_bytes = max(
-        (
-            estimated_primary_trace_bytes
-            + 4
-            * fit_rows
-            * context_length
-            * (
-                4 * key_value_heads * source_head_dim**2
-                + 12
-                * query_heads
-                * 2
-                * native_head_dim**2
-                + 3 * query_heads * context_length
-                + 12 * query_heads * source_head_dim
-            )
-        )
-        for context_length in context_lengths
+    solver_row_chunk_size = maximum_local_fit_rows
+    solver_peak = estimate_gqa_native_streamed_peak_bytes(
+        fit_rows=maximum_local_fit_rows,
+        context_length=selected_context_length,
+        hidden_size=hidden_size,
+        query_heads=query_heads,
+        key_value_heads=key_value_heads,
+        source_head_dim=source_head_dim,
+        native_head_dim=native_head_dim,
+        row_chunk_size=solver_row_chunk_size,
+        decay_rank=int(mixer.w_lora.lora[0].out_features),
+        erase_rank=int(mixer.a_lora.lora[0].out_features),
+        gate_rank=int(mixer.g_lora.lora[0].out_features),
     )
+    estimated_solver_peak_bytes = solver_peak["estimated_peak_bytes"]
     max_trace_bytes_per_rank = int(max_trace_bytes_per_rank)
     if (
         max_trace_bytes_per_rank <= 0
@@ -5147,9 +5155,23 @@ def _activation_fit_gqa_native_zero_step_transaction(
             f"estimated={estimated_solver_peak_bytes} "
             f"limit={max_trace_bytes_per_rank}"
         )
-    gathered_contexts = []
+    query_weight = source_mixer.q_proj.weight.detach().float()
+    key_weight = source_mixer.k_proj.weight.detach().float()
+    value_weight = source_mixer.v_proj.weight.detach().float()
+    output_weight = source_mixer.o_proj.weight.detach().float()
+    output_bias = getattr(source_mixer.o_proj, "bias", None)
+    output_bias = (
+        None if output_bias is None else output_bias.detach().float()
+    )
+    group_width = query_heads // key_value_heads
+    grouped_indices = torch.arange(
+        key_value_heads,
+        device=mixer.r_proj.weight.device,
+    ) * group_width
+    calibration_rows = max(2, fit_rows // 2)
+    local_contexts = []
     rank_contributions = []
-    for context_length in context_lengths:
+    for context_length in (selected_context_length,):
         global_rows = tuple(range(fit_rows))
         local_rows = global_rows[distributed.rank :: distributed.world_size]
         local_parts = []
@@ -5224,51 +5246,27 @@ def _activation_fit_gqa_native_zero_step_transaction(
                 "GQA native zero-step trace collection failed: "
                 f"{collection_errors}"
             )
-        gathered = distributed.gather_objects(
-            {
-                "rank": distributed.rank,
-                "context_length": context_length,
-                "row_indices": list(local_rows),
-                "row_indices_sha256": _sha256_json(list(local_rows)),
-                "parts": local_parts,
-            }
-        )
-        if distributed.is_primary:
-            if gathered is None:
-                raise ContractError("primary rank did not receive GQA traces")
-            rank_contributions.append(
-                {
-                    "context_length": context_length,
-                    "ranks": [
-                        {
-                            "rank": item["rank"],
-                            "row_indices": item["row_indices"],
-                            "row_indices_sha256": item[
-                                "row_indices_sha256"
-                            ],
-                        }
-                        for item in gathered
-                    ],
-                }
-            )
-            parts = [
-                part
-                for item in gathered
-                for part in item["parts"]
-            ]
-            if sum(len(part["row_indices"]) for part in parts) < 3:
-                continue
+        assembly_error = None
+        local_contribution = None
+        try:
             row_indices = torch.tensor(
                 [
                     row
-                    for part in parts
+                    for part in local_parts
                     for row in part["row_indices"]
                 ],
                 dtype=torch.long,
             )
+            if row_indices.numel() != len(local_rows):
+                raise ContractError(
+                    "GQA local trace row count differs from its shard"
+                )
             order = torch.argsort(row_indices)
             signals = {
-                name: torch.cat([part[name] for part in parts], dim=0)
+                name: torch.cat(
+                    [part[name] for part in local_parts],
+                    dim=0,
+                )
                 .index_select(0, order)
                 .to(
                     device=mixer.r_proj.weight.device,
@@ -5283,139 +5281,230 @@ def _activation_fit_gqa_native_zero_step_transaction(
                     "mixer_output",
                 )
             }
-            gathered_contexts.append(
-                (
-                    context_length,
-                    row_indices.index_select(0, order).tolist(),
-                    signals,
-                )
+            sorted_rows = tuple(
+                int(value)
+                for value in row_indices.index_select(0, order).tolist()
             )
-
-    primary_result = None
-    primary_error = None
-    if distributed.is_primary:
-        try:
-            candidates = []
-            query_weight = source_mixer.q_proj.weight.detach().float()
-            key_weight = source_mixer.k_proj.weight.detach().float()
-            value_weight = source_mixer.v_proj.weight.detach().float()
-            output_weight = source_mixer.o_proj.weight.detach().float()
-            output_bias = getattr(source_mixer.o_proj, "bias", None)
-            output_bias = (
-                None if output_bias is None else output_bias.detach().float()
-            )
-            group_width = query_heads // key_value_heads
-            grouped_indices = torch.arange(
-                key_value_heads,
-                device=mixer.r_proj.weight.device,
-            ) * group_width
-            for context_length, row_indices, signals in gathered_contexts:
-                row_count = len(row_indices)
-                calibration_rows = max(2, row_count // 2)
-                if calibration_rows >= row_count:
-                    continue
-                query = signals["query"].reshape(
-                    row_count,
-                    context_length,
-                    query_heads,
-                    source_head_dim,
-                )
-                key = signals["key"].reshape_as(query)
-                value = signals["value"].reshape_as(query)
-                gate = signals["gate"].reshape_as(query)
-                positions = torch.arange(
-                    context_length,
-                    dtype=torch.long,
-                    device=query.device,
-                ).unsqueeze(0).expand(row_count, -1)
-                result = fit_gqa_native_zero_step(
-                    mixer,
-                    GQANativeFitTrace(
-                        mixer_input=signals["mixer_input"],
-                        query=query,
-                        key=key,
-                        value=value,
-                        grouped_key=key.index_select(2, grouped_indices),
-                        grouped_value=value.index_select(2, grouped_indices),
-                        gate=gate,
-                        mixer_output=signals["mixer_output"],
-                        query_weight=query_weight,
-                        key_weight=key_weight,
-                        value_weight=value_weight,
-                        output_weight=output_weight,
-                        output_bias=output_bias,
-                    ),
-                    GQANativeFitConfig(
-                        calibration_rows=calibration_rows,
-                        positions=positions,
-                        source_head_dim=source_head_dim,
-                        rotary_dim=int(mixer.rotary_dim),
-                        rope_theta=float(mixer.rope_theta),
-                        supervised_token_start=int(burn_in_tokens),
-                    ),
-                )
-                score = float(
-                    result.report["native_parameter_projection"][
-                        "complete_free_running_mixer"
-                    ]["nmse"]
-                )
-                candidates.append(
-                    {
-                        "context_length": context_length,
-                        "row_indices": row_indices,
-                        "development_mixer_nmse": score,
-                        "parameters": result.parameters,
-                        "report": result.report,
-                    }
-                )
-            if not candidates:
+            if sorted_rows != local_rows:
                 raise ContractError(
-                    "GQA native zero-step produced no calibration/development split"
+                    "GQA local trace row identities differ from their shard"
                 )
-            primary_result = max(
-                candidates,
-                key=lambda item: item["context_length"],
+            local_row_count = len(sorted_rows)
+            query = signals["query"].reshape(
+                local_row_count,
+                context_length,
+                query_heads,
+                source_head_dim,
             )
-            primary_result["candidate_summaries"] = [
-                {
-                    "context_length": item["context_length"],
-                    "row_indices": item["row_indices"],
-                    "development_mixer_nmse": item[
-                        "development_mixer_nmse"
-                    ],
-                }
-                for item in candidates
-            ]
+            key = signals["key"].reshape_as(query)
+            value = signals["value"].reshape_as(query)
+            gate = signals["gate"].reshape_as(query)
+            positions = torch.arange(
+                context_length,
+                dtype=torch.long,
+                device=query.device,
+            ).unsqueeze(0).expand(local_row_count, -1)
+            validate_gqa_native_fit_trace(
+                mixer,
+                GQANativeFitTrace(
+                    mixer_input=signals["mixer_input"],
+                    query=query,
+                    key=key,
+                    value=value,
+                    grouped_key=key.index_select(2, grouped_indices),
+                    grouped_value=value.index_select(2, grouped_indices),
+                    gate=gate,
+                    mixer_output=signals["mixer_output"],
+                    query_weight=query_weight,
+                    key_weight=key_weight,
+                    value_weight=value_weight,
+                    output_weight=output_weight,
+                    output_bias=output_bias,
+                ),
+                GQANativeFitConfig(
+                    calibration_rows=calibration_rows,
+                    positions=positions,
+                    source_head_dim=source_head_dim,
+                    rotary_dim=int(mixer.rotary_dim),
+                    rope_theta=float(mixer.rope_theta),
+                    supervised_token_start=int(burn_in_tokens),
+                    row_chunk_size=solver_row_chunk_size,
+                    global_row_indices=sorted_rows,
+                ),
+            )
+            local_contexts.append(
+                (context_length, sorted_rows, signals)
+            )
+            local_contribution = {
+                "rank": distributed.rank,
+                "row_indices": list(sorted_rows),
+                "row_indices_sha256": _sha256_json(list(sorted_rows)),
+                "signal_sha256": {
+                    name: _tensor_sha256(value)
+                    for name, value in sorted(signals.items())
+                },
+            }
         except BaseException as error:
-            primary_error = f"{type(error).__name__}: {error}"
-    fit_status = distributed.broadcast_object(
+            assembly_error = f"{type(error).__name__}: {error}"
+        assembly_statuses = distributed.all_gather_objects(
+            {
+                "rank": distributed.rank,
+                "error": assembly_error,
+                "contribution": local_contribution,
+            }
+        )
+        assembly_errors = [
+            item for item in assembly_statuses
+            if item["error"] is not None
+        ]
+        if assembly_errors:
+            _restore_module_state(mixer, baseline_state)
+            raise ContractError(
+                "GQA native zero-step trace assembly failed: "
+                f"{assembly_errors}"
+            )
+        rank_contributions.append(
+            {
+                "context_length": context_length,
+                "ranks": [
+                    item["contribution"] for item in assembly_statuses
+                ],
+            }
+        )
+
+    selected_result = None
+    fit_error = None
+    try:
+        candidates = []
+        for context_length, row_indices, signals in local_contexts:
+            local_row_count = len(row_indices)
+            query = signals["query"].reshape(
+                local_row_count,
+                context_length,
+                query_heads,
+                source_head_dim,
+            )
+            key = signals["key"].reshape_as(query)
+            value = signals["value"].reshape_as(query)
+            gate = signals["gate"].reshape_as(query)
+            positions = torch.arange(
+                context_length,
+                dtype=torch.long,
+                device=query.device,
+            ).unsqueeze(0).expand(local_row_count, -1)
+            result = fit_gqa_native_zero_step(
+                mixer,
+                GQANativeFitTrace(
+                    mixer_input=signals["mixer_input"],
+                    query=query,
+                    key=key,
+                    value=value,
+                    grouped_key=key.index_select(2, grouped_indices),
+                    grouped_value=value.index_select(2, grouped_indices),
+                    gate=gate,
+                    mixer_output=signals["mixer_output"],
+                    query_weight=query_weight,
+                    key_weight=key_weight,
+                    value_weight=value_weight,
+                    output_weight=output_weight,
+                    output_bias=output_bias,
+                ),
+                GQANativeFitConfig(
+                    calibration_rows=calibration_rows,
+                    positions=positions,
+                    source_head_dim=source_head_dim,
+                    rotary_dim=int(mixer.rotary_dim),
+                    rope_theta=float(mixer.rope_theta),
+                    supervised_token_start=int(burn_in_tokens),
+                    row_chunk_size=solver_row_chunk_size,
+                    global_row_indices=row_indices,
+                    reduce_sum=distributed.all_reduce_sum,
+                    reduce_max=distributed.all_reduce_max,
+                ),
+            )
+            score = float(
+                result.report["native_parameter_projection"][
+                    "complete_free_running_mixer"
+                ]["nmse"]
+            )
+            distributed_report = {
+                **result.report,
+                "trace_hash_scope": "rank-sharded",
+                "trace_shards": rank_contributions,
+                "trace_aggregate_sha256": _sha256_json(
+                    rank_contributions
+                ),
+            }
+            candidates.append(
+                {
+                    "context_length": context_length,
+                    "row_indices": list(range(fit_rows)),
+                    "development_mixer_nmse": score,
+                    "parameters": result.parameters,
+                    "report": distributed_report,
+                }
+            )
+        if not candidates:
+            raise ContractError(
+                "GQA native zero-step produced no calibration/development split"
+            )
+        selected_result = max(
+            candidates,
+            key=lambda item: item["context_length"],
+        )
+        selected_result["candidate_summaries"] = [
+            {
+                "context_length": item["context_length"],
+                "row_indices": item["row_indices"],
+                "development_mixer_nmse": item[
+                    "development_mixer_nmse"
+                ],
+            }
+            for item in candidates
+        ]
+    except BaseException as error:
+        fit_error = f"{type(error).__name__}: {error}"
+    fit_statuses = distributed.all_gather_objects(
         {
-            "error": primary_error,
+            "rank": distributed.rank,
+            "error": fit_error,
             "selected_context_length": (
                 None
-                if primary_result is None
-                else primary_result["context_length"]
+                if selected_result is None
+                else selected_result["context_length"]
             ),
         }
-        if distributed.is_primary
-        else None
     )
-    if fit_status["error"] is not None:
+    fit_errors = [
+        item for item in fit_statuses if item["error"] is not None
+    ]
+    if fit_errors:
         _restore_module_state(mixer, baseline_state)
         raise ContractError(
-            f"GQA native zero-step fit failed: {fit_status['error']}"
+            f"GQA native zero-step fit failed: {fit_errors}"
         )
 
-    candidate_parameters = {}
-    for name, parameter in sorted(mixer.named_parameters()):
-        candidate = (
-            primary_result["parameters"][name]
-            if distributed.is_primary
-            else torch.empty_like(parameter, dtype=torch.float32)
+    candidate_parameters = {
+        name: selected_result["parameters"][name].to(
+            device=parameter.device,
+            dtype=torch.float32,
         )
-        candidate = candidate.to(device=parameter.device, dtype=torch.float32)
-        distributed.broadcast_tensor(candidate)
-        candidate_parameters[name] = candidate
+        for name, parameter in sorted(mixer.named_parameters())
+    }
+    candidate_digests = distributed.all_gather_objects(
+        {
+            name: _tensor_sha256(value)
+            for name, value in sorted(candidate_parameters.items())
+        }
+    )
+    if any(
+        digest != candidate_digests[0]
+        for digest in candidate_digests[1:]
+    ):
+        _restore_module_state(mixer, baseline_state)
+        raise ContractError(
+            "GQA native zero-step distributed solves produced different parameters"
+        )
     materialization = materialize_native_projection(mixer, candidate_parameters)
     candidate_validation = _validate(
         executor=executor,
@@ -5502,19 +5591,25 @@ def _activation_fit_gqa_native_zero_step_transaction(
                     for length in requested_context_lengths
                     if length not in context_lengths
                 ],
-                "selected_context_length": primary_result["context_length"],
-                "candidate_summaries": primary_result["candidate_summaries"],
+                "selected_context_length": selected_result["context_length"],
+                "candidate_summaries": selected_result["candidate_summaries"],
                 "rank_contributions": rank_contributions,
                 "trace_transport": {
                     "collection": "rank-sharded-teacher-forward",
                     "wire_dtype": "bfloat16",
-                    "destination": "rank-0-only-object-gather",
-                    "estimated_primary_trace_bytes": (
+                    "destination": "rank-local-streamed-solve",
+                    "solver_collectives": (
+                        "additive-statistic-and-gradient-all-reduce"
+                    ),
+                    "formal_context_collection": "longest-only",
+                    "shorter_contexts": "prefix-diagnostics-only",
+                    "estimated_max_local_trace_bytes": (
                         estimated_primary_trace_bytes
                     ),
                     "estimated_solver_peak_bytes": (
                         estimated_solver_peak_bytes
                     ),
+                    "solver_peak_breakdown": solver_peak,
                     "max_trace_bytes_per_rank": max_trace_bytes_per_rank,
                 },
                 "train_cache_binding": train_reader.manifest.get("binding"),
@@ -5540,7 +5635,7 @@ def _activation_fit_gqa_native_zero_step_transaction(
                 "mapped_component_restoration_ablations": (
                     mapped_component_ablations
                 ),
-                "fit_report": primary_result["report"],
+                "fit_report": selected_result["report"],
                 "baseline_parameter_sha256": baseline_hashes,
                 "proposed_parameter_sha256": proposed_hashes,
                 "selected_parameter_sha256": selected_hashes,

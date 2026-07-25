@@ -144,6 +144,12 @@ class DistributedContext:
             dist.all_reduce(value, op=dist.ReduceOp.SUM)
         return value
 
+    def all_reduce_max(self, value: torch.Tensor) -> torch.Tensor:
+        """Take an elementwise maximum across every training rank."""
+        if self.world_size > 1:
+            dist.all_reduce(value, op=dist.ReduceOp.MAX)
+        return value
+
     def broadcast_tensor(self, value: torch.Tensor, *, source_rank: int = 0) -> torch.Tensor:
         """Broadcast an already allocated tensor without Python object serialization."""
         if self.world_size > 1:

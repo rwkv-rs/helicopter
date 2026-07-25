@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import math
 import struct
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 import torch
@@ -149,6 +149,241 @@ class CausalAttention:
     weights: Tensor
     hazards: Tensor
     valid_hazards: Tensor
+
+
+@dataclass(frozen=True)
+class StreamedHazardAttention:
+    exact_output: Tensor
+    bounded_output: Tensor
+    exact_rollout_metrics: dict[str, float]
+    bounded_hazard_metrics: dict[str, float]
+
+
+def _metrics_from_sums(
+    *,
+    squared_error: Tensor,
+    target_square: Tensor,
+    prediction_square: Tensor,
+    dot: Tensor,
+) -> dict[str, float]:
+    target_square = target_square.clamp_min(1e-30)
+    return {
+        "nmse": float(squared_error / target_square),
+        "relative_l2": float(
+            torch.sqrt(squared_error.clamp_min(0) / target_square)
+        ),
+        "cosine": float(
+            dot
+            / torch.sqrt(
+                prediction_square.clamp_min(1e-30) * target_square
+            )
+        ),
+    }
+
+
+def streamed_hazard_attention(
+    query: Tensor,
+    key: Tensor,
+    value: Tensor,
+    center: Tensor,
+    *,
+    development_row_start: int,
+    supervised_token_start: int,
+    query_block_size: int = 64,
+    reduce_sum: Callable[[Tensor], Tensor] | None = None,
+) -> StreamedHazardAttention:
+    """Evaluate exact and bounded hazards with ``O(time × feature)`` storage.
+
+    The implementation still evaluates every causal query/update pair, but it
+    never materializes ``[batch,head,time,time]``.  Report statistics are
+    accumulated only on the adaptive-development suffix.
+    """
+
+    if query.shape != key.shape or query.shape != value.shape:
+        raise ValueError("query, key, and value must have identical shapes")
+    if query.ndim != 4:
+        raise ValueError("attention inputs must be [batch,time,head,feature]")
+    batch, sequence_length, heads, head_dim = query.shape
+    if center.shape != (heads, head_dim):
+        raise ValueError("center must be [head,feature]")
+    if not 0 <= development_row_start < batch:
+        raise ValueError("development row start must leave non-empty rows")
+    if not 0 <= supervised_token_start < sequence_length:
+        raise ValueError("supervised token start is outside the trace")
+    if query_block_size <= 0:
+        raise ValueError("query block size must be positive")
+
+    exact_output = torch.empty_like(query, dtype=torch.float32)
+    bounded_output = torch.empty_like(query, dtype=torch.float32)
+    exact_sums = torch.zeros(4, dtype=torch.float64, device=query.device)
+    hazard_sums = torch.zeros(6, dtype=torch.float64, device=query.device)
+    scale = head_dim**-0.5
+    center = center.float()
+
+    def hazard_rollout(
+        hazard: Tensor,
+        row_value: Tensor,
+        valid: Tensor,
+    ) -> Tensor:
+        bounded = hazard.clamp(0, 1)
+        survival_log = torch.log1p(
+            -bounded.clamp_max(1 - torch.finfo(torch.float32).eps)
+        )
+        survival_log = survival_log.masked_fill(~valid, 0)
+        suffix_including = torch.flip(
+            torch.cumsum(torch.flip(survival_log, dims=(-1,)), dim=-1),
+            dims=(-1,),
+        )
+        suffix_after = suffix_including - survival_log
+        weights = (
+            bounded * torch.exp(suffix_after)
+        ).masked_fill(~valid, 0)
+        return weights @ row_value
+
+    for row in range(batch):
+        for head in range(heads):
+            row_query = query[row, :, head].float()
+            row_key = key[row, :, head].float()
+            row_value = value[row, :, head].float()
+            head_center = center[head]
+            center_logits = torch.empty(
+                sequence_length,
+                dtype=torch.float32,
+                device=query.device,
+            )
+            slopes = torch.zeros_like(row_key)
+            center_logits[0] = torch.inf
+            for update in range(1, sequence_length):
+                previous_key = row_key[:update]
+                center_scores = previous_key @ head_center * scale
+                center_weights = torch.softmax(center_scores, dim=0)
+                center_key = center_weights @ previous_key
+                center_logits[update] = (
+                    row_key[update] @ head_center * scale
+                    - torch.logsumexp(center_scores, dim=0)
+                )
+                slopes[update] = (row_key[update] - center_key) * scale
+            update_indices = torch.arange(
+                sequence_length,
+                device=query.device,
+            )
+            for query_start in range(
+                0,
+                sequence_length,
+                query_block_size,
+            ):
+                query_stop = min(
+                    sequence_length,
+                    query_start + query_block_size,
+                )
+                query_indices = torch.arange(
+                    query_start,
+                    query_stop,
+                    device=query.device,
+                )
+                valid = update_indices.unsqueeze(0) <= query_indices.unsqueeze(
+                    1
+                )
+                block_query = row_query[query_start:query_stop]
+                scores = block_query @ row_key.T * scale
+                masked_scores = scores.masked_fill(~valid, float("-inf"))
+                exact_hazard = torch.exp(
+                    masked_scores
+                    - torch.logcumsumexp(masked_scores, dim=-1)
+                ).masked_fill(~valid, 0)
+                exact_current = hazard_rollout(
+                    exact_hazard,
+                    row_value,
+                    valid,
+                )
+                bounded_hazard = torch.sigmoid(
+                    center_logits.unsqueeze(0)
+                    + (block_query - head_center) @ slopes.T
+                ).masked_fill(~valid, 0)
+                bounded_hazard[:, 0] = 1
+                bounded_current = hazard_rollout(
+                    bounded_hazard,
+                    row_value,
+                    valid,
+                )
+                exact_output[
+                    row,
+                    query_start:query_stop,
+                    head,
+                ] = exact_current
+                bounded_output[
+                    row,
+                    query_start:query_stop,
+                    head,
+                ] = bounded_current
+                report_mask = (
+                    (row >= development_row_start)
+                    & (query_indices >= supervised_token_start)
+                )
+                if not bool(report_mask.any()):
+                    continue
+                report_exact = exact_current[report_mask]
+                report_bounded_hazard = bounded_hazard[report_mask]
+                report_exact_hazard = exact_hazard[report_mask]
+                direct = (
+                    torch.softmax(masked_scores[report_mask], dim=-1)
+                    @ row_value
+                )
+                exact_error = report_exact - direct
+                exact_sums += torch.stack(
+                    (
+                        exact_error.double().square().sum(),
+                        direct.double().square().sum(),
+                        report_exact.double().square().sum(),
+                        (report_exact.double() * direct.double()).sum(),
+                    )
+                )
+                hazard_error = (
+                    report_bounded_hazard - report_exact_hazard
+                )[valid[report_mask]]
+                exact_valid = report_exact_hazard[valid[report_mask]]
+                bounded_valid = report_bounded_hazard[valid[report_mask]]
+                hazard_sums += torch.stack(
+                    (
+                        hazard_error.double().square().sum(),
+                        exact_valid.double().square().sum(),
+                        bounded_valid.double().square().sum(),
+                        (bounded_valid.double() * exact_valid.double()).sum(),
+                        hazard_error.double().abs().sum(),
+                        torch.tensor(
+                            hazard_error.numel(),
+                            dtype=torch.float64,
+                            device=query.device,
+                        ),
+                    )
+                )
+    if reduce_sum is not None:
+        exact_sums = reduce_sum(exact_sums)
+        hazard_sums = reduce_sum(hazard_sums)
+    exact_metrics = _metrics_from_sums(
+        squared_error=exact_sums[0],
+        target_square=exact_sums[1],
+        prediction_square=exact_sums[2],
+        dot=exact_sums[3],
+    )
+    hazard_metrics_value = _metrics_from_sums(
+        squared_error=hazard_sums[0],
+        target_square=hazard_sums[1],
+        prediction_square=hazard_sums[2],
+        dot=hazard_sums[3],
+    )
+    hazard_metrics_value.update(
+        {
+            "mae": float(hazard_sums[4] / hazard_sums[5].clamp_min(1)),
+            "outside_unit_interval_fraction": 0.0,
+        }
+    )
+    return StreamedHazardAttention(
+        exact_output=exact_output,
+        bounded_output=bounded_output,
+        exact_rollout_metrics=exact_metrics,
+        bounded_hazard_metrics=hazard_metrics_value,
+    )
 
 
 def causal_attention(query: Tensor, key: Tensor, value: Tensor) -> CausalAttention:
@@ -350,6 +585,285 @@ class AffineRollout:
     bias: Tensor
     closure_scale: Tensor
     centered_query: Tensor
+
+
+@dataclass(frozen=True)
+class StreamedAffineModel:
+    """Fitted affine recurrence parameters without time-major state storage."""
+
+    center: Tensor
+    closure_scale: Tensor
+    calibration_batches: int
+    row_chunk_size: int
+    peak_state_elements: int
+
+
+def _validate_streamed_affine_inputs(
+    query: Tensor,
+    grouped_key: Tensor,
+    grouped_value: Tensor,
+    center: Tensor,
+    *,
+    calibration_batches: int,
+    row_chunk_size: int,
+) -> tuple[int, int, int, int, int]:
+    if query.ndim != 4 or grouped_key.ndim != 4 or grouped_value.ndim != 4:
+        raise ValueError("query, key, and value must be rank four")
+    if grouped_key.shape != grouped_value.shape:
+        raise ValueError("grouped key and value must align")
+    batch, sequence_length, heads, head_dim = query.shape
+    if grouped_key.shape[:2] != (batch, sequence_length):
+        raise ValueError("grouped key does not align with query")
+    groups = grouped_key.shape[2]
+    if heads % groups:
+        raise ValueError("query heads must divide evenly into KV groups")
+    if grouped_key.shape[-1] != head_dim or center.shape != (groups, head_dim):
+        raise ValueError("GQA head dimensions or center do not align")
+    if not 0 < calibration_batches <= batch:
+        raise ValueError("calibration_batches must select a non-empty prefix")
+    if row_chunk_size <= 0:
+        raise ValueError("row_chunk_size must be positive")
+    return batch, sequence_length, heads, groups, head_dim
+
+
+def fit_streamed_affine_model(
+    query: Tensor,
+    grouped_key: Tensor,
+    grouped_value: Tensor,
+    center: Tensor,
+    *,
+    calibration_batches: int,
+    row_chunk_size: int = 1,
+    reduce_sum: Callable[[Tensor], Tensor] | None = None,
+) -> StreamedAffineModel:
+    """Fit the dense affine closure while retaining only current row states.
+
+    The recurrence and least-squares closure are identical to
+    :func:`affine_state_rollout`.  The difference is purely representational:
+    no ``[batch,time,group,dim,dim]`` tensor is materialized.
+    """
+
+    (
+        _,
+        sequence_length,
+        heads,
+        groups,
+        head_dim,
+    ) = _validate_streamed_affine_inputs(
+        query,
+        grouped_key,
+        grouped_value,
+        center,
+        calibration_batches=calibration_batches,
+        row_chunk_size=row_chunk_size,
+    )
+    group_width = heads // groups
+    head_to_group = torch.arange(heads, device=query.device) // group_width
+    centered_query = query[:calibration_batches].float() - center[
+        head_to_group
+    ].view(1, 1, heads, head_dim).float()
+    probability, slope = probability_tangent_parameters(
+        grouped_key[:calibration_batches],
+        center,
+    )
+    state = query.new_zeros(
+        (calibration_batches, groups, head_dim, head_dim),
+        dtype=torch.float32,
+    )
+    bias = query.new_zeros(
+        (calibration_batches, groups, head_dim),
+        dtype=torch.float32,
+    )
+    closure_scale = query.new_zeros(
+        (groups, sequence_length),
+        dtype=torch.float32,
+    )
+
+    for index in range(sequence_length):
+        current_slope = slope[:, index]
+        slope_norm = torch.linalg.vector_norm(
+            current_slope,
+            dim=-1,
+        ).clamp_min(1e-30)
+        direction = current_slope / slope_norm.unsqueeze(-1)
+        closure_statistics = torch.zeros(
+            groups,
+            2,
+            dtype=torch.float64,
+            device=query.device,
+        )
+        if index:
+            for group in range(groups):
+                head_start = group * group_width
+                head_stop = head_start + group_width
+                future_query = centered_query[
+                    :,
+                    index:,
+                    head_start:head_stop,
+                ]
+                calibration_state = state[:, group]
+                calibration_slope = current_slope[:, group]
+                calibration_direction = direction[:, group]
+                slope_query = torch.einsum(
+                    "bd,bshd->bsh",
+                    calibration_slope,
+                    future_query,
+                )
+                slope_square = slope_query.square()
+                weighted_query = torch.einsum(
+                    "bsh,bshd->bd",
+                    slope_square,
+                    future_query,
+                )
+                state_direction = torch.einsum(
+                    "bod,bd->bo",
+                    calibration_state,
+                    calibration_direction,
+                )
+                state_weighted_query = torch.einsum(
+                    "bod,bd->bo",
+                    calibration_state,
+                    weighted_query,
+                )
+                closure_statistics[group, 0] = (
+                    state_direction.double()
+                    * state_weighted_query.double()
+                ).sum()
+                closure_statistics[group, 1] = (
+                    state_direction.double().square().sum(dim=-1)
+                    * slope_square.double().sum(dim=(1, 2))
+                ).sum()
+            if reduce_sum is not None:
+                closure_statistics = reduce_sum(closure_statistics)
+            closure_scale[:, index] = torch.where(
+                closure_statistics[:, 1] > 1e-30,
+                closure_statistics[:, 0]
+                / closure_statistics[:, 1].clamp_min(1e-30),
+                0,
+            ).float()
+
+        old_bias = bias
+        decayed_state = (
+            (1 - probability[:, index]).unsqueeze(-1).unsqueeze(-1)
+            * state
+        )
+        write = (
+            grouped_value[:calibration_batches, index].float() - old_bias
+        ).unsqueeze(-1) * current_slope.unsqueeze(-2)
+        state_direction = torch.einsum(
+            "bgod,bgd->bgo",
+            state,
+            direction,
+        )
+        correction = (
+            closure_scale[:, index].view(1, groups, 1, 1)
+            * slope_norm.unsqueeze(-1).unsqueeze(-1)
+            * state_direction.unsqueeze(-1)
+            * direction.unsqueeze(-2)
+        )
+        state = decayed_state + write - correction
+        bias = (
+            (1 - probability[:, index]).unsqueeze(-1) * old_bias
+            + probability[:, index].unsqueeze(-1)
+            * grouped_value[:calibration_batches, index].float()
+        )
+
+    return StreamedAffineModel(
+        center=center.detach().float().clone(),
+        closure_scale=closure_scale,
+        calibration_batches=calibration_batches,
+        row_chunk_size=row_chunk_size,
+        peak_state_elements=calibration_batches * groups * head_dim * head_dim,
+    )
+
+
+def _stream_affine_steps(
+    query: Tensor,
+    grouped_key: Tensor,
+    grouped_value: Tensor,
+    model: StreamedAffineModel,
+    *,
+    row_start: int,
+    row_stop: int,
+    probability: Tensor | None = None,
+    slope: Tensor | None = None,
+):
+    """Yield one post-update affine state without retaining prior time steps."""
+
+    if not 0 <= row_start < row_stop <= query.shape[0]:
+        raise ValueError("streamed affine row range is invalid")
+    center = model.center.to(device=query.device, dtype=torch.float32)
+    groups = grouped_key.shape[2]
+    heads = query.shape[2]
+    head_dim = query.shape[-1]
+    group_width = heads // groups
+    head_to_group = torch.arange(heads, device=query.device) // group_width
+    centered_query = query[row_start:row_stop].float() - center[
+        head_to_group
+    ].view(1, 1, heads, head_dim)
+    if (probability is None) != (slope is None):
+        raise ValueError("streamed affine tangent cache must be complete")
+    if probability is None:
+        probability, slope = probability_tangent_parameters(
+            grouped_key[row_start:row_stop],
+            center,
+        )
+    else:
+        probability = probability[row_start:row_stop]
+        slope = slope[row_start:row_stop]
+    rows = row_stop - row_start
+    state = query.new_zeros(
+        (rows, groups, head_dim, head_dim),
+        dtype=torch.float32,
+    )
+    bias = query.new_zeros(
+        (rows, groups, head_dim),
+        dtype=torch.float32,
+    )
+    closure_scale = model.closure_scale.to(
+        device=query.device,
+        dtype=torch.float32,
+    )
+    for index in range(query.shape[1]):
+        current_slope = slope[:, index]
+        slope_norm = torch.linalg.vector_norm(
+            current_slope,
+            dim=-1,
+        ).clamp_min(1e-30)
+        direction = current_slope / slope_norm.unsqueeze(-1)
+        old_bias = bias
+        decayed_state = (
+            (1 - probability[:, index]).unsqueeze(-1).unsqueeze(-1)
+            * state
+        )
+        write = (
+            grouped_value[row_start:row_stop, index].float() - old_bias
+        ).unsqueeze(-1) * current_slope.unsqueeze(-2)
+        state_direction = torch.einsum(
+            "bgod,bgd->bgo",
+            state,
+            direction,
+        )
+        correction = (
+            closure_scale[:, index].view(1, groups, 1, 1)
+            * slope_norm.unsqueeze(-1).unsqueeze(-1)
+            * state_direction.unsqueeze(-1)
+            * direction.unsqueeze(-2)
+        )
+        state = decayed_state + write - correction
+        bias = (
+            (1 - probability[:, index]).unsqueeze(-1) * old_bias
+            + probability[:, index].unsqueeze(-1)
+            * grouped_value[row_start:row_stop, index].float()
+        )
+        yield (
+            index,
+            state,
+            bias,
+            centered_query[:, index],
+            probability[:, index],
+            current_slope,
+        )
 
 
 def affine_state_rollout(
@@ -793,6 +1307,330 @@ def rope_aligned_two_state_bases(
     return torch.stack(fitted)
 
 
+def rope_aligned_two_state_bases_streamed(
+    query: Tensor,
+    grouped_key: Tensor,
+    grouped_value: Tensor,
+    model: StreamedAffineModel,
+    *,
+    native_dim: int,
+    rotary_dim: int,
+    steps: int = 64,
+    learning_rate: float = 0.05,
+    reduce_sum: Callable[[Tensor], Tensor] | None = None,
+) -> Tensor:
+    """Fit the same observable basis without storing time-major operators.
+
+    Every objective and gradient contribution is replayed from the fitted
+    affine recurrence.  Peak state storage is therefore
+    ``row_chunk_size × groups × source_dim²`` rather than
+    ``rows × time × groups × source_dim²``.
+    """
+
+    (
+        batch,
+        _,
+        heads,
+        groups,
+        input_dim,
+    ) = _validate_streamed_affine_inputs(
+        query,
+        grouped_key,
+        grouped_value,
+        model.center,
+        calibration_batches=model.calibration_batches,
+        row_chunk_size=model.row_chunk_size,
+    )
+    if input_dim != native_dim * 2:
+        raise ValueError("two-state RoPE basis requires source_dim=2*native_dim")
+    if not 0 <= rotary_dim < native_dim:
+        raise ValueError("rotary_dim must leave room for an invariant DC channel")
+    if steps < 0:
+        raise ValueError("steps must be non-negative")
+    if learning_rate <= 0:
+        raise ValueError("learning_rate must be positive")
+    invariant_dim = input_dim - rotary_dim
+    state_ranks = (
+        native_dim - 1 - rotary_dim,
+        native_dim - 1,
+    )
+    if state_ranks[0] <= 0 or state_ranks[1] > invariant_dim:
+        raise ValueError("native feature budget does not fit RoPE partition")
+
+    device = query.device
+    head_to_group = (
+        torch.arange(heads, device=device) // (heads // groups)
+    )
+    tangent_probability, tangent_slope = probability_tangent_parameters(
+        grouped_key,
+        model.center.to(device=device, dtype=torch.float32),
+    )
+    query_gram = torch.zeros(
+        heads,
+        invariant_dim,
+        invariant_dim,
+        dtype=torch.float32,
+        device=device,
+    )
+    state_gram = torch.zeros(
+        heads,
+        2,
+        invariant_dim,
+        invariant_dim,
+        dtype=torch.float32,
+        device=device,
+    )
+    calibration_batches = model.calibration_batches
+    for row_start in range(
+        0,
+        calibration_batches,
+        model.row_chunk_size,
+    ):
+        row_stop = min(
+            calibration_batches,
+            row_start + model.row_chunk_size,
+        )
+        for _, state, _, centered_query, _, _ in _stream_affine_steps(
+            query,
+            grouped_key,
+            grouped_value,
+            model,
+            row_start=row_start,
+            row_stop=row_stop,
+            probability=tangent_probability,
+            slope=tangent_slope,
+        ):
+            invariant_query = centered_query[..., rotary_dim:]
+            query_gram.add_(
+                torch.einsum(
+                    "bhd,bhe->hde",
+                    invariant_query,
+                    invariant_query,
+                )
+            )
+            head_state = state.index_select(1, head_to_group).unflatten(
+                2,
+                (2, native_dim),
+            )
+            invariant_state = head_state[..., rotary_dim:]
+            state_gram.add_(
+                torch.einsum(
+                    "bhsod,bhsoe->hsde",
+                    invariant_state,
+                    invariant_state,
+                )
+            )
+    if reduce_sum is not None:
+        query_gram = reduce_sum(query_gram)
+        state_gram = reduce_sum(state_gram)
+
+    def objective(bases: Tensor, state_index: int) -> Tensor:
+        losses = torch.zeros(
+            heads,
+            dtype=torch.float32,
+            device=device,
+        )
+        for row_start in range(
+            0,
+            calibration_batches,
+            model.row_chunk_size,
+        ):
+            row_stop = min(
+                calibration_batches,
+                row_start + model.row_chunk_size,
+            )
+            for _, state, _, centered_query, _, _ in _stream_affine_steps(
+                query,
+                grouped_key,
+                grouped_value,
+                model,
+                row_start=row_start,
+                row_stop=row_stop,
+                probability=tangent_probability,
+                slope=tangent_slope,
+            ):
+                invariant_query = centered_query[..., rotary_dim:]
+                projected = torch.einsum(
+                    "bhd,hdr->bhr",
+                    invariant_query,
+                    bases,
+                )
+                projected = torch.einsum(
+                    "bhr,hdr->bhd",
+                    projected,
+                    bases,
+                )
+                residual = invariant_query - projected
+                head_state = state.index_select(1, head_to_group).unflatten(
+                    2,
+                    (2, native_dim),
+                )[:, :, state_index]
+                observable_error = torch.einsum(
+                    "bhod,bhd->bho",
+                    head_state[..., rotary_dim:],
+                    residual,
+                )
+                if state_index == 1 and rotary_dim:
+                    observable_error = observable_error + torch.einsum(
+                        "bhor,bhr->bho",
+                        head_state[..., :rotary_dim],
+                        centered_query[..., :rotary_dim],
+                    )
+                losses = losses + observable_error.square().sum(dim=(0, 2))
+        return losses if reduce_sum is None else reduce_sum(losses)
+
+    fitted_invariant: list[Tensor] = []
+    for state_index, rank in enumerate(state_ranks):
+        query_initial = torch.stack(
+            [
+                top_eigenvectors(query_gram[head], rank)
+                for head in range(heads)
+            ]
+        )
+        sensitivity_initial = torch.stack(
+            [
+                top_eigenvectors(state_gram[head, state_index], rank)
+                for head in range(heads)
+            ]
+        )
+        query_loss = objective(query_initial, state_index)
+        sensitivity_loss = objective(sensitivity_initial, state_index)
+        choose_query = query_loss <= sensitivity_loss
+        selected = torch.where(
+            choose_query[:, None, None],
+            query_initial,
+            sensitivity_initial,
+        )
+        selected_loss = torch.where(
+            choose_query,
+            query_loss,
+            sensitivity_loss,
+        )
+        parameter = selected.clone().requires_grad_(True)
+        optimizer = torch.optim.Adam((parameter,), lr=learning_rate)
+        gradient_time_block_size = 16
+        for _ in range(steps):
+            optimizer.zero_grad(set_to_none=True)
+            orthogonal, _ = torch.linalg.qr(
+                parameter,
+                mode="reduced",
+            )
+            basis_gradient = torch.zeros_like(orthogonal)
+            for row_start in range(
+                0,
+                calibration_batches,
+                model.row_chunk_size,
+            ):
+                row_stop = min(
+                    calibration_batches,
+                    row_start + model.row_chunk_size,
+                )
+                block_loss = None
+                block_tokens = 0
+                block_basis = (
+                    orthogonal.detach().clone().requires_grad_(True)
+                )
+                for _, state, _, centered_query, _, _ in _stream_affine_steps(
+                    query,
+                    grouped_key,
+                    grouped_value,
+                    model,
+                    row_start=row_start,
+                    row_stop=row_stop,
+                    probability=tangent_probability,
+                    slope=tangent_slope,
+                ):
+                    invariant_query = centered_query[..., rotary_dim:]
+                    projected = torch.einsum(
+                        "bhd,hdr->bhr",
+                        invariant_query,
+                        block_basis,
+                    )
+                    residual = invariant_query - torch.einsum(
+                        "bhr,hdr->bhd",
+                        projected,
+                        block_basis,
+                    )
+                    head_state = state.index_select(
+                        1,
+                        head_to_group,
+                    ).unflatten(2, (2, native_dim))[:, :, state_index]
+                    observable_error = torch.einsum(
+                        "bhod,bhd->bho",
+                        head_state[..., rotary_dim:],
+                        residual,
+                    )
+                    if state_index == 1 and rotary_dim:
+                        observable_error = observable_error + torch.einsum(
+                            "bhor,bhr->bho",
+                            head_state[..., :rotary_dim],
+                            centered_query[..., :rotary_dim],
+                        )
+                    current_loss = observable_error.square().sum()
+                    block_loss = (
+                        current_loss
+                        if block_loss is None
+                        else block_loss + current_loss
+                    )
+                    block_tokens += 1
+                    if block_tokens == gradient_time_block_size:
+                        block_loss.backward()
+                        basis_gradient.add_(block_basis.grad)
+                        block_loss = None
+                        block_tokens = 0
+                        block_basis = (
+                            orthogonal.detach()
+                            .clone()
+                            .requires_grad_(True)
+                        )
+                if block_loss is not None:
+                    block_loss.backward()
+                    basis_gradient.add_(block_basis.grad)
+            if reduce_sum is not None:
+                basis_gradient = reduce_sum(basis_gradient)
+            orthogonal.backward(basis_gradient)
+            optimizer.step()
+        with torch.no_grad():
+            candidate, _ = torch.linalg.qr(parameter, mode="reduced")
+            candidate_loss = objective(candidate, state_index)
+            accepted = torch.isfinite(candidate_loss) & (
+                candidate_loss < selected_loss
+            )
+            selected = torch.where(
+                accepted[:, None, None],
+                candidate,
+                selected,
+            )
+        fitted_invariant.append(selected)
+
+    rotary_identity = torch.eye(
+        input_dim,
+        rotary_dim,
+        dtype=torch.float32,
+        device=device,
+    )
+    fitted = []
+    for head in range(heads):
+        head_bases = []
+        for state_index, invariant_basis in enumerate(fitted_invariant):
+            lifted = torch.zeros(
+                input_dim,
+                invariant_basis.shape[-1],
+                dtype=torch.float32,
+                device=device,
+            )
+            lifted[rotary_dim:] = invariant_basis[head]
+            head_bases.append(
+                torch.cat((rotary_identity, lifted), dim=-1)
+                if state_index == 0
+                else lifted
+            )
+        fitted.append(torch.stack(head_bases))
+    if batch < calibration_batches:
+        raise AssertionError("validated calibration rows exceed batch")
+    return torch.stack(fitted)
+
+
 @dataclass(frozen=True)
 class TwoStateProjection:
     states: Tensor
@@ -812,6 +1650,314 @@ class NativeTwoStateRollout:
     erase: Tensor
     key: Tensor
     value: Tensor
+
+
+@dataclass(frozen=True)
+class StreamedNativeTwoStateStep:
+    """One ephemeral row-chunk/time contribution to the native fit."""
+
+    row_start: int
+    row_stop: int
+    time_index: int
+    affine_output: Tensor
+    compressed_output: Tensor
+    read: Tensor
+    requested_decay: Tensor
+    decay: Tensor
+    erase: Tensor
+    key: Tensor
+    value: Tensor
+    free_running_output: Tensor
+
+
+def iter_streamed_native_two_state_steps(
+    query: Tensor,
+    grouped_key: Tensor,
+    grouped_value: Tensor,
+    model: StreamedAffineModel,
+    bases: Tensor,
+    *,
+    native_dim: int,
+    dc_indices: tuple[int, int] | None = None,
+):
+    """Replay compressed/native states one row chunk and token at a time."""
+
+    (
+        batch,
+        _,
+        heads,
+        groups,
+        source_dim,
+    ) = _validate_streamed_affine_inputs(
+        query,
+        grouped_key,
+        grouped_value,
+        model.center,
+        calibration_batches=model.calibration_batches,
+        row_chunk_size=model.row_chunk_size,
+    )
+    if source_dim != 2 * native_dim:
+        raise ValueError("streamed two-state fit requires source_dim=2*native_dim")
+    if bases.shape != (heads, 2, source_dim, native_dim - 1):
+        raise ValueError(
+            "streamed bases must provide one DC plus native_dim-1 features"
+        )
+    if dc_indices is None:
+        dc_indices = (native_dim - 1, native_dim - 1)
+    if len(dc_indices) != 2 or any(
+        not 0 <= index < native_dim for index in dc_indices
+    ):
+        raise ValueError("each DC index must fit the native head dimension")
+
+    device = query.device
+    group_width = heads // groups
+    head_to_group = torch.arange(heads, device=device) // group_width
+    center = model.center.to(device=device, dtype=torch.float32)
+    head_center = center.index_select(0, head_to_group)
+    bases = bases.to(device=device, dtype=torch.float32)
+    projected_center = torch.einsum(
+        "hsdr,hd->hsr",
+        bases,
+        head_center,
+    )
+
+    for row_start in range(0, batch, model.row_chunk_size):
+        row_stop = min(batch, row_start + model.row_chunk_size)
+        rows = row_stop - row_start
+        target_previous = torch.zeros(
+            rows,
+            heads * 2,
+            native_dim,
+            native_dim,
+            dtype=torch.float32,
+            device=device,
+        )
+        free_previous = torch.zeros_like(target_previous)
+        for (
+            time_index,
+            state,
+            bias,
+            centered_query,
+            grouped_probability,
+            grouped_slope,
+        ) in _stream_affine_steps(
+            query,
+            grouped_key,
+            grouped_value,
+            model,
+            row_start=row_start,
+            row_stop=row_stop,
+        ):
+            raw_query = query[
+                row_start:row_stop,
+                time_index,
+            ].float()
+            head_state = state.index_select(1, head_to_group).unflatten(
+                2,
+                (2, native_dim),
+            )
+            head_bias = bias.index_select(1, head_to_group).unflatten(
+                2,
+                (2, native_dim),
+            )
+            native_target = torch.empty(
+                rows,
+                heads,
+                2,
+                native_dim,
+                native_dim,
+                dtype=torch.float32,
+                device=device,
+            )
+            native_read = torch.empty(
+                rows,
+                heads,
+                2,
+                native_dim,
+                dtype=torch.float32,
+                device=device,
+            )
+            for state_index, dc_index in enumerate(dc_indices):
+                feature_indices = [
+                    index
+                    for index in range(native_dim)
+                    if index != dc_index
+                ]
+                compressed = torch.einsum(
+                    "bhod,hdr->bhor",
+                    head_state[:, :, state_index],
+                    bases[:, state_index],
+                )
+                dc_bias = head_bias[:, :, state_index] - torch.einsum(
+                    "bhor,hr->bho",
+                    compressed,
+                    projected_center[:, state_index],
+                )
+                native_target[
+                    :, :, state_index, :, dc_index
+                ] = dc_bias
+                native_target[
+                    :, :, state_index, :, feature_indices
+                ] = compressed
+                native_read[
+                    :, :, state_index, dc_index
+                ] = 1
+                native_read[
+                    :, :, state_index, feature_indices
+                ] = torch.einsum(
+                    "bhd,hdr->bhr",
+                    raw_query,
+                    bases[:, state_index],
+                )
+
+            affine_output = (
+                torch.einsum(
+                    "bhod,bhd->bho",
+                    state.index_select(1, head_to_group),
+                    centered_query,
+                )
+                + bias.index_select(1, head_to_group)
+            )
+            compressed_output = torch.einsum(
+                "bhsod,bhsd->bhso",
+                native_target,
+                native_read,
+            ).flatten(2)
+
+            probability = grouped_probability.index_select(
+                1,
+                head_to_group,
+            )
+            slope = grouped_slope.index_select(1, head_to_group)
+            compressed_slope = torch.einsum(
+                "hsfr,bhf->bhsr",
+                bases,
+                slope,
+            )
+            shared_key = torch.empty_like(native_read)
+            for state_index, dc_index in enumerate(dc_indices):
+                feature_indices = [
+                    index
+                    for index in range(native_dim)
+                    if index != dc_index
+                ]
+                shared_key[
+                    :, :, state_index, dc_index
+                ] = probability
+                shared_key[
+                    :, :, state_index, feature_indices
+                ] = compressed_slope[:, :, state_index]
+            key = shared_key.flatten(1, 2)
+            requested_decay = (1 - probability).unsqueeze(-1).expand(
+                -1,
+                -1,
+                2,
+            ).flatten(1, 2)
+            decay = requested_decay.clamp(
+                min=RWKV7_MINIMUM_DECAY,
+                max=1,
+            )
+            current_target = native_target.flatten(1, 2)
+            normalized_key = torch.nn.functional.normalize(
+                key,
+                dim=-1,
+            )
+            decayed = target_previous * decay[:, :, None, None]
+            residual = current_target - decayed
+            key_norm = key.square().sum(dim=-1, keepdim=True).clamp_min(
+                1e-30
+            )
+            state_key = torch.einsum(
+                "bhod,bhd->bho",
+                target_previous,
+                normalized_key,
+            )
+            erase = torch.zeros_like(key)
+            value = torch.zeros(
+                rows,
+                heads * 2,
+                native_dim,
+                dtype=torch.float32,
+                device=device,
+            )
+            for _ in range(3):
+                erase_update = -torch.einsum(
+                    "bho,bhd->bhod",
+                    state_key,
+                    normalized_key * erase,
+                )
+                after_erase = residual - erase_update
+                value = torch.einsum(
+                    "bhod,bhd->bho",
+                    after_erase,
+                    key,
+                ) / key_norm
+                after_write = residual - torch.einsum(
+                    "bho,bhd->bhod",
+                    value,
+                    key,
+                )
+                erase_coefficient = -torch.einsum(
+                    "bho,bhd->bhod",
+                    state_key,
+                    normalized_key,
+                )
+                erase_denominator = erase_coefficient.square().sum(
+                    dim=-2,
+                ).clamp_min(1e-30)
+                erase = (
+                    (erase_coefficient * after_write).sum(dim=-2)
+                    / erase_denominator
+                ).clamp(0, 1)
+            erase_update = -torch.einsum(
+                "bho,bhd->bhod",
+                state_key,
+                normalized_key * erase,
+            )
+            value = torch.einsum(
+                "bhod,bhd->bho",
+                residual - erase_update,
+                key,
+            ) / key_norm
+            erase_left = -normalized_key
+            erase_right = normalized_key * erase
+            _, teacher_current = rwkv7_step(
+                target_previous,
+                native_read.flatten(1, 2),
+                decay.unsqueeze(-1).expand_as(key),
+                key,
+                value,
+                erase_left,
+                erase_right,
+            )
+            free_output, free_current = rwkv7_step(
+                free_previous,
+                native_read.flatten(1, 2),
+                decay.unsqueeze(-1).expand_as(key),
+                key,
+                value,
+                erase_left,
+                erase_right,
+            )
+            yield StreamedNativeTwoStateStep(
+                row_start=row_start,
+                row_stop=row_stop,
+                time_index=time_index,
+                affine_output=affine_output,
+                compressed_output=compressed_output,
+                read=native_read.flatten(1, 2),
+                requested_decay=requested_decay,
+                decay=decay,
+                erase=erase,
+                key=key,
+                value=value,
+                free_running_output=free_output.unflatten(
+                    1,
+                    (heads, 2),
+                ).flatten(2),
+            )
+            target_previous = current_target
+            free_previous = free_current
 
 
 @dataclass(frozen=True)
@@ -1147,6 +2293,52 @@ def native_signal_rollout(
         states[:, index] = state
         outputs[:, index] = output
     return NativeSignalRollout(states=states, output=outputs)
+
+
+def native_signal_output_rollout(
+    read: Tensor,
+    decay: Tensor,
+    key: Tensor,
+    value: Tensor,
+    erase: Tensor,
+) -> Tensor:
+    """Replay native signals while retaining only outputs and current state."""
+
+    if read.ndim != 4:
+        raise ValueError("read must be [batch,time,head,feature]")
+    if (
+        key.shape != read.shape
+        or value.shape != read.shape
+        or erase.shape != read.shape
+        or decay.shape != read.shape
+    ):
+        raise ValueError("native output-only signals must align with read")
+    batch, sequence_length, heads, head_dim = read.shape
+    state = torch.zeros(
+        batch,
+        heads,
+        head_dim,
+        head_dim,
+        dtype=torch.float32,
+        device=read.device,
+    )
+    outputs = torch.empty_like(read, dtype=torch.float32)
+    for index in range(sequence_length):
+        normalized_key = torch.nn.functional.normalize(
+            key[:, index].float(),
+            dim=-1,
+        )
+        output, state = rwkv7_step(
+            state,
+            read[:, index].float(),
+            decay[:, index].float(),
+            key[:, index].float(),
+            value[:, index].float(),
+            -normalized_key,
+            normalized_key * erase[:, index].float(),
+        )
+        outputs[:, index] = output
+    return outputs
 
 
 def fit_bias_free_projection(
