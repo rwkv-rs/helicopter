@@ -64,11 +64,13 @@ def _plan(tmp_path: Path):
 
 
 def _environment(tmp_path: Path) -> EvaluationEnvironment:
+    staging_root = tmp_path / "staging"
+    staging_root.mkdir(mode=0o700)
     return EvaluationEnvironment(
         weight_root=tmp_path,
         scoreboard_url="https://scoreboard.test",
         scoreboard_token="secret",
-        staging_root=tmp_path / "staging",
+        staging_root=staging_root,
     )
 
 
