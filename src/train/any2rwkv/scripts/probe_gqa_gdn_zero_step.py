@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import importlib
 import json
 import math
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
@@ -15,10 +15,21 @@ from transformers import AutoTokenizer
 from transformers.masking_utils import create_causal_mask
 
 from any2rwkv.checkpoint import read_checkpoint, sha256_file
-from any2rwkv.mixer import apply_partial_rope
+from any2rwkv.configuration_any2rwkv import Any2RWKV7Config
+from any2rwkv.contract import build_target_config
+from any2rwkv.kernel import load_rwkv_lm_kernel
+from any2rwkv.migration_init import (
+    WarmStartTensorProvider,
+    WarmStartVariant,
+    plan_warm_start,
+)
+from any2rwkv.mixer import ProjectionBoundaryRWKV7Attention, apply_partial_rope
 from any2rwkv.streamed_teacher import StreamedQwen35Teacher
+from any2rwkv.target import rwkv7_mixer_specs
 from any2rwkv.zero_step_probe import (
     LowRankProjection,
+    NativeProjectionMaterialization,
+    SelectedBiasFreeProjection,
     affine_state_rollout,
     causal_attention,
     fit_low_rank_projection,
@@ -26,6 +37,7 @@ from any2rwkv.zero_step_probe import (
     gdn_reference_scan,
     hazard_metrics,
     logit_taylor_hazards,
+    materialize_native_projection,
     native_signal_rollout,
     native_two_state_rollout,
     normalized_mse,
@@ -38,11 +50,24 @@ from any2rwkv.zero_step_probe import (
     rope_aligned_two_state_bases,
     rollout_hazards,
     select_bias_free_projection,
+    tensor_sha256,
     tensor_metrics,
     two_state_projection,
     two_state_outputs,
     verify_gdn_mapping,
 )
+
+
+@dataclass(frozen=True)
+class NativeWeightProjectionFit:
+    report: dict[str, object]
+    read: SelectedBiasFreeProjection
+    key: SelectedBiasFreeProjection
+    value: SelectedBiasFreeProjection
+    decay: LowRankProjection
+    erase: LowRankProjection
+    gate: LowRankProjection
+    output: SelectedBiasFreeProjection
 
 
 def parse_dtype(name: str) -> torch.dtype:
@@ -197,6 +222,27 @@ def trace_gqa(
     }
 
 
+def slice_gqa_rows(
+    signals: dict[str, Tensor],
+    start: int,
+    stop: int,
+) -> dict[str, Tensor]:
+    row_aligned = {
+        "query",
+        "key",
+        "value",
+        "grouped_key",
+        "grouped_value",
+        "gate",
+        "mixer_input",
+        "actual_mixer_output",
+    }
+    return {
+        name: value[start:stop] if name in row_aligned else value
+        for name, value in signals.items()
+    }
+
+
 def project_gqa_mixer(head_output: Tensor, signals: dict[str, Tensor]) -> Tensor:
     gated = head_output.float() * signals["gate"]
     return functional.linear(
@@ -215,11 +261,6 @@ def heldout_metrics(
         prediction[calibration_rows:],
         target[calibration_rows:],
     )
-
-
-def tensor_sha256(value: Tensor) -> str:
-    contiguous = value.detach().cpu().contiguous()
-    return hashlib.sha256(contiguous.numpy().tobytes()).hexdigest()
 
 
 def rotate_native_read(
@@ -267,7 +308,7 @@ def fit_native_weight_projection(
     source_key_weight: Tensor,
     source_value_weight: Tensor,
     source_output_weight: Tensor,
-) -> dict[str, object]:
+) -> NativeWeightProjectionFit:
     """Fit native-shaped parameters for FP32 signal-level emulation."""
     ridges = (1e-4, 1e-3, 1e-2, 1e-1, 1.0, 10.0, 100.0)
     target_pre_rope_read = rotate_native_read(
@@ -586,7 +627,7 @@ def fit_native_weight_projection(
             "absolute_ridge": gate_up.absolute_ridge,
         }
     )
-    return {
+    report = {
         "status": "diagnostic-not-installed",
         "scope": "fp32-signal-level-emulation",
         "evaluation_split_role": (
@@ -648,6 +689,248 @@ def fit_native_weight_projection(
         ),
         "complete_free_running_mixer_vs_exact_softmax": final_metrics,
     }
+    return NativeWeightProjectionFit(
+        report=report,
+        read=read,
+        key=key,
+        value=value,
+        decay=decay,
+        erase=erase,
+        gate=gate,
+        output=output,
+    )
+
+
+def fitted_native_tensors(
+    module: ProjectionBoundaryRWKV7Attention,
+    fit: NativeWeightProjectionFit,
+    *,
+    source_value_weight: Tensor,
+) -> dict[str, Tensor]:
+    """Build a complete source-compatible parameter set for one real module."""
+    tensors = {
+        name: torch.zeros_like(parameter, dtype=torch.float32)
+        for name, parameter in module.named_parameters()
+    }
+    tensors["k_k"].fill_(1)
+    tensors["g_norm.weight"].fill_(1)
+    tensors["r_proj.weight"].copy_(fit.read.projection.weight)
+    tensors["k_proj.weight"].copy_(fit.key.projection.weight)
+    tensors["v_proj.weight"].copy_(fit.value.projection.weight)
+    tensors["o_proj.weight"].copy_(fit.output.projection.weight)
+    tensors["w_lora.lora.0.weight"].copy_(fit.decay.down_weight)
+    tensors["w_lora.lora.2.weight"].copy_(fit.decay.up_weight)
+    tensors["w_lora.lora.2.bias"].copy_(fit.decay.bias)
+    tensors["a_lora.lora.0.weight"].copy_(fit.erase.down_weight)
+    tensors["a_lora.lora.2.weight"].copy_(fit.erase.up_weight)
+    tensors["a_lora.lora.2.bias"].copy_(fit.erase.bias)
+    tensors["g_lora.lora.0.weight"].copy_(fit.gate.down_weight)
+    tensors["g_lora.lora.2.weight"].copy_(fit.gate.up_weight)
+    if module.layer_idx:
+        value_rank = tensors["v_lora.lora.0.weight"].shape[0]
+        if source_value_weight.ndim != 2:
+            raise ValueError("source value projection must be a matrix")
+        basis_indices = torch.linspace(
+            0,
+            source_value_weight.shape[0] - 1,
+            value_rank,
+            dtype=torch.float64,
+            device=source_value_weight.device,
+        ).round().to(torch.long)
+        tensors["v_lora.lora.0.weight"].copy_(
+            source_value_weight.index_select(0, basis_indices)
+        )
+        tensors["v_lora.lora.2.bias"].fill_(
+            torch.logit(
+                torch.tensor(
+                    torch.finfo(torch.bfloat16).eps**2,
+                    device=source_value_weight.device,
+                )
+            )
+        )
+    return tensors
+
+
+def materialization_report(
+    materialization: NativeProjectionMaterialization,
+) -> dict[str, object]:
+    return {
+        "aggregate_sha256": materialization.aggregate_sha256,
+        "tensor_count": len(materialization.tensors),
+        "tensors": {
+            tensor.name: {
+                "shape": list(tensor.shape),
+                "dtype": tensor.dtype,
+                "sha256": tensor.sha256,
+            }
+            for tensor in materialization.tensors
+        },
+    }
+
+
+def frozen_mapped_baseline_tensors(
+    checkpoint,
+    target_config: Any2RWKV7Config,
+    *,
+    layer_index: int,
+) -> dict[str, Tensor]:
+    """Materialize the repository's deterministic mapped baseline once."""
+    specs = rwkv7_mixer_specs(
+        layer_index,
+        hidden_size=target_config.hidden_size,
+        head_dim=target_config.head_dim,
+        attention_hidden_size=target_config.attention_hidden_size,
+        decay_rank=target_config.decay_low_rank_dim,
+        a_rank=target_config.a_low_rank_dim,
+        gate_rank=target_config.gate_low_rank_dim,
+        value_rank=target_config.v_low_rank_dim,
+    )
+    plan = plan_warm_start(
+        checkpoint,
+        specs,
+        variant=WarmStartVariant.MAPPED,
+    )
+    provider = WarmStartTensorProvider(checkpoint, specs, plan)
+    prefix = f"model.layers.{layer_index}.attn."
+    return {
+        spec.name.removeprefix(prefix): provider(spec)
+        for spec in specs
+    }
+
+
+def run_materialized_native_gate(
+    *,
+    fit: NativeWeightProjectionFit,
+    baseline_tensors: dict[str, Tensor],
+    signals: dict[str, Tensor],
+    positions: Tensor,
+    v_first: Tensor,
+    target_config: Any2RWKV7Config,
+    layer_index: int,
+    source_head_dim: int,
+    rotary_dim: int,
+    rope_theta: float,
+) -> dict[str, object]:
+    """Evaluate fitted and frozen-mapped tensors through real BF16 modules."""
+    module_kwargs = {
+        "source_used_rope": True,
+        "rotary_dim": rotary_dim,
+        "rope_theta": rope_theta,
+        "rope_num_heads": signals["query"].shape[2],
+        "rope_head_dim": source_head_dim,
+    }
+    candidate = ProjectionBoundaryRWKV7Attention(
+        target_config,
+        layer_index,
+        **module_kwargs,
+    ).to(device=signals["mixer_input"].device, dtype=torch.bfloat16)
+    baseline = ProjectionBoundaryRWKV7Attention(
+        target_config,
+        layer_index,
+        **module_kwargs,
+    ).to(device=signals["mixer_input"].device, dtype=torch.bfloat16)
+    candidate_materialization = materialize_native_projection(
+        candidate,
+        fitted_native_tensors(
+            candidate,
+            fit,
+            source_value_weight=signals["value_weight"],
+        ),
+    )
+    baseline_materialization = materialize_native_projection(
+        baseline,
+        baseline_tensors,
+    )
+    kernel = load_rwkv_lm_kernel(target_config.head_dim)
+    module_input = signals["mixer_input"].to(torch.bfloat16)
+    expected_v_first_shape = (
+        *module_input.shape[:2],
+        target_config.attention_hidden_size,
+    )
+    if tuple(v_first.shape) != expected_v_first_shape:
+        raise ValueError(
+            "layer-0 value proxy must align with the nonfirst native layer; "
+            f"got={tuple(v_first.shape)} expected={expected_v_first_shape}"
+        )
+    v_first = v_first.to(device=module_input.device, dtype=torch.bfloat16)
+    zero_v_first = torch.zeros_like(v_first)
+    with torch.inference_mode():
+        candidate_output, _, candidate_state, candidate_signals = (
+            candidate.forward_sequence(
+                module_input,
+                positions=positions,
+                kernel=kernel,
+                v_first=v_first,
+            )
+        )
+        zero_v_first_output, _, _, _ = candidate.forward_sequence(
+            module_input,
+            positions=positions,
+            kernel=kernel,
+            v_first=zero_v_first,
+        )
+        baseline_output, _, baseline_state, _ = baseline.forward_sequence(
+            module_input,
+            positions=positions,
+            kernel=kernel,
+            v_first=v_first,
+        )
+    target = signals["actual_mixer_output"]
+    candidate_metrics = tensor_metrics(candidate_output, target)
+    baseline_metrics = tensor_metrics(baseline_output, target)
+    accepted = (
+        math.isfinite(candidate_metrics["nmse"])
+        and candidate_metrics["nmse"] < baseline_metrics["nmse"]
+    )
+    return {
+        "status": "accepted" if accepted else "rejected",
+        "selection_rule": (
+            "finite candidate NMSE strictly below the frozen mapped baseline "
+            "on final sample IDs"
+        ),
+        "precision": {
+            "module_parameters": "torch.bfloat16",
+            "module_input": str(module_input.dtype),
+            "kernel_vectors": "torch.bfloat16",
+            "recurrent_state": str(candidate_state.dtype),
+            "metrics": "torch.float32",
+        },
+        "v_first_path": (
+            "source layer-0 canonical beta*value trace; v_lora uses "
+            "deterministic source-value basis, zero up projection, and "
+            "logit(BF16 eps^2) bias"
+        ),
+        "zero_v_first_counterfactual": {
+            "output_vs_source_value_proxy_output": tensor_metrics(
+                zero_v_first_output,
+                candidate_output,
+            ),
+            "output_vs_exact_qwen_mixer": tensor_metrics(
+                zero_v_first_output,
+                target,
+            ),
+        },
+        "candidate_vs_exact_qwen_mixer": candidate_metrics,
+        "frozen_mapped_baseline_vs_exact_qwen_mixer": baseline_metrics,
+        "candidate_vs_frozen_mapped_baseline": tensor_metrics(
+            candidate_output,
+            baseline_output,
+        ),
+        "candidate_output_sha256": tensor_sha256(candidate_output),
+        "baseline_output_sha256": tensor_sha256(baseline_output),
+        "candidate_final_state_sha256": tensor_sha256(candidate_state),
+        "baseline_final_state_sha256": tensor_sha256(baseline_state),
+        "candidate_gate": tensor_metrics(
+            candidate_signals["gate"],
+            signals["gate"].flatten(2),
+        ),
+        "candidate_materialization": materialization_report(
+            candidate_materialization
+        ),
+        "baseline_materialization": materialization_report(
+            baseline_materialization
+        ),
+    }
 
 
 def gqa_diagnostics(
@@ -658,7 +941,7 @@ def gqa_diagnostics(
     source_head_dim: int,
     rotary_dim: int,
     rope_theta: float,
-) -> dict[str, object]:
+) -> tuple[dict[str, object], NativeWeightProjectionFit]:
     query = signals["query"]
     key = signals["key"]
     value = signals["value"]
@@ -843,6 +1126,7 @@ def gqa_diagnostics(
     full_affine = full_matrix_output + bias_by_head
     native_candidate_name = "rope_aligned_observable_127x2_plus_two_dc"
     sketch_results: dict[str, object] = {}
+    selected_native_fit: NativeWeightProjectionFit | None = None
     for name, (basis, projection_bias, projection_query, dc_indices) in {
         "first_127_coordinates_plus_dc": (
             coordinate_basis,
@@ -927,7 +1211,7 @@ def gqa_diagnostics(
         )
         native_weight_projection = None
         if name == native_candidate_name:
-            native_weight_projection = fit_native_weight_projection(
+            selected_native_fit = fit_native_weight_projection(
                 mixer_input=signals["mixer_input"],
                 target_read=target_native_read,
                 native_transition=native_transition,
@@ -946,6 +1230,7 @@ def gqa_diagnostics(
                 source_value_weight=signals["value_weight"],
                 source_output_weight=signals["output_weight"],
             )
+            native_weight_projection = selected_native_fit.report
         teacher_forced_native_states = (
             native_transition.teacher_forced_states.flatten(2, 3)
         )
@@ -1259,7 +1544,7 @@ def gqa_diagnostics(
         ),
     }
 
-    return {
+    report = {
         "exactness_checks": {
             "hazard_recurrence_vs_softmax_attention": heldout_metrics(
                 exact_recurrent_output,
@@ -1276,6 +1561,9 @@ def gqa_diagnostics(
         "affine_state": affine_results,
         "state_compression": compression_results,
     }
+    if selected_native_fit is None:
+        raise RuntimeError("native GQA candidate did not produce a weight fit")
+    return report, selected_native_fit
 
 
 def gdn_diagnostics(
@@ -1355,6 +1643,32 @@ def main() -> int:
     parser.add_argument("--dataset", required=True, type=Path)
     parser.add_argument("--rows", type=int, default=8)
     parser.add_argument("--calibration-rows", type=int, default=4)
+    parser.add_argument(
+        "--development-rows",
+        type=int,
+        help=(
+            "Explicit adaptive-development row count after calibration. "
+            "Defaults to all non-final rows."
+        ),
+    )
+    parser.add_argument(
+        "--final-rows",
+        type=int,
+        default=0,
+        help=(
+            "Reserve this many trailing rows for the one-shot real BF16 module "
+            "gate; they are excluded from every fit and method selection."
+        ),
+    )
+    parser.add_argument(
+        "--final-row-offset",
+        type=int,
+        help=(
+            "Optional start index of the frozen final rows. A gap after the "
+            "development split is allowed so an exposed final split can be "
+            "retired without changing calibration or fitting rows."
+        ),
+    )
     parser.add_argument("--sequence-length", type=int, default=64)
     parser.add_argument("--gdn-layer", type=int, default=0)
     parser.add_argument("--gqa-layer", type=int, default=3)
@@ -1370,8 +1684,31 @@ def main() -> int:
         default="bfloat16",
     )
     args = parser.parse_args()
-    if args.rows < 2 or not 0 < args.calibration_rows < args.rows:
-        raise SystemExit("rows must exceed a positive calibration-row prefix")
+    development_rows = (
+        args.rows - args.calibration_rows - args.final_rows
+        if args.development_rows is None
+        else args.development_rows
+    )
+    fit_rows = args.calibration_rows + development_rows
+    final_row_offset = (
+        fit_rows
+        if args.final_row_offset is None
+        else args.final_row_offset
+    )
+    final_row_stop = final_row_offset + args.final_rows
+    if (
+        args.rows < 2
+        or args.final_rows < 0
+        or development_rows <= 0
+        or args.calibration_rows <= 0
+        or fit_rows > args.rows
+        or final_row_offset < fit_rows
+        or final_row_stop > args.rows
+    ):
+        raise SystemExit(
+            "rows must contain disjoint non-empty calibration/development "
+            "prefixes and a non-negative in-range final split"
+        )
     if args.sequence_length < 2:
         raise SystemExit("sequence length must be at least two")
     device = torch.device(args.device)
@@ -1455,6 +1792,56 @@ def main() -> int:
     if not isinstance(text_config, dict):
         raise SystemExit("source text_config must be a JSON object")
     source_head_dim = int(text_config["head_dim"])
+    rotary_dim = int(
+        source_head_dim
+        * checkpoint.contract.partial_rotary_factor
+    )
+    fit_gqa_signals = slice_gqa_rows(gqa_signals, 0, fit_rows)
+    gqa_report, native_fit = gqa_diagnostics(
+        fit_gqa_signals,
+        calibration_rows=args.calibration_rows,
+        positions=position_ids[:fit_rows],
+        source_head_dim=source_head_dim,
+        rotary_dim=rotary_dim,
+        rope_theta=checkpoint.contract.rope_theta,
+    )
+    real_module_gate = None
+    if args.final_rows:
+        final_gdn_signals = {
+            name: value[final_row_offset:final_row_stop]
+            for name, value in gdn_signals.items()
+        }
+        v_first = (
+            final_gdn_signals["beta"].unsqueeze(-1)
+            * final_gdn_signals["value"]
+        ).flatten(2)
+        target_config = Any2RWKV7Config(
+            **build_target_config(
+                checkpoint.config,
+                require_final_layers=False,
+            )
+        )
+        real_module_gate = run_materialized_native_gate(
+            fit=native_fit,
+            baseline_tensors=frozen_mapped_baseline_tensors(
+                checkpoint,
+                target_config,
+                layer_index=args.gqa_layer,
+            ),
+            signals=slice_gqa_rows(
+                gqa_signals,
+                final_row_offset,
+                final_row_stop,
+            ),
+            positions=position_ids[final_row_offset:final_row_stop],
+            v_first=v_first,
+            target_config=target_config,
+            layer_index=args.gqa_layer,
+            source_head_dim=source_head_dim,
+            rotary_dim=rotary_dim,
+            rope_theta=checkpoint.contract.rope_theta,
+        )
+    gqa_report["real_bf16_module_gate"] = real_module_gate
 
     result = {
         "schema_version": 1,
@@ -1468,8 +1855,27 @@ def main() -> int:
             "dataset": str(args.dataset.resolve()),
             "dataset_sha256": sha256_file(args.dataset),
             "sample_ids": sample_ids,
-            "calibration_rows": args.calibration_rows,
-            "heldout_rows": args.rows - args.calibration_rows,
+            "split_sample_ids": {
+                "calibration": sample_ids[: args.calibration_rows],
+                "adaptive_development": sample_ids[
+                    args.calibration_rows : fit_rows
+                ],
+                "unused_gap": sample_ids[fit_rows:final_row_offset],
+                "frozen_final": sample_ids[
+                    final_row_offset:final_row_stop
+                ],
+            },
+            "split_rows": {
+                "calibration": args.calibration_rows,
+                "adaptive_development": development_rows,
+                "unused_gap": final_row_offset - fit_rows,
+                "frozen_final": args.final_rows,
+            },
+            "final_split_policy": (
+                "final sample IDs are selected by a pre-fit row offset and "
+                "excluded from every solver and method-selection metric; an "
+                "optional gap retires previously exposed final rows"
+            ),
             "sequence_length": args.sequence_length,
             "gdn_layer": args.gdn_layer,
             "gqa_layer": args.gqa_layer,
@@ -1485,19 +1891,12 @@ def main() -> int:
             "metric_dtype": "torch.float32",
             "mapping_check_dtype": "torch.float64",
         },
-        "gqa": gqa_diagnostics(
-            gqa_signals,
-            calibration_rows=args.calibration_rows,
-            positions=position_ids,
-            source_head_dim=source_head_dim,
-            rotary_dim=int(
-                source_head_dim
-                * checkpoint.contract.partial_rotary_factor
-            ),
-            rope_theta=checkpoint.contract.rope_theta,
-        ),
+        "gqa": gqa_report,
         "gdn": gdn_diagnostics(
-            gdn_signals,
+            {
+                name: value[:fit_rows]
+                for name, value in gdn_signals.items()
+            },
             calibration_rows=args.calibration_rows,
         ),
     }

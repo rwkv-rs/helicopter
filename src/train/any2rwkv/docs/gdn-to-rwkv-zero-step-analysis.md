@@ -244,8 +244,9 @@ RMSNorm 与 GroupNorm 的差异也在这个最终可见目标中处理。可以�
 实验直接读取 Qwen3.5-2B 的真实 checkpoint：
 
 - GDN：第 0 层，16 heads、head dimension 128；
-- 数据：8 条 FineWeb-Edu 文本，每条 64 tokens；
-- 划分：前 4 条 calibration，后 4 条 held-out；
+- 数据：共享 trace 共 32 条 FineWeb-Edu 文本，每条 64 tokens；GDN
+  diagnostic 只使用前 16 条；
+- 划分：前 8 条 calibration、后 8 条 adaptive development；
 - 设备：DGX Spark 的 NVIDIA GB10；
 - 前向与指标：FP32，恒等式自检使用 FP64；
 - checkpoint shard SHA-256：`aa33250c4fc64891ddfaba3a314fd9542ea371843c387178b425fbcc5ed680b1`。
@@ -254,16 +255,24 @@ RMSNorm 与 GroupNorm 的差异也在这个最终可见目标中处理。可以�
 
 | 验证项 | 结果 | 含义 |
 | --- | ---: | --- |
-| 式 $(3)$ canonical recurrence output relative L2 | $2.45\times10^{-16}$ | GDN recurrence 可精确嵌入 |
+| 式 $(3)$ canonical recurrence output relative L2 | $2.17\times10^{-16}$ | GDN recurrence 可精确嵌入 |
 | canonical recurrence output max abs | $1.67\times10^{-16}$ | FP64 机器精度 |
 | native 最小可达 decay | 0.54524 | 式 $(5)$ 的参数域 |
 | source decay 低于该下界的比例 | 24.28% | 确有域外 activation |
-| 仅 clamp decay 的 core output NMSE | 0.001216 | native 不可达域的直接可见影响较小 |
-| 仅 clamp decay 的 core output cosine | 0.999402 | 为逐层蒸馏留下了较近的起点 |
+| 仅 clamp decay 的 core output NMSE | 0.001111 | native 不可达域的直接可见影响较小 |
+| 仅 clamp decay 的 core output cosine | 0.999451 | 为逐层蒸馏留下了较近的起点 |
 
-这里的 0.001216 是只替换 decay 后、归一化与 output projection 之前的 core recurrence 指标，不等同于完整迁移后的 mixer NMSE。它说明 native decay mismatch 真实存在，但在该层、该 held-out sample 上的可见影响约为千分之一；式 $(10)$ 的联合投影和逐层蒸馏仍然是完整方案的一部分。
+这里的 0.001111 是只替换 decay 后、归一化与 output projection 之前的
+core recurrence 指标，不等同于完整迁移后的 mixer NMSE。它说明 native decay
+mismatch 真实存在，但在该层、该 development sample 上的可见影响约为千分之一；
+式 $(10)$ 的联合投影和逐层蒸馏仍然是完整方案的一部分。
 
-FP32 与 BF16 两次独立运行的关键排序和量级一致。完整原始结果见 [`evidence/qwen35-2b-gqa-gdn-zero-step-probe.json`](evidence/qwen35-2b-gqa-gdn-zero-step-probe.json)，可复现实验入口为 [`../scripts/probe_gqa_gdn_zero_step.py`](../scripts/probe_gqa_gdn_zero_step.py)。
+完整原始结果见
+[`evidence/qwen35-2b-gqa-gdn-zero-step-probe.json`](evidence/qwen35-2b-gqa-gdn-zero-step-probe.json)，
+SHA-256 为
+`e0738bd4957b855861984f61b52464ec9c291d43eed6c8eccdb0b2814b8486c8`；
+可复现实验入口为
+[`../scripts/probe_gqa_gdn_zero_step.py`](../scripts/probe_gqa_gdn_zero_step.py)。
 
 ## 6. 完整迁移顺序
 

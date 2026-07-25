@@ -3,6 +3,11 @@ from __future__ import annotations
 import torch
 import pytest
 
+from any2rwkv.configuration_any2rwkv import Any2RWKV7Config
+from any2rwkv.contract import build_target_config
+from any2rwkv.fixture import tiny_qwen35_config
+from any2rwkv.kernel import NativeRwkv7Kernel
+from any2rwkv.mixer import ProjectionBoundaryRWKV7Attention
 from any2rwkv.recurrent import rwkv7_step
 from any2rwkv.zero_step_probe import (
     RWKV7_MINIMUM_DECAY,
@@ -12,6 +17,7 @@ from any2rwkv.zero_step_probe import (
     fit_low_rank_projection,
     four_state_block_output,
     logit_taylor_hazards,
+    materialize_native_projection,
     native_signal_rollout,
     native_two_state_rollout,
     observable_query_bases,
@@ -24,6 +30,32 @@ from any2rwkv.zero_step_probe import (
     two_state_outputs,
     verify_gdn_mapping,
 )
+
+
+def reference_native_kernel(state, r, w, k, v, a, b):
+    batch, tokens, channels = r.shape
+    heads = state.shape[1]
+    head_dim = channels // heads
+    outputs = []
+    current = state
+    for index in range(tokens):
+        rt, wt, kt, vt, at, bt = (
+            value[:, index].view(batch, heads, head_dim)
+            for value in (r, w, k, v, a, b)
+        )
+        decay = torch.exp(-0.6065306597 * torch.sigmoid(wt.float()))
+        current = (
+            current * decay.unsqueeze(-2)
+            + (current @ at.float().unsqueeze(-1)) @ bt.float().unsqueeze(-2)
+            + vt.float().unsqueeze(-1) @ kt.float().unsqueeze(-2)
+        )
+        outputs.append((current @ rt.float().unsqueeze(-1)).squeeze(-1))
+    return (
+        torch.stack(outputs, dim=1)
+        .reshape(batch, tokens, channels)
+        .to(r.dtype),
+        current,
+    )
 
 
 def test_exact_hazard_rollout_recovers_causal_attention() -> None:
@@ -422,6 +454,144 @@ def test_native_signal_rollout_replays_exact_rwkv7_signals() -> None:
         actual.states,
         torch.stack(expected_states, dim=1),
     )
+
+
+def test_native_projection_materialization_is_complete_atomic_and_hash_bound() -> None:
+    source = tiny_qwen35_config(layers=2, moe=False)
+    source["mtp_num_hidden_layers"] = 0
+    config = Any2RWKV7Config(
+        **build_target_config(source, require_final_layers=False)
+    )
+    mixer = ProjectionBoundaryRWKV7Attention(
+        config,
+        1,
+        source_used_rope=False,
+        rotary_dim=0,
+        rope_theta=10_000.0,
+    ).to(torch.bfloat16)
+    before = {
+        name: parameter.detach().clone()
+        for name, parameter in mixer.named_parameters()
+    }
+    candidate = {
+        name: torch.zeros_like(parameter, dtype=torch.float32)
+        for name, parameter in mixer.named_parameters()
+    }
+    candidate["k_k"].fill_(1)
+    candidate["g_norm.weight"].fill_(1)
+    candidate["v_lora.lora.2.bias"].fill_(
+        torch.logit(
+            torch.tensor(torch.finfo(torch.bfloat16).eps**2)
+        )
+    )
+
+    incomplete = dict(candidate)
+    incomplete.pop("r_proj.weight")
+    with pytest.raises(ValueError, match="cover every module parameter"):
+        materialize_native_projection(mixer, incomplete)
+    for name, parameter in mixer.named_parameters():
+        torch.testing.assert_close(parameter, before[name])
+
+    malformed = dict(candidate)
+    malformed["r_proj.weight"] = torch.zeros(1)
+    with pytest.raises(ValueError, match="shape mismatch"):
+        materialize_native_projection(mixer, malformed)
+    for name, parameter in mixer.named_parameters():
+        torch.testing.assert_close(parameter, before[name])
+
+    installed = materialize_native_projection(mixer, candidate)
+    assert len(installed.aggregate_sha256) == 64
+    assert {item.name for item in installed.tensors} == set(candidate)
+    for name, parameter in mixer.named_parameters():
+        torch.testing.assert_close(
+            parameter,
+            candidate[name].to(torch.bfloat16),
+            rtol=0,
+            atol=0,
+        )
+
+    repeated = materialize_native_projection(mixer, candidate)
+    assert repeated.aggregate_sha256 == installed.aggregate_sha256
+    assert repeated.tensors == installed.tensors
+
+
+def test_materialized_nonfirst_native_projection_runs_real_bf16_sequence() -> None:
+    source = tiny_qwen35_config(layers=2, moe=False)
+    source["mtp_num_hidden_layers"] = 0
+    config = Any2RWKV7Config(
+        **build_target_config(source, require_final_layers=False)
+    )
+    mixer = ProjectionBoundaryRWKV7Attention(
+        config,
+        1,
+        source_used_rope=False,
+        rotary_dim=0,
+        rope_theta=10_000.0,
+    ).to(torch.bfloat16)
+    candidate = {
+        name: torch.zeros_like(parameter, dtype=torch.float32)
+        for name, parameter in mixer.named_parameters()
+    }
+    recurrent_width = config.attention_hidden_size
+    candidate["r_proj.weight"].copy_(
+        torch.eye(recurrent_width, config.hidden_size)
+    )
+    candidate["k_proj.weight"].copy_(
+        torch.eye(recurrent_width, config.hidden_size)
+    )
+    candidate["v_proj.weight"].copy_(
+        torch.eye(recurrent_width, config.hidden_size)
+    )
+    candidate["o_proj.weight"].copy_(
+        torch.eye(config.hidden_size, recurrent_width)
+    )
+    candidate["k_k"].fill_(1)
+    candidate["g_norm.weight"].fill_(1)
+    candidate["g_lora.lora.2.weight"][:, :recurrent_width].copy_(
+        torch.eye(recurrent_width) * 2
+    )
+    candidate["v_lora.lora.2.bias"].fill_(
+        torch.logit(
+            torch.tensor(torch.finfo(torch.bfloat16).eps**2)
+        )
+    )
+    materialize_native_projection(mixer, candidate)
+
+    generator = torch.Generator().manual_seed(20260725)
+    values = torch.randn(
+        2,
+        16,
+        config.hidden_size,
+        generator=generator,
+        dtype=torch.bfloat16,
+    )
+    positions = torch.arange(16).view(1, -1).expand(2, -1)
+    output, _, final_state, signals = mixer.forward_sequence(
+        values,
+        positions=positions,
+        kernel=NativeRwkv7Kernel(
+            reference_native_kernel,
+            head_size=config.head_dim,
+        ),
+        v_first=torch.zeros(
+            2,
+            16,
+            recurrent_width,
+            dtype=torch.bfloat16,
+        ),
+    )
+
+    assert output.shape == values.shape
+    assert final_state.shape == (
+        2,
+        config.num_heads,
+        config.head_dim,
+        config.head_dim,
+    )
+    assert output.dtype == torch.bfloat16
+    assert bool(torch.isfinite(output.float()).all())
+    assert bool(torch.isfinite(final_state).all())
+    assert float(signals["gate"].detach().abs().sum()) > 0
 
 
 def test_native_two_state_rollout_recovers_reachable_no_erase_sequence() -> None:

@@ -309,13 +309,15 @@ $$
 
 - GQA：第 3 层，8 Query heads、2 KV heads、source head dimension 256；
 - target：16 个 native heads，head dimension 128；
-- 数据：16 条 FineWeb-Edu 文本，每条 64 tokens；
-- 划分：前 8 条 calibration，后 8 条 adaptive development held-out；后者已参与方法迭代，不能再解释为最终泛化集；
+- 数据：32 条 FineWeb-Edu 文本，每条 64 tokens；
+- 划分：前 8 条 calibration、随后 8 条 adaptive development、中间 8 条
+  retired gap、最后 8 条 frozen final；gap 是已暴露但不参与此次 gate 的旧 final，
+  新 frozen final 的 sample IDs 在求解前固定，未参与任何 ridge、basis 或方法选择；
 - 设备：DGX Spark / NVIDIA GB10；
-- 前向与指标：FP32；
+- source trace 与拟合：FP32；最终 gate：BF16 module/input/kernel vectors、FP32 recurrent state 与指标归约；
 - source shard SHA-256：`aa33250c4fc64891ddfaba3a314fd9542ea371843c387178b425fbcc5ed680b1`。
 
-关键 held-out 结果如下：
+adaptive development 上的分阶段结果如下：
 
 | 阶段 | NMSE | 含义 |
 | --- | ---: | --- |
@@ -336,19 +338,46 @@ $$
 | fitted `a_lora` erase logit | 0.10619 | rank-64 affine 参数化 |
 | fitted bias-free `g_lora` gate | 0.22783 | rank-128 source-row `sigmoid` feature 参数化 |
 | fitted signals free-running → dynamic oracle | 0.35804 | 权重投影导致的递推误差 |
-| all fitted signals → exact Softmax mixer | **0.66073** | FP32 signal-level emulation，尚未写入真实模块 |
+| all fitted signals → exact Softmax mixer | **0.66101** | FP32 signal-level emulation，用于候选筛选 |
 
-动态 oracle 的 `r_proj.weight` shape 为 `2048×2048`，SHA-256 为
-`254407284a84b42c7cbecf8ccda19102412e2888b0eaa5cfc964991b0fc43156`；加入逐 projection ridge-center 选择后的 `r_proj.weight` SHA-256 为
-`4bca4ec7400c5291ed24145f917e3f928cdf77f885bd41478c17183917e04287`。
-完整 evidence JSON 的 SHA-256 为
-`fe4b49f2ff693b3f0aa15833204ee7cb5d9570c2877ce686e92ec74ff4db8d2e`。
+所有候选 tensor 随后完整写入第 3 层
+`ProjectionBoundaryRWKV7Attention`。非首层 `v_lora` 使用 source value
+projection 的确定性 row basis，up projection 为零，bias 为
+`logit(BF16 eps²)`；真实 `v_first` 路径输入 layer-0 GDN canonical
+`β·value` trace，`forward_sequence` 从零 recurrent state 运行。最后 8 条
+全新 frozen final 的结果为：
 
-当前结果只是 FP32 signal-level emulation，并不是已安装进 `ProjectionBoundaryRWKV7Attention` 的真实前向；这 8 条 development held-out 也已被反复用于方法迭代。因此它保持 `diagnostic-not-installed`，不能作为最终泛化估计。下一道 gate 必须把所有 tensor 实际写入模块，用 BF16 `forward_sequence` 在预先冻结、此前从未参与方法选择的 sample IDs 上复测，并与冻结 mapped baseline 比较。
+| frozen-final BF16 gate | NMSE | cosine |
+| --- | ---: | ---: |
+| fitted native module → exact Qwen mixer | **0.67028** | 0.57449 |
+| frozen mapped control → exact Qwen mixer | 3.12758 | 0.30105 |
 
-现有分阶段 NMSE 只能定位候选接口，不能据此断言某一组件是主要误差源。要作这种归因，还需依次把 fitted `r/k/v`、`w/a`、gate 和 `o_proj` 替换为对应 exact oracle，运行互斥 counterfactual ablation。只有真实模块前向严格优于冻结 baseline，才允许写入 zero-step checkpoint。
+候选在未见 sample IDs 上把 NMSE 相对 frozen mapped control 降低约
+78.6%，满足“有限且严格优于冻结 baseline”的安装条件。候选 BF16
+materialization SHA-256 为
+`bf1de2a6b55e63edf578c4746308f6ed6fc726733811585a29850a31c0bd2ed5`，
+control SHA-256 为
+`2b68e0c0f85a1065cb2ad7d0279ec826f792276b04858bd4b7cb93ec397709f3`。
+安装接口要求 26 个参数逐项完整覆盖、shape 匹配且 BF16 cast 后 finite，任何一项
+不满足都在修改模块前拒绝，因此 evidence 绑定的是实际执行的 BF16 tensor，而非
+拟合阶段的 FP32 临时矩阵。
 
-完整原始结果见 [`evidence/qwen35-2b-gqa-gdn-zero-step-probe.json`](evidence/qwen35-2b-gqa-gdn-zero-step-probe.json)，可复现实验入口为 [`../scripts/probe_gqa_gdn_zero_step.py`](../scripts/probe_gqa_gdn_zero_step.py)。
+把同一候选的 `v_first` 改为零时，输出相对 canonical `β·value` 路径的 NMSE
+仅为 `2.09×10^-9`、relative L2 为 `4.57×10^-5`，说明近零 shortcut 确实把
+跨层 value 影响压到了 BF16 zero-step 的数值噪声量级，而非靠全零输入人为获得
+主要收益。
+
+`0.67028` 仍然离“无需蒸馏复现 source mixer”很远；它证明的是正确构造可以显著
+改善 zero-step，而不是消除了架构差。若要归因剩余误差，仍需在另一个预先冻结的
+split 上运行 exact `r/k/v`、`w/a`、gate、`o_proj` 互斥
+counterfactual，不能从相关的分阶段 NMSE 直接下结论。
+
+完整原始结果见
+[`evidence/qwen35-2b-gqa-gdn-zero-step-probe.json`](evidence/qwen35-2b-gqa-gdn-zero-step-probe.json)，
+SHA-256 为
+`e0738bd4957b855861984f61b52464ec9c291d43eed6c8eccdb0b2814b8486c8`；
+可复现实验入口为
+[`../scripts/probe_gqa_gdn_zero_step.py`](../scripts/probe_gqa_gdn_zero_step.py)。
 
 ## 7. 完整迁移顺序
 

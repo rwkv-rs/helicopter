@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import math
+import struct
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import torch
@@ -818,6 +821,113 @@ class LowRankProjection:
 class NativeSignalRollout:
     states: Tensor
     output: Tensor
+
+
+@dataclass(frozen=True)
+class MaterializedTensor:
+    name: str
+    shape: tuple[int, ...]
+    dtype: str
+    sha256: str
+
+
+@dataclass(frozen=True)
+class NativeProjectionMaterialization:
+    """Hash-bound record of one atomic native attention installation."""
+
+    aggregate_sha256: str
+    tensors: tuple[MaterializedTensor, ...]
+
+
+def tensor_bytes(value: Tensor) -> bytes:
+    """Return exact storage bytes, including dtypes unsupported by NumPy."""
+    contiguous = value.detach().cpu().contiguous()
+    return contiguous.view(torch.uint8).numpy().tobytes()
+
+
+def tensor_sha256(value: Tensor) -> str:
+    return hashlib.sha256(tensor_bytes(value)).hexdigest()
+
+
+def _materialization_digest(
+    tensors: tuple[tuple[str, Tensor], ...],
+) -> str:
+    digest = hashlib.sha256()
+    for name, value in tensors:
+        encoded_name = name.encode("utf-8")
+        encoded_dtype = str(value.dtype).encode("ascii")
+        digest.update(struct.pack(">I", len(encoded_name)))
+        digest.update(encoded_name)
+        digest.update(struct.pack(">I", len(encoded_dtype)))
+        digest.update(encoded_dtype)
+        digest.update(struct.pack(">I", value.ndim))
+        for dimension in value.shape:
+            digest.update(struct.pack(">Q", int(dimension)))
+        payload = tensor_bytes(value)
+        digest.update(struct.pack(">Q", len(payload)))
+        digest.update(payload)
+    return digest.hexdigest()
+
+
+def materialize_native_projection(
+    module: torch.nn.Module,
+    tensors: Mapping[str, Tensor],
+) -> NativeProjectionMaterialization:
+    """Atomically install a complete native attention parameter set.
+
+    The mapping must cover every parameter exactly.  Values are first cast to
+    the destination dtype/device and validated without mutating ``module``;
+    only then are all parameters copied.  The returned digest is computed from
+    the installed tensors, so evidence cannot accidentally bind the FP32 fit
+    rather than the BF16 module that was actually evaluated.
+    """
+    parameters = dict(module.named_parameters())
+    expected = set(parameters)
+    provided = set(tensors)
+    if provided != expected:
+        missing = sorted(expected - provided)
+        unexpected = sorted(provided - expected)
+        raise ValueError(
+            "native projection must cover every module parameter exactly; "
+            f"missing={missing} unexpected={unexpected}"
+        )
+    prepared: list[tuple[str, Tensor]] = []
+    for name in sorted(parameters):
+        parameter = parameters[name]
+        source = tensors[name]
+        if tuple(source.shape) != tuple(parameter.shape):
+            raise ValueError(
+                f"native projection shape mismatch for {name}: "
+                f"got={tuple(source.shape)} expected={tuple(parameter.shape)}"
+            )
+        converted = source.detach().to(
+            device=parameter.device,
+            dtype=parameter.dtype,
+        ).contiguous()
+        if not bool(torch.isfinite(converted.float()).all()):
+            raise ValueError(
+                f"native projection contains non-finite values after cast: {name}"
+            )
+        prepared.append((name, converted))
+    with torch.no_grad():
+        for name, converted in prepared:
+            parameters[name].copy_(converted)
+    installed = tuple(
+        (name, parameters[name].detach().cpu().contiguous())
+        for name in sorted(parameters)
+    )
+    return NativeProjectionMaterialization(
+        aggregate_sha256=_materialization_digest(installed),
+        tensors=tuple(
+            MaterializedTensor(
+                name=name,
+                shape=tuple(value.shape),
+                dtype=str(value.dtype),
+                sha256=tensor_sha256(value),
+            )
+            for name, value in installed
+        ),
+    )
 
 
 def _ridge_affine_projection(
