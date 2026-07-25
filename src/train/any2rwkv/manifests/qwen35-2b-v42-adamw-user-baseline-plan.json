@@ -1,0 +1,89 @@
+{
+  "schema_version": 3,
+  "classification": "real-24-layer-adamw-user-baseline-performance-gated",
+  "evidence_tier": "exploratory",
+  "seed": 20260714,
+  "experiment_comparison": {
+    "baseline_run_id": "v41",
+    "only_changes": [
+      "把 AdamW 超参数改为显式用户基线，并使用 10 次实际 update warmup",
+      "取消梯度累积，micro batch 只接受新的 8 卡 Nsight 性能门禁选择",
+      "加入每次性能候选、最终 batch 选择和训练的 online W&B 与中文报告，并在 NCCL/CUDA 初始化前完成 8-rank W&B 身份同步",
+      "性能门禁分开检查 CUDA kernel 时间线空泡与 Nsight SMs Active，不能把前者冒充 GPU 利用率"
+    ]
+  },
+  "optimizer": {
+    "name": "adamw",
+    "learning_rate": 0.000001,
+    "final_learning_rate": 0.000001,
+    "warmup_steps": 10,
+    "betas": [0.9, 0.99],
+    "epsilon": 1e-8,
+    "weight_decay": 0.1
+  },
+  "learning_rate": 0.000001,
+  "local_learning_rate_by_mixer_kind": {},
+  "learning_rate_schedule": "warmup-constant",
+  "layer_learning_rate_schedule_epochs": 72,
+  "learning_rate_warmup_ratio": 0.0,
+  "min_learning_rate_ratio": 1.0,
+  "gradient_clip_norm": 1.0,
+  "max_parameter_update_relative_l2": null,
+  "optimizer_telemetry_interval_steps": 16,
+  "burn_in_tokens": 128,
+  "supervised_tokens": 512,
+  "accumulation_steps": 1,
+  "gradient_checkpointing": false,
+  "micro_batch_size": 8,
+  "distributed_world_size": 8,
+  "cache_shard_rows": 16,
+  "checkpoint_interval_micro_batches": 0,
+  "activation_fit_rows": 32,
+  "activation_fit_ridge": 0.001,
+  "activation_fit_functional_steps": 256,
+  "activation_fit_functional_learning_rate": 0.0003,
+  "activation_fit_attention_time_mix_ablation": false,
+  "max_layer_input_cache_bytes": 500000000000,
+  "max_cached_layer_input_bytes_per_rank": 4294967296,
+  "execution_mode": "streamed_layer_store",
+  "cache_teacher_layers": false,
+  "max_cuda_reserved_bytes": 90000000000,
+  "layer_min_epochs": 24,
+  "layer_max_epochs": 72,
+  "layer_min_delta": 0.00125785544514656,
+  "layer_patience": 2,
+  "corrective_min_sweeps": 1,
+  "corrective_max_sweeps": 1,
+  "corrective_min_delta": 0.0,
+  "local_loss_weights": {
+    "mixer_mse": 1.0,
+    "block_mse": 1.0,
+    "cosine": 0.1
+  },
+  "global_loss_weights": {
+    "token_kl": 1.0,
+    "shifted_ce": 0.25
+  },
+  "training_control_evidence": {
+    "status": "exploratory-unvalidated",
+    "artifact_sha256": null
+  },
+  "tracking": {
+    "mode": "online",
+    "project": "any2rwkv",
+    "entity": null,
+    "group": "qwen35-2b-adamw-calibration",
+    "tags": ["qwen35-2b", "layer-major", "adamw", "user-baseline"],
+    "job_types": {
+      "profile": "performance-profile",
+      "distill": "layerwise-distillation",
+      "corrective": "fully-recurrent-corrective"
+    }
+  },
+  "notes": [
+    "这是用户给出的 AdamW 超参数基线，不是已经证明最优的配置。",
+    "micro_batch_size=8 只是让 schema 可解析的占位值；缺少 performance_evidence 时 strict wrapper 必须拒绝训练，不能沿用 v41 的旧 batch 结论。",
+    "性能扫描必须让每个候选 batch 覆盖 layer 0、后续 GDN、full-attention 与下一层输入缓存切换；只从全部场景合格的 batch 中选择按真实层数量加权端到端吞吐最高者，再生成不可变候选。仍保持 accumulation_steps=1，局部逐层阶段不开 gradient checkpointing。",
+    "Muon 不在本计划中启用；只有 AdamW 基线跑稳后才创建同条件独立 A/B。"
+  ]
+}
