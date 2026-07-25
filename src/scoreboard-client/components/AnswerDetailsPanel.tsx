@@ -2,13 +2,13 @@
 
 import { useEffect, useState } from "react";
 
-import { useComparisonStore } from "./store";
+import { useComparisonStore } from "./ComparisonProvider";
 import type {
   AnswerOutcome,
   AnswerSample,
   AnswerSampleGroups,
   ScoreCellSelection,
-} from "./types";
+} from "../lib/comparison_types";
 
 const OUTCOMES: { id: AnswerOutcome; label: string }[] = [
   { id: "correct", label: "正确作答" },

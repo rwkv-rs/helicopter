@@ -1,6 +1,6 @@
-import { ComparisonProvider } from "../features/comparisons/store";
-import { ScoreboardPage } from "../features/comparisons/ScoreboardPage";
-import { ScoreHistoryPage } from "../features/comparisons/ScoreHistoryPage";
+import { ComparisonProvider } from "../components/ComparisonProvider";
+import { DashboardPage } from "../components/DashboardPage";
+import { HistoryPage } from "../components/HistoryPage";
 
 export const dynamic = "force-dynamic";
 
@@ -41,7 +41,7 @@ export default async function Home({ searchParams }: { searchParams: SearchParam
         </nav>
       </header>
       <ComparisonProvider>
-        {isHistory ? <ScoreHistoryPage /> : <ScoreboardPage />}
+        {isHistory ? <HistoryPage /> : <DashboardPage />}
       </ComparisonProvider>
     </main>
   );

@@ -11,16 +11,16 @@ import {
   useReducer,
 } from "react";
 
-import { MockComparisonDataSource } from "./mock";
+import { MockComparisonDataSource } from "../lib/comparison_mock";
 import type {
+  AnswerSampleGroups,
   ComparisonDataSource,
   ComparisonDataset,
   ComparisonId,
   DomainId,
   HistoryPoint,
   ScoreCellSelection,
-} from "./types";
-import type { AnswerSampleGroups } from "./types";
+} from "../lib/comparison_types";
 
 interface ComparisonState {
   status: "loading" | "ready" | "error";

@@ -2,7 +2,7 @@
 
 import { useMemo } from "react";
 
-import { useComparisonStore } from "./store";
+import { useComparisonStore } from "./ComparisonProvider";
 import type {
   BenchmarkScore,
   ComparisonId,
@@ -12,7 +12,7 @@ import type {
   ParameterGroup,
   ScoreArm,
   ScoreCellSelection,
-} from "./types";
+} from "../lib/comparison_types";
 
 const DOMAINS: { id: DomainId; label: string }[] = [
   { id: "regular", label: "常规评估" },

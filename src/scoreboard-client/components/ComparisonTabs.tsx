@@ -1,6 +1,6 @@
 "use client";
 
-import { useComparisonStore } from "./store";
+import { useComparisonStore } from "./ComparisonProvider";
 
 export function ComparisonTabs() {
   const { state, dispatch } = useComparisonStore();
@@ -22,4 +22,3 @@ export function ComparisonTabs() {
     </nav>
   );
 }
-

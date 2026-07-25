@@ -10,7 +10,7 @@ import type {
   HistoryPoint,
   ParameterGroup,
   ScoreCellSelection,
-} from "./types";
+} from "./comparison_types";
 
 const COMPARISONS: ComparisonOption[] = [
   {
