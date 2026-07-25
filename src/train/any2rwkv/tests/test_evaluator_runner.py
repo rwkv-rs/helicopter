@@ -18,6 +18,7 @@ from any2rwkv.evaluate import (
     quality_gate,
 )
 from any2rwkv.artifacts import file_sha256
+from any2rwkv.distill import MIGRATION_BASELINE_STAGES
 from any2rwkv.evaluator_runner import (
     EvaluationSample,
     EvaluatorConfig,
@@ -168,7 +169,8 @@ class EvaluatorRunnerTests(unittest.TestCase):
         self.assertFalse(result["gates"]["P2"]["passed"])
         self.assertEqual(result["gates"]["P2"]["failures"], ["ruler:not_run", "downstream:not_run"])
         self.assertEqual(len(result["binding"]["evaluator_input_sha256"]), 64)
-        for kind in ("intermediate", "state", "output"):
+        self.assertNotIn("state", result["metrics"]["warmed"]["layers"])
+        for kind in ("intermediate", "mixer", "block"):
             rows = result["metrics"]["warmed"]["layers"][kind]
             self.assertTrue(all(row["status"] == "run" for row in rows))
             self.assertTrue(all(row["normalized_mse"] == 0.0 for row in rows))
@@ -300,23 +302,50 @@ class EvaluatorRunnerTests(unittest.TestCase):
 
     def test_migration_matrix_is_checkpoint_bound_and_complete(self) -> None:
         student_sha = "e" * 64
-        rows = {
-            name: {"mean_token_kl": value}
-            for name, value in {
+        values = {
+            name: 1.0 + index / 10
+            for index, name in enumerate(MIGRATION_BASELINE_STAGES)
+        }
+        values.update(
+            {
+                "teacher": 0.0,
                 "random": 3.0,
                 "naive_copy": 2.0,
                 "mapped": 1.5,
                 "activation_fitted": 1.2,
-                "layerwise_distilled": 1.0,
-            }.items()
+                "fully_recurrent": 1.0,
+                "corrective_sweep_0": 0.9,
+            }
+        )
+        rows = {
+            name: {"mean_token_kl": value, "token_budget": 128}
+            for name, value in values.items()
+        }
+        rows["activation_fitted"].update(
+            {
+                "solver_invoked": True,
+                "fit_report_sha256": "a" * 64,
+                "materialization_sha256": "b" * 64,
+            }
+        )
+        binding = {
+            "student_sha256": student_sha,
+            "tokenizer_sha256": "c" * 64,
+            "dataset_sha256": "d" * 64,
+            "split": "validation",
+            "seed": 20260725,
+            "burn_in_tokens": 16,
+            "precision": "bf16-fp32-state",
+            "token_budget": 128,
         }
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "migration-baselines.json"
             path.write_text(
                 json.dumps(
                     {
-                        "schema_version": 1,
+                        "schema_version": 2,
                         "student_sha256": student_sha,
+                        "binding": binding,
                         "baselines": rows,
                     }
                 ),

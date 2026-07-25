@@ -8,6 +8,12 @@ from any2rwkv.contract import build_target_config
 from any2rwkv.fixture import tiny_qwen35_config
 from any2rwkv.kernel import NativeRwkv7Kernel
 from any2rwkv.mixer import ProjectionBoundaryRWKV7Attention
+from any2rwkv.mixer import apply_partial_rope
+from any2rwkv.recipes.qwen35_to_rwkv7.gqa_zero_step import (
+    GQANativeFitConfig,
+    GQANativeFitTrace,
+    fit_gqa_native_zero_step,
+)
 from any2rwkv.recurrent import rwkv7_step
 from any2rwkv.zero_step_probe import (
     RWKV7_MINIMUM_DECAY,
@@ -301,6 +307,48 @@ def test_two_state_projection_uses_independent_bases_and_dc_channels() -> None:
     torch.testing.assert_close(projection.output, exact)
     torch.testing.assert_close(projection.read[..., 3], torch.ones(2, 5, 1, 2))
     assert projection.query_basis.shape == (1, 2, 8, 3)
+
+
+def test_two_state_projection_dc_matches_centered_observable_objective() -> None:
+    generator = torch.Generator().manual_seed(20260725)
+    states = torch.randn(2, 4, 1, 8, 8, generator=generator)
+    bias = torch.randn(2, 4, 1, 8, generator=generator)
+    query_center = torch.tensor(
+        [[3.0, -2.0, 1.0, 4.0, -3.0, 2.0, 5.0, -1.0]]
+    )
+    centered_query = torch.randn(2, 4, 1, 8, generator=generator)
+    query = centered_query + query_center.view(1, 1, 1, 8)
+    bases = torch.zeros(1, 2, 8, 3)
+    bases[0, 0, :3] = torch.eye(3)
+    bases[0, 1, 4:7] = torch.eye(3)
+
+    projection = two_state_projection(
+        states,
+        bias,
+        query,
+        bases,
+        dc_indices=(3, 3),
+        query_center=query_center,
+    )
+    expected_halves = []
+    for state_index in range(2):
+        start = state_index * 4
+        stop = start + 4
+        basis = bases[0, state_index]
+        projected_centered_query = (
+            centered_query[:, :, 0] @ basis
+        ) @ basis.T
+        expected_halves.append(
+            torch.einsum(
+                "btod,btd->bto",
+                states[:, :, 0, start:stop],
+                projected_centered_query,
+            )
+            + bias[:, :, 0, start:stop]
+        )
+    expected = torch.cat(expected_halves, dim=-1).unsqueeze(2)
+
+    torch.testing.assert_close(projection.output, expected)
 
 
 def test_rope_aligned_two_state_bases_respect_rotary_reachability() -> None:
@@ -638,6 +686,167 @@ def test_materialized_nonfirst_native_projection_runs_real_bf16_sequence() -> No
     assert bool(torch.isfinite(output.float()).all())
     assert bool(torch.isfinite(final_state).all())
     assert float(signals["gate"].detach().abs().sum()) > 0
+
+
+def test_gqa_native_fit_materializes_exact_module_shapes_and_runs_bf16() -> None:
+    source = tiny_qwen35_config(layers=2, moe=False)
+    source.update(
+        {
+            "hidden_size": 16,
+            "intermediate_size": 32,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "head_dim": 8,
+            "linear_key_head_dim": 4,
+            "linear_value_head_dim": 4,
+            "linear_num_key_heads": 4,
+            "linear_num_value_heads": 4,
+            "mtp_num_hidden_layers": 0,
+        }
+    )
+    config = Any2RWKV7Config(
+        **build_target_config(source, require_final_layers=False)
+    )
+    mixer = ProjectionBoundaryRWKV7Attention(
+        config,
+        1,
+        source_used_rope=True,
+        rotary_dim=2,
+        rope_theta=10_000.0,
+        rope_num_heads=2,
+        rope_head_dim=8,
+    ).to(torch.bfloat16)
+    generator = torch.Generator().manual_seed(20260725)
+    batch, tokens = 5, 6
+    mixer_input = torch.randn(
+        batch,
+        tokens,
+        config.hidden_size,
+        generator=generator,
+    )
+    query_weight = torch.randn(
+        2 * 8 * 2,
+        config.hidden_size,
+        generator=generator,
+    ) * 0.1
+    key_weight = torch.randn(
+        8,
+        config.hidden_size,
+        generator=generator,
+    ) * 0.1
+    value_weight = torch.randn(
+        8,
+        config.hidden_size,
+        generator=generator,
+    ) * 0.1
+    output_weight = torch.randn(
+        config.hidden_size,
+        2 * 8,
+        generator=generator,
+    ) * 0.1
+    packed_query = (mixer_input @ query_weight.T).reshape(
+        batch,
+        tokens,
+        2,
+        16,
+    )
+    query_pre_rope, gate_logits = packed_query.chunk(2, dim=-1)
+    grouped_key_pre_rope = (mixer_input @ key_weight.T).reshape(
+        batch,
+        tokens,
+        1,
+        8,
+    )
+    grouped_value = (mixer_input @ value_weight.T).reshape(
+        batch,
+        tokens,
+        1,
+        8,
+    )
+    positions = torch.arange(tokens).view(1, -1).expand(batch, -1)
+    query = apply_partial_rope(
+        query_pre_rope,
+        positions,
+        rotary_dim=2,
+        theta=10_000.0,
+    )
+    grouped_key = apply_partial_rope(
+        grouped_key_pre_rope,
+        positions,
+        rotary_dim=2,
+        theta=10_000.0,
+    )
+    key = grouped_key.repeat_interleave(2, dim=2)
+    value = grouped_value.repeat_interleave(2, dim=2)
+    gate = torch.sigmoid(gate_logits)
+    exact_attention = causal_attention(query, key, value).output
+    mixer_output = (exact_attention * gate).flatten(2) @ output_weight.T
+
+    fitted = fit_gqa_native_zero_step(
+        mixer,
+        GQANativeFitTrace(
+            mixer_input=mixer_input,
+            query=query,
+            key=key,
+            value=value,
+            grouped_key=grouped_key,
+            grouped_value=grouped_value,
+            gate=gate,
+            mixer_output=mixer_output,
+            query_weight=query_weight,
+            key_weight=key_weight,
+            value_weight=value_weight,
+            output_weight=output_weight,
+            output_bias=None,
+        ),
+        GQANativeFitConfig(
+            calibration_rows=3,
+            positions=positions,
+            source_head_dim=8,
+            rotary_dim=2,
+            rope_theta=10_000.0,
+            observable_fit_steps=2,
+        ),
+    )
+
+    assert set(fitted.parameters) == {
+        name for name, _ in mixer.named_parameters()
+    }
+    for name, parameter in mixer.named_parameters():
+        assert fitted.parameters[name].shape == parameter.shape
+        assert bool(torch.isfinite(fitted.parameters[name]).all())
+    assert fitted.report["observable_state_compression"]["budget"] == {
+        "states_per_source_head": 2,
+        "dc_per_state": 1,
+        "query_features_per_state": 3,
+        "shared_input_subspace": False,
+    }
+    installed = materialize_native_projection(mixer, fitted.parameters)
+    assert len(installed.aggregate_sha256) == 64
+    values = mixer_input.to(torch.bfloat16)
+    output, _, final_state, _ = mixer.forward_sequence(
+        values,
+        positions=positions,
+        kernel=NativeRwkv7Kernel(
+            reference_native_kernel,
+            head_size=config.head_dim,
+        ),
+        v_first=torch.zeros(
+            batch,
+            tokens,
+            config.attention_hidden_size,
+            dtype=torch.bfloat16,
+        ),
+    )
+    assert output.shape == values.shape
+    assert final_state.shape == (
+        batch,
+        config.num_heads,
+        config.head_dim,
+        config.head_dim,
+    )
+    assert bool(torch.isfinite(output.float()).all())
+    assert bool(torch.isfinite(final_state).all())
 
 
 def test_native_two_state_rollout_recovers_reachable_no_erase_sequence() -> None:

@@ -108,7 +108,16 @@ class MappingTests(unittest.TestCase):
     def test_baseline_result_is_written_atomically_and_bound(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "migration-baselines.json"
-            binding = {"source_sha256": "a" * 64}
+            binding = {
+                "student_sha256": "a" * 64,
+                "tokenizer_sha256": "b" * 64,
+                "dataset_sha256": "c" * 64,
+                "split": "validation",
+                "seed": 20260725,
+                "burn_in_tokens": 8,
+                "precision": "bf16-fp32-state",
+                "token_budget": 32,
+            }
             _write_baseline_result(
                 path,
                 name="random",
@@ -117,6 +126,7 @@ class MappingTests(unittest.TestCase):
                 token_budget=32,
             )
             payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["schema_version"], 2)
             self.assertEqual(payload["binding"], binding)
             self.assertEqual(payload["baselines"]["random"]["token_budget"], 32)
 

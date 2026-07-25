@@ -23,6 +23,7 @@ from .evaluate import (
     read_quality_threshold_profile,
 )
 from .distributed import DistributedContext
+from .distill import MIGRATION_BASELINE_STAGES
 
 
 @dataclass(frozen=True)
@@ -107,20 +108,6 @@ def _first_tensor(value: Any) -> Tensor | None:
     return None
 
 
-def _state_tensor(value: Any) -> Tensor | None:
-    if isinstance(value, Mapping):
-        for name in ("state", "recurrent_state", "final_state"):
-            if isinstance(value.get(name), Tensor):
-                return value[name]
-    for name in ("state", "recurrent_state", "final_state"):
-        candidate = getattr(value, name, None)
-        if isinstance(candidate, Tensor):
-            return candidate
-    if isinstance(value, (tuple, list)):
-        return next((item for item in value[1:] if isinstance(item, Tensor) and item.ndim >= 4), None)
-    return None
-
-
 def _layers(model: nn.Module) -> list[nn.Module]:
     candidates = (
         getattr(getattr(model, "model", None), "layers", None),
@@ -145,13 +132,16 @@ class _HookRecorder:
         self.model = model
         self.layers = _layers(model)
         self.intermediate: list[list[Tensor]] = [[] for _ in self.layers]
-        self.state: list[list[Tensor]] = [[] for _ in self.layers]
+        self.mixer_output: list[list[Tensor]] = [[] for _ in self.layers]
         self.direct_output: list[list[Tensor]] = [[] for _ in self.layers]
         self.boundary_output: list[list[Tensor]] = [[] for _ in self.layers]
         self.handles: list[Any] = []
 
     def __enter__(self) -> "_HookRecorder":
         for index, layer in enumerate(self.layers):
+            self.handles.append(
+                layer.register_forward_pre_hook(self._intermediate_hook(index))
+            )
             self.handles.append(_mixer(layer).register_forward_hook(self._mixer_hook(index)))
             self.handles.append(layer.register_forward_hook(self._layer_hook(index)))
         for index in range(len(self.layers) - 1):
@@ -169,12 +159,17 @@ class _HookRecorder:
 
     def _mixer_hook(self, index: int):
         def capture(module, args, output):
-            intermediate = _first_tensor(output)
-            if intermediate is not None:
-                self.intermediate[index].append(intermediate.detach().cpu())
-            state = _state_tensor(output)
-            if state is not None:
-                self.state[index].append(state.detach().cpu())
+            value = _first_tensor(output)
+            if value is not None:
+                self.mixer_output[index].append(value.detach().cpu())
+
+        return capture
+
+    def _intermediate_hook(self, index: int):
+        def capture(module, args):
+            value = _first_tensor(args)
+            if value is not None:
+                self.intermediate[index].append(value.detach().cpu())
 
         return capture
 
@@ -197,8 +192,8 @@ class _HookRecorder:
     def signal(self, kind: str, index: int) -> Tensor | None:
         values = {
             "intermediate": self.intermediate[index],
-            "state": self.state[index],
-            "output": self.direct_output[index] or self.boundary_output[index],
+            "mixer": self.mixer_output[index],
+            "block": self.direct_output[index] or self.boundary_output[index],
         }[kind]
         if not values:
             return None
@@ -304,7 +299,7 @@ def _evaluate_mode(
         raise ValueError("teacher/student layer counts differ")
     accumulators = {
         kind: [_PairAccumulator() for _ in range(layer_count)]
-        for kind in ("intermediate", "state", "output")
+        for kind in ("intermediate", "mixer", "block")
     }
     unavailable: dict[str, set[int]] = {kind: set() for kind in accumulators}
     rows: list[dict[str, Any]] = []
@@ -347,7 +342,7 @@ def _evaluate_mode(
         rows = []
         accumulators = {
             kind: [_PairAccumulator() for _ in range(layer_count)]
-            for kind in ("intermediate", "state", "output")
+            for kind in ("intermediate", "mixer", "block")
         }
         unavailable = {kind: set() for kind in accumulators}
         for shard in shards:
@@ -593,11 +588,17 @@ def run_evaluator(
         )
     ruler = _external_suite("RULER", ruler_scores, samples=config.bootstrap_samples, seed=config.seed)
     downstream = _external_suite("downstream", downstream_scores, samples=config.bootstrap_samples, seed=config.seed)
-    output_layers = warmed["layers"]["output"]
-    if any(row["status"] != "run" for row in output_layers):
-        raise ValueError("block output hooks are required for every layer")
-    layer_cosines = tuple(float(row["cosine"]) for row in output_layers)
-    layer_mse = tuple(float(row["normalized_mse"]) for row in output_layers)
+    for boundary in ("intermediate", "mixer", "block"):
+        if any(
+            row["status"] != "run"
+            for row in warmed["layers"][boundary]
+        ):
+            raise ValueError(
+                f"{boundary} hooks are required for every layer"
+            )
+    block_layers = warmed["layers"]["block"]
+    layer_cosines = tuple(float(row["cosine"]) for row in block_layers)
+    layer_mse = tuple(float(row["normalized_mse"]) for row in block_layers)
     ruler_lower = None
     ruler_bucket_min = None
     if ruler["status"] == "run":
@@ -853,26 +854,59 @@ def read_migration_baselines(
     student_sha256: str,
 ) -> dict[str, float]:
     payload = json.loads(path.read_text(encoding="utf-8"))
-    if payload.get("schema_version") != 1:
-        raise ValueError("migration baseline schema_version must be 1")
+    if payload.get("schema_version") != 2:
+        raise ValueError("migration baseline schema_version must be 2")
     if payload.get("student_sha256") != student_sha256:
         raise ValueError("migration baselines are bound to a different student checkpoint")
+    binding = payload.get("binding")
+    required_binding = {
+        "student_sha256",
+        "tokenizer_sha256",
+        "dataset_sha256",
+        "split",
+        "seed",
+        "burn_in_tokens",
+        "precision",
+        "token_budget",
+    }
+    if (
+        not isinstance(binding, dict)
+        or not required_binding.issubset(binding)
+        or binding.get("student_sha256") != student_sha256
+    ):
+        raise ValueError(
+            "migration baselines lack a shared hash-bound evaluation protocol"
+        )
     rows = payload.get("baselines")
     if not isinstance(rows, dict):
         raise ValueError("migration baselines must contain a baselines object")
-    required = {
-        "random",
-        "naive_copy",
-        "mapped",
-        "activation_fitted",
-        "layerwise_distilled",
-    }
+    required = set(MIGRATION_BASELINE_STAGES)
     missing = sorted(required - rows.keys())
     if missing:
         raise ValueError(f"migration baseline matrix is incomplete: {missing}")
+    for name in MIGRATION_BASELINE_STAGES:
+        row = rows[name]
+        if (
+            not isinstance(row, dict)
+            or int(row.get("token_budget", -1))
+            != int(binding["token_budget"])
+            or not math.isfinite(float(row.get("mean_token_kl", float("nan"))))
+        ):
+            raise ValueError(
+                f"migration baseline row violates the shared protocol: {name}"
+            )
+    fitted = rows["activation_fitted"]
+    if (
+        fitted.get("solver_invoked") is not True
+        or len(str(fitted.get("fit_report_sha256", ""))) != 64
+        or len(str(fitted.get("materialization_sha256", ""))) != 64
+    ):
+        raise ValueError(
+            "activation_fitted baseline lacks solver/materialization evidence"
+        )
     return {
         name: float(rows[name]["mean_token_kl"])
-        for name in required
+        for name in MIGRATION_BASELINE_STAGES
     }
 
 

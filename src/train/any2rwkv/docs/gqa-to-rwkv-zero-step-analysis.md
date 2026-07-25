@@ -130,9 +130,7 @@ $$
 先把式 \((5)\) 的 affine oracle 写成
 
 $$
-o_t(q)=b_t+M_t(q-\mu)
-=
-\underbrace{(b_t-M_t\mu)}_{\widetilde b_t}+M_tq.
+o_t(q)=b_t+M_t(q-\mu).
 \tag{6}
 $$
 
@@ -155,15 +153,22 @@ P_{h,a}^\top q_{\tau,h}\\
 1
 \end{bmatrix},
 \qquad
-\widetilde S_{t,h,a}
+S^{\mathrm{native}}_{t,h,a}
 =
 \begin{bmatrix}
-M_{t,h,a}P_{h,a} & \widetilde b_{t,h,a}
+M_{t,h,a}P_{h,a}
+&
+b_{t,h,a}-M_{t,h,a}P_{h,a}P_{h,a}^{\top}\mu_h
 \end{bmatrix}.
 \tag{7}
 $$
 
-DC 放在 native head 的最后一个 channel，避免参与 partial RoPE。\(P_{h,1}\) 与 \(P_{h,2}\) 分别最小化各自 row block 的 future-read observable loss：
+式 \((7)\) 的 DC 补偿必须使用每个 head、每个 state 自己的
+\(P_{h,a}P_{h,a}^{\top}\mu_h\)，不能先用共享的 \(M_t\mu\) 抵消 center。
+否则只要 \(\mu_h\) 不在所选子空间内，basis 的 centered-query objective 与
+raw-query materialization 就会相差一个常量项。DC 放在 native head 的最后一个
+channel，避免参与 partial RoPE。\(P_{h,1}\) 与 \(P_{h,2}\) 分别最小化各自
+row block 的 future-read observable loss：
 
 $$
 \min_{P^\top P=I}
@@ -303,107 +308,57 @@ $$
 
 再按真实 `down → tanh → up+bias` 参数化做 rank-64 拟合；`a_lora` 对 \(\operatorname{logit}(a)\) 做 rank-64 affine 拟合；`g_lora` 必须严格遵守 `down → sigmoid → up` 的 rank-128、无 output bias 结构。最后从零状态完整 rollout，对 recurrent output 做原生 16-group normalization，乘 gate 后再按式 \((17)\) 求 bias-free `o_proj`。每一阶段都保存增量 NMSE。开发期间可以用 calibration 内部分割选择 ridge center 和超参数；最终安装规则只能看预先冻结、此前从未参与方法选择的样本，并且必须用真实模块的 BF16 `forward_sequence` 计算完整 mixer output。
 
-## 6. 真实单层验证
+## 6. 验证协议
 
-实验读取 Qwen3.5-2B 的真实 checkpoint：
+正确性先由不依赖真实权重的公式回归测试固定。对显著非零的
+\(\mu\)，测试直接比较压缩读出与
 
-- GQA：第 3 层，8 Query heads、2 KV heads、source head dimension 256；
-- target：16 个 native heads，head dimension 128；
-- 数据：40 条 FineWeb-Edu 文本，每条 64 tokens；
-- 划分：前 8 条 calibration、随后 8 条 adaptive development、中间 16 条
-  retired gap、最后 8 条 fresh frozen final；gap 包含此前已经暴露的两组样本，
-  fresh final 的 sample IDs 在求解前固定，未参与 center、closure、basis、ridge
-  或方法选择；
-- 设备：DGX Spark / NVIDIA GB10；
-- source trace 与拟合：FP32；最终 gate：BF16 module/input/kernel vectors、FP32 recurrent state 与指标归约；
-- source shard SHA-256：`aa33250c4fc64891ddfaba3a314fd9542ea371843c387178b425fbcc5ed680b1`。
+$$
+b+MPP^\top(q-\mu)
+=\left(b-MPP^\top\mu\right)+MPP^\top q,
+\tag{19}
+$$
 
-adaptive development 上的分阶段结果如下：
+从而保证每个 query head、每个 state 的 DC 都是
+\(b-MPP^\top\mu\)。只验证 \(\mu=0\) 会掩盖错误，不能作为回归用例。
 
-| 阶段 | NMSE | 含义 |
-| --- | ---: | --- |
-| exact hazard recurrence → Softmax attention | \(4.81\times10^{-14}\) | 式 \((1)\) 的数值自检 |
-| calibration-mean bounded hazard → source mixer | 0.07079 | 保留 sigmoid 的 surrogate |
-| RoPE-aligned 两状态 → affine oracle | 0.02991 | 每个 state 独立 `1 DC + 127 features` |
-| RoPE-aligned 两状态 → exact Softmax mixer | 0.28429 | affine 与有限状态误差合计 |
-| teacher-forced native transition → materialized 两状态 | 0.00140 | 式 \((16)\) 的单步投影 |
-| free-running native transition → materialized 两状态 | 0.01939 | recurrence 漂移 |
-| free-running native transition → exact Softmax mixer | 0.28722 | 使用理想 read |
-| bias-free pre-RoPE read signal | 0.15867 | 式 \((13)\) |
-| native read → exact Softmax mixer | 0.33012 | 使用 materialized state |
-| native transition + native read → exact Softmax mixer | 0.33911 | 动态 oracle 加可实现 read |
-| fitted `r_proj` signal | 0.02750 | source-centered ridge 胜出 |
-| fitted `k_proj` signal | 0.16196 | zero-centered ridge 胜出 |
-| fitted `v_proj` signal | 0.12503 | source-centered ridge 胜出 |
-| fitted `w_lora` decay logit | 0.15114 | rank-64 `tanh` 参数化 |
-| fitted `a_lora` erase logit | 0.10599 | rank-64 affine 参数化 |
-| fitted bias-free `g_lora` gate | 0.22783 | rank-128 source-row `sigmoid` feature 参数化 |
-| fitted signals free-running → dynamic oracle | 0.35963 | 权重投影导致的递推误差 |
-| all fitted signals → exact Softmax mixer | **0.66079** | FP32 signal-level emulation，用于候选筛选 |
+真实单层验证必须把方法选择与安装判定分开：
 
-所有候选 tensor 随后完整写入第 3 层
-`ProjectionBoundaryRWKV7Attention`。非首层 `v_lora` 使用 source value
-projection 的确定性 row basis，up projection 为零，bias 为
-`logit(BF16 eps²)`；真实 `v_first` 路径输入 layer-0 GDN canonical
-`β·value` trace，`forward_sequence` 从零 recurrent state 运行。最后 8 条
-全新 frozen final 的结果为：
+1. 所有 context 候选使用同一组 sample IDs；指标只计算共同的 supervised
+   suffix，不把不同 burn-in 或不同样本的 NMSE 横向比较。
+2. 完整的最长因果 trace 已经包含所有短前缀，因此正式路径确定性地选择最长
+   context；短 context 和 calibration 内部 development 只报告诊断误差，不参与
+   安装判定。
+3. installation split 与 epoch/convergence validation split 的 sample IDs
+   完全互斥。前者只决定 zero-step candidate 是否替换 frozen baseline，后者只在
+   安装完成后评价逐层训练。
+4. rolling cache transition 始终推进完整 validation cache；不能把 installation
+   或 epoch selection 的子集继续传播到下一层。
 
-| frozen-final BF16 gate | NMSE | cosine |
-| --- | ---: | ---: |
-| fitted native module → exact Qwen mixer | **0.69412** | 0.55308 |
-| frozen mapped control → exact Qwen mixer | 3.07023 | 0.29192 |
+候选必须一次性覆盖真实模块要求的全部参数，先在副本上完成 shape、dtype、
+finite 与 BF16 cast 检查，再用原生 `forward_sequence` 从零 recurrent state
+计算完整 mixer output。只改善 hazard、state、read、gate 或 output
+projection 的内部代理指标都不能触发安装；只有 installation split 上的完整
+mixer normalized MSE 严格优于 frozen baseline 时才提交，否则原子回滚。
 
-候选在未见 sample IDs 上把 NMSE 相对 frozen mapped control 降低约
-77.4%，满足“有限且严格优于冻结 baseline”的安装条件。候选 BF16
-materialization SHA-256 为
-`c91dc35d09c96d67d3a870505de3d8c233da78a5ce111fd448087f0ecf872266`，
-control SHA-256 为
-`2b68e0c0f85a1065cb2ad7d0279ec826f792276b04858bd4b7cb93ec397709f3`。
-安装接口要求 26 个参数逐项完整覆盖、shape 匹配且 BF16 cast 后 finite，任何一项
-不满足都在修改模块前拒绝，因此 evidence 绑定的是实际执行的 BF16 tensor，而非
-拟合阶段的 FP32 临时矩阵。
+选中的 module-state SHA、fit-report SHA、split identity、row digest 与 solver
+配置进入 pre-epoch cursor。写入不可变 generation 后，再从 safetensors 重新读取
+并计算 state SHA；它必须与选择时的 SHA 完全一致，resume 也必须复验同一绑定。
+这样可以排除“内存中选中了新候选，但 replay 恢复了旧 generation”的静默覆盖。
 
-把同一候选的 `v_first` 改为零时，输出相对 canonical `β·value` 路径的 NMSE
-仅为 `1.54×10^-9`、relative L2 为 `3.93×10^-5`，说明近零 shortcut 确实把
-跨层 value 影响压到了 BF16 zero-step 的数值噪声量级，而非靠全零输入人为获得
-主要收益。
+逐组把某个 fitted component 恢复为 mapped 值，只是
+`mapped-component restoration ablation`，用于定位各组件适配关系；它不是
+exact oracle，也不能被表述成精确 counterfactual。真正的 exact-component
+counterfactual 必须从同一冻结 trace 生成相应 oracle signal，并重新执行同一
+native kernel。
 
-对这组 fresh final，再冻结 calibration/development 得到的 group center、
-rank-one closure、RoPE-aligned basis 和全部权重，只逐组替换一个 component；
-每次都从零状态重新执行同一个 BF16 native kernel：
-
-| 单组 counterfactual | NMSE | 相对完整候选 \(\Delta\)NMSE |
-| --- | ---: | ---: |
-| 完整 fitted candidate | 0.69412 | 0 |
-| exact dynamic-oracle `r/k/v` | 0.66344 | -0.03068 |
-| exact dynamic-oracle `w/a` | 0.69117 | -0.00295 |
-| exact source gate | 0.66326 | -0.03086 |
-| source `o_proj` 单独替换 | 2.54864 | +1.85452 |
-
-`r/k/v` 与 gate 各自只能收回约 0.031 NMSE，`w/a` 单独只能收回约
-0.003；三者都不是当前 0.694 NMSE 的单一主因。source `o_proj` 单独替换反而
-大幅退化，说明 fitted `o_proj` 已经在补偿 native state、GroupNorm 与 gate
-形成的特征坐标，不能把 source readout 脱离前级表示直接称作“更精确”的替代。
-因此剩余误差是多个边界共同适配的问题，逐层蒸馏需要联合训练完整 mixer，不能只
-修一个 projection。
-
-同一 run 还把 output loss 与 \(10^{-6}\) 倍 final-state loss 一起反传：
-head-size 128 原生 CUDA kernel 的 BF16 vector、FP32 state backward 为
-`accepted`，input gradient 有限且非零，26 个参数均得到有限 gradient，其中
-25 个非零；`v_lora` down 在 zero-up 初值处梯度为零正是链式法则预期，不是
-断图。counterfactual signal replay 与安装模块输出的 NMSE 为精确 0，证明上述
-差值来自互斥 component 替换，而不是另一套 recurrence。
-
-`0.69412` 仍然离“无需蒸馏复现 source mixer”很远；它证明正确构造可以显著改善
-zero-step，并排除了某个单独 fitted component 主导全部误差的简单解释，但没有
-消除架构差。
-
-完整原始结果见
-[`evidence/qwen35-2b-gqa-gdn-zero-step-probe.json`](evidence/qwen35-2b-gqa-gdn-zero-step-probe.json)，
-SHA-256 为
-`99d7f1ed740632b0b268f203eae0d1635e8355ffd2931b957056f03e380c818b`；
-可复现实验入口为
-[`../scripts/probe_gqa_gdn_zero_step.py`](../scripts/probe_gqa_gdn_zero_step.py)。
+真实权重实验还必须满足空间有界。当前 dense 原型会同时物化多 context 的
+query、state 与 solver matrix；对 Qwen3.5-2B 的真实几何，它的保守峰值估算已经
+超过单卡预算，因此正式 runner 必须 fail closed。可交付实现应按
+row/query-head/KV-group 流式累计 observable objective 的充分统计量，再分
+head/group 求解和归并；不能用 OOM、超时或缩小到失真 workload 代替真实单层
+证据。在这一路径完成并按上述协议重跑以前，不发布任何 GQA 真实权重 NMSE、BF16
+SHA 或误差归因数值。
 
 ## 7. 完整迁移顺序
 
@@ -411,7 +366,9 @@ SHA-256 为
 
 1. 精确回放 post-RoPE Q/K、V、source gate 与 mixer output。
 2. 按式 \((2)\) 至式 \((5)\) 构造 calibration-centered bounded hazard oracle。
-3. 将 affine oracle 改写为 raw-query read 与 DC bias，避免把固定 center 塞进位置相关权重。
+3. 对每个 head/state 用
+   \(b-MPP^\top\mu\) 构造 raw-query read 的独立 DC，避免把共享
+   \(b-M\mu\) 错当成压缩后的补偿。
 4. 按式 \((10)\) 至式 \((12)\) 求两个独立、RoPE 可达的 observable query bases。
 5. 按式 \((14)\) 至式 \((16)\) 投影 native decay、erase、write，并从零状态 free-running 回放。
 6. 对目标 read/key 先做 inverse RoPE；对每个 bias-free projection 在 calibration 内独立选择 zero-centered 或 source-centered scale-relative ridge。

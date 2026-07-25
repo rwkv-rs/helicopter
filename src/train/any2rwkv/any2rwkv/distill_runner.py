@@ -791,16 +791,53 @@ def _write_baseline_result(
     path: Path,
     *,
     name: str,
-    metrics: dict[str, float],
+    metrics: dict[str, object],
     binding: dict[str, object],
     token_budget: int,
 ) -> None:
+    required_binding = {
+        "student_sha256",
+        "tokenizer_sha256",
+        "dataset_sha256",
+        "split",
+        "seed",
+        "burn_in_tokens",
+        "precision",
+        "token_budget",
+    }
+    if not required_binding.issubset(binding):
+        raise ContractError(
+            "migration baseline binding lacks the shared evaluation protocol"
+        )
+    if int(binding["token_budget"]) != int(token_budget):
+        raise ContractError(
+            "migration baseline token budget differs from the shared binding"
+        )
+    if name == "activation_fitted" and (
+        metrics.get("solver_invoked") is not True
+        or not isinstance(metrics.get("fit_report_sha256"), str)
+        or len(str(metrics["fit_report_sha256"])) != 64
+        or not isinstance(metrics.get("materialization_sha256"), str)
+        or len(str(metrics["materialization_sha256"])) != 64
+    ):
+        raise ContractError(
+            "activation_fitted baseline requires solver and materialization evidence"
+        )
     payload = (
         json.loads(path.read_text(encoding="utf-8"))
         if path.is_file()
-        else {"schema_version": 1, "binding": binding, "baselines": {}}
+        else {
+            "schema_version": 2,
+            "student_sha256": binding["student_sha256"],
+            "binding": binding,
+            "baselines": {},
+        }
     )
-    if payload.get("binding") != binding:
+    if (
+        payload.get("schema_version") != 2
+        or payload.get("student_sha256") != binding["student_sha256"]
+        or payload.get("binding") != binding
+    ):
         raise ContractError("migration baseline binding changed within one run")
     payload["baselines"][name] = {**metrics, "token_budget": token_budget}
     write_json(path, payload)

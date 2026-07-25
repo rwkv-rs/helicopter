@@ -15,6 +15,24 @@ from .errors import ContractError
 
 
 DEFAULT_VOCAB_CHUNK_SIZE = 8192
+MIGRATION_BASELINE_STAGES = (
+    "teacher",
+    "random",
+    "naive_copy",
+    "mapped",
+    "gdn_algebraic_oracle",
+    "gdn_native_projection",
+    "gqa_kv_repeat",
+    "gqa_kv_expand",
+    "gqa_exact_hazard_oracle",
+    "gqa_bounded_hazard",
+    "gqa_observable_compressed",
+    "gqa_native_projected_zero_step",
+    "activation_fitted",
+    "hybrid",
+    "fully_recurrent",
+    "corrective_sweep_0",
+)
 
 
 @dataclass(frozen=True)
@@ -540,7 +558,7 @@ def zero_step_baselines(
     teacher_logits: Tensor,
     labels: Tensor,
 ) -> tuple[BaselineResult, ...]:
-    required = {"random", "naive_copy", "gdn_algebraic", "kv_repeat", "kv_expand", "activation_fitted"}
+    required = set(MIGRATION_BASELINE_STAGES)
     missing = required - candidates.keys()
     if missing:
         raise ContractError(f"zero-step baseline matrix is incomplete: {sorted(missing)}")

@@ -163,6 +163,29 @@ class DistributedContext:
         dist.all_gather_object(values, value)
         return tuple(values)
 
+    def gather_objects(
+        self, value, *, destination_rank: int = 0
+    ) -> tuple[object, ...] | None:
+        """Gather Python objects only on one rank.
+
+        This is reserved for bounded control-plane or trace payloads which
+        cannot be reduced into tensors.  Unlike ``all_gather_objects``, it
+        avoids replicating the complete payload in every worker process.
+        """
+        if not 0 <= destination_rank < self.world_size:
+            raise ContractError("distributed object-gather destination is invalid")
+        if self.world_size == 1:
+            return (value,)
+        values: list[object | None] | None = (
+            [None] * self.world_size if self.rank == destination_rank else None
+        )
+        dist.gather_object(
+            value,
+            object_gather_list=values,
+            dst=destination_rank,
+        )
+        return None if values is None else tuple(values)
+
     def broadcast_path(self, path: Path | None) -> Path:
         values = [str(path) if self.is_primary and path is not None else None]
         if self.world_size > 1:

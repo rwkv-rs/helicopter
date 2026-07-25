@@ -10,6 +10,8 @@ from typing import Mapping, Sequence
 
 import torch
 
+from .distill import MIGRATION_BASELINE_STAGES
+
 
 @dataclass(frozen=True)
 class QualityMetrics:
@@ -439,13 +441,35 @@ def quality_gate(
 
 
 def migration_gate(baselines: Mapping[str, float]) -> GateResult:
-    required = {"random", "naive_copy", "mapped", "activation_fitted", "layerwise_distilled"}
+    required = set(MIGRATION_BASELINE_STAGES)
     missing = sorted(required - baselines.keys())
     failures = [f"missing:{name}" for name in missing]
-    if not missing and not (baselines["mapped"] < baselines["random"] and baselines["mapped"] < baselines["naive_copy"]):
-        failures.append("mapped initialization does not beat random and naive_copy")
-    if not missing and baselines["layerwise_distilled"] > min(baselines["random"], baselines["naive_copy"]):
-        failures.append("distilled result does not beat fixed-token baselines")
+    if not missing:
+        if abs(float(baselines["teacher"])) > 1e-12:
+            failures.append("teacher baseline token KL is not zero")
+        if not (
+            baselines["mapped"] < baselines["random"]
+            and baselines["mapped"] < baselines["naive_copy"]
+        ):
+            failures.append(
+                "mapped initialization does not beat random and naive_copy"
+            )
+        if not (
+            baselines["activation_fitted"] < baselines["random"]
+            and baselines["activation_fitted"] < baselines["naive_copy"]
+        ):
+            failures.append(
+                "activation-fitted initialization does not beat random and naive_copy"
+            )
+        if baselines["fully_recurrent"] > min(
+            baselines["random"],
+            baselines["naive_copy"],
+        ):
+            failures.append(
+                "fully recurrent result does not beat fixed-token baselines"
+            )
+        if baselines["corrective_sweep_0"] > baselines["fully_recurrent"]:
+            failures.append("first corrective sweep regresses fully recurrent KL")
     return GateResult("migration", not failures, tuple(failures))
 
 

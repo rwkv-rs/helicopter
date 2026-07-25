@@ -595,6 +595,7 @@ class StreamedQwen35HybridExecutor:
                     key_pre_rope = key_pre_rope.repeat_interleave(groups, dim=1)
                     value = value.repeat_interleave(groups, dim=1)
                 teacher_signals = {
+                    "mixer_input": source_mixer_input.detach(),
                     "q": query_pre_rope.transpose(1, 2).flatten(2).detach(),
                     "k": key_pre_rope.transpose(1, 2).flatten(2).detach(),
                     "v": value.transpose(1, 2).flatten(2).detach(),

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 import torch
+from safetensors import safe_open
 
 from ...artifacts import file_sha256, write_json
 from ...core import (
@@ -42,6 +43,12 @@ from ...migration import (
 from ...mixer_store import RWKV7MixerLayerStore
 from ...streamed_teacher import StreamedQwen35HybridExecutor, StreamedQwen35Teacher
 from ...streaming_training import ActiveLayerOptimizer, ActiveLayerOptimizerSnapshot
+from ...zero_step_probe import materialize_native_projection
+from .gqa_zero_step import (
+    GQANativeFitConfig,
+    GQANativeFitTrace,
+    fit_gqa_native_zero_step,
+)
 
 
 def performance_profile_cases(
@@ -504,6 +511,7 @@ def run_suffix_free_layer_major(
             prefix_fingerprint,
             max_cached_bytes=max_cached_layer_input_bytes_per_rank,
         )
+        full_validation_reader = validation_reader
         train_cache_manifest_sha256 = file_sha256(
             train_reader.cache_dir / "manifest.json"
         )
@@ -564,6 +572,19 @@ def run_suffix_free_layer_major(
             if layer_index < len(source_layer_types)
             else None
         )
+        gqa_native_geometry = (
+            _gqa_native_zero_step_geometry(mixer=mixer, loaded_layer=loaded_layer)
+            if source_layer_type == "full_attention"
+            else None
+        )
+        gqa_installation_reader = None
+        if gqa_native_geometry is not None:
+            gqa_installation_reader, validation_reader = (
+                _split_gqa_validation_protocol(
+                    validation_reader,
+                    world_size=distributed.world_size,
+                )
+            )
         configured_learning_rate = learning_rate_profiles.get(
             source_layer_type, plan.learning_rate
         )
@@ -652,6 +673,7 @@ def run_suffix_free_layer_major(
         activation_fit_functional_learning_rate = float(
             plan.activation_fit_functional_learning_rate
         )
+        gqa_activation_fit = None
         if (
             activation_fit_rows
             and source_layer_type in {"linear_attention", "full_attention"}
@@ -659,53 +681,37 @@ def run_suffix_free_layer_major(
         ):
             activation_fit_baseline = None
             if source_layer_type == "full_attention":
-                attention_projection_baseline = (
-                    _activation_fit_attention_dependency_transaction(
-                        executor=executor,
-                        train_reader=train_reader,
-                        validation_reader=validation_reader,
-                        mixer=mixer,
-                        loaded_layer=loaded_layer,
-                        layer_index=layer_index,
-                        burn_in_tokens=plan.burn_in_tokens,
-                        fit_rows=activation_fit_rows,
-                        ridge=float(getattr(plan, "activation_fit_ridge", 1e-3)),
-                        functional_steps=activation_fit_functional_steps,
-                        functional_learning_rate=(
-                            activation_fit_functional_learning_rate
-                        ),
-                        micro_batch_size=plan.micro_batch_size,
-                        loss_weights=plan.local_loss_weights,
-                        run_dir=run_dir,
-                        distributed=distributed,
-                    )
+                gqa_activation_fit = _activation_fit_full_attention(
+                    gqa_native_geometry=gqa_native_geometry,
+                    gqa_installation_reader=gqa_installation_reader,
+                    executor=executor,
+                    train_reader=train_reader,
+                    validation_reader=validation_reader,
+                    mixer=mixer,
+                    loaded_layer=loaded_layer,
+                    layer_index=layer_index,
+                    burn_in_tokens=plan.burn_in_tokens,
+                    fit_rows=activation_fit_rows,
+                    ridge=float(getattr(plan, "activation_fit_ridge", 1e-3)),
+                    functional_steps=activation_fit_functional_steps,
+                    functional_learning_rate=(
+                        activation_fit_functional_learning_rate
+                    ),
+                    micro_batch_size=plan.micro_batch_size,
+                    loss_weights=plan.local_loss_weights,
+                    max_trace_bytes_per_rank=(
+                        max_cached_layer_input_bytes_per_rank
+                    ),
+                    run_time_mix_ablation=bool(
+                        getattr(
+                            plan,
+                            "activation_fit_attention_time_mix_ablation",
+                            False,
+                        )
+                    ),
+                    run_dir=run_dir,
+                    distributed=distributed,
                 )
-                if attention_projection_baseline is not None and bool(
-                    getattr(
-                        plan,
-                        "activation_fit_attention_time_mix_ablation",
-                        False,
-                    )
-                ):
-                    _activation_fit_attention_time_mix_transaction(
-                        executor=executor,
-                        train_reader=train_reader,
-                        validation_reader=validation_reader,
-                        mixer=mixer,
-                        loaded_layer=loaded_layer,
-                        layer_index=layer_index,
-                        burn_in_tokens=plan.burn_in_tokens,
-                        fit_rows=activation_fit_rows,
-                        ridge=float(getattr(plan, "activation_fit_ridge", 1e-3)),
-                        functional_steps=activation_fit_functional_steps,
-                        functional_learning_rate=(
-                            activation_fit_functional_learning_rate
-                        ),
-                        micro_batch_size=plan.micro_batch_size,
-                        loss_weights=plan.local_loss_weights,
-                        run_dir=run_dir,
-                        distributed=distributed,
-                    )
             if source_layer_type == "linear_attention":
                 activation_fit_baseline = _activation_fit_decay_projection(
                     executor=executor,
@@ -855,6 +861,24 @@ def run_suffix_free_layer_major(
                 frozen_parameter_sha256,
                 boundary="pre-epoch-baseline",
             )
+            if gqa_activation_fit is not None:
+                committed_input_sha256 = _sha256_json(
+                    _module_state_hashes(mixer)
+                )
+                if (
+                    committed_input_sha256
+                    != gqa_activation_fit["selected_module_state_sha256"]
+                ):
+                    raise ContractError(
+                        "GQA native zero-step selection changed before the "
+                        "immutable pre-epoch generation"
+                    )
+                gqa_activation_fit = {
+                    **gqa_activation_fit,
+                    "pre_epoch_generation_input_sha256": (
+                        committed_input_sha256
+                    ),
+                }
             baseline_cursor = _cursor(
                 layer_index,
                 -1,
@@ -869,6 +893,7 @@ def run_suffix_free_layer_major(
                 consumed_rows=(),
                 train_cache_manifest_sha256=train_cache_manifest_sha256,
                 validation_cache_manifest_sha256=validation_cache_manifest_sha256,
+                activation_fit_binding=gqa_activation_fit,
             )
             best_generation = _commit_distributed_generation(
                 distributed,
@@ -878,6 +903,27 @@ def run_suffix_free_layer_major(
                 optimizer,
                 baseline_cursor,
             )
+            if gqa_activation_fit is not None:
+                generation_state_sha256 = _generation_mixer_state_sha256(
+                    best_generation
+                    / "mixer"
+                    / f"layer-{layer_index:03d}.safetensors",
+                    layer_index=layer_index,
+                )
+                if (
+                    generation_state_sha256
+                    != gqa_activation_fit["selected_module_state_sha256"]
+                ):
+                    raise ContractError(
+                        "immutable pre-epoch generation differs from the "
+                        "selected GQA native zero-step state"
+                    )
+                gqa_activation_fit = {
+                    **gqa_activation_fit,
+                    "pre_epoch_generation_state_sha256": (
+                        generation_state_sha256
+                    ),
+                }
             snapshot = optimizer.release()
             layer_state = LayerConvergenceState(
                 completed_epochs=0,
@@ -902,6 +948,7 @@ def run_suffix_free_layer_major(
                         "generation_manifest_sha256": file_sha256(
                             best_generation / "integrity.json"
                         ),
+                        "activation_fit": gqa_activation_fit,
                     },
                 )
             frozen_pre_epoch_validation = pre_epoch_validation
@@ -1341,7 +1388,7 @@ def run_suffix_free_layer_major(
                         cache_root=cache_root,
                         current_layer=layer_index,
                         train_reader=train_reader,
-                        validation_reader=validation_reader,
+                        validation_reader=full_validation_reader,
                         mixer=mixer,
                         loaded_layer=loaded_layer,
                         shard_rows=plan.cache_shard_rows,
@@ -1354,7 +1401,10 @@ def run_suffix_free_layer_major(
                         run_dir=run_dir,
                         source_layer=layer_index,
                         target_layer=layer_index + 1,
-                        row_count=train_reader.row_count + validation_reader.row_count,
+                        row_count=(
+                            train_reader.row_count
+                            + full_validation_reader.row_count
+                        ),
                         sequence_length=sequence_length,
                         local_wall_seconds=(
                             time.perf_counter() - cache_transition_started
@@ -1421,7 +1471,14 @@ def run_suffix_free_layer_major(
                 # locals still keep layer i resident.  This is also important
                 # for CPU cache shards: the per-rank byte LRU belongs only to
                 # the active layer and must not survive the transition.
-                del train_reader, validation_reader, loaded_layer, mixer, optimizer
+                del (
+                    train_reader,
+                    validation_reader,
+                    full_validation_reader,
+                    loaded_layer,
+                    mixer,
+                    optimizer,
+                )
                 gc.collect()
                 prefix_fingerprint = next_prefix_fingerprint
                 progress = None
@@ -1885,11 +1942,17 @@ def _cleanup_stale_layer_caches(cache_root: Path, *, keep_layer: int) -> None:
 
 
 def _cache_binding(base_binding, split, prefix_fingerprint):
-    return {
+    binding = {
         **base_binding,
         "split": split,
         "prefix_fingerprint": prefix_fingerprint,
     }
+    split_sample_ids = base_binding.get("split_sample_ids_sha256")
+    if isinstance(split_sample_ids, dict):
+        sample_ids_sha256 = split_sample_ids.get(split)
+        if isinstance(sample_ids_sha256, str):
+            binding["source_sample_ids_sha256"] = sample_ids_sha256
+    return binding
 
 
 def _run_binding(
@@ -1906,6 +1969,13 @@ def _run_binding(
     warm_start_plan = run_dir / "warm-start-plan.json"
     if not warm_start_plan.is_file():
         raise ContractError("layer-major training requires warm-start-plan.json")
+    dataset_payload = json.loads(dataset_manifest.read_text(encoding="utf-8"))
+    split_sample_ids_sha256 = {
+        split: str(metadata["source_sample_ids_sha256"])
+        for split, metadata in dataset_payload.get("splits", {}).items()
+        if isinstance(metadata, dict)
+        and isinstance(metadata.get("source_sample_ids_sha256"), str)
+    }
     return {
         "recipe": "qwen35_to_rwkv7",
         "source_checkpoint_sha256": _sha256_json(source_manifest.file_hashes),
@@ -1918,6 +1988,7 @@ def _run_binding(
         ),
         "training_config_sha256": file_sha256(training_config),
         "dataset_manifest_sha256": file_sha256(dataset_manifest),
+        "split_sample_ids_sha256": split_sample_ids_sha256,
     }
 
 
@@ -2079,6 +2150,147 @@ def _validate_gdn_head_geometry(*, mixer, loaded_layer) -> None:
             "lossy GDN head/state repartition is forbidden: "
             f"source={source_geometry} target={target_geometry}"
         )
+
+
+class _LayerInputReaderView:
+    """A deterministic row-local view over an immutable layer-input cache."""
+
+    def __init__(self, parent, row_indices, *, role: str) -> None:
+        self._parent = parent
+        self._row_indices = tuple(int(value) for value in row_indices)
+        if not self._row_indices:
+            raise ContractError("layer-input reader view requires at least one row")
+        if len(set(self._row_indices)) != len(self._row_indices):
+            raise ContractError("layer-input reader view contains duplicate rows")
+        if min(self._row_indices) < 0 or max(self._row_indices) >= parent.row_count:
+            raise ContractError("layer-input reader view row is out of range")
+        self.cache_dir = parent.cache_dir
+        self.manifest = dict(parent.manifest)
+        binding = dict(self.manifest.get("binding", {}))
+        binding.update(
+            {
+                "row_subset_role": role,
+                "parent_row_count": parent.row_count,
+                "parent_row_indices": list(self._row_indices),
+                "parent_row_indices_sha256": _sha256_json(
+                    list(self._row_indices)
+                ),
+                "parent_row_identity_sha256": _sha256_json(
+                    [
+                        {
+                            "dataset_manifest_sha256": binding.get(
+                                "dataset_manifest_sha256"
+                            ),
+                            "split": binding.get("split"),
+                            "source_sample_ids_sha256": binding.get(
+                                "source_sample_ids_sha256"
+                            ),
+                            "row_index": row_index,
+                        }
+                        for row_index in self._row_indices
+                    ]
+                ),
+            }
+        )
+        self.manifest.update(
+            {
+                "row_count": len(self._row_indices),
+                "binding": binding,
+            }
+        )
+
+    @property
+    def row_count(self) -> int:
+        return len(self._row_indices)
+
+    def read_rows(self, row_indices) -> LayerInputBatch:
+        requested = tuple(int(value) for value in row_indices)
+        if not requested:
+            raise ContractError("layer-input reader view requires at least one row")
+        try:
+            parent_rows = tuple(self._row_indices[value] for value in requested)
+        except IndexError as error:
+            raise ContractError(
+                "layer-input reader view row is out of range"
+            ) from error
+        if min(requested) < 0:
+            raise ContractError("layer-input reader view row is out of range")
+        batch = self._parent.read_rows(parent_rows)
+        return LayerInputBatch(
+            row_indices=torch.tensor(
+                requested,
+                dtype=batch.row_indices.dtype,
+                device=batch.row_indices.device,
+            ),
+            hidden_states=batch.hidden_states,
+            shared_states=batch.shared_states,
+        )
+
+
+def _split_gqa_validation_protocol(reader, *, world_size: int):
+    """Reserve disjoint installation and epoch-validation row identities."""
+    binding = reader.manifest.get("binding")
+    if (
+        not isinstance(binding, dict)
+        or binding.get("split") != "validation"
+        or not isinstance(binding.get("dataset_manifest_sha256"), str)
+        or not isinstance(binding.get("source_sample_ids_sha256"), str)
+        or len(binding["source_sample_ids_sha256"]) != 64
+    ):
+        raise ContractError(
+            "GQA validation protocol requires a sample-identity-bound "
+            "validation cache"
+        )
+    if world_size <= 0 or reader.row_count < 2 * world_size:
+        raise ContractError(
+            "GQA validation protocol requires at least two rows per rank"
+        )
+    installation_rows = tuple(range(0, reader.row_count, 2))
+    epoch_rows = tuple(range(1, reader.row_count, 2))
+    if min(len(installation_rows), len(epoch_rows)) < world_size:
+        raise ContractError(
+            "GQA validation protocol produced an undersized distributed split"
+        )
+    return (
+        _LayerInputReaderView(
+            reader,
+            installation_rows,
+            role="gqa-native-zero-step-installation",
+        ),
+        _LayerInputReaderView(
+            reader,
+            epoch_rows,
+            role="layerwise-epoch-selection",
+        ),
+    )
+
+
+def _gqa_native_zero_step_geometry(*, mixer, loaded_layer):
+    source_mixer = getattr(loaded_layer.module, "self_attn", None)
+    if source_mixer is None or not hasattr(source_mixer, "q_proj"):
+        return None
+    query_heads = int(source_mixer.config.num_attention_heads)
+    key_value_heads = int(source_mixer.config.num_key_value_heads)
+    source_head_dim = int(source_mixer.head_dim)
+    if key_value_heads >= query_heads:
+        return None
+    if (
+        source_head_dim != 2 * int(mixer.head_dim)
+        or int(mixer.num_heads) != 2 * query_heads
+    ):
+        return None
+    if (
+        int(mixer.rope_num_heads) != query_heads
+        or int(mixer.rope_head_dim) != source_head_dim
+    ):
+        raise ContractError(
+            "GQA native zero-step requires preserved source RoPE head geometry"
+        )
+    return {
+        "query_heads": query_heads,
+        "key_value_heads": key_value_heads,
+        "source_head_dim": source_head_dim,
+    }
 
 
 def _attention_context_lengths(reader, burn_in_tokens):
@@ -4750,6 +4962,700 @@ def _activation_fit_output_projection(
         )
 
 
+def _activation_fit_full_attention(
+    *,
+    gqa_native_geometry,
+    gqa_installation_reader,
+    executor,
+    train_reader,
+    validation_reader,
+    mixer,
+    loaded_layer,
+    layer_index,
+    burn_in_tokens,
+    fit_rows,
+    ridge,
+    functional_steps,
+    functional_learning_rate,
+    micro_batch_size,
+    loss_weights,
+    max_trace_bytes_per_rank,
+    run_time_mix_ablation,
+    run_dir,
+    distributed,
+):
+    """Choose exactly one full-attention activation-fit implementation."""
+    if gqa_native_geometry is not None:
+        if gqa_installation_reader is None:
+            raise ContractError(
+                "GQA native zero-step lacks its installation reader"
+            )
+        return _activation_fit_gqa_native_zero_step_transaction(
+            executor=executor,
+            train_reader=train_reader,
+            validation_reader=gqa_installation_reader,
+            mixer=mixer,
+            loaded_layer=loaded_layer,
+            layer_index=layer_index,
+            burn_in_tokens=burn_in_tokens,
+            fit_rows=fit_rows,
+            micro_batch_size=micro_batch_size,
+            loss_weights=loss_weights,
+            max_trace_bytes_per_rank=max_trace_bytes_per_rank,
+            run_dir=run_dir,
+            distributed=distributed,
+        )
+
+    attention_projection_baseline = (
+        _activation_fit_attention_dependency_transaction(
+            executor=executor,
+            train_reader=train_reader,
+            validation_reader=validation_reader,
+            mixer=mixer,
+            loaded_layer=loaded_layer,
+            layer_index=layer_index,
+            burn_in_tokens=burn_in_tokens,
+            fit_rows=fit_rows,
+            ridge=ridge,
+            functional_steps=functional_steps,
+            functional_learning_rate=functional_learning_rate,
+            micro_batch_size=micro_batch_size,
+            loss_weights=loss_weights,
+            run_dir=run_dir,
+            distributed=distributed,
+        )
+    )
+    if attention_projection_baseline is not None and run_time_mix_ablation:
+        _activation_fit_attention_time_mix_transaction(
+            executor=executor,
+            train_reader=train_reader,
+            validation_reader=validation_reader,
+            mixer=mixer,
+            loaded_layer=loaded_layer,
+            layer_index=layer_index,
+            burn_in_tokens=burn_in_tokens,
+            fit_rows=fit_rows,
+            ridge=ridge,
+            functional_steps=functional_steps,
+            functional_learning_rate=functional_learning_rate,
+            micro_batch_size=micro_batch_size,
+            loss_weights=loss_weights,
+            run_dir=run_dir,
+            distributed=distributed,
+        )
+    return None
+
+
+def _activation_fit_gqa_native_zero_step_transaction(
+    *,
+    executor,
+    train_reader,
+    validation_reader,
+    mixer,
+    loaded_layer,
+    layer_index,
+    burn_in_tokens,
+    fit_rows,
+    micro_batch_size,
+    loss_weights,
+    max_trace_bytes_per_rank,
+    run_dir,
+    distributed,
+):
+    """Fit and atomically gate the native two-state GQA zero-step candidate.
+
+    Calibration and adaptive-development rows come only from ``distill_train``.
+    Every context candidate uses the same rows; the longest causal trace is
+    selected because it contains every shorter prefix. Adaptive-development
+    metrics are diagnostic, not a cross-horizon selection score. The mutually
+    exclusive validation cache is first touched only after the selected
+    complete parameter set has been materialized in the real BF16 module. That
+    complete-forward score solely decides commit versus rollback; post-decision
+    component ablations are diagnostic and cannot change it.
+    """
+    geometry = _gqa_native_zero_step_geometry(
+        mixer=mixer,
+        loaded_layer=loaded_layer,
+    )
+    if geometry is None:
+        return None
+    source_mixer = loaded_layer.module.self_attn
+    query_heads = int(geometry["query_heads"])
+    key_value_heads = int(geometry["key_value_heads"])
+    source_head_dim = int(geometry["source_head_dim"])
+    _require_independent_activation_fit_caches(train_reader, validation_reader)
+    fit_rows = int(fit_rows)
+    if (
+        fit_rows > train_reader.row_count
+        or fit_rows < max(3, distributed.world_size)
+    ):
+        raise ContractError("GQA native zero-step rows violate fit capacity")
+
+    baseline = _validate(
+        executor=executor,
+        reader=validation_reader,
+        mixer=mixer,
+        loaded_layer=loaded_layer,
+        layer_index=layer_index,
+        burn_in_tokens=burn_in_tokens,
+        micro_batch_size=micro_batch_size,
+        loss_weights=loss_weights,
+        distributed=distributed,
+    )
+    baseline_state = _snapshot_module_state(mixer)
+    baseline_hashes = _module_state_hashes(mixer)
+    requested_context_lengths = _attention_context_lengths(
+        train_reader,
+        burn_in_tokens,
+    )
+    context_lengths = tuple(
+        length
+        for length in requested_context_lengths
+        if length - int(burn_in_tokens) >= 2
+    )
+    hidden_size = int(train_reader.manifest["hidden_size"])
+    trace_width = 2 * hidden_size + 4 * query_heads * source_head_dim
+    estimated_primary_trace_bytes = (
+        2 * fit_rows * sum(context_lengths) * trace_width
+    )
+    native_head_dim = int(mixer.head_dim)
+    estimated_solver_peak_bytes = max(
+        (
+            estimated_primary_trace_bytes
+            + 4
+            * fit_rows
+            * context_length
+            * (
+                4 * key_value_heads * source_head_dim**2
+                + 12
+                * query_heads
+                * 2
+                * native_head_dim**2
+                + 3 * query_heads * context_length
+                + 12 * query_heads * source_head_dim
+            )
+        )
+        for context_length in context_lengths
+    )
+    max_trace_bytes_per_rank = int(max_trace_bytes_per_rank)
+    if (
+        max_trace_bytes_per_rank <= 0
+        or estimated_solver_peak_bytes > max_trace_bytes_per_rank
+    ):
+        raise ContractError(
+            "GQA native zero-step solver exceeds the per-rank memory bound: "
+            f"estimated={estimated_solver_peak_bytes} "
+            f"limit={max_trace_bytes_per_rank}"
+        )
+    gathered_contexts = []
+    rank_contributions = []
+    for context_length in context_lengths:
+        global_rows = tuple(range(fit_rows))
+        local_rows = global_rows[distributed.rank :: distributed.world_size]
+        local_parts = []
+        local_error = None
+        try:
+            for start in range(0, len(local_rows), micro_batch_size):
+                rows = local_rows[start : start + micro_batch_size]
+                cached = train_reader.read_rows(rows)
+                with torch.no_grad():
+                    output = executor.forward_cached_layer_local(
+                        cached.hidden_states[:, :context_length],
+                        shared_states=(
+                            None
+                            if cached.shared_states is None
+                            else cached.shared_states[:, :context_length]
+                        ),
+                        active_layer_index=layer_index,
+                        active_mixer=mixer,
+                        loaded_layer=loaded_layer,
+                    )
+                required_signals = {
+                    "mixer_input",
+                    "q_post_rope",
+                    "k_post_rope",
+                    "v",
+                    "gate",
+                }
+                if (
+                    output.teacher_signals is None
+                    or not required_signals.issubset(output.teacher_signals)
+                ):
+                    raise ContractError(
+                        "source GQA mixer did not expose the native zero-step trace"
+                    )
+                local_parts.append(
+                    {
+                        "row_indices": list(cached.row_indices),
+                        "mixer_input": output.teacher_signals["mixer_input"]
+                        .detach()
+                        .to(device="cpu", dtype=torch.bfloat16),
+                        "query": output.teacher_signals["q_post_rope"]
+                        .detach()
+                        .to(device="cpu", dtype=torch.bfloat16),
+                        "key": output.teacher_signals["k_post_rope"]
+                        .detach()
+                        .to(device="cpu", dtype=torch.bfloat16),
+                        "value": output.teacher_signals["v"]
+                        .detach()
+                        .to(device="cpu", dtype=torch.bfloat16),
+                        "gate": output.teacher_signals["gate"]
+                        .detach()
+                        .to(device="cpu", dtype=torch.bfloat16),
+                        "mixer_output": output.teacher_mixer_output.detach()
+                        .to(device="cpu", dtype=torch.bfloat16),
+                    }
+                )
+        except Exception as error:
+            local_error = f"{type(error).__name__}: {error}"
+            local_parts = []
+        collection_status = distributed.all_gather_objects(
+            {
+                "rank": distributed.rank,
+                "error": local_error,
+            }
+        )
+        collection_errors = [
+            item for item in collection_status if item["error"] is not None
+        ]
+        if collection_errors:
+            _restore_module_state(mixer, baseline_state)
+            raise ContractError(
+                "GQA native zero-step trace collection failed: "
+                f"{collection_errors}"
+            )
+        gathered = distributed.gather_objects(
+            {
+                "rank": distributed.rank,
+                "context_length": context_length,
+                "row_indices": list(local_rows),
+                "row_indices_sha256": _sha256_json(list(local_rows)),
+                "parts": local_parts,
+            }
+        )
+        if distributed.is_primary:
+            if gathered is None:
+                raise ContractError("primary rank did not receive GQA traces")
+            rank_contributions.append(
+                {
+                    "context_length": context_length,
+                    "ranks": [
+                        {
+                            "rank": item["rank"],
+                            "row_indices": item["row_indices"],
+                            "row_indices_sha256": item[
+                                "row_indices_sha256"
+                            ],
+                        }
+                        for item in gathered
+                    ],
+                }
+            )
+            parts = [
+                part
+                for item in gathered
+                for part in item["parts"]
+            ]
+            if sum(len(part["row_indices"]) for part in parts) < 3:
+                continue
+            row_indices = torch.tensor(
+                [
+                    row
+                    for part in parts
+                    for row in part["row_indices"]
+                ],
+                dtype=torch.long,
+            )
+            order = torch.argsort(row_indices)
+            signals = {
+                name: torch.cat([part[name] for part in parts], dim=0)
+                .index_select(0, order)
+                .to(
+                    device=mixer.r_proj.weight.device,
+                    dtype=torch.float32,
+                )
+                for name in (
+                    "mixer_input",
+                    "query",
+                    "key",
+                    "value",
+                    "gate",
+                    "mixer_output",
+                )
+            }
+            gathered_contexts.append(
+                (
+                    context_length,
+                    row_indices.index_select(0, order).tolist(),
+                    signals,
+                )
+            )
+
+    primary_result = None
+    primary_error = None
+    if distributed.is_primary:
+        try:
+            candidates = []
+            query_weight = source_mixer.q_proj.weight.detach().float()
+            key_weight = source_mixer.k_proj.weight.detach().float()
+            value_weight = source_mixer.v_proj.weight.detach().float()
+            output_weight = source_mixer.o_proj.weight.detach().float()
+            output_bias = getattr(source_mixer.o_proj, "bias", None)
+            output_bias = (
+                None if output_bias is None else output_bias.detach().float()
+            )
+            group_width = query_heads // key_value_heads
+            grouped_indices = torch.arange(
+                key_value_heads,
+                device=mixer.r_proj.weight.device,
+            ) * group_width
+            for context_length, row_indices, signals in gathered_contexts:
+                row_count = len(row_indices)
+                calibration_rows = max(2, row_count // 2)
+                if calibration_rows >= row_count:
+                    continue
+                query = signals["query"].reshape(
+                    row_count,
+                    context_length,
+                    query_heads,
+                    source_head_dim,
+                )
+                key = signals["key"].reshape_as(query)
+                value = signals["value"].reshape_as(query)
+                gate = signals["gate"].reshape_as(query)
+                positions = torch.arange(
+                    context_length,
+                    dtype=torch.long,
+                    device=query.device,
+                ).unsqueeze(0).expand(row_count, -1)
+                result = fit_gqa_native_zero_step(
+                    mixer,
+                    GQANativeFitTrace(
+                        mixer_input=signals["mixer_input"],
+                        query=query,
+                        key=key,
+                        value=value,
+                        grouped_key=key.index_select(2, grouped_indices),
+                        grouped_value=value.index_select(2, grouped_indices),
+                        gate=gate,
+                        mixer_output=signals["mixer_output"],
+                        query_weight=query_weight,
+                        key_weight=key_weight,
+                        value_weight=value_weight,
+                        output_weight=output_weight,
+                        output_bias=output_bias,
+                    ),
+                    GQANativeFitConfig(
+                        calibration_rows=calibration_rows,
+                        positions=positions,
+                        source_head_dim=source_head_dim,
+                        rotary_dim=int(mixer.rotary_dim),
+                        rope_theta=float(mixer.rope_theta),
+                        supervised_token_start=int(burn_in_tokens),
+                    ),
+                )
+                score = float(
+                    result.report["native_parameter_projection"][
+                        "complete_free_running_mixer"
+                    ]["nmse"]
+                )
+                candidates.append(
+                    {
+                        "context_length": context_length,
+                        "row_indices": row_indices,
+                        "development_mixer_nmse": score,
+                        "parameters": result.parameters,
+                        "report": result.report,
+                    }
+                )
+            if not candidates:
+                raise ContractError(
+                    "GQA native zero-step produced no calibration/development split"
+                )
+            primary_result = max(
+                candidates,
+                key=lambda item: item["context_length"],
+            )
+            primary_result["candidate_summaries"] = [
+                {
+                    "context_length": item["context_length"],
+                    "row_indices": item["row_indices"],
+                    "development_mixer_nmse": item[
+                        "development_mixer_nmse"
+                    ],
+                }
+                for item in candidates
+            ]
+        except BaseException as error:
+            primary_error = f"{type(error).__name__}: {error}"
+    fit_status = distributed.broadcast_object(
+        {
+            "error": primary_error,
+            "selected_context_length": (
+                None
+                if primary_result is None
+                else primary_result["context_length"]
+            ),
+        }
+        if distributed.is_primary
+        else None
+    )
+    if fit_status["error"] is not None:
+        _restore_module_state(mixer, baseline_state)
+        raise ContractError(
+            f"GQA native zero-step fit failed: {fit_status['error']}"
+        )
+
+    candidate_parameters = {}
+    for name, parameter in sorted(mixer.named_parameters()):
+        candidate = (
+            primary_result["parameters"][name]
+            if distributed.is_primary
+            else torch.empty_like(parameter, dtype=torch.float32)
+        )
+        candidate = candidate.to(device=parameter.device, dtype=torch.float32)
+        distributed.broadcast_tensor(candidate)
+        candidate_parameters[name] = candidate
+    materialization = materialize_native_projection(mixer, candidate_parameters)
+    candidate_validation = _validate(
+        executor=executor,
+        reader=validation_reader,
+        mixer=mixer,
+        loaded_layer=loaded_layer,
+        layer_index=layer_index,
+        burn_in_tokens=burn_in_tokens,
+        micro_batch_size=micro_batch_size,
+        loss_weights=loss_weights,
+        distributed=distributed,
+    )
+    accepted = _gqa_native_validation_improves(
+        baseline,
+        candidate_validation,
+    )
+    mapped_component_ablations = (
+        _gqa_native_mapped_component_restoration_ablations(
+            executor=executor,
+            reader=validation_reader,
+            mixer=mixer,
+            loaded_layer=loaded_layer,
+            layer_index=layer_index,
+            burn_in_tokens=burn_in_tokens,
+            micro_batch_size=micro_batch_size,
+            loss_weights=loss_weights,
+            distributed=distributed,
+            baseline_state=baseline_state,
+        )
+    )
+    proposed_hashes = _module_state_hashes(mixer)
+    if not accepted:
+        _restore_module_state(mixer, baseline_state)
+    selected_hashes = _module_state_hashes(mixer)
+    rank_hashes = distributed.all_gather_objects(
+        {
+            "rank": distributed.rank,
+            "materialization_sha256": materialization.aggregate_sha256,
+            "selected_module_state_sha256": _sha256_json(selected_hashes),
+        }
+    )
+    if any(
+        item["materialization_sha256"]
+        != rank_hashes[0]["materialization_sha256"]
+        or item["selected_module_state_sha256"]
+        != rank_hashes[0]["selected_module_state_sha256"]
+        for item in rank_hashes[1:]
+    ):
+        _restore_module_state(mixer, baseline_state)
+        raise ContractError(
+            "GQA native zero-step materialization differs across ranks"
+        )
+    report_path = (
+        run_dir
+        / "activation-fit"
+        / f"gqa-native-zero-step-layer-{layer_index:03d}.json"
+    )
+    def write_report() -> None:
+        write_json(
+            report_path,
+            {
+                "schema_version": 1,
+                "status": "accepted" if accepted else "rejected",
+                "layer": layer_index,
+                "boundary": (
+                    "gqa-exact-hazard-bounded-surrogate-observable-two-state-"
+                    "native-bf16-validation-v1"
+                ),
+                "world_size": distributed.world_size,
+                "source_geometry": {
+                    "query_heads": query_heads,
+                    "key_value_heads": key_value_heads,
+                    "head_dim": source_head_dim,
+                },
+                "target_geometry": {
+                    "native_heads": int(mixer.num_heads),
+                    "head_dim": int(mixer.head_dim),
+                },
+                "fit_rows": fit_rows,
+                "requested_context_lengths": list(requested_context_lengths),
+                "eligible_context_lengths": list(context_lengths),
+                "skipped_context_lengths": [
+                    length
+                    for length in requested_context_lengths
+                    if length not in context_lengths
+                ],
+                "selected_context_length": primary_result["context_length"],
+                "candidate_summaries": primary_result["candidate_summaries"],
+                "rank_contributions": rank_contributions,
+                "trace_transport": {
+                    "collection": "rank-sharded-teacher-forward",
+                    "wire_dtype": "bfloat16",
+                    "destination": "rank-0-only-object-gather",
+                    "estimated_primary_trace_bytes": (
+                        estimated_primary_trace_bytes
+                    ),
+                    "estimated_solver_peak_bytes": (
+                        estimated_solver_peak_bytes
+                    ),
+                    "max_trace_bytes_per_rank": max_trace_bytes_per_rank,
+                },
+                "train_cache_binding": train_reader.manifest.get("binding"),
+                "validation_cache_binding": validation_reader.manifest.get(
+                    "binding"
+                ),
+                "validation_protocol": (
+                    "disjoint-installation-subset; post-decision ablations "
+                    "cannot select parameters; epoch selection uses a separate "
+                    "row subset"
+                ),
+                "selection_rule": (
+                    "same fit rows at every eligible context; select the "
+                    "longest causal trace because it contains every shorter "
+                    "prefix; adaptive-development NMSE is diagnostic only"
+                ),
+                "acceptance_rule": (
+                    "finite and strictly lower frozen-validation BF16 native "
+                    "free-running mixer normalized MSE"
+                ),
+                "validation_baseline": baseline,
+                "validation_candidate": candidate_validation,
+                "mapped_component_restoration_ablations": (
+                    mapped_component_ablations
+                ),
+                "fit_report": primary_result["report"],
+                "baseline_parameter_sha256": baseline_hashes,
+                "proposed_parameter_sha256": proposed_hashes,
+                "selected_parameter_sha256": selected_hashes,
+                "materialization": asdict(materialization),
+                "rank_parameter_hashes": list(rank_hashes),
+            },
+        )
+
+    _rank0_filesystem_step(
+        distributed,
+        "publish GQA native zero-step report",
+        write_report,
+    )
+    return {
+        "attempted": True,
+        "accepted": accepted,
+        "report": str(report_path.relative_to(run_dir)),
+        "report_sha256": file_sha256(report_path),
+        "selected_module_state_sha256": _sha256_json(selected_hashes),
+    }
+
+
+def _gqa_native_validation_improves(baseline, candidate) -> bool:
+    numeric = [
+        float(value)
+        for metrics in (baseline, candidate)
+        for value in metrics.values()
+        if isinstance(value, (int, float))
+    ]
+    return bool(
+        numeric
+        and all(math.isfinite(value) for value in numeric)
+        and float(candidate["mixer_normalized_mse"])
+        < float(baseline["mixer_normalized_mse"])
+    )
+
+
+def _gqa_native_mapped_component_restoration_ablations(
+    *,
+    executor,
+    reader,
+    mixer,
+    loaded_layer,
+    layer_index,
+    burn_in_tokens,
+    micro_batch_size,
+    loss_weights,
+    distributed,
+    baseline_state,
+):
+    """Restore one mapped component at a time after the commit decision."""
+    candidate_state = _snapshot_module_state(mixer)
+    parameter_names = set(candidate_state)
+    groups = {
+        "r_proj": ("x_r", "r_proj.weight"),
+        "k_proj": ("x_k", "k_proj.weight", "k_k", "k_a"),
+        "v_proj": (
+            "x_v",
+            "v_proj.weight",
+            "v_lora.lora.0.weight",
+            "v_lora.lora.2.weight",
+            "v_lora.lora.2.bias",
+        ),
+        "w_a": (
+            "x_w",
+            "x_a",
+            "w_lora.lora.0.weight",
+            "w_lora.lora.2.weight",
+            "w_lora.lora.2.bias",
+            "a_lora.lora.0.weight",
+            "a_lora.lora.2.weight",
+            "a_lora.lora.2.bias",
+        ),
+        "gate": (
+            "x_g",
+            "g_lora.lora.0.weight",
+            "g_lora.lora.2.weight",
+        ),
+        "o_proj": (
+            "g_norm.weight",
+            "g_norm.bias",
+            "r_k",
+            "o_proj.weight",
+        ),
+    }
+    reports = {}
+    try:
+        for group, names in groups.items():
+            counterfactual = dict(candidate_state)
+            restored_names = [
+                name for name in names if name in parameter_names
+            ]
+            for name in restored_names:
+                counterfactual[name] = baseline_state[name]
+            _restore_module_state(mixer, counterfactual)
+            reports[group] = {
+                "operation": "mapped-component-restoration-ablation",
+                "parameter_names": restored_names,
+                "validation": _validate(
+                    executor=executor,
+                    reader=reader,
+                    mixer=mixer,
+                    loaded_layer=loaded_layer,
+                    layer_index=layer_index,
+                    burn_in_tokens=burn_in_tokens,
+                    micro_batch_size=micro_batch_size,
+                    loss_weights=loss_weights,
+                    distributed=distributed,
+                ),
+            }
+    finally:
+        _restore_module_state(mixer, candidate_state)
+    return reports
+
+
 def _activation_fit_attention_dependency_transaction(
     *,
     executor,
@@ -5494,6 +6400,29 @@ def _module_state_hashes(module: torch.nn.Module) -> dict[str, str]:
     }
 
 
+def _generation_mixer_state_sha256(
+    path: Path,
+    *,
+    layer_index: int,
+) -> str:
+    if not path.is_file():
+        raise ContractError(f"immutable mixer generation is missing: {path}")
+    prefix = f"model.layers.{layer_index}.attn."
+    hashes = {}
+    with safe_open(path, framework="pt", device="cpu") as handle:
+        for name in handle.keys():
+            if not name.startswith(prefix):
+                raise ContractError(
+                    "immutable mixer generation contains an unexpected tensor"
+                )
+            hashes[name.removeprefix(prefix)] = _tensor_sha256(
+                handle.get_tensor(name)
+            )
+    if not hashes:
+        raise ContractError("immutable mixer generation contains no tensors")
+    return _sha256_json(dict(sorted(hashes.items())))
+
+
 def _cursor(
     layer_index,
     epoch_index,
@@ -5503,12 +6432,13 @@ def _cursor(
     consumed_rows,
     train_cache_manifest_sha256,
     validation_cache_manifest_sha256,
+    activation_fit_binding=None,
 ):
     if len(consumed_rows) != next_train_row or len(set(consumed_rows)) != len(
         consumed_rows
     ):
         raise ContractError("layer-major cursor rows are not a unique consumed prefix")
-    return {
+    cursor = {
         "schedule": "rolling-cache-layer-major-v1",
         "active_layer": layer_index,
         "epoch_index": epoch_index,
@@ -5519,6 +6449,14 @@ def _cursor(
         "train_cache_manifest_sha256": train_cache_manifest_sha256,
         "validation_cache_manifest_sha256": validation_cache_manifest_sha256,
     }
+    if activation_fit_binding is not None:
+        cursor["activation_fit_binding"] = {
+            "report_sha256": activation_fit_binding["report_sha256"],
+            "selected_module_state_sha256": activation_fit_binding[
+                "selected_module_state_sha256"
+            ],
+        }
+    return cursor
 
 
 def _generation_destination(run_dir, optimizer, cursor) -> Path:

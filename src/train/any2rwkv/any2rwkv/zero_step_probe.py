@@ -1040,11 +1040,16 @@ def fit_low_rank_projection(
         calibration_target,
         ridge=ridge,
     )
-    _, _, right = torch.linalg.svd(
-        affine_weight,
-        full_matrices=False,
+    if not bool(torch.isfinite(affine_weight).all()):
+        raise ValueError("low-rank affine solve produced non-finite directions")
+    # The affine solve can be strongly rank deficient for nearly constant
+    # decay/erase targets.  LAPACK SVD can terminate the process on that exact
+    # regime, so diagonalize the finite FP64 right Gram matrix instead.
+    right_gram = affine_weight.double().T @ affine_weight.double()
+    _, eigenvectors = torch.linalg.eigh(right_gram)
+    down_weight = (
+        eigenvectors.flip(-1).T[:rank].float().contiguous()
     )
-    down_weight = right[:rank].contiguous()
     if hidden_activation == "tanh":
         calibration_linear = calibration_source @ down_weight.T
         maximum = calibration_linear.abs().max().clamp_min(1e-6)
@@ -1280,13 +1285,17 @@ def two_state_projection(
     bases: Tensor,
     *,
     dc_indices: tuple[int, int] = (0, 0),
+    query_center: Tensor | None = None,
 ) -> TwoStateProjection:
     """Materialize two independent DC-plus-query native states.
 
     Each half of the source value/output dimension owns one native state, one
     DC channel, and ``native_dim-1`` query features.  A rank-three ``bases``
     tensor is accepted as the legacy shared-basis special case; rank four
-    provides the full independent two-state budget.
+    provides the full independent two-state budget. When bases were fitted
+    against centered queries, ``query_center`` supplies the per-head center and
+    the DC channel stores ``b - S P Pᵀ c`` so raw-query materialization remains
+    consistent with the fitted observable objective.
     """
     if states.ndim != 5 or bias.ndim != 4:
         raise ValueError("states and bias have invalid ranks")
@@ -1308,6 +1317,8 @@ def two_state_projection(
         raise ValueError(
             "each native state requires one DC plus native_dim-1 query features"
         )
+    if query_center is not None and query_center.shape != (heads, input_dim):
+        raise ValueError("query center must align with every query head")
     if len(dc_indices) != 2 or any(
         not 0 <= index < native_dim for index in dc_indices
     ):
@@ -1343,13 +1354,23 @@ def two_state_projection(
             compressed = states[
                 :, :, group, start:stop
             ].float() @ basis
+            dc_bias = bias[:, :, group, start:stop].float()
+            if query_center is not None:
+                projected_center = torch.einsum(
+                    "dr,d->r",
+                    basis,
+                    query_center[head].float(),
+                )
+                dc_bias = dc_bias - torch.einsum(
+                    "btor,r->bto",
+                    compressed,
+                    projected_center,
+                )
             native_state = states.new_empty(
                 (batch, sequence_length, native_dim, native_dim),
                 dtype=torch.float32,
             )
-            native_state[..., dc_indices[state_index]] = bias[
-                :, :, group, start:stop
-            ].float()
+            native_state[..., dc_indices[state_index]] = dc_bias
             native_state[..., feature_indices] = compressed
             head_states.append(native_state)
             head_reads.append(read)

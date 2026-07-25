@@ -342,6 +342,7 @@ class LayerTensorStoreTests(unittest.TestCase):
                 key = key.repeat_interleave(groups, dim=2)
                 value = value.repeat_interleave(groups, dim=2)
 
+            torch.testing.assert_close(signals["mixer_input"], normalized)
             torch.testing.assert_close(signals["q"], query)
             torch.testing.assert_close(signals["k"], key.flatten(2))
             torch.testing.assert_close(signals["v"], value.flatten(2))

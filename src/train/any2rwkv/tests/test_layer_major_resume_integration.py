@@ -25,12 +25,18 @@ from any2rwkv.migration_init import (
 from any2rwkv.mixer_store import RWKV7MixerLayerStore
 from any2rwkv.mapping import is_locally_trainable
 from any2rwkv.recipes.qwen35_to_rwkv7.layer_major_runner import (
+    _activation_fit_full_attention,
+    _activation_fit_gqa_native_zero_step_transaction,
     _dependency_transaction_improves,
     _frozen_parameter_sha256,
+    _generation_mixer_state_sha256,
+    _module_state_hashes,
     _require_independent_activation_fit_caches,
     _require_frozen_parameter_sha256,
     _retain_gate_fit_candidate,
     _resolve_best_generation,
+    _split_gqa_validation_protocol,
+    _sha256_json,
     _write_generation_integrity,
     prepare_performance_profile_caches,
     run_suffix_free_layer_major,
@@ -45,9 +51,14 @@ from any2rwkv.recipes.qwen35_to_rwkv7.global_corrective_runner import (
     run_global_corrective,
 )
 from any2rwkv.distributed import DistributedContext
+from any2rwkv.core import LayerInputCacheReader
 from any2rwkv.streaming_training import ActiveLayerOptimizerSnapshot
 from any2rwkv.streaming_training import ActiveLayerOptimizer
-from any2rwkv.streamed_teacher import Qwen35TeacherLayerLoader
+from any2rwkv.streamed_teacher import (
+    Qwen35TeacherLayerLoader,
+    StreamedQwen35HybridExecutor,
+    StreamedQwen35Teacher,
+)
 from any2rwkv.target import build_zero_step_ledger, rwkv7_mixer_specs
 from any2rwkv.distill_runner import (
     _binding_sha256,
@@ -64,6 +75,78 @@ from any2rwkv.recipes import resolve_recipe
 
 class PlannedInterruption(RuntimeError):
     pass
+
+
+def test_gqa_full_attention_fit_does_not_fall_through_to_legacy(
+    monkeypatch,
+) -> None:
+    selected = {
+        "accepted": True,
+        "selected_module_state_sha256": "a" * 64,
+    }
+    monkeypatch.setattr(
+        layer_major_runner_module,
+        "_activation_fit_gqa_native_zero_step_transaction",
+        lambda **_kwargs: selected,
+    )
+
+    def reject_legacy(**_kwargs):
+        raise AssertionError("legacy attention fit must not overwrite GQA")
+
+    monkeypatch.setattr(
+        layer_major_runner_module,
+        "_activation_fit_attention_dependency_transaction",
+        reject_legacy,
+    )
+    monkeypatch.setattr(
+        layer_major_runner_module,
+        "_activation_fit_attention_time_mix_transaction",
+        reject_legacy,
+    )
+
+    result = _activation_fit_full_attention(
+        gqa_native_geometry={"query_heads": 4},
+        gqa_installation_reader=object(),
+        executor=object(),
+        train_reader=object(),
+        validation_reader=object(),
+        mixer=object(),
+        loaded_layer=object(),
+        layer_index=3,
+        burn_in_tokens=0,
+        fit_rows=8,
+        ridge=1e-3,
+        functional_steps=2,
+        functional_learning_rate=1e-3,
+        micro_batch_size=1,
+        loss_weights=object(),
+        max_trace_bytes_per_rank=1024,
+        run_time_mix_ablation=True,
+        run_dir=Path("/unused"),
+        distributed=object(),
+    )
+
+    assert result is selected
+
+
+def test_immutable_generation_digest_matches_selected_module_state(
+    tmp_path: Path,
+) -> None:
+    _, zero_step, _ = _prepare_fixture(tmp_path)
+    store = RWKV7MixerLayerStore(zero_step, tmp_path / "overlay")
+    mixer = store.load_mixer(0, device="cpu", dtype=torch.float32)
+    generation = tmp_path / "generation"
+    store.save_generation(
+        generation,
+        0,
+        mixer,
+        cursor={"phase": "pre-epoch-baseline"},
+    )
+
+    assert _generation_mixer_state_sha256(
+        generation / "layer-000.safetensors",
+        layer_index=0,
+    ) == _sha256_json(_module_state_hashes(mixer))
 
 
 def test_global_window_scores_each_label_from_its_preceding_position() -> None:
@@ -273,6 +356,210 @@ def test_profile_cache_preparation_closes_pre_evidence_cycle(
             train_manifest["binding"]["training_config_sha256"]
             == file_sha256(training_config)
         )
+
+
+def test_gqa_native_zero_step_runs_in_formal_layer_transaction(
+    tmp_path: Path,
+) -> None:
+    source, zero_step, trainable = _prepare_fixture(
+        tmp_path,
+        layers=4,
+        config_overrides={
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "head_dim": 16,
+            "linear_key_head_dim": 8,
+            "linear_value_head_dim": 8,
+            "linear_num_key_heads": 8,
+            "linear_num_value_heads": 8,
+            "partial_rotary_factor": 0.25,
+            "rope_parameters": {
+                "rope_type": "default",
+                "rope_theta": 1_000_000.0,
+                "partial_rotary_factor": 0.25,
+            },
+        },
+    )
+    training_config = tmp_path / "gqa-fit-plan.json"
+    dataset_manifest = tmp_path / "gqa-data-splits.json"
+    training_config.write_text('{"schema_version": 3}\n', encoding="utf-8")
+    dataset_manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "splits": {
+                    "distill_train": {
+                        "source_sample_ids_sha256": "a" * 64,
+                    },
+                    "validation": {
+                        "source_sample_ids_sha256": "b" * 64,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    rows = tuple(
+        tuple((row + token) % 61 + 3 for token in range(4))
+        for row in range(9)
+    )
+    validation_rows = tuple(
+        tuple((token + 17) % 64 for token in row)
+        for row in rows[:4]
+    )
+    prepare_performance_profile_caches(
+        source_manifest=source,
+        run_dir=zero_step,
+        zero_step_dir=zero_step,
+        token_rows=rows,
+        validation_rows=validation_rows,
+        plan=SimpleNamespace(
+            distributed_world_size=1,
+            cache_shard_rows=2,
+            max_layer_input_cache_bytes=100_000_000,
+            max_cached_layer_input_bytes_per_rank=10_000_000,
+        ),
+        initial_trainable=trainable,
+        training_config=training_config,
+        dataset_manifest=dataset_manifest,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+    cache_root = zero_step / "performance-profile-cache" / "layer-003"
+    train_reader = LayerInputCacheReader(
+        cache_root / "distill_train",
+        pin_memory=False,
+    )
+    validation_reader = LayerInputCacheReader(
+        cache_root / "validation",
+        pin_memory=False,
+    )
+    installation_reader, epoch_reader = _split_gqa_validation_protocol(
+        validation_reader,
+        world_size=1,
+    )
+    store = RWKV7MixerLayerStore(zero_step, tmp_path / "gqa-overlay")
+    mixer = store.load_base_mixer(3, device="cpu", dtype=torch.float32)
+    teacher = StreamedQwen35Teacher(
+        source,
+        device="cpu",
+        dtype=torch.float32,
+        load_output_head=False,
+    )
+    loaded = teacher.loader.load_layer(3, device="cpu", dtype=torch.float32)
+    run_dir = tmp_path / "gqa-fit-run"
+    run_dir.mkdir()
+
+    outcome = _activation_fit_gqa_native_zero_step_transaction(
+        executor=StreamedQwen35HybridExecutor(teacher),
+        train_reader=train_reader,
+        validation_reader=installation_reader,
+        mixer=mixer,
+        loaded_layer=loaded,
+        layer_index=3,
+        burn_in_tokens=0,
+        fit_rows=9,
+        micro_batch_size=1,
+        loss_weights=SimpleNamespace(
+            mixer_mse=1.0,
+            block_mse=1.0,
+            cosine=0.1,
+        ),
+        max_trace_bytes_per_rank=10_000_000,
+        run_dir=run_dir,
+        distributed=DistributedContext.initialize(),
+    )
+
+    report = json.loads(
+        (
+            run_dir
+            / "activation-fit"
+            / "gqa-native-zero-step-layer-003.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert report["status"] in {"accepted", "rejected"}
+    assert report["source_geometry"] == {
+        "query_heads": 4,
+        "key_value_heads": 2,
+        "head_dim": 16,
+    }
+    assert report["target_geometry"] == {
+        "native_heads": 8,
+        "head_dim": 8,
+    }
+    assert report["requested_context_lengths"] == [1, 2, 4]
+    assert report["eligible_context_lengths"] == [2, 4]
+    assert report["skipped_context_lengths"] == [1]
+    assert {
+        tuple(candidate["row_indices"])
+        for candidate in report["candidate_summaries"]
+    } == {tuple(range(9))}
+    assert set(report["fit_report"]) >= {
+        "exact_prefix_hazard_oracle",
+        "bounded_hazard_surrogate",
+        "observable_state_compression",
+        "native_transition",
+        "native_parameter_projection",
+        "solver_config_sha256",
+        "trace_aggregate_sha256",
+        "source_weight_aggregate_sha256",
+    }
+    for stage in (
+        "exact_prefix_hazard_oracle",
+        "bounded_hazard_surrogate",
+        "observable_state_compression",
+        "native_transition",
+    ):
+        assert len(
+            report["fit_report"][stage]["per_query_head"]
+        ) == 4
+        assert len(
+            report["fit_report"][stage]["per_key_value_group"]
+        ) == 2
+    assert set(report["mapped_component_restoration_ablations"]) == {
+        "r_proj",
+        "k_proj",
+        "v_proj",
+        "w_a",
+        "gate",
+        "o_proj",
+    }
+    assert len(report["materialization"]["aggregate_sha256"]) == 64
+    assert (
+        report["train_cache_binding"]["split"] == "distill_train"
+        and report["validation_cache_binding"]["split"] == "validation"
+    )
+    assert (
+        report["validation_cache_binding"]["row_subset_role"]
+        == "gqa-native-zero-step-installation"
+    )
+    assert (
+        epoch_reader.manifest["binding"]["row_subset_role"]
+        == "layerwise-epoch-selection"
+    )
+    assert (
+        report["validation_cache_binding"]["parent_row_indices_sha256"]
+        != epoch_reader.manifest["binding"]["parent_row_indices_sha256"]
+    )
+    assert set(
+        report["validation_cache_binding"]["parent_row_indices"]
+    ).isdisjoint(
+        epoch_reader.manifest["binding"]["parent_row_indices"]
+    )
+    assert (
+        report["train_cache_binding"]["source_sample_ids_sha256"]
+        != report["validation_cache_binding"]["source_sample_ids_sha256"]
+    )
+    assert (
+        report["validation_cache_binding"]["parent_row_identity_sha256"]
+        != epoch_reader.manifest["binding"]["parent_row_identity_sha256"]
+    )
+    assert outcome["report_sha256"] == file_sha256(
+        run_dir
+        / "activation-fit"
+        / "gqa-native-zero-step-layer-003.json"
+    )
+    assert outcome["accepted"] is (report["status"] == "accepted")
 
 
 def test_local_stage_rejects_any_frozen_parameter_drift(tmp_path: Path) -> None:

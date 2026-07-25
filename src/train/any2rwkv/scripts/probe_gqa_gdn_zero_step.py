@@ -836,17 +836,17 @@ def replay_frozen_gqa_oracle(
         fit_rank_one_closure=False,
         fixed_closure_scale=oracle.closure_scale,
     )
-    uncentered_bias = affine.bias - torch.einsum(
-        "btgod,gd->btgo",
-        affine.states,
-        oracle.group_center,
-    )
+    head_to_group = torch.arange(
+        signals["query"].shape[2],
+        device=signals["query"].device,
+    ) // (signals["query"].shape[2] // signals["grouped_key"].shape[2])
     projection = two_state_projection(
         affine.states,
-        uncentered_bias,
+        affine.bias,
         signals["query"],
         oracle.query_basis,
         dc_indices=oracle.dc_indices,
+        query_center=oracle.group_center.index_select(0, head_to_group),
     )
     tangent_probability, tangent_slope = probability_tangent_parameters(
         signals["grouped_key"],
@@ -1487,11 +1487,7 @@ def gqa_diagnostics(
         query.shape[-1], device=query.device, dtype=torch.float32
     )[:, :query_subspace_rank].expand(query.shape[2], -1, -1)
     bias_by_head = affine.bias[:, :, head_to_group]
-    uncentered_bias = affine.bias - torch.einsum(
-        "btgod,gd->btgo",
-        affine.states,
-        group_center,
-    )
+    query_center_by_head = group_center.index_select(0, head_to_group)
     native_dim = query.shape[-1] // 2
     disjoint_basis = torch.zeros(
         query.shape[2],
@@ -1534,42 +1530,54 @@ def gqa_diagnostics(
     native_candidate_name = "rope_aligned_observable_127x2_plus_two_dc"
     sketch_results: dict[str, object] = {}
     selected_native_fit: NativeWeightProjectionFit | None = None
-    for name, (basis, projection_bias, projection_query, dc_indices) in {
+    for name, (
+        basis,
+        projection_bias,
+        projection_query,
+        dc_indices,
+        projection_center,
+    ) in {
         "first_127_coordinates_plus_dc": (
             coordinate_basis,
             affine.bias,
             affine.centered_query,
             (0, 0),
+            None,
         ),
         "query_pca_127_plus_dc": (
             query_basis,
             affine.bias,
             affine.centered_query,
             (0, 0),
+            None,
         ),
         "future_read_observable_127_plus_dc": (
             observable_basis,
             affine.bias,
             affine.centered_query,
             (0, 0),
+            None,
         ),
         "operator_svd_127_plus_dc": (
             operator_basis,
             affine.bias,
             affine.centered_query,
             (0, 0),
+            None,
         ),
         "rope_aligned_disjoint_127x2_plus_two_dc": (
             disjoint_basis,
-            uncentered_bias,
+            affine.bias,
             query,
             (native_dim - 1, native_dim - 1),
+            query_center_by_head,
         ),
         "rope_aligned_observable_127x2_plus_two_dc": (
             rope_observable_basis,
-            uncentered_bias,
+            affine.bias,
             query,
             (native_dim - 1, native_dim - 1),
+            query_center_by_head,
         ),
     }.items():
         materialized = two_state_projection(
@@ -1578,6 +1586,7 @@ def gqa_diagnostics(
             projection_query,
             basis,
             dc_indices=dc_indices,
+            query_center=projection_center,
         )
         sketch_affine = materialized.output
         sketch_matrix = sketch_affine - bias_by_head
