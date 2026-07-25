@@ -24,6 +24,9 @@ UV_INDEX_URL="${UV_INDEX_URL:-${PYPI_INDEX_URL:-}}"
 HF_ENDPOINT="${HF_ENDPOINT:-}"
 CARGO_REGISTRY_MIRROR="${CARGO_REGISTRY_MIRROR:-}"
 CARGO_REGISTRY_MIRROR_NAME="${CARGO_REGISTRY_MIRROR_NAME:-rsproxy-sparse}"
+BUN_VERSION="1.3.14"
+BUN_LINUX_X64_SHA256="951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f"
+BUN_LINUX_AARCH64_SHA256="a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b"
 
 export VLLM_BUILD_PROFILE
 
@@ -199,6 +202,19 @@ clean_vllm_cmake_cache() {
   done < <(find "$VLLM/.deps" -maxdepth 1 -type d -name '*-subbuild' -print | LC_ALL=C sort)
 }
 
+remove_obsolete_lighteval_tree() {
+  local obsolete="$ROOT/src/eval/lighteval"
+  [[ -e "$obsolete" || -L "$obsolete" ]] || return 0
+  [[ "$obsolete" == "$ROOT/src/eval/lighteval" ]] ||
+    die "refusing to remove unexpected obsolete evaluator path: $obsolete"
+  [[ -d "$obsolete" && ! -L "$obsolete" ]] ||
+    die "obsolete evaluator path is not a regular directory: $obsolete"
+  run rm -rf -- "$obsolete"
+  [[ "${DRY_RUN:-0}" == "1" || ! -e "$obsolete" ]] ||
+    die "obsolete evaluator tree remains after cleanup: $obsolete"
+  rmdir "$ROOT/src/eval" 2>/dev/null || true
+}
+
 ensure_uv() {
   if ! have "$UV"; then
     have curl || die "uv is missing and curl is not available to install it"
@@ -211,6 +227,56 @@ ensure_uv() {
   if [[ "$UPDATE_UV" == "1" ]]; then
     run "$UV" self update || warn "uv self update failed; continuing with installed uv"
   fi
+}
+
+ensure_bun() {
+  component_enabled scoreboard-client || return 0
+  if have bun && [[ "$(bun --version)" == "$BUN_VERSION" ]]; then
+    return 0
+  fi
+  have curl || die "curl is required to install Bun $BUN_VERSION"
+  have sha256sum || die "sha256sum is required to verify Bun $BUN_VERSION"
+  [[ -x "$VENV/bin/python" ]] ||
+    die "workspace Python is required before installing Bun"
+
+  local architecture archive_name expected_sha256 download_url
+  case "$(uname -m)" in
+    x86_64)
+      architecture="x64"
+      expected_sha256="$BUN_LINUX_X64_SHA256"
+      ;;
+    aarch64 | arm64)
+      architecture="aarch64"
+      expected_sha256="$BUN_LINUX_AARCH64_SHA256"
+      ;;
+    *)
+      die "Bun $BUN_VERSION is not pinned for architecture $(uname -m)"
+      ;;
+  esac
+  archive_name="bun-linux-$architecture.zip"
+  download_url="https://github.com/oven-sh/bun/releases/download/bun-v$BUN_VERSION/$archive_name"
+
+  local temporary_root archive extracted binary actual_sha256
+  temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/helicopter-bun.XXXXXX")"
+  archive="$temporary_root/$archive_name"
+  extracted="$temporary_root/extracted"
+  run curl --fail --location --retry 3 --output "$archive" "$download_url"
+  actual_sha256="$(sha256sum "$archive" | awk '{print $1}')"
+  if [[ "$actual_sha256" != "$expected_sha256" ]]; then
+    rm -rf -- "$temporary_root"
+    die "Bun $BUN_VERSION SHA-256 mismatch for $archive_name"
+  fi
+  mkdir -p "$extracted"
+  run "$VENV/bin/python" -m zipfile -e "$archive" "$extracted"
+  binary="$extracted/bun-linux-$architecture/bun"
+  [[ -f "$binary" && ! -L "$binary" ]] || {
+    rm -rf -- "$temporary_root"
+    die "Bun $BUN_VERSION archive does not contain the expected binary"
+  }
+  run install -m 0755 "$binary" "$VENV/bin/bun"
+  rm -rf -- "$temporary_root"
+  [[ "$("$VENV/bin/bun" --version)" == "$BUN_VERSION" ]] ||
+    die "installed Bun version does not match $BUN_VERSION"
 }
 
 install_system_deps() {
@@ -359,7 +425,7 @@ sync_scoreboard_client() {
     print_cmd bun "${install_args[@]}"
     return 0
   fi
-  have bun || die "bun is required for scoreboard-client"
+  ensure_bun
   run bun "${install_args[@]}"
 }
 
@@ -488,6 +554,7 @@ check_python_packages() {
 
 configure_network
 configure_build_dirs
+remove_obsolete_lighteval_tree
 clean_submodule_venvs
 python_component_enabled && ensure_uv
 check_compiler_env

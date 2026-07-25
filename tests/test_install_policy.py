@@ -64,6 +64,26 @@ def test_installer_exports_an_absolute_native_build_tmpdir() -> None:
     assert 'export TMPDIR="$BUILD_TMPDIR"' in local
 
 
+def test_installer_pins_workspace_bun_and_removes_the_obsolete_evaluator() -> None:
+    local = (ROOT / "scripts/install_local.sh").read_text(encoding="utf-8")
+
+    assert 'BUN_VERSION="1.3.14"' in local
+    assert (
+        'BUN_LINUX_X64_SHA256="'
+        "951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f"
+        '"'
+    ) in local
+    assert (
+        'BUN_LINUX_AARCH64_SHA256="'
+        "a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b"
+        '"'
+    ) in local
+    assert 'install -m 0755 "$binary" "$VENV/bin/bun"' in local
+    assert 'obsolete="$ROOT/src/eval/lighteval"' in local
+    assert 'run rm -rf -- "$obsolete"' in local
+    assert local.index("remove_obsolete_lighteval_tree") < local.index("sync_uv_env")
+
+
 def test_full_install_profile_remains_disabled() -> None:
     for script in ("install_local.sh", "install_remote.sh"):
         source = (ROOT / "scripts" / script).read_text(encoding="utf-8")
