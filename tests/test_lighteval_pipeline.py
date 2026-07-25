@@ -175,19 +175,60 @@ def test_parser_reads_artifacts_written_by_pinned_evaluation_tracker(tmp_path):
     invalid(); rows[0]["model_response"]["logprobs"] = [0.0, 0.0]; assert evaluate.diagnose(results, rows)["completions"] == 0
 def test_scoreboard_projection_is_honest_and_transport_is_gzip_idempotent(monkeypatch):
     results, rows = artifacts()
-    def rejected(match):
-        with pytest.raises(ValueError, match=match): evaluate.publication_payload(results, rows)
-    rejected("multi-completion"); rows[0]["model_response"] = {"text": ["2"], "output_tokens": [[1]]}; results["results"]["gsm8k|0"]["other"] = 1.0
-    rejected("multi-metric"); del results["results"]["gsm8k|0"]["other"]; rejected("lack the identity")
+    results["results"]["gsm8k|0"].update(exact_match_stderr=0.1, other_metric=0.75)
+    results["config_tasks"]["judge|0"] = {"generation_size": 2}
+    results["results"]["judge|0"] = {"judge_score": 0.6, "judge_score_stderr": 0.02}
+    rows.append({
+        "doc": {"id": "1", "query": "judge", "task_name": "judge|0"},
+        "model_response": {
+            "text": [], "output_tokens": [], "logprobs": [-0.1],
+            "argmax_logits_eq_gold": [True],
+        },
+        "metric": {"judge_score": 0.6},
+    })
+    metadata = {
+        "model": {"label": "model", "architecture": "RWKV", "generation": "G1H", "parameters": "1.5B"},
+        "evaluation": {"prompt_profile": "unified", "prompt_template": "template", "precision": "fp16"},
+        "task_defaults": {"domain": "regular", "evaluation_method": "lighteval", "score_multiplier": 100},
+        "tasks": {"judge|0": {"label": "Judge", "primary_metric": "judge_score"}},
+        "comparisons": [],
+    }
+    publications = evaluate.publication_payloads(
+        results, rows, metadata=metadata,
+        artifact={"lighteval_version": "0.13.0", "results_path": "results.json", "details_paths": ["details.parquet"]},
+    )
+    assert len(publications) == 2
+    by_task = {payload["task_name"]: payload for _, payload in publications}
+    assert by_task["gsm8k|0"]["aggregates"] == {
+        "exact_match": 0.5, "exact_match_stderr": 0.1, "other_metric": 0.75}
+    assert by_task["gsm8k|0"]["primary_metric"] == "exact_match"
+    assert len(by_task["gsm8k|0"]["details"][0]["model_response"]["text"]) == 2
+    assert by_task["judge|0"]["primary_metric"] == "judge_score"
+    assert by_task["judge|0"]["diagnostics"]["completions"] == 0
+
     sent = {}; monkeypatch.setattr(evaluate, "urlopen", lambda request, timeout:
-        (sent.update(request=request, timeout=timeout), SimpleNamespace(read=lambda: b"ok"))[1])
-    payload = {"manifest": {"digest": "a" * 64}, "non_official": True}
-    assert evaluate.publish(payload, "https://scoreboard", "token", "run") == b"ok"
+        (sent.update(request=request, timeout=timeout), SimpleNamespace(read=lambda: b'{"disposition":"created"}'))[1])
+    publication_id, payload = publications[0]
+    assert evaluate.publish(payload, "https://scoreboard", "token", publication_id) == {"disposition": "created"}
     request = sent["request"]; assert json.loads(gzip.decompress(request.data)) == payload
-    assert request.get_header("Idempotency-key") == f"publish:{'a' * 64}" and sent["timeout"] == 30
+    assert request.full_url.endswith(publication_id.replace(":", "%3A"))
+    assert request.get_header("Idempotency-key") == f"publish:{evaluate._content_digest(payload)}" and sent["timeout"] == 30
+
     pipeline = SimpleNamespace(evaluate=lambda: None, save_and_push_results=lambda: None,
         show_results=lambda: None, get_results=lambda: {"evaluation": "succeeded"})
-    monkeypatch.setattr(evaluate, "build_pipeline", lambda: pipeline); monkeypatch.setattr(evaluate, "read_standard_artifacts", lambda _: artifacts()); monkeypatch.setattr(evaluate, "PUBLISH_SCOREBOARD", True)
+    calls = []
+    monkeypatch.setattr(evaluate, "build_pipeline", lambda: pipeline); monkeypatch.setattr(evaluate, "read_standard_artifacts", lambda _: artifacts())
+    monkeypatch.setattr(evaluate, "_artifact_metadata", lambda _: {"fixture": True})
+    monkeypatch.setattr(evaluate, "publication_payloads", lambda *_args, **_kwargs: [
+        ("one", {"task_name": "first"}), ("two", {"task_name": "second"})])
+    monkeypatch.setattr(evaluate, "publish", lambda payload, *_args: (
+        calls.append(payload["task_name"]),
+        (_ for _ in ()).throw(RuntimeError("first failed")) if payload["task_name"] == "first" else {"disposition": "created"},
+    )[1])
+    monkeypatch.setattr(evaluate, "PUBLISH_SCOREBOARD", True)
+    monkeypatch.setattr(evaluate, "SCOREBOARD_URL", "https://scoreboard")
+    monkeypatch.setattr(evaluate, "SCOREBOARD_TOKEN", "token")
     assert evaluate.main() == {"evaluation": "succeeded"}
+    assert calls == ["first", "second"]
     pipeline.evaluate = lambda: (_ for _ in ()).throw(RuntimeError("native prerequisite"))
     with pytest.raises(RuntimeError, match="native prerequisite"): evaluate.main()

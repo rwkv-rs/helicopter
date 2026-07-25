@@ -1,7 +1,8 @@
 # ruff: noqa: E401, E402, E501, E701, E702
-import gzip, json, os, re, sys
+import gzip, hashlib, importlib.metadata, json, os, re, sys
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -49,7 +50,63 @@ GENERATION_PARAMETERS = {
     "temperature": 0.96, "top_p": 0.76, "top_k": 32,
     "presence_penalty": 1.0, "frequency_penalty": 0.1, "penalty_decay": 0.988,
     "stop_tokens": ["\nUser:"], "max_new_tokens": MAX_NEW_TOKENS}
-PUBLISH_SCOREBOARD, SCOREBOARD_URL, SCOREBOARD_TOKEN = False, "", ""
+PUBLISH_SCOREBOARD = os.environ.get("LIGHTEVAL_PUBLISH_SCOREBOARD", "0") == "1"
+SCOREBOARD_URL = os.environ.get("LIGHTEVAL_SCOREBOARD_URL", "")
+SCOREBOARD_TOKEN = os.environ.get("LIGHTEVAL_SCOREBOARD_TOKEN", "")
+SCOREBOARD_METADATA = json.loads(os.environ.get("LIGHTEVAL_SCOREBOARD_METADATA", json.dumps({
+    "model": {
+        "label": "RWKV G1H 7.2B",
+        "architecture": "RWKV",
+        "generation": "G1H",
+        "parameters": "7.2B",
+    },
+    "evaluation": {
+        "prompt_profile": "rwkv-tokenizer-chat-template",
+        "prompt_template": "RWKV tokenizer chat template",
+        "precision": WKV_MODE,
+    },
+    "task_defaults": {
+        "domain": "regular",
+        "evaluation_method": "lighteval",
+        "score_multiplier": 100.0,
+    },
+    "tasks": {
+        "gsm8k|0": {
+            "label": "GSM8K",
+            "domain": "math",
+            "evaluation_method": "cot",
+        },
+    },
+    "comparisons": [{
+        "comparison": {
+            "id": "generation",
+            "label": "G1G vs G1H",
+            "short_label": "代际",
+            "a_label": "G1G",
+            "b_label": "G1H",
+            "contract": "prompt、precision、sampling 与输出边界保持一致。",
+        },
+        "parameter_group": {
+            "id": "7.2b",
+            "label": "7.2B",
+            "a_model": {
+                "label": "RWKV G1G 7.2B",
+                "architecture": "RWKV",
+                "generation": "G1G",
+                "parameters": "7.2B",
+            },
+            "b_model": {
+                "label": "RWKV G1H 7.2B",
+                "architecture": "RWKV",
+                "generation": "G1H",
+                "parameters": "7.2B",
+            },
+            "parameter_delta_percent": 0.0,
+            "comparable": True,
+        },
+        "arm": "b",
+    }],
+})))
 _MARKUP = re.compile(r"\*\*|__|`+")
 _BOXED = re.compile(r"\\boxed\{\s*(?:([A-Z])|\\(?:text|mathrm)\{\s*([A-Z])\s*\})\s*\}", re.I)
 _EXPLICIT = re.compile(r"^\s*(?:(?:thus|therefore|hence|so)[,:]?\s+)?(?:the\s+)?(?:(?:final|correct)\s+)?(?:answer|choice|option)\s*(?:is|:|=)\s*([A-Z])\b", re.I | re.M)
@@ -183,12 +240,14 @@ def _completions(results: dict, rows: list[dict]):
     if global_limit is not None: global_limit = _positive_limit(global_limit, "global max_new_tokens")
     for row in rows:
         try:
-            doc, response, metric = row["doc"], row["model_response"], row["metric"]; task_name = doc["task_name"]; texts, token_lists = response["text"], response["output_tokens"]
+            doc, response, metric = row["doc"], row["model_response"], row["metric"]; task_name = doc["task_name"]
         except (KeyError, TypeError, AttributeError) as error: raise ValueError("details are missing doc/model_response/metric fields") from error
-        if not isinstance(metric, dict) or not isinstance(texts, list) or not isinstance(token_lists, list): raise ValueError("details contain invalid metric/text/output_tokens fields")
+        if not isinstance(response, dict) or not isinstance(metric, dict): raise ValueError("details contain invalid model_response/metric fields")
+        texts, token_lists = response.get("text"), response.get("output_tokens")
         if not texts:
             if any(response.get(key) not in (None, []) for key in ("logprobs", "argmax_logits_eq_gold")): continue  # Log-likelihood rows have no generated completion.
             raise ValueError("empty completion lacks log-likelihood evidence")
+        if not isinstance(texts, list) or not isinstance(token_lists, list): raise ValueError("details contain invalid text/output_tokens fields")
         if len(texts) != len(token_lists): raise ValueError("completion and output-token counts differ")
         if global_limit is None:
             try: limit = _positive_limit(task_configs[task_name]["generation_size"], f"{task_name} generation_size")
@@ -204,34 +263,127 @@ def diagnose(results: dict, rows: list[dict]) -> dict[str, int | float]:
         "samples": len(rows), "completions": count, "truncated": truncated, "non_truncated": count - truncated,
         "truncation_rate": truncated / count if count else 0.0, "turn_boundary_violations": violations,
         "turn_boundary_violation_rate": violations / count if count else 0.0}
-def publication_payload(results: dict, rows: list[dict]) -> dict:
-    task_results = {key: value for key, value in results["results"].items() if key != "all"}
-    if len(task_results) != 1: raise ValueError("Scoreboard publication requires exactly one task")
-    _, aggregates = next(iter(task_results.items()))
-    metrics = {key: value for key, value in aggregates.items() if not key.endswith("_stderr") and isinstance(value, (int, float))}
-    if len(metrics) != 1: raise ValueError("special or multi-metric results cannot be published losslessly")
-    if len(list(_completions(results, rows))) != len(rows) or any(len(row["model_response"]["text"]) != 1 for row in rows): raise ValueError("multi-completion or non-generative rows cannot be published losslessly")
-    raise ValueError("standard LightEval artifacts lack the identity, accounting, finish-reason, and checksum evidence required by the current Scoreboard API")
-def publish(payload: dict, base_url: str, token: str, run_id: str):
-    raw = json.dumps(payload, separators=(",", ":")).encode(); body = gzip.compress(raw)
-    request = Request(f"{base_url.rstrip('/')}/api/v1/evaluation-publications/{run_id}", data=body, method="PUT", headers={
+def _canonical_json(value: object) -> bytes:
+    return json.dumps(value, ensure_ascii=False, allow_nan=False,
+                      sort_keys=True, separators=(",", ":")).encode()
+def _content_digest(payload: dict) -> str:
+    return hashlib.sha256(_canonical_json(payload)).hexdigest()
+def _artifact_metadata(output_dir: Path) -> dict:
+    result_files = list(output_dir.glob("results/**/results_*.json"))
+    if len(result_files) != 1: raise ValueError("expected one standard results JSON")
+    result_file = result_files[0]; stamp = result_file.stem.removeprefix("results_"); model_dir = result_file.parent.relative_to(output_dir / "results")
+    detail_files = list((output_dir / "details" / model_dir / stamp).glob(f"details_*_{stamp}.parquet"))
+    if not detail_files: raise ValueError("expected matching standard details parquet")
+    return {
+        "lighteval_version": importlib.metadata.version("lighteval"),
+        "results_path": str(result_file.relative_to(output_dir)),
+        "details_paths": [str(path.relative_to(output_dir)) for path in sorted(detail_files)],
+    }
+def _task_metadata(task_name: str, metadata: dict) -> tuple[dict, str | None]:
+    defaults = metadata.get("task_defaults")
+    overrides = metadata.get("tasks", {}).get(task_name, {})
+    if not isinstance(defaults, dict) or not isinstance(overrides, dict): raise ValueError("Scoreboard task metadata must be objects")
+    benchmark = {**defaults, **overrides}
+    primary_metric = benchmark.pop("primary_metric", None)
+    benchmark.setdefault("label", task_name)
+    required = ("label", "domain", "evaluation_method", "score_multiplier")
+    if any(key not in benchmark for key in required): raise ValueError(f"Scoreboard metadata for {task_name} is incomplete")
+    return benchmark, primary_metric
+def _sampling_config(results: dict) -> dict:
+    model_config = results.get("config_general", {}).get("model_config", {})
+    generation = model_config.get("generation_parameters", {})
+    if not isinstance(model_config, dict) or not isinstance(generation, dict): raise ValueError("results are missing model sampling configuration")
+    return {
+        "temperature": generation.get("temperature"),
+        "top_p": generation.get("top_p"),
+        "top_k": generation.get("top_k"),
+        "max_tokens": generation.get("max_new_tokens"),
+        "seed": model_config.get("seed"),
+    }
+def publication_payloads(results: dict, rows: list[dict], *,
+                         metadata: dict = SCOREBOARD_METADATA,
+                         artifact: dict | None = None) -> list[tuple[str, dict]]:
+    task_results = results.get("results")
+    task_configs = results.get("config_tasks")
+    if not isinstance(task_results, dict) or not isinstance(task_configs, dict): raise ValueError("results are missing task results/configuration")
+    by_task: dict[str, list[dict]] = {}
+    for row in rows:
+        try: task_name = row["doc"]["task_name"]
+        except (KeyError, TypeError) as error: raise ValueError("detail row is missing doc.task_name") from error
+        if not isinstance(task_name, str): raise ValueError("detail task_name must be a string")
+        by_task.setdefault(task_name, []).append(row)
+    artifact = artifact or {
+        "lighteval_version": importlib.metadata.version("lighteval"),
+        "results_path": "results/results.json",
+        "details_paths": ["details/details.parquet"],
+    }
+    publications = []
+    for task_name, raw_aggregates in task_results.items():
+        if task_name == "all": continue
+        if task_name not in task_configs: raise ValueError(f"missing task config for {task_name}")
+        task_rows = by_task.get(task_name)
+        if not task_rows: raise ValueError(f"missing detail rows for {task_name}")
+        if not isinstance(raw_aggregates, dict): raise ValueError(f"invalid aggregates for {task_name}")
+        aggregates = {key: value for key, value in raw_aggregates.items()
+                      if not isinstance(value, bool) and isinstance(value, (int, float))}
+        benchmark, primary_override = _task_metadata(task_name, metadata)
+        primary_candidates = [key for key in aggregates if not key.endswith("_stderr")]
+        primary_metric = primary_override or (primary_candidates[0] if primary_candidates else None)
+        if primary_metric is None or primary_metric not in aggregates: raise ValueError(f"missing primary metric for {task_name}")
+        diagnostics = diagnose(results, task_rows)
+        payload = {
+            "schema_version": "lighteval-standard-v1",
+            "source_run_id": RUN_ID,
+            "artifact": artifact,
+            "task_name": task_name,
+            "task_config": task_configs[task_name],
+            "model": metadata["model"],
+            "benchmark": benchmark,
+            "evaluation": metadata["evaluation"],
+            "comparisons": metadata.get("comparisons", []),
+            "sampling_config": _sampling_config(results),
+            "primary_metric": primary_metric,
+            "aggregates": aggregates,
+            "diagnostics": diagnostics,
+            "details": [{
+                "doc": row["doc"],
+                "metric": row["metric"],
+                "model_response": row["model_response"],
+            } for row in task_rows],
+        }
+        suffix = hashlib.sha256(task_name.encode()).hexdigest()[:16]
+        publications.append((f"{RUN_ID}:{suffix}", payload))
+    unknown = set(by_task) - {task for task in task_results if task != "all"}
+    if unknown: raise ValueError(f"details have no task results: {sorted(unknown)}")
+    return publications
+def publish(payload: dict, base_url: str, token: str, publication_id: str):
+    digest = _content_digest(payload); raw = _canonical_json(payload); body = gzip.compress(raw)
+    request = Request(f"{base_url.rstrip('/')}/api/v1/evaluation-publications/{quote(publication_id, safe='')}", data=body, method="PUT", headers={
         "Authorization": f"Bearer {token}", "Content-Encoding": "gzip", "Content-Type": "application/json",
-        "Idempotency-Key": f"publish:{payload['manifest']['digest']}"})
-    return urlopen(request, timeout=30).read()
+        "Idempotency-Key": f"publish:{digest}"})
+    response = urlopen(request, timeout=30).read()
+    try: return json.loads(response)
+    except (json.JSONDecodeError, UnicodeDecodeError): return response
 def main() -> dict:
     pipeline = build_pipeline()
     pipeline.evaluate()
     pipeline.save_and_push_results()
     pipeline.show_results()
     results, rows = read_standard_artifacts(OUTPUT_DIR)
-    diagnostics = diagnose(results, rows)
-    print(json.dumps(diagnostics, indent=2))
+    print(json.dumps(diagnose(results, rows), indent=2))
     if PUBLISH_SCOREBOARD:
-        try:
-            payload = publication_payload(results, rows)
-            publish(payload, SCOREBOARD_URL, SCOREBOARD_TOKEN, RUN_ID)
-        except Exception as error:
-            print(f"Scoreboard publication failed: {error}", file=sys.stderr)
+        if not SCOREBOARD_URL or not SCOREBOARD_TOKEN:
+            print("Scoreboard publication failed: URL and token are required", file=sys.stderr)
+        else:
+            try: publications = publication_payloads(results, rows, artifact=_artifact_metadata(OUTPUT_DIR))
+            except Exception as error:
+                print(f"Scoreboard publication failed: {error}", file=sys.stderr); publications = []
+            for publication_id, payload in publications:
+                try:
+                    receipt = publish(payload, SCOREBOARD_URL, SCOREBOARD_TOKEN, publication_id)
+                    print(f"Scoreboard publication {payload['task_name']}: {receipt}")
+                except Exception as error:
+                    print(f"Scoreboard publication {payload['task_name']} failed: {error}", file=sys.stderr)
     return pipeline.get_results()
 if __name__ == "__main__":
     main()
