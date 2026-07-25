@@ -22,7 +22,7 @@ def artifacts(limit=3):
     return {"config_general": {"model_config": {"generation_parameters": {"max_new_tokens": limit}}}, "config_tasks": {"gsm8k|0": {"generation_size": 2}}, "results": {"gsm8k|0": {"exact_match": 0.5}}}, [{"doc": {"id": "0", "query": "1+1?", "task_name": "gsm8k|0"}, "model_response": {"text": ["2", "bad\nUser:"], "output_tokens": [[1, 2, 3], [4, 5]]}, "metric": {"exact_match": 1.0}}]
 def test_layout_registry_passthrough_and_generation_contract():
     component = ROOT / "src/eval/lighteval"; assert list(component.glob("*.py")) == [component / "evaluate.py"] and not (component / "pyproject.toml").exists()
-    preset = ROOT / "configs/lighteval-pro6000.toml"; text = preset.read_text(); assert tomllib.loads(text) == {"wkv_mode": "fp16", "batch_size": 2560} and "1.5B=2560/2560" in text and "13.3B=1280/640" in text
+    preset = tomllib.loads((ROOT / "configs/lighteval-pro6000.toml").read_text()); assert preset == {"tasks": [{"model_size": size, "wkv_mode": mode, "batch_size": batch} for size, mode, batch in (("1.5B", "fp16", 2560), ("1.5B", "fp32io16", 2560), ("2.9B", "fp16", 2560), ("2.9B", "fp32io16", 2560), ("7.2B", "fp16", 2560), ("7.2B", "fp32io16", 1280), ("13.3B", "fp16", 1280), ("13.3B", "fp32io16", 640))]}
     assert all(text not in (component / "evaluate.py").read_text() for text in ("Question:", "Answer:", "DAPO")) and 'kwargs.setdefault("disable_log_stats", "VLLM_LOG_STATS_INTERVAL" not in os.environ)' in (ROOT / "src/infer/vllm-rwkv/vllm/entrypoints/llm.py").read_text()
     assert Registry(tasks=evaluate.TASKS).load_tasks() and evaluate.DetectorFactory.seed == 0
     with pytest.raises(ValueError): Registry(tasks="definitely_unknown_task|0").load_tasks()
