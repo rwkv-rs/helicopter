@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import torch
 from torch import Tensor
 
-from .recurrent import rwkv7_scan
+from .recurrent import rwkv7_scan, rwkv7_step
+
+
+RWKV7_MINIMUM_DECAY = math.exp(-math.exp(-0.5))
 
 
 def normalized_mse(prediction: Tensor, target: Tensor) -> float:
@@ -539,6 +543,686 @@ def query_input_bases(
     return torch.stack(bases)
 
 
+def _observable_projection_loss(
+    state: Tensor,
+    query: Tensor,
+    basis: Tensor,
+    fixed_error: Tensor | None = None,
+) -> Tensor:
+    projected = (query @ basis) @ basis.T
+    residual = query - projected
+    observable_error = torch.einsum("nod,nd->no", state, residual)
+    if fixed_error is not None:
+        observable_error = observable_error + fixed_error
+    return observable_error.square().sum()
+
+
+def _fit_observable_basis(
+    state: Tensor,
+    query: Tensor,
+    *,
+    rank: int,
+    steps: int,
+    learning_rate: float,
+    fixed_error: Tensor | None = None,
+) -> Tensor:
+    initial = top_eigenvectors(query.T @ query, rank)
+    sensitivity = top_eigenvectors(
+        torch.einsum("nod,noe->de", state, state),
+        rank,
+    )
+    candidates = (initial.float(), sensitivity)
+    candidate_losses = tuple(
+        _observable_projection_loss(
+            state,
+            query,
+            candidate,
+            fixed_error,
+        )
+        for candidate in candidates
+    )
+    selected_index = min(
+        range(len(candidates)),
+        key=lambda index: float(candidate_losses[index]),
+    )
+    selected = candidates[selected_index]
+    selected_loss = candidate_losses[selected_index]
+    parameter = selected.clone().requires_grad_(True)
+    optimizer = torch.optim.Adam((parameter,), lr=learning_rate)
+    for _ in range(steps):
+        optimizer.zero_grad(set_to_none=True)
+        orthogonal, _ = torch.linalg.qr(parameter, mode="reduced")
+        loss = _observable_projection_loss(
+            state,
+            query,
+            orthogonal,
+            fixed_error,
+        )
+        loss.backward()
+        optimizer.step()
+    with torch.no_grad():
+        candidate, _ = torch.linalg.qr(parameter, mode="reduced")
+        candidate_loss = _observable_projection_loss(
+            state,
+            query,
+            candidate,
+            fixed_error,
+        )
+        if torch.isfinite(candidate_loss) and candidate_loss < selected_loss:
+            selected = candidate
+    return selected
+
+
+def observable_query_bases(
+    states: Tensor,
+    centered_query: Tensor,
+    *,
+    calibration_batches: int,
+    rank: int,
+    steps: int = 64,
+    learning_rate: float = 0.05,
+) -> Tensor:
+    """Fit orthogonal input bases against future-read observable error.
+
+    The objective is ``sum ||S(q - PP^T q)||²`` on calibration rows.  Each
+    Query head is fitted against the state of its KV group.  Query PCA is the
+    deterministic starting point and remains selected unless projected-gradient
+    refinement strictly improves this observable objective.
+    """
+    if states.ndim != 5:
+        raise ValueError("states must be [batch,time,group,output,input]")
+    if centered_query.ndim != 4:
+        raise ValueError("query must be [batch,time,head,feature]")
+    batch, sequence_length, groups, output_dim, input_dim = states.shape
+    if centered_query.shape[:2] != (batch, sequence_length):
+        raise ValueError("state and query batch/time dimensions must align")
+    heads = centered_query.shape[2]
+    if heads % groups:
+        raise ValueError("query heads must divide evenly into state groups")
+    if output_dim != input_dim or centered_query.shape[-1] != input_dim:
+        raise ValueError("state and query feature dimensions must align")
+    if not 0 < calibration_batches <= batch:
+        raise ValueError("calibration_batches must select a non-empty prefix")
+    if not 0 < rank <= input_dim:
+        raise ValueError("rank must fit the input dimension")
+    if steps < 0:
+        raise ValueError("steps must be non-negative")
+    if learning_rate <= 0:
+        raise ValueError("learning_rate must be positive")
+
+    group_width = heads // groups
+    fitted: list[Tensor] = []
+    for head in range(heads):
+        group = head // group_width
+        state = states[:calibration_batches, :, group].reshape(
+            -1, output_dim, input_dim
+        ).float()
+        query = centered_query[:calibration_batches, :, head].reshape(
+            -1, input_dim
+        ).float()
+        fitted.append(
+            _fit_observable_basis(
+                state,
+                query,
+                rank=rank,
+                steps=steps,
+                learning_rate=learning_rate,
+            )
+        )
+    return torch.stack(fitted)
+
+
+def rope_aligned_two_state_bases(
+    states: Tensor,
+    centered_query: Tensor,
+    *,
+    calibration_batches: int,
+    native_dim: int,
+    rotary_dim: int,
+    steps: int = 64,
+    learning_rate: float = 0.05,
+) -> Tensor:
+    """Fit independent two-state bases inside the source-RoPE commutant.
+
+    The first native state retains all rotary coordinates and fits its remaining
+    invariant features.  The second state can only use invariant coordinates
+    under the preserved flattened source-head RoPE layout, so its unavoidable
+    rotary contribution is included as a fixed observable residual.
+    """
+    if states.ndim != 5 or centered_query.ndim != 4:
+        raise ValueError("states and query must be rank five/four")
+    batch, sequence_length, groups, output_dim, input_dim = states.shape
+    if centered_query.shape[:2] != (batch, sequence_length):
+        raise ValueError("states and query batch/time dimensions must align")
+    heads = centered_query.shape[2]
+    if heads % groups:
+        raise ValueError("query heads must divide evenly into state groups")
+    if input_dim != output_dim or output_dim != native_dim * 2:
+        raise ValueError("two-state RoPE basis requires source_dim=2*native_dim")
+    if not 0 <= rotary_dim < native_dim:
+        raise ValueError("rotary_dim must leave room for an invariant DC channel")
+    if not 0 < calibration_batches <= batch:
+        raise ValueError("calibration_batches must select a non-empty prefix")
+    invariant_dim = input_dim - rotary_dim
+    first_invariant_rank = native_dim - 1 - rotary_dim
+    second_invariant_rank = native_dim - 1
+    if first_invariant_rank <= 0 or second_invariant_rank > invariant_dim:
+        raise ValueError("native feature budget does not fit RoPE partition")
+
+    group_width = heads // groups
+    rotary_identity = torch.eye(
+        input_dim,
+        rotary_dim,
+        dtype=torch.float32,
+        device=states.device,
+    )
+    fitted: list[Tensor] = []
+    for head in range(heads):
+        group = head // group_width
+        query = centered_query[:calibration_batches, :, head].reshape(
+            -1, input_dim
+        ).float()
+        invariant_query = query[:, rotary_dim:]
+        head_bases = []
+        for state_index, invariant_rank in enumerate(
+            (first_invariant_rank, second_invariant_rank)
+        ):
+            start = state_index * native_dim
+            stop = start + native_dim
+            state = states[
+                :calibration_batches,
+                :,
+                group,
+                start:stop,
+            ].reshape(-1, native_dim, input_dim).float()
+            invariant_state = state[..., rotary_dim:]
+            if state_index == 0:
+                fixed_error = None
+            else:
+                fixed_error = torch.einsum(
+                    "nor,nr->no",
+                    state[..., :rotary_dim],
+                    query[:, :rotary_dim],
+                )
+            invariant_basis = _fit_observable_basis(
+                invariant_state,
+                invariant_query,
+                rank=invariant_rank,
+                steps=steps,
+                learning_rate=learning_rate,
+                fixed_error=fixed_error,
+            )
+            lifted_invariant = torch.zeros(
+                input_dim,
+                invariant_rank,
+                dtype=torch.float32,
+                device=states.device,
+            )
+            lifted_invariant[rotary_dim:] = invariant_basis
+            if state_index == 0:
+                basis = torch.cat((rotary_identity, lifted_invariant), dim=-1)
+            else:
+                basis = lifted_invariant
+            head_bases.append(basis)
+        fitted.append(torch.stack(head_bases))
+    return torch.stack(fitted)
+
+
+@dataclass(frozen=True)
+class TwoStateProjection:
+    states: Tensor
+    read: Tensor
+    output: Tensor
+    query_basis: Tensor
+    dc_indices: tuple[int, int]
+
+
+@dataclass(frozen=True)
+class NativeTwoStateRollout:
+    teacher_forced_states: Tensor
+    free_running_states: Tensor
+    free_running_output: Tensor
+    requested_decay: Tensor
+    decay: Tensor
+    erase: Tensor
+    key: Tensor
+    value: Tensor
+
+
+@dataclass(frozen=True)
+class BiasFreeProjection:
+    weight: Tensor
+    prediction: Tensor
+
+
+@dataclass(frozen=True)
+class SelectedBiasFreeProjection:
+    projection: BiasFreeProjection
+    ridge: float
+    absolute_ridge: float
+    ridge_scale: float
+    selection_nmse: dict[float, float]
+
+
+def fit_bias_free_projection(
+    source: Tensor,
+    target: Tensor,
+    *,
+    calibration_batches: int,
+    ridge: float = 1e-3,
+) -> BiasFreeProjection:
+    """Fit a native bias-free linear projection on calibration batches."""
+    if source.ndim != 3 or target.ndim < 3:
+        raise ValueError("source and target must include batch and time")
+    if source.shape[:2] != target.shape[:2]:
+        raise ValueError("source and target batch/time dimensions must align")
+    if not 0 < calibration_batches <= source.shape[0]:
+        raise ValueError("calibration_batches must select a non-empty prefix")
+    if ridge < 0:
+        raise ValueError("ridge must be non-negative")
+    source_width = source.shape[-1]
+    target_shape = target.shape[2:]
+    target_width = math.prod(target_shape)
+    calibration_source = source[:calibration_batches].reshape(
+        -1, source_width
+    ).float()
+    calibration_target = target[:calibration_batches].reshape(
+        -1, target_width
+    ).float()
+    if calibration_source.shape[0] >= source_width:
+        gram = calibration_source.T @ calibration_source
+        if ridge:
+            gram = gram + torch.eye(
+                source_width,
+                dtype=gram.dtype,
+                device=gram.device,
+            ) * ridge
+        rhs = calibration_source.T @ calibration_target
+        weight = torch.linalg.solve(gram, rhs).T
+    else:
+        gram = calibration_source @ calibration_source.T
+        if ridge:
+            gram = gram + torch.eye(
+                calibration_source.shape[0],
+                dtype=gram.dtype,
+                device=gram.device,
+            ) * ridge
+        coefficients = torch.linalg.solve(gram, calibration_target)
+        weight = (calibration_source.T @ coefficients).T
+    prediction = (source.float() @ weight.T).reshape(
+        *source.shape[:2],
+        *target_shape,
+    )
+    return BiasFreeProjection(weight=weight, prediction=prediction)
+
+
+def select_bias_free_projection(
+    source: Tensor,
+    target: Tensor,
+    *,
+    calibration_batches: int,
+    ridges: tuple[float, ...],
+) -> SelectedBiasFreeProjection:
+    """Select a scale-relative ridge, then refit all calibration rows.
+
+    ``ridges`` contains dimensionless multipliers.  Their absolute values are
+    scaled by the mean diagonal of the fit-split feature Gram matrix, making
+    the candidate set invariant to the number of calibration tokens and a
+    common rescaling of the source activations.
+    """
+    if calibration_batches < 2:
+        raise ValueError("ridge selection requires at least two calibration batches")
+    if not ridges or any(ridge <= 0 for ridge in ridges):
+        raise ValueError("ridge candidates must be non-empty and positive")
+    fit_batches = max(1, calibration_batches // 2)
+    fit_source = source[:fit_batches].reshape(-1, source.shape[-1]).float()
+    ridge_scale = float(
+        fit_source.square().sum() / max(1, fit_source.shape[-1])
+    )
+    ridge_scale = max(ridge_scale, torch.finfo(torch.float32).tiny)
+    selection_nmse: dict[float, float] = {}
+    for ridge_multiplier in ridges:
+        candidate = fit_bias_free_projection(
+            source[:calibration_batches],
+            target[:calibration_batches],
+            calibration_batches=fit_batches,
+            ridge=ridge_multiplier * ridge_scale,
+        )
+        selection_nmse[ridge_multiplier] = normalized_mse(
+            candidate.prediction[fit_batches:calibration_batches],
+            target[fit_batches:calibration_batches],
+        )
+    selected_multiplier = min(
+        ridges,
+        key=lambda ridge: (selection_nmse[ridge], ridge),
+    )
+    selected_ridge = selected_multiplier * ridge_scale
+    projection = fit_bias_free_projection(
+        source,
+        target,
+        calibration_batches=calibration_batches,
+        ridge=selected_ridge,
+    )
+    return SelectedBiasFreeProjection(
+        projection=projection,
+        ridge=selected_multiplier,
+        absolute_ridge=selected_ridge,
+        ridge_scale=ridge_scale,
+        selection_nmse=selection_nmse,
+    )
+
+
+def two_state_projection(
+    states: Tensor,
+    bias: Tensor,
+    query: Tensor,
+    bases: Tensor,
+    *,
+    dc_indices: tuple[int, int] = (0, 0),
+) -> TwoStateProjection:
+    """Materialize two independent DC-plus-query native states.
+
+    Each half of the source value/output dimension owns one native state, one
+    DC channel, and ``native_dim-1`` query features.  A rank-three ``bases``
+    tensor is accepted as the legacy shared-basis special case; rank four
+    provides the full independent two-state budget.
+    """
+    if states.ndim != 5 or bias.ndim != 4:
+        raise ValueError("states and bias have invalid ranks")
+    batch, sequence_length, groups, output_dim, input_dim = states.shape
+    if query.ndim != 4 or query.shape[:2] != (batch, sequence_length):
+        raise ValueError("query does not align with states")
+    heads = query.shape[2]
+    if bias.shape != (batch, sequence_length, groups, output_dim):
+        raise ValueError("bias does not align with states")
+    if heads % groups:
+        raise ValueError("query heads must divide evenly into state groups")
+    native_dim = output_dim // 2
+    if output_dim % 2 or input_dim != output_dim:
+        raise ValueError("two-state projection requires a square even operator")
+    expected_rank = native_dim - 1
+    if bases.shape == (heads, input_dim, expected_rank):
+        bases = bases.unsqueeze(1).expand(-1, 2, -1, -1)
+    if bases.shape != (heads, 2, input_dim, expected_rank):
+        raise ValueError(
+            "each native state requires one DC plus native_dim-1 query features"
+        )
+    if len(dc_indices) != 2 or any(
+        not 0 <= index < native_dim for index in dc_indices
+    ):
+        raise ValueError("each DC index must fit the native head dimension")
+    group_width = heads // groups
+    projected_states = []
+    reads = []
+    outputs = []
+    for head in range(heads):
+        group = head // group_width
+        head_query = query[:, :, head].float()
+        head_states = []
+        head_reads = []
+        head_outputs = []
+        for state_index in range(2):
+            start = state_index * native_dim
+            stop = start + native_dim
+            basis = bases[head, state_index].float()
+            feature_indices = [
+                index
+                for index in range(native_dim)
+                if index != dc_indices[state_index]
+            ]
+            read = head_query.new_empty(
+                (batch, sequence_length, native_dim)
+            )
+            read[..., dc_indices[state_index]] = 1
+            read[..., feature_indices] = torch.einsum(
+                "dr,btd->btr",
+                basis,
+                head_query,
+            )
+            compressed = states[
+                :, :, group, start:stop
+            ].float() @ basis
+            native_state = states.new_empty(
+                (batch, sequence_length, native_dim, native_dim),
+                dtype=torch.float32,
+            )
+            native_state[..., dc_indices[state_index]] = bias[
+                :, :, group, start:stop
+            ].float()
+            native_state[..., feature_indices] = compressed
+            head_states.append(native_state)
+            head_reads.append(read)
+            head_outputs.append(
+                torch.einsum("btod,btd->bto", native_state, read)
+            )
+        projected_states.append(torch.stack(head_states, dim=2))
+        reads.append(torch.stack(head_reads, dim=2))
+        outputs.append(torch.cat(head_outputs, dim=-1))
+    return TwoStateProjection(
+        states=torch.stack(projected_states, dim=2),
+        read=torch.stack(reads, dim=2),
+        output=torch.stack(outputs, dim=2),
+        query_basis=bases.float(),
+        dc_indices=dc_indices,
+    )
+
+
+def native_two_state_rollout(
+    projection: TwoStateProjection,
+    probability: Tensor,
+    slope: Tensor,
+    *,
+    minimum_decay: float = RWKV7_MINIMUM_DECAY,
+) -> NativeTwoStateRollout:
+    """Project affine two-state transitions onto native RWKV7 dynamic signals.
+
+    For each token, the bounded hazard fixes a scalar decay and the compressed
+    affine slope fixes the native key.  With ``k_k=1`` and ``k_a=0``, the
+    channel-wise erase and write value are fitted by bounded coordinate least
+    squares under the exact native recurrence.  Signals are fitted
+    teacher-forced, then replayed from zero to expose free-running drift.  This
+    is a dynamic-signal oracle: fitting source activations to native projection
+    weights is a separate stage.
+    """
+    target = projection.states.float()
+    if target.ndim != 6:
+        raise ValueError("projection states must be [batch,time,head,2,d,d]")
+    batch, sequence_length, heads, state_count, head_dim, input_dim = target.shape
+    if state_count != 2 or head_dim != input_dim:
+        raise ValueError("native projection requires two square states per head")
+    if probability.ndim != 3 or slope.ndim != 4:
+        raise ValueError("probability and slope must be grouped token signals")
+    groups = probability.shape[2]
+    if probability.shape[:2] != (batch, sequence_length):
+        raise ValueError("probability does not align with projection")
+    if slope.shape[:3] != (batch, sequence_length, groups):
+        raise ValueError("slope does not align with probability")
+    if heads % groups or slope.shape[-1] != projection.query_basis.shape[2]:
+        raise ValueError("grouped hazard signals do not align with Query heads")
+    expected_basis_shape = (heads, 2, slope.shape[-1], head_dim - 1)
+    if projection.query_basis.shape != expected_basis_shape:
+        raise ValueError(
+            "query basis must provide native head_dim-1 compressed features"
+        )
+    if not 0 < minimum_decay <= 1:
+        raise ValueError("minimum_decay must be in (0,1]")
+
+    group_width = heads // groups
+    head_to_group = torch.arange(heads, device=target.device) // group_width
+    grouped_probability = probability[:, :, head_to_group].float()
+    grouped_slope = slope[:, :, head_to_group].float()
+    compressed_slope = torch.einsum(
+        "hsfr,bthf->bthsr",
+        projection.query_basis.float(),
+        grouped_slope,
+    )
+    shared_key = target.new_empty(
+        (batch, sequence_length, heads, 2, head_dim)
+    )
+    for state_index, dc_index in enumerate(projection.dc_indices):
+        feature_indices = [
+            index for index in range(head_dim) if index != dc_index
+        ]
+        shared_key[:, :, :, state_index, dc_index] = grouped_probability
+        shared_key[:, :, :, state_index, feature_indices] = (
+            compressed_slope[:, :, :, state_index]
+        )
+    if shared_key.shape[-1] != head_dim:
+        raise ValueError("DC plus compressed slope must fill native head_dim")
+    key = shared_key.flatten(2, 3)
+    requested_decay = 1 - grouped_probability
+    desired_decay = requested_decay.clamp(
+        min=minimum_decay,
+        max=1,
+    )
+    requested_decay = requested_decay.unsqueeze(-1).expand(
+        -1, -1, -1, 2
+    ).flatten(2, 3)
+    decay = desired_decay.unsqueeze(-1).expand(
+        -1, -1, -1, 2
+    ).flatten(2, 3)
+
+    native_target = target.flatten(2, 3)
+    native_heads = native_target.shape[2]
+    teacher_states = torch.empty_like(native_target)
+    free_states = torch.empty_like(native_target)
+    erase_rows = torch.empty(
+        batch,
+        sequence_length,
+        native_heads,
+        head_dim,
+        dtype=torch.float32,
+        device=target.device,
+    )
+    values = torch.empty(
+        batch,
+        sequence_length,
+        native_heads,
+        head_dim,
+        dtype=torch.float32,
+        device=target.device,
+    )
+    native_read = projection.read.flatten(2, 3).float()
+    free_outputs = torch.empty(
+        batch,
+        sequence_length,
+        native_heads,
+        head_dim,
+        dtype=torch.float32,
+        device=target.device,
+    )
+    target_previous = torch.zeros_like(native_target[:, 0])
+    free_previous = torch.zeros_like(native_target[:, 0])
+    for index in range(sequence_length):
+        current_target = native_target[:, index]
+        current_key = key[:, index]
+        normalized_key = torch.nn.functional.normalize(current_key, dim=-1)
+        current_decay = decay[:, index]
+        decayed = target_previous * current_decay[:, :, None, None]
+        residual = current_target - decayed
+
+        key_norm = current_key.square().sum(dim=-1, keepdim=True).clamp_min(
+            1e-30
+        )
+        state_key = torch.einsum(
+            "bhod,bhd->bho",
+            target_previous,
+            normalized_key,
+        )
+        erase = torch.zeros_like(current_key)
+        value = torch.zeros(
+            batch,
+            native_heads,
+            head_dim,
+            dtype=torch.float32,
+            device=target.device,
+        )
+        for _ in range(3):
+            erase_update = -torch.einsum(
+                "bho,bhd->bhod",
+                state_key,
+                normalized_key * erase,
+            )
+            after_erase = residual - erase_update
+            value = torch.einsum(
+                "bhod,bhd->bho",
+                after_erase,
+                current_key,
+            ) / key_norm
+            after_write = residual - torch.einsum(
+                "bho,bhd->bhod",
+                value,
+                current_key,
+            )
+            erase_coefficient = -torch.einsum(
+                "bho,bhd->bhod",
+                state_key,
+                normalized_key,
+            )
+            erase_denominator = erase_coefficient.square().sum(
+                dim=-2
+            ).clamp_min(1e-30)
+            erase = (
+                (erase_coefficient * after_write).sum(dim=-2)
+                / erase_denominator
+            ).clamp(0, 1)
+        erase_update = -torch.einsum(
+            "bho,bhd->bhod",
+            state_key,
+            normalized_key * erase,
+        )
+        value = torch.einsum(
+            "bhod,bhd->bho",
+            residual - erase_update,
+            current_key,
+        ) / key_norm
+        erase_left = -normalized_key
+        erase_right = normalized_key * erase
+        _, teacher_current = rwkv7_step(
+            target_previous,
+            native_read[:, index],
+            current_decay.unsqueeze(-1).expand_as(current_key),
+            current_key,
+            value,
+            erase_left,
+            erase_right,
+        )
+
+        free_output, free_current = rwkv7_step(
+            free_previous,
+            native_read[:, index],
+            current_decay.unsqueeze(-1).expand_as(current_key),
+            current_key,
+            value,
+            erase_left,
+            erase_right,
+        )
+        teacher_states[:, index] = teacher_current
+        free_states[:, index] = free_current
+        free_outputs[:, index] = free_output
+        erase_rows[:, index] = erase
+        values[:, index] = value
+        target_previous = current_target
+        free_previous = free_current
+
+    native_output = free_outputs.reshape(
+        batch,
+        sequence_length,
+        heads,
+        head_dim * 2,
+    )
+    return NativeTwoStateRollout(
+        teacher_forced_states=teacher_states.unflatten(2, (heads, 2)),
+        free_running_states=free_states.unflatten(2, (heads, 2)),
+        free_running_output=native_output,
+        requested_decay=requested_decay,
+        decay=decay,
+        erase=erase_rows,
+        key=key,
+        value=values,
+    )
+
+
 def two_state_outputs(
     states: Tensor,
     centered_query: Tensor,
@@ -555,25 +1239,18 @@ def two_state_outputs(
         raise ValueError("state/query/basis dimensions do not align")
     group_width = heads // groups
     full_outputs = []
-    sketch_outputs = []
+    bias = states.new_zeros(
+        (batch, sequence_length, groups, output_dim)
+    )
     for head in range(heads):
         group = head // group_width
         state = states[:, :, group]
         query = centered_query[:, :, head]
-        basis = bases[head]
-        compressed_query = torch.einsum(
-            "dr,btd->btr", basis, query
-        )
-        projected_query = torch.einsum(
-            "dr,btr->btd", basis, compressed_query
-        )
         full_outputs.append(
             torch.einsum("btod,btd->bto", state, query)
         )
-        sketch_outputs.append(
-            torch.einsum("btod,btd->bto", state, projected_query)
-        )
-    return torch.stack(full_outputs, dim=2), torch.stack(sketch_outputs, dim=2)
+    projection = two_state_projection(states, bias, centered_query, bases)
+    return torch.stack(full_outputs, dim=2), projection.output
 
 
 def four_state_block_output(state: Tensor, query: Tensor) -> Tensor:

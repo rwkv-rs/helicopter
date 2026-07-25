@@ -115,74 +115,160 @@ $$
 
 这个轨迹保留 sigmoid，不急于把二阶乘积压成某个人工闭包。它既是 zero-step 状态投影的目标，也是后续逐层蒸馏的辅助 teacher。
 
-## 3. 两个 `128×128` 状态应直接拟合可观测轨迹
+## 3. 两个 `128×128` 状态有两套独立 read
 
-Qwen3.5-2B 的 GQA head dimension 是 256，而 target RWKV7 head dimension 是 128。每个 source Query head 分到两个 target states，状态总容量为
-
-$$2\times128\times128=32768.$$
-
-它小于任意 \(256\times256\) 算子的 65536 个自由度，因此两个状态不负责保存任意完整矩阵；它们只保存真实 future-query 分布能够读到的部分。
-
-先为 Query head \(h\) 选择 127 维读出子空间 \(R_h\)，再显式保留一个常数通道：
+Qwen3.5-2B 的 GQA head dimension 是 256，target RWKV7 head dimension 是 128。一个 source Query head 对应两个 native states：
 
 $$
-x_{\tau,h}
+S_{t,h,1},S_{t,h,2}\in\mathbb R^{128\times128}.
+$$
+
+这里最重要的一点是：两个 state 各自有一个 128 维 read，并不共享同一个 read。因而每个 state 都可以使用一个 DC 通道和 127 个 query features；两者合计是两个 DC 与 254 个 feature slots。
+
+这仍不等价于任意 \(256\times256\) 算子。第一个 state 只产生前 128 个 value channels，第二个只产生后 128 个 value channels；每个 output-row block 只能读取自己的 127 维 query 子空间。正确的容量描述是“两个独立的 \(128\times256\) row-block 低秩读出”，而不是把元素数量相加后宣称无损。
+
+先把式 \((5)\) 的 affine oracle 写成
+
+$$
+o_t(q)=b_t+M_t(q-\mu)
 =
-\begin{bmatrix}
-1\\
-R_h(q_{\tau,h}-\mu_h)
-\end{bmatrix}
-\in\mathbb R^{128}.
+\underbrace{(b_t-M_t\mu)}_{\widetilde b_t}+M_tq.
 \tag{6}
 $$
 
-常数通道保存 Value 的 DC 模式。其余 127 个方向由 calibration queries 的 PCA 给出解析初值，再用 source gate 与 `o_proj` 诱导的度量做广义特征分解。
-
-对 value space 选择一个固定正交基 \(U_h\)，并把 \(U_ho_t(q)\) 分成两个 128 维部分 \(y_{t,h,1},y_{t,h,2}\)。每个 prefix 的 oracle state 直接由加权 ridge 得到：
+把 \(M_t\) 按 output rows 分成 \(M_{t,1},M_{t,2}\)。对每个 block 分别选择
 
 $$
-S_{t,h,a}^{*}
+P_{h,a}\in\mathbb R^{256\times127},
+\qquad
+P_{h,a}^\top P_{h,a}=I,
+\qquad a\in\{1,2\}.
+$$
+
+对应的 read 与 state 为
+
+$$
+x_{\tau,h,a}
 =
-\arg\min_{S\in\mathbb R^{128\times128}}
-\sum_{\tau\ge t}
-w_{t,\tau,h}
-\left\|
-C_{\tau,h,a}
-\left(
-y_{t,h,a}(q_{\tau,h})-Sx_{\tau,h}
-\right)
-\right\|_2^2
-+
-\lambda\|S\|_F^2.
+\begin{bmatrix}
+P_{h,a}^\top q_{\tau,h}\\
+1
+\end{bmatrix},
+\qquad
+\widetilde S_{t,h,a}
+=
+\begin{bmatrix}
+M_{t,h,a}P_{h,a} & \widetilde b_{t,h,a}
+\end{bmatrix}.
 \tag{7}
 $$
 
-这里 \(a\in\{1,2\}\)，\(C_{\tau,h,a}\) 合并 source gate、value basis 和 `o_proj` 的可观测度量。权重取最终输出敏感度：
+DC 放在 native head 的最后一个 channel，避免参与 partial RoPE。\(P_{h,1}\) 与 \(P_{h,2}\) 分别最小化各自 row block 的 future-read observable loss：
 
 $$
-w_{t,\tau,h}
-=
-s_{t\rightarrow\tau}(q_{\tau,h})^2
+\min_{P^\top P=I}
+\sum_{(t,\tau)\in\mathcal C}
 \left\|
-C_{\tau,h}
-\left(
-v_t-o_{t-1}(q_{\tau,h})
-\right)
-\right\|_2^2,
-\qquad
-s_{t\rightarrow\tau}(q)
-=
-\prod_{j=t+1}^{\tau}(1-p_j(q)).
+M_{t,h,a}
+\left(I-PP^\top\right)
+q_{\tau,h}
+\right\|_2^2.
 \tag{8}
 $$
 
-式 \((7)\) 从 exact Softmax trajectory 或式 \((5)\) 的 bounded trajectory 直接求状态快照，不需要先构造一个完整 \(256\times256\) 算子。这样，状态预算、DC 通道和最终可见误差从一开始就在同一个目标里。
+式 \((8)\) 直接衡量 state 丢掉的 query 分量最终能产生多少输出，不把无权 Frobenius state error 当作跨架构目标。
 
-若允许每个 Query head 使用四个 `128×128` states，则矩阵部分可以按 \(2\times2\) block 完全重构；若实现 grouped multi-read state，还可以复用同一 KV group 的状态内容。标准两个-state 初始化则以式 \((7)\) 的 observable loss 为准。
+## 4. query 子空间还必须与 source RoPE 可交换
 
-## 4. 从状态快照投影到 native RWKV7
+仅有较低的式 \((8)\) 还不够，因为 `r_proj.weight` 是与位置无关的线性权重，RoPE 在 projection 之后才执行。若目标 read 不属于 source RoPE 的可达子空间，离线 state snapshot 再好，也无法变成真实的 native read。
 
-得到 \(S_{t,h,a}^{*}\) 后，再拟合 native RWKV7 单步更新：
+Qwen3.5-2B 每个 source head 是 256 维，partial RoPE 只旋转前 64 维：
+
+$$
+R_\tau
+=
+\operatorname{Diag}
+\left(
+R_\tau^{\mathrm{rot}}\in\mathbb R^{64\times64},
+I_{192}
+\right).
+\tag{9}
+$$
+
+两个相邻的 native `128` heads 在 projection boundary 重新视为一个 `256`-dim source head，因此 read 变换 \(T\) 必须满足
+
+$$
+TR_\tau=R_\tau T,\qquad\forall\tau.
+\tag{10}
+$$
+
+一个直接可实现的参数化是：
+
+$$
+P_{h,1}
+=
+\begin{bmatrix}
+I_{64} & 0\\
+0 & P_{h,1}^{\mathrm{inv}}
+\end{bmatrix},
+\qquad
+P_{h,1}^{\mathrm{inv}}\in\mathbb R^{192\times63},
+\tag{11}
+$$
+
+$$
+P_{h,2}
+=
+\begin{bmatrix}
+0\\
+P_{h,2}^{\mathrm{inv}}
+\end{bmatrix},
+\qquad
+P_{h,2}^{\mathrm{inv}}\in\mathbb R^{192\times127}.
+\tag{12}
+$$
+
+第一个 state 保留全部 64 个 rotary coordinates，再从 192 个 invariant coordinates 中选择 63 维；第二个 state 的 127 个 features 全部来自 invariant subspace。第二个 output-row block 无法直接读取 rotary coordinates，这部分作为固定残差加入式 \((8)\)，而不是在报告中隐藏。
+
+随后先对目标 post-RoPE read 施加 \(R_\tau^{-1}\)，再拟合原生无 bias 的 `r_proj.weight`：
+
+$$
+W_r^*
+=
+\arg\min_W
+\sum_{(x,\tau)\in\mathcal C}
+\left\|
+Wx-R_\tau^{-1}x_{\tau}^{*}
+\right\|_2^2
++
+\lambda\|W\|_F^2.
+\tag{13}
+$$
+
+\(\lambda\) 按 calibration feature Gram 的平均对角线缩放，使 ridge candidate 不随 token 数或激活整体缩放漂移。验证时必须重新施加 \(R_\tau\) 后再读取 state。
+
+## 5. 把状态轨迹投影到 native recurrence
+
+对每个 state，bounded hazard 给出请求 decay
+
+$$
+d_t^{\mathrm{req}}=1-\widehat p_t,
+\tag{14}
+$$
+
+compressed slope 与 DC 组成 native key：
+
+$$
+\kappa_{t,h,a}
+=
+\begin{bmatrix}
+P_{h,a}^{\top}\nabla_q\widehat p_t\\
+\widehat p_t
+\end{bmatrix}.
+\tag{15}
+$$
+
+在 `k_k=1、k_a=0` 的真实 RWKV7 子空间中，单步更新为
 
 $$
 S_t
@@ -191,101 +277,61 @@ S_{t-1}\operatorname{Diag}(d_t)
 -
 (S_{t-1}n_t)(n_t\odot a_t)^\top
 +
-u_t\kappa_t^\top.
-\tag{9}
+u_t\kappa_t^\top,
+\qquad
+n_t=\frac{\kappa_t}{\|\kappa_t\|_2}.
+\tag{16}
 $$
 
-状态误差不使用无权 Frobenius norm，而使用 future reads 的 Gram：
+其中 \(d_t\) 先投影到 native decay 可达区间；\(a_t\in[0,1]^{128}\) 与 \(u_t\in\mathbb R^{128}\) 在 teacher-forced target state 上做有界坐标最小二乘。求得动态信号后必须从零状态完整 free-running 回放，最终只以 observable output 衡量漂移。
 
-$$
-G_{t,h,a}
-=
-\sum_{\tau\ge t}
-w_{t,\tau,h}
-x_{\tau,h}x_{\tau,h}^\top.
-\tag{10}
-$$
-
-令 \(\Delta S_t=S_t^*-F_{\mathrm{RWKV}}(S_{t-1}^*)\)，求解
-
-$$
-\min_{d,n,a,u,\kappa}
-\operatorname{Tr}
-\left(
-\Delta S_tG_{t,h,a}\Delta S_t^\top
-\right).
-\tag{11}
-$$
-
-一个稳定的闭式顺序是：
-
-1. bounded diagonal regression 求 \(d_t\)；
-2. 对旧状态残差做加权 rank-1 SVD，求 erase direction 和 strength；
-3. 对剩余残差做第二次加权 rank-1 SVD，求 write value 与 write key；
-4. 按 native key normalization 重新分配尺度；
-5. 运行真实 recurrent rollout，以 free-running residual 重算一次式 \((11)\)。
-
-GQA 的共享性在这里继续保留：同组 Query heads 共用 source Key、Value 和 transition statistics，各自只保留与本 head 查询协方差对齐的两个 observable states。
-
-## 5. 从 oracle signals 得到模型参数
-
-每个 token 现在都有目标 read、decay、erase、write 和 gate signals。参数初始化按可逆性从内向外进行：
-
-1. 用 ridge 拟合 read、write key 和 write value；
-2. 用 reduced-rank regression 初始化各 LoRA control subspace；
-3. 对有界 decay、erase 先做 inverse link，再拟合 logits；
-4. 回放 native recurrence；
-5. 在实际 recurrent output 上闭式重算 `g_norm`、gate 和 `o_proj`。
-
-zero-step checkpoint 随后进入逐层蒸馏。训练时冻结其余层，使用真实 layer input，完整 free-running rollout 当前 mixer，并联合最小化：
-
-$$
-\mathcal L_{\mathrm{layer}}
-=
-\mathcal L_{\mathrm{mixer}}
-+
-\lambda_{\mathrm{block}}\mathcal L_{\mathrm{block}}
-+
-\lambda_{\mathrm{oracle}}\mathcal L_{\mathrm{bounded\ oracle}}.
-\tag{12}
-$$
-
-主项始终是 source mixer output；bounded oracle 只约束优化方向，不替代真实 Softmax teacher。完成一层后再推进下一层，避免把前层尚未校正的输入漂移同时传给所有层。
+式 \((16)\) 是动态信号 oracle。要得到 checkpoint，还需依次拟合 `k_proj`、`v_proj`、`w_lora`、`a_lora`，再在真实 rollout 上重解 `g_norm`、gate 与 `o_proj`。每一阶段都保存增量 NMSE，最终安装规则只看独立 held-out 上的完整 mixer output。
 
 ## 6. 真实单层验证
 
 实验读取 Qwen3.5-2B 的真实 checkpoint：
 
-- GQA：第 3 层，8 Query heads、2 KV heads、head dimension 256；
-- 数据：8 条 FineWeb-Edu 文本，每条 64 tokens；
-- 划分：前 4 条 calibration，后 4 条 held-out；
-- 设备：DGX Spark 的 NVIDIA GB10；
+- GQA：第 3 层，8 Query heads、2 KV heads、source head dimension 256；
+- target：16 个 native heads，head dimension 128；
+- 数据：16 条 FineWeb-Edu 文本，每条 64 tokens；
+- 划分：前 8 条 calibration，后 8 条此前未见 held-out；
+- 设备：DGX Spark / NVIDIA GB10；
 - 前向与指标：FP32；
-- checkpoint shard SHA-256：`aa33250c4fc64891ddfaba3a314fd9542ea371843c387178b425fbcc5ed680b1`。
+- source shard SHA-256：`aa33250c4fc64891ddfaba3a314fd9542ea371843c387178b425fbcc5ed680b1`。
 
 关键 held-out 结果如下：
 
-| 验证项 | mixer/output NMSE | 说明 |
+| 阶段 | NMSE | 含义 |
 | --- | ---: | --- |
-| exact hazard recurrence → Softmax output | \(4.96\times10^{-14}\) | 式 \((1)\) 的数值自检 |
-| calibration-mean logit Taylor | 0.07344 | 保留 sigmoid 的 bounded oracle |
-| 两状态：1 DC + 127 query-PCA，相对完整 affine state | 0.01221 | 严格计入两个 `128×128` state 的增量损失 |
-| 四状态矩阵分块，相对完整矩阵 | \(9.79\times10^{-15}\) | matrix-only exact control |
+| exact hazard recurrence → Softmax attention | \(4.64\times10^{-14}\) | 式 \((1)\) 的数值自检 |
+| calibration-mean bounded hazard → source mixer | 0.07079 | 保留 sigmoid 的 surrogate |
+| RoPE-aligned 两状态 → affine oracle | 0.02986 | 每个 state 独立 `1 DC + 127 features` |
+| RoPE-aligned 两状态 → exact Softmax mixer | 0.28418 | affine 与有限状态误差合计 |
+| teacher-forced native transition → materialized 两状态 | 0.00140 | 式 \((16)\) 的单步投影 |
+| free-running native transition → materialized 两状态 | 0.01942 | recurrence 漂移 |
+| free-running native transition → exact Softmax mixer | 0.28699 | 使用理想 read |
+| bias-free pre-RoPE read signal | 0.15870 | 式 \((13)\) |
+| native read → exact Softmax mixer | 0.33002 | 使用 materialized state |
+| native transition + native read → exact Softmax mixer | **0.33895** | 当前完整 zero-step observable |
 
-两状态实验还给出：矩阵可观测分量 NMSE 为 0.09933；加入 DC 后，相对完整 affine output 的 NMSE 为 0.01221。四状态结果说明额外损失来自两个-state 的可观测压缩，而不是分块代数本身。
+`r_proj.weight` shape 为 `2048×2048`，SHA-256 为
+`254407284a84b42c7cbecf8ccda19102412e2888b0eaa5cfc964991b0fc43156`。
+完整 evidence JSON 的 SHA-256 为
+`b27c1c2def59c63ef1708e9eec98b9b82986c024c467af00c2bc27c81e10eb2a`。
 
-FP32 与 BF16 两次独立运行的关键排序和量级一致。完整原始结果见 [`evidence/qwen35-2b-gqa-gdn-zero-step-probe.json`](evidence/qwen35-2b-gqa-gdn-zero-step-probe.json)，可复现实验入口为 [`../scripts/probe_gqa_gdn_zero_step.py`](../scripts/probe_gqa_gdn_zero_step.py)。
+完整原始结果见 [`evidence/qwen35-2b-gqa-gdn-zero-step-probe.json`](evidence/qwen35-2b-gqa-gdn-zero-step-probe.json)，可复现实验入口为 [`../scripts/probe_gqa_gdn_zero_step.py`](../scripts/probe_gqa_gdn_zero_step.py)。
 
 ## 7. 完整迁移顺序
 
-最终流程可以压缩为七步：
+最终流程可以压缩为八步：
 
 1. 精确回放 post-RoPE Q/K、V、source gate 与 mixer output。
 2. 按式 \((2)\) 至式 \((5)\) 构造 calibration-centered bounded hazard oracle。
-3. 用 exact Softmax future-query trajectories 求式 \((7)\) 的两个 observable states。
-4. 用式 \((10)\)、式 \((11)\) 投影 native decay、erase 和 write。
-5. 用 ridge、截断 SVD 和 inverse link 初始化全部模型参数。
-6. 运行一次 native free-running rollout，闭式重算 norm、gate 与 `o_proj`。
-7. 以该 checkpoint 开始逐层蒸馏，只用独立 held-out mixer NMSE 选择配置。
+3. 将 affine oracle 改写为 raw-query read 与 DC bias，避免把固定 center 塞进位置相关权重。
+4. 按式 \((10)\) 至式 \((12)\) 求两个独立、RoPE 可达的 observable query bases。
+5. 按式 \((14)\) 至式 \((16)\) 投影 native decay、erase、write，并从零状态 free-running 回放。
+6. 对目标 read 先做 inverse RoPE，再以 scale-relative ridge 初始化 bias-free `r_proj.weight`。
+7. 拟合其余 native projections，并在真实 recurrent output 上重解 norm、gate 与 `o_proj`。
+8. 只用独立 held-out 的完整 mixer NMSE 决定安装，再从该 checkpoint 开始逐层蒸馏。
 
-这条路线把三类误差分开了：Softmax hazard 近似、有限状态可观测压缩、native recurrence 参数化。每一层都有独立指标，因此既能把 zero-step NMSE 尽量压低，也能让后续逐层蒸馏只修正真正剩下的部分。
+这条路线把 hazard 近似、两个 state 的可观测容量、RoPE 可达性、native recurrence 和真实权重投影分开计量；最终又统一回到完整 mixer output。因此，zero-step 优化不会被某个更漂亮但不可安装的内部代理指标带偏。

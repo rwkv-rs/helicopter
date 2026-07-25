@@ -3,67 +3,67 @@
   "gdn": {
     "canonical_recurrence_mapping": {
       "output_max_abs": 1.6653345369377348e-16,
-      "output_relative_l2": 2.445699935254236e-16
+      "output_relative_l2": 2.1689195913249334e-16
     },
     "native_decay_link": {
       "clipped_core_output_vs_exact": {
-        "cosine": 0.9994019865989685,
-        "nmse": 0.0012164079817011952,
-        "relative_l2": 0.03487704321742058
+        "cosine": 0.9994511008262634,
+        "nmse": 0.001111306599341333,
+        "relative_l2": 0.03333626314997673
       },
       "decay_quantiles": {
         "q00": 0.003038319991901517,
-        "q01": 0.009911042638123035,
-        "q05": 0.031009189784526825,
+        "q01": 0.009868064895272255,
+        "q05": 0.031493086367845535,
         "q100": 1.0,
-        "q50": 0.9991765022277832,
+        "q50": 0.9991787075996399,
         "q95": 1.0,
         "q99": 1.0
       },
-      "fraction_below_minimum": 0.2427978515625,
+      "fraction_below_minimum": 0.2421875,
       "minimum_reachable_decay": 0.5452392101287842
     }
   },
   "gqa": {
     "affine_state": {
       "closure_scale": {
-        "maximum": 5.460529327392578,
-        "median": 2.297670841217041,
-        "minimum": -1.4303597211837769
+        "maximum": 6.543560028076172,
+        "median": 2.1588356494903564,
+        "minimum": -1.0214011669158936
       },
       "with_calibrated_rank_one_closure": {
         "attention_output": {
-          "cosine": 0.948945164680481,
-          "nmse": 0.09965259581804276,
-          "relative_l2": 0.3156780004501343
+          "cosine": 0.9472231864929199,
+          "nmse": 0.10285437107086182,
+          "relative_l2": 0.3207091689109802
         },
         "mixer_output": {
-          "cosine": 0.8874356150627136,
-          "nmse": 0.21432119607925415,
-          "relative_l2": 0.46294841170310974
+          "cosine": 0.8861150741577148,
+          "nmse": 0.2161892056465149,
+          "relative_l2": 0.46496152877807617
         }
       },
       "without_rank_one_closure": {
         "attention_output": {
-          "cosine": 0.9482066035270691,
-          "nmse": 0.10140065848827362,
-          "relative_l2": 0.3184347152709961
+          "cosine": 0.9459656476974487,
+          "nmse": 0.10560646653175354,
+          "relative_l2": 0.3249714970588684
         },
         "mixer_output": {
-          "cosine": 0.8901082873344421,
-          "nmse": 0.21183595061302185,
-          "relative_l2": 0.4602563977241516
+          "cosine": 0.8881144523620605,
+          "nmse": 0.21521280705928802,
+          "relative_l2": 0.4639103412628174
         }
       }
     },
     "exactness_checks": {
       "hazard_recurrence_vs_softmax_attention": {
         "cosine": 1.0000001192092896,
-        "nmse": 4.959176312332482e-14,
-        "relative_l2": 2.2269207988756534e-07
+        "nmse": 4.635427783804269e-14,
+        "relative_l2": 2.1530044591600017e-07
       },
       "manual_attention_vs_qwen_mixer": {
-        "cosine": 1.0000001192092896,
+        "cosine": 0.9999999403953552,
         "nmse": 0.0,
         "relative_l2": 0.0
       }
@@ -71,173 +71,1129 @@
     "hazard_linearization": {
       "logit_taylor_at_calibration_mean": {
         "attention_output": {
-          "cosine": 0.9868261218070984,
-          "nmse": 0.027169087901711464,
-          "relative_l2": 0.16483047604560852
+          "cosine": 0.9866812825202942,
+          "nmse": 0.027747176587581635,
+          "relative_l2": 0.1665748506784439
         },
         "hazard": {
-          "cosine": 0.9828444719314575,
-          "mae": 0.02455000765621662,
-          "nmse": 0.04553091526031494,
+          "cosine": 0.9830932021141052,
+          "mae": 0.024088213220238686,
+          "nmse": 0.045381512492895126,
           "outside_unit_interval_fraction": 0.0,
-          "relative_l2": 0.21337975561618805
+          "relative_l2": 0.21302936971187592
         },
         "mixer_output": {
-          "cosine": 0.9657119512557983,
-          "nmse": 0.07344327867031097,
-          "relative_l2": 0.27100422978401184
+          "cosine": 0.9666488170623779,
+          "nmse": 0.07078724354505539,
+          "relative_l2": 0.26605871319770813
         }
       },
       "logit_taylor_at_zero": {
         "attention_output": {
-          "cosine": 0.9782127737998962,
-          "nmse": 0.0458330437541008,
-          "relative_l2": 0.21408653259277344
+          "cosine": 0.9758661389350891,
+          "nmse": 0.05137589946389198,
+          "relative_l2": 0.2266625463962555
         },
         "hazard": {
-          "cosine": 0.9634998440742493,
-          "mae": 0.04661991447210312,
-          "nmse": 0.11554204672574997,
+          "cosine": 0.9611830115318298,
+          "mae": 0.047954101115465164,
+          "nmse": 0.12628324329853058,
           "outside_unit_interval_fraction": 0.0,
-          "relative_l2": 0.33991479873657227
+          "relative_l2": 0.35536354780197144
         },
         "mixer_output": {
-          "cosine": 0.9470832943916321,
-          "nmse": 0.1188245415687561,
-          "relative_l2": 0.3447093665599823
+          "cosine": 0.9392686486244202,
+          "nmse": 0.13610631227493286,
+          "relative_l2": 0.36892589926719666
         }
       },
       "probability_taylor_at_zero": {
         "attention_output": {
-          "cosine": 0.9545910954475403,
-          "nmse": 0.0901462584733963,
-          "relative_l2": 0.30024367570877075
+          "cosine": 0.9402497410774231,
+          "nmse": 0.11816516518592834,
+          "relative_l2": 0.34375160932540894
         },
         "hazard": {
-          "cosine": 0.9458109736442566,
-          "mae": 0.04222940653562546,
-          "nmse": 0.10878478735685349,
-          "outside_unit_interval_fraction": 0.20222355425357819,
-          "relative_l2": 0.32982537150382996
+          "cosine": 0.9464423060417175,
+          "mae": 0.041868049651384354,
+          "nmse": 0.10507506132125854,
+          "outside_unit_interval_fraction": 0.19175931811332703,
+          "relative_l2": 0.3241528570652008
         },
         "mixer_output": {
-          "cosine": 0.9014301896095276,
-          "nmse": 0.19848814606666565,
-          "relative_l2": 0.4455201029777527
+          "cosine": 0.8562666177749634,
+          "nmse": 0.2855480909347534,
+          "relative_l2": 0.5343669652938843
         }
       },
       "probability_taylor_at_zero_clipped": {
         "attention_output": {
-          "cosine": 0.9702433943748474,
-          "nmse": 0.05917444825172424,
-          "relative_l2": 0.24325799942016602
+          "cosine": 0.9653663039207458,
+          "nmse": 0.06886981427669525,
+          "relative_l2": 0.2624306082725525
         },
         "hazard": {
-          "cosine": 0.9691271781921387,
-          "mae": 0.03008032962679863,
-          "nmse": 0.060913972556591034,
+          "cosine": 0.9647735357284546,
+          "mae": 0.030902491882443428,
+          "nmse": 0.06925301998853683,
           "outside_unit_interval_fraction": 0.0,
-          "relative_l2": 0.24680757522583008
+          "relative_l2": 0.26315969228744507
         },
         "mixer_output": {
-          "cosine": 0.9349806308746338,
-          "nmse": 0.12827739119529724,
-          "relative_l2": 0.3581583499908447
+          "cosine": 0.9148616790771484,
+          "nmse": 0.16587679088115692,
+          "relative_l2": 0.40727972984313965
         }
       }
     },
     "state_compression": {
       "four_state_128x128_exact_block_control_matrix_only": {
-        "cosine": 1.0,
-        "nmse": 9.792544515075177e-15,
-        "relative_l2": 9.895728680930915e-08
+        "cosine": 0.9999998807907104,
+        "nmse": 9.895265047621653e-15,
+        "relative_l2": 9.947495271944717e-08
       },
       "two_state_128x128": {
         "bases": {
           "first_127_coordinates_plus_dc": {
             "attention_output_vs_exact_softmax": {
-              "cosine": 0.9194148182868958,
-              "nmse": 0.15486212074756622,
-              "relative_l2": 0.39352527260780334
+              "cosine": 0.9184465408325195,
+              "nmse": 0.15666905045509338,
+              "relative_l2": 0.3958144187927246
             },
+            "dc_indices": [
+              0,
+              0
+            ],
+            "materialized_read_shape": [
+              16,
+              64,
+              8,
+              2,
+              128
+            ],
+            "materialized_state_shape": [
+              16,
+              64,
+              8,
+              2,
+              128,
+              128
+            ],
             "matrix_observable_loss_vs_full_affine_state": {
-              "cosine": 0.8681954741477966,
-              "nmse": 0.29600790143013,
-              "relative_l2": 0.5440660715103149
+              "cosine": 0.88203364610672,
+              "nmse": 0.2673012316226959,
+              "relative_l2": 0.5170118808746338
             },
             "mixer_output_vs_exact_softmax": {
-              "cosine": 0.821930468082428,
-              "nmse": 0.32618245482444763,
-              "relative_l2": 0.5711238384246826
+              "cosine": 0.8258994221687317,
+              "nmse": 0.31939318776130676,
+              "relative_l2": 0.5651488304138184
+            },
+            "native_bias_free_read_projection": {
+              "absolute_ridge": 374.3376770019531,
+              "attention_output_vs_exact_softmax": {
+                "cosine": 0.6066741943359375,
+                "nmse": 0.6477929353713989,
+                "relative_l2": 0.8048558831214905
+              },
+              "attention_output_vs_materialized_two_state": {
+                "cosine": 0.6609064936637878,
+                "nmse": 0.5786343216896057,
+                "relative_l2": 0.7606801986694336
+              },
+              "calibration_selection_nmse_by_multiplier": {
+                "0.0001": 0.4946707487106323,
+                "0.001": 0.494429349899292,
+                "0.01": 0.49229878187179565,
+                "0.1": 0.4816962778568268,
+                "1.0": 0.47392237186431885,
+                "10.0": 0.5319961309432983,
+                "100.0": 0.65816330909729
+              },
+              "dc_channel": {
+                "cosine": 0.6360841393470764,
+                "nmse": 0.6155646443367004,
+                "relative_l2": 0.7845792770385742
+              },
+              "mixer_output_vs_exact_softmax": {
+                "cosine": 0.6277824640274048,
+                "nmse": 0.6215868592262268,
+                "relative_l2": 0.7884078025817871
+              },
+              "read_signal": {
+                "cosine": 0.7738760113716125,
+                "nmse": 0.40116003155708313,
+                "relative_l2": 0.6333719491958618
+              },
+              "ridge_scale": 374.3376770019531,
+              "selected_ridge_multiplier": 1.0,
+              "weight_sha256": "9b7ea8b4ba84c7b31c346d8fd556e3ae30c79783f199f1249c7a32910d5f8e18",
+              "weight_shape": [
+                2048,
+                2048
+              ]
+            },
+            "native_dynamic_signal_oracle": {
+              "erase": {
+                "maximum": 0.5013678669929504,
+                "median": 0.028602302074432373,
+                "minimum": 0.0,
+                "one_fraction": 0.0,
+                "zero_fraction": 0.0233154296875
+              },
+              "free_running_attention_output_vs_exact_softmax": {
+                "cosine": 0.91864413022995,
+                "nmse": 0.1562943011522293,
+                "relative_l2": 0.39534077048301697
+              },
+              "free_running_attention_output_vs_materialized_two_state": {
+                "cosine": 0.999891996383667,
+                "nmse": 0.0002161360898753628,
+                "relative_l2": 0.014701568521559238
+              },
+              "free_running_mixer_output_vs_exact_softmax": {
+                "cosine": 0.8275993466377258,
+                "nmse": 0.31664490699768066,
+                "relative_l2": 0.5627121329307556
+              },
+              "free_running_with_bias_free_read_mixer_vs_exact_softmax": {
+                "cosine": 0.6311212778091431,
+                "nmse": 0.6165037155151367,
+                "relative_l2": 0.7851775288581848
+              },
+              "free_running_with_bias_free_read_vs_exact_softmax": {
+                "cosine": 0.6093329191207886,
+                "nmse": 0.6433857679367065,
+                "relative_l2": 0.8021133542060852
+              },
+              "free_running_with_bias_free_read_vs_materialized_two_state": {
+                "cosine": 0.6635467410087585,
+                "nmse": 0.5739474892616272,
+                "relative_l2": 0.7575932741165161
+              },
+              "realized_decay": {
+                "maximum": 0.9993926882743835,
+                "median": 0.9792139530181885,
+                "minimum": 0.5452392101287842
+              },
+              "requested_decay": {
+                "clamped_fraction": 0.015625,
+                "maximum": 0.9993926882743835,
+                "median": 0.9792139530181885,
+                "minimum": 0.0
+              },
+              "scope": "native-compatible k_k=1, k_a=0, scalar decay and channel-wise erase; source-to-weight fitting is not included",
+              "signal_shapes": {
+                "decay": [
+                  16,
+                  64,
+                  16
+                ],
+                "erase": [
+                  16,
+                  64,
+                  16,
+                  128
+                ],
+                "key": [
+                  16,
+                  64,
+                  16,
+                  128
+                ],
+                "value": [
+                  16,
+                  64,
+                  16,
+                  128
+                ]
+              },
+              "teacher_forced_attention_output_vs_materialized_two_state": {
+                "cosine": 0.9999970197677612,
+                "nmse": 6.424513685487909e-06,
+                "relative_l2": 0.0025346626061946154
+              }
             },
             "total_loss_vs_full_affine_state": {
-              "cosine": 0.9816944003105164,
-              "nmse": 0.036396145820617676,
-              "relative_l2": 0.1907777339220047
+              "cosine": 0.9828422665596008,
+              "nmse": 0.03407536447048187,
+              "relative_l2": 0.18459513783454895
+            }
+          },
+          "future_read_observable_127_plus_dc": {
+            "attention_output_vs_exact_softmax": {
+              "cosine": 0.9389663338661194,
+              "nmse": 0.11840422451496124,
+              "relative_l2": 0.34409916400909424
+            },
+            "dc_indices": [
+              0,
+              0
+            ],
+            "materialized_read_shape": [
+              16,
+              64,
+              8,
+              2,
+              128
+            ],
+            "materialized_state_shape": [
+              16,
+              64,
+              8,
+              2,
+              128,
+              128
+            ],
+            "matrix_observable_loss_vs_full_affine_state": {
+              "cosine": 0.9653120636940002,
+              "nmse": 0.07534085959196091,
+              "relative_l2": 0.2744829058647156
+            },
+            "mixer_output_vs_exact_softmax": {
+              "cosine": 0.8674522638320923,
+              "nmse": 0.24858608841896057,
+              "relative_l2": 0.4985840916633606
+            },
+            "native_bias_free_read_projection": {
+              "absolute_ridge": 374.3376770019531,
+              "attention_output_vs_exact_softmax": {
+                "cosine": 0.616695761680603,
+                "nmse": 0.6405764818191528,
+                "relative_l2": 0.8003602623939514
+              },
+              "attention_output_vs_materialized_two_state": {
+                "cosine": 0.6556029915809631,
+                "nmse": 0.5922014713287354,
+                "relative_l2": 0.7695463299751282
+              },
+              "calibration_selection_nmse_by_multiplier": {
+                "0.0001": 0.5486583113670349,
+                "0.001": 0.5483845472335815,
+                "0.01": 0.5459698438644409,
+                "0.1": 0.5341360569000244,
+                "1.0": 0.5286452770233154,
+                "10.0": 0.6021605730056763,
+                "100.0": 0.7406269311904907
+              },
+              "dc_channel": {
+                "cosine": 0.6228498220443726,
+                "nmse": 0.6433190703392029,
+                "relative_l2": 0.802071750164032
+              },
+              "mixer_output_vs_exact_softmax": {
+                "cosine": 0.6392367482185364,
+                "nmse": 0.616820216178894,
+                "relative_l2": 0.7853790521621704
+              },
+              "read_signal": {
+                "cosine": 0.7566341757774353,
+                "nmse": 0.42750558257102966,
+                "relative_l2": 0.653839111328125
+              },
+              "ridge_scale": 374.3376770019531,
+              "selected_ridge_multiplier": 1.0,
+              "weight_sha256": "a675ef456b0aece351e801038a0fddd4a418ed01592a209d377005dca036fee9",
+              "weight_shape": [
+                2048,
+                2048
+              ]
+            },
+            "native_dynamic_signal_oracle": {
+              "erase": {
+                "maximum": 0.5518853068351746,
+                "median": 0.030101466923952103,
+                "minimum": 0.0,
+                "one_fraction": 0.0,
+                "zero_fraction": 0.023315906524658203
+              },
+              "free_running_attention_output_vs_exact_softmax": {
+                "cosine": 0.9390685558319092,
+                "nmse": 0.118235282599926,
+                "relative_l2": 0.34385359287261963
+              },
+              "free_running_attention_output_vs_materialized_two_state": {
+                "cosine": 0.9998112916946411,
+                "nmse": 0.0003807330795098096,
+                "relative_l2": 0.01951238326728344
+              },
+              "free_running_mixer_output_vs_exact_softmax": {
+                "cosine": 0.869194507598877,
+                "nmse": 0.24569977819919586,
+                "relative_l2": 0.49568113684654236
+              },
+              "free_running_with_bias_free_read_mixer_vs_exact_softmax": {
+                "cosine": 0.6451820731163025,
+                "nmse": 0.6065755486488342,
+                "relative_l2": 0.7788295745849609
+              },
+              "free_running_with_bias_free_read_vs_exact_softmax": {
+                "cosine": 0.6237636208534241,
+                "nmse": 0.628662109375,
+                "relative_l2": 0.7928822040557861
+              },
+              "free_running_with_bias_free_read_vs_materialized_two_state": {
+                "cosine": 0.662939727306366,
+                "nmse": 0.5791544914245605,
+                "relative_l2": 0.7610220313072205
+              },
+              "realized_decay": {
+                "maximum": 0.9993926882743835,
+                "median": 0.9792139530181885,
+                "minimum": 0.5452392101287842
+              },
+              "requested_decay": {
+                "clamped_fraction": 0.015625,
+                "maximum": 0.9993926882743835,
+                "median": 0.9792139530181885,
+                "minimum": 0.0
+              },
+              "scope": "native-compatible k_k=1, k_a=0, scalar decay and channel-wise erase; source-to-weight fitting is not included",
+              "signal_shapes": {
+                "decay": [
+                  16,
+                  64,
+                  16
+                ],
+                "erase": [
+                  16,
+                  64,
+                  16,
+                  128
+                ],
+                "key": [
+                  16,
+                  64,
+                  16,
+                  128
+                ],
+                "value": [
+                  16,
+                  64,
+                  16,
+                  128
+                ]
+              },
+              "teacher_forced_attention_output_vs_materialized_two_state": {
+                "cosine": 0.999992311000824,
+                "nmse": 1.960009649337735e-05,
+                "relative_l2": 0.004427200183272362
+              }
+            },
+            "total_loss_vs_full_affine_state": {
+              "cosine": 0.9952005743980408,
+              "nmse": 0.009604397229850292,
+              "relative_l2": 0.09800202399492264
             }
           },
           "operator_svd_127_plus_dc": {
             "attention_output_vs_exact_softmax": {
-              "cosine": 0.9357331395149231,
-              "nmse": 0.12448860704898834,
-              "relative_l2": 0.3528294265270233
+              "cosine": 0.9378753900527954,
+              "nmse": 0.12049898505210876,
+              "relative_l2": 0.3471296429634094
             },
+            "dc_indices": [
+              0,
+              0
+            ],
+            "materialized_read_shape": [
+              16,
+              64,
+              8,
+              2,
+              128
+            ],
+            "materialized_state_shape": [
+              16,
+              64,
+              8,
+              2,
+              128,
+              128
+            ],
             "matrix_observable_loss_vs_full_affine_state": {
-              "cosine": 0.9448400139808655,
-              "nmse": 0.12418963760137558,
-              "relative_l2": 0.35240548849105835
+              "cosine": 0.9596807956695557,
+              "nmse": 0.08548954129219055,
+              "relative_l2": 0.29238593578338623
             },
             "mixer_output_vs_exact_softmax": {
-              "cosine": 0.8547161221504211,
-              "nmse": 0.27128034830093384,
-              "relative_l2": 0.5208458304405212
+              "cosine": 0.863497793674469,
+              "nmse": 0.2560068964958191,
+              "relative_l2": 0.5059712529182434
+            },
+            "native_bias_free_read_projection": {
+              "absolute_ridge": 37.43376770019531,
+              "attention_output_vs_exact_softmax": {
+                "cosine": 0.5496492385864258,
+                "nmse": 0.7787100672721863,
+                "relative_l2": 0.8824455142021179
+              },
+              "attention_output_vs_materialized_two_state": {
+                "cosine": 0.5848904252052307,
+                "nmse": 0.7446318864822388,
+                "relative_l2": 0.8629205226898193
+              },
+              "calibration_selection_nmse_by_multiplier": {
+                "0.0001": 0.6232845187187195,
+                "0.001": 0.6230304837226868,
+                "0.01": 0.620821475982666,
+                "0.1": 0.6109713315963745,
+                "1.0": 0.6132972240447998,
+                "10.0": 0.7027975916862488,
+                "100.0": 0.8466231226921082
+              },
+              "dc_channel": {
+                "cosine": 0.5424797534942627,
+                "nmse": 0.8178310394287109,
+                "relative_l2": 0.9043401479721069
+              },
+              "mixer_output_vs_exact_softmax": {
+                "cosine": 0.6004630327224731,
+                "nmse": 0.7141096591949463,
+                "relative_l2": 0.8450500965118408
+              },
+              "read_signal": {
+                "cosine": 0.710918664932251,
+                "nmse": 0.49976667761802673,
+                "relative_l2": 0.7069417238235474
+              },
+              "ridge_scale": 374.3376770019531,
+              "selected_ridge_multiplier": 0.1,
+              "weight_sha256": "ba44ee1499438766f041313cbe85706f98207a051c093ca0041d447740644b7f",
+              "weight_shape": [
+                2048,
+                2048
+              ]
+            },
+            "native_dynamic_signal_oracle": {
+              "erase": {
+                "maximum": 0.5651341676712036,
+                "median": 0.03150714933872223,
+                "minimum": 0.0,
+                "one_fraction": 0.0,
+                "zero_fraction": 0.0233154296875
+              },
+              "free_running_attention_output_vs_exact_softmax": {
+                "cosine": 0.9380773901939392,
+                "nmse": 0.12008531391620636,
+                "relative_l2": 0.34653329849243164
+              },
+              "free_running_attention_output_vs_materialized_two_state": {
+                "cosine": 0.9997865557670593,
+                "nmse": 0.0004289804492145777,
+                "relative_l2": 0.02071184292435646
+              },
+              "free_running_mixer_output_vs_exact_softmax": {
+                "cosine": 0.8655444979667664,
+                "nmse": 0.2523590922355652,
+                "relative_l2": 0.5023536086082458
+              },
+              "free_running_with_bias_free_read_mixer_vs_exact_softmax": {
+                "cosine": 0.6071000695228577,
+                "nmse": 0.6989793181419373,
+                "relative_l2": 0.8360497951507568
+              },
+              "free_running_with_bias_free_read_vs_exact_softmax": {
+                "cosine": 0.5575457215309143,
+                "nmse": 0.7607624530792236,
+                "relative_l2": 0.8722169399261475
+              },
+              "free_running_with_bias_free_read_vs_materialized_two_state": {
+                "cosine": 0.5930535793304443,
+                "nmse": 0.7250576019287109,
+                "relative_l2": 0.8515031337738037
+              },
+              "realized_decay": {
+                "maximum": 0.9993926882743835,
+                "median": 0.9792139530181885,
+                "minimum": 0.5452392101287842
+              },
+              "requested_decay": {
+                "clamped_fraction": 0.015625,
+                "maximum": 0.9993926882743835,
+                "median": 0.9792139530181885,
+                "minimum": 0.0
+              },
+              "scope": "native-compatible k_k=1, k_a=0, scalar decay and channel-wise erase; source-to-weight fitting is not included",
+              "signal_shapes": {
+                "decay": [
+                  16,
+                  64,
+                  16
+                ],
+                "erase": [
+                  16,
+                  64,
+                  16,
+                  128
+                ],
+                "key": [
+                  16,
+                  64,
+                  16,
+                  128
+                ],
+                "value": [
+                  16,
+                  64,
+                  16,
+                  128
+                ]
+              },
+              "teacher_forced_attention_output_vs_materialized_two_state": {
+                "cosine": 0.9999926686286926,
+                "nmse": 1.9502434952300973e-05,
+                "relative_l2": 0.004416156094521284
+              }
             },
             "total_loss_vs_full_affine_state": {
-              "cosine": 0.9923787713050842,
-              "nmse": 0.01526994351297617,
-              "relative_l2": 0.12357162684202194
+              "cosine": 0.9945408701896667,
+              "nmse": 0.010898143984377384,
+              "relative_l2": 0.10439417511224747
             }
           },
           "query_pca_127_plus_dc": {
             "attention_output_vs_exact_softmax": {
-              "cosine": 0.9374371767044067,
-              "nmse": 0.12131637334823608,
-              "relative_l2": 0.34830501675605774
+              "cosine": 0.9392379522323608,
+              "nmse": 0.11789602786302567,
+              "relative_l2": 0.34335991740226746
             },
+            "dc_indices": [
+              0,
+              0
+            ],
+            "materialized_read_shape": [
+              16,
+              64,
+              8,
+              2,
+              128
+            ],
+            "materialized_state_shape": [
+              16,
+              64,
+              8,
+              2,
+              128,
+              128
+            ],
             "matrix_observable_loss_vs_full_affine_state": {
-              "cosine": 0.9540859460830688,
-              "nmse": 0.09933104366064072,
-              "relative_l2": 0.3151682913303375
+              "cosine": 0.969130277633667,
+              "nmse": 0.06675076484680176,
+              "relative_l2": 0.25836169719696045
             },
             "mixer_output_vs_exact_softmax": {
-              "cosine": 0.8553134799003601,
-              "nmse": 0.2709102928638458,
-              "relative_l2": 0.5204904675483704
+              "cosine": 0.8654258251190186,
+              "nmse": 0.2524934411048889,
+              "relative_l2": 0.502487301826477
+            },
+            "native_bias_free_read_projection": {
+              "absolute_ridge": 37.43376770019531,
+              "attention_output_vs_exact_softmax": {
+                "cosine": 0.5752652883529663,
+                "nmse": 0.7248368859291077,
+                "relative_l2": 0.851373553276062
+              },
+              "attention_output_vs_materialized_two_state": {
+                "cosine": 0.6096784472465515,
+                "nmse": 0.6892744898796082,
+                "relative_l2": 0.8302255272865295
+              },
+              "calibration_selection_nmse_by_multiplier": {
+                "0.0001": 0.5190839171409607,
+                "0.001": 0.5188971757888794,
+                "0.01": 0.5172691345214844,
+                "0.1": 0.5098827481269836,
+                "1.0": 0.513753354549408,
+                "10.0": 0.5965512990951538,
+                "100.0": 0.7371352910995483
+              },
+              "dc_channel": {
+                "cosine": 0.5688680410385132,
+                "nmse": 0.7578325271606445,
+                "relative_l2": 0.8705357313156128
+              },
+              "mixer_output_vs_exact_softmax": {
+                "cosine": 0.6245064735412598,
+                "nmse": 0.6613577604293823,
+                "relative_l2": 0.8132390379905701
+              },
+              "read_signal": {
+                "cosine": 0.7763833403587341,
+                "nmse": 0.4030285179615021,
+                "relative_l2": 0.6348452568054199
+              },
+              "ridge_scale": 374.3376770019531,
+              "selected_ridge_multiplier": 0.1,
+              "weight_sha256": "d8629565275c313bc499a0e28aea021da9892251524b664f3a954b37de7ae650",
+              "weight_shape": [
+                2048,
+                2048
+              ]
+            },
+            "native_dynamic_signal_oracle": {
+              "erase": {
+                "maximum": 0.5129733085632324,
+                "median": 0.027654709294438362,
+                "minimum": 0.0,
+                "one_fraction": 0.0,
+                "zero_fraction": 0.0233154296875
+              },
+              "free_running_attention_output_vs_exact_softmax": {
+                "cosine": 0.9390191435813904,
+                "nmse": 0.11841002851724625,
+                "relative_l2": 0.34410762786865234
+              },
+              "free_running_attention_output_vs_materialized_two_state": {
+                "cosine": 0.9997616410255432,
+                "nmse": 0.0005037462105974555,
+                "relative_l2": 0.022444289177656174
+              },
+              "free_running_mixer_output_vs_exact_softmax": {
+                "cosine": 0.8665953874588013,
+                "nmse": 0.2511381208896637,
+                "relative_l2": 0.501136839389801
+              },
+              "free_running_with_bias_free_read_mixer_vs_exact_softmax": {
+                "cosine": 0.6292280554771423,
+                "nmse": 0.6554999947547913,
+                "relative_l2": 0.8096295595169067
+              },
+              "free_running_with_bias_free_read_vs_exact_softmax": {
+                "cosine": 0.5802978277206421,
+                "nmse": 0.7166962027549744,
+                "relative_l2": 0.8465791344642639
+              },
+              "free_running_with_bias_free_read_vs_materialized_two_state": {
+                "cosine": 0.6150662899017334,
+                "nmse": 0.6800729036331177,
+                "relative_l2": 0.8246653079986572
+              },
+              "realized_decay": {
+                "maximum": 0.9993926882743835,
+                "median": 0.9792139530181885,
+                "minimum": 0.5452392101287842
+              },
+              "requested_decay": {
+                "clamped_fraction": 0.015625,
+                "maximum": 0.9993926882743835,
+                "median": 0.9792139530181885,
+                "minimum": 0.0
+              },
+              "scope": "native-compatible k_k=1, k_a=0, scalar decay and channel-wise erase; source-to-weight fitting is not included",
+              "signal_shapes": {
+                "decay": [
+                  16,
+                  64,
+                  16
+                ],
+                "erase": [
+                  16,
+                  64,
+                  16,
+                  128
+                ],
+                "key": [
+                  16,
+                  64,
+                  16,
+                  128
+                ],
+                "value": [
+                  16,
+                  64,
+                  16,
+                  128
+                ]
+              },
+              "teacher_forced_attention_output_vs_materialized_two_state": {
+                "cosine": 0.9999886751174927,
+                "nmse": 2.6466985218576156e-05,
+                "relative_l2": 0.005144607275724411
+              }
             },
             "total_loss_vs_full_affine_state": {
-              "cosine": 0.9939063787460327,
-              "nmse": 0.01221341360360384,
-              "relative_l2": 0.1105143204331398
+              "cosine": 0.995751142501831,
+              "nmse": 0.008509337902069092,
+              "relative_l2": 0.09224607795476913
+            }
+          },
+          "rope_aligned_disjoint_127x2_plus_two_dc": {
+            "attention_output_vs_exact_softmax": {
+              "cosine": 0.9227324724197388,
+              "nmse": 0.14857196807861328,
+              "relative_l2": 0.3854503631591797
+            },
+            "dc_indices": [
+              127,
+              127
+            ],
+            "materialized_read_shape": [
+              16,
+              64,
+              8,
+              2,
+              128
+            ],
+            "materialized_state_shape": [
+              16,
+              64,
+              8,
+              2,
+              128,
+              128
+            ],
+            "matrix_observable_loss_vs_full_affine_state": {
+              "cosine": 0.7744012475013733,
+              "nmse": 0.4006284773349762,
+              "relative_l2": 0.6329522132873535
+            },
+            "mixer_output_vs_exact_softmax": {
+              "cosine": 0.8145220279693604,
+              "nmse": 0.33658158779144287,
+              "relative_l2": 0.5801565051078796
+            },
+            "native_bias_free_read_projection": {
+              "absolute_ridge": 3.7433767700195313,
+              "attention_output_vs_exact_softmax": {
+                "cosine": 0.9112452864646912,
+                "nmse": 0.16976507008075714,
+                "relative_l2": 0.4120256006717682
+              },
+              "attention_output_vs_materialized_two_state": {
+                "cosine": 0.9940665364265442,
+                "nmse": 0.012093386612832546,
+                "relative_l2": 0.10996993631124496
+              },
+              "calibration_selection_nmse_by_multiplier": {
+                "0.0001": 0.24071374535560608,
+                "0.001": 0.24069777131080627,
+                "0.01": 0.24057671427726746,
+                "0.1": 0.24071218073368073,
+                "1.0": 0.25082266330718994,
+                "10.0": 0.3019513487815857,
+                "100.0": 0.39149874448776245
+              },
+              "dc_channel": {
+                "cosine": 0.9983373284339905,
+                "nmse": 0.003527690190821886,
+                "relative_l2": 0.059394363313913345
+              },
+              "mixer_output_vs_exact_softmax": {
+                "cosine": 0.7853447794914246,
+                "nmse": 0.38329628109931946,
+                "relative_l2": 0.6191092729568481
+              },
+              "read_signal": {
+                "cosine": 0.913077175617218,
+                "nmse": 0.166297048330307,
+                "relative_l2": 0.40779536962509155
+              },
+              "ridge_scale": 374.3376770019531,
+              "selected_ridge_multiplier": 0.01,
+              "weight_sha256": "4917c064990cb9148173fdb71530ecc6f31f6757acf391af4b116a78f8b553f6",
+              "weight_shape": [
+                2048,
+                2048
+              ]
+            },
+            "native_dynamic_signal_oracle": {
+              "erase": {
+                "maximum": 0.6724230647087097,
+                "median": 0.0245991013944149,
+                "minimum": 0.0,
+                "one_fraction": 0.0,
+                "zero_fraction": 0.032928466796875
+              },
+              "free_running_attention_output_vs_exact_softmax": {
+                "cosine": 0.9191394448280334,
+                "nmse": 0.15554757416248322,
+                "relative_l2": 0.39439523220062256
+              },
+              "free_running_attention_output_vs_materialized_two_state": {
+                "cosine": 0.9923490881919861,
+                "nmse": 0.01544220931828022,
+                "relative_l2": 0.12426669150590897
+              },
+              "free_running_mixer_output_vs_exact_softmax": {
+                "cosine": 0.8105897307395935,
+                "nmse": 0.34294453263282776,
+                "relative_l2": 0.5856146812438965
+              },
+              "free_running_with_bias_free_read_mixer_vs_exact_softmax": {
+                "cosine": 0.7737517356872559,
+                "nmse": 0.4013373851776123,
+                "relative_l2": 0.6335119605064392
+              },
+              "free_running_with_bias_free_read_vs_exact_softmax": {
+                "cosine": 0.9036416411399841,
+                "nmse": 0.18428419530391693,
+                "relative_l2": 0.42928338050842285
+              },
+              "free_running_with_bias_free_read_vs_materialized_two_state": {
+                "cosine": 0.9857573509216309,
+                "nmse": 0.029530420899391174,
+                "relative_l2": 0.17184418439865112
+              },
+              "realized_decay": {
+                "maximum": 0.9993926882743835,
+                "median": 0.9792139530181885,
+                "minimum": 0.5452392101287842
+              },
+              "requested_decay": {
+                "clamped_fraction": 0.015625,
+                "maximum": 0.9993926882743835,
+                "median": 0.9792139530181885,
+                "minimum": 0.0
+              },
+              "scope": "native-compatible k_k=1, k_a=0, scalar decay and channel-wise erase; source-to-weight fitting is not included",
+              "signal_shapes": {
+                "decay": [
+                  16,
+                  64,
+                  16
+                ],
+                "erase": [
+                  16,
+                  64,
+                  16,
+                  128
+                ],
+                "key": [
+                  16,
+                  64,
+                  16,
+                  128
+                ],
+                "value": [
+                  16,
+                  64,
+                  16,
+                  128
+                ]
+              },
+              "teacher_forced_attention_output_vs_materialized_two_state": {
+                "cosine": 0.9995516538619995,
+                "nmse": 0.0009000370046123862,
+                "relative_l2": 0.03000061772763729
+              }
+            },
+            "total_loss_vs_full_affine_state": {
+              "cosine": 0.97420734167099,
+              "nmse": 0.05107181891798973,
+              "relative_l2": 0.22599075734615326
+            }
+          },
+          "rope_aligned_observable_127x2_plus_two_dc": {
+            "attention_output_vs_exact_softmax": {
+              "cosine": 0.9339228868484497,
+              "nmse": 0.1277914047241211,
+              "relative_l2": 0.3574792742729187
+            },
+            "dc_indices": [
+              127,
+              127
+            ],
+            "materialized_read_shape": [
+              16,
+              64,
+              8,
+              2,
+              128
+            ],
+            "materialized_state_shape": [
+              16,
+              64,
+              8,
+              2,
+              128,
+              128
+            ],
+            "matrix_observable_loss_vs_full_affine_state": {
+              "cosine": 0.8772802948951721,
+              "nmse": 0.23421500623226166,
+              "relative_l2": 0.4839576780796051
+            },
+            "mixer_output_vs_exact_softmax": {
+              "cosine": 0.8461042046546936,
+              "nmse": 0.28418320417404175,
+              "relative_l2": 0.5330883860588074
+            },
+            "native_bias_free_read_projection": {
+              "absolute_ridge": 3.7433767700195313,
+              "attention_output_vs_exact_softmax": {
+                "cosine": 0.9234337210655212,
+                "nmse": 0.14742091298103333,
+                "relative_l2": 0.38395431637763977
+              },
+              "attention_output_vs_materialized_two_state": {
+                "cosine": 0.993049144744873,
+                "nmse": 0.014227042905986309,
+                "relative_l2": 0.11927716434001923
+              },
+              "calibration_selection_nmse_by_multiplier": {
+                "0.0001": 0.24591434001922607,
+                "0.001": 0.24590782821178436,
+                "0.01": 0.2458774894475937,
+                "0.1": 0.2467215359210968,
+                "1.0": 0.26032933592796326,
+                "10.0": 0.32152897119522095,
+                "100.0": 0.4239257574081421
+              },
+              "dc_channel": {
+                "cosine": 0.9983373284339905,
+                "nmse": 0.003527690190821886,
+                "relative_l2": 0.059394363313913345
+              },
+              "mixer_output_vs_exact_softmax": {
+                "cosine": 0.8185226917266846,
+                "nmse": 0.33002057671546936,
+                "relative_l2": 0.5744742155075073
+              },
+              "read_signal": {
+                "cosine": 0.9172343611717224,
+                "nmse": 0.15870213508605957,
+                "relative_l2": 0.3983743488788605
+              },
+              "ridge_scale": 374.3376770019531,
+              "selected_ridge_multiplier": 0.01,
+              "weight_sha256": "254407284a84b42c7cbecf8ccda19102412e2888b0eaa5cfc964991b0fc43156",
+              "weight_shape": [
+                2048,
+                2048
+              ]
+            },
+            "native_dynamic_signal_oracle": {
+              "erase": {
+                "maximum": 0.6886500716209412,
+                "median": 0.025673847645521164,
+                "minimum": 0.0,
+                "one_fraction": 0.0,
+                "zero_fraction": 0.032806396484375
+              },
+              "free_running_attention_output_vs_exact_softmax": {
+                "cosine": 0.9289621710777283,
+                "nmse": 0.13704372942447662,
+                "relative_l2": 0.3701941668987274
+              },
+              "free_running_attention_output_vs_materialized_two_state": {
+                "cosine": 0.9902431964874268,
+                "nmse": 0.019420862197875977,
+                "relative_l2": 0.1393587440252304
+              },
+              "free_running_mixer_output_vs_exact_softmax": {
+                "cosine": 0.8445793986320496,
+                "nmse": 0.2869946360588074,
+                "relative_l2": 0.5357187986373901
+              },
+              "free_running_with_bias_free_read_mixer_vs_exact_softmax": {
+                "cosine": 0.8130553364753723,
+                "nmse": 0.3389468789100647,
+                "relative_l2": 0.5821914672851562
+              },
+              "free_running_with_bias_free_read_vs_exact_softmax": {
+                "cosine": 0.9164340496063232,
+                "nmse": 0.16074582934379578,
+                "relative_l2": 0.4009312093257904
+              },
+              "free_running_with_bias_free_read_vs_materialized_two_state": {
+                "cosine": 0.9838435053825378,
+                "nmse": 0.032989051192998886,
+                "relative_l2": 0.18162886798381805
+              },
+              "realized_decay": {
+                "maximum": 0.9993926882743835,
+                "median": 0.9792139530181885,
+                "minimum": 0.5452392101287842
+              },
+              "requested_decay": {
+                "clamped_fraction": 0.015625,
+                "maximum": 0.9993926882743835,
+                "median": 0.9792139530181885,
+                "minimum": 0.0
+              },
+              "scope": "native-compatible k_k=1, k_a=0, scalar decay and channel-wise erase; source-to-weight fitting is not included",
+              "signal_shapes": {
+                "decay": [
+                  16,
+                  64,
+                  16
+                ],
+                "erase": [
+                  16,
+                  64,
+                  16,
+                  128
+                ],
+                "key": [
+                  16,
+                  64,
+                  16,
+                  128
+                ],
+                "value": [
+                  16,
+                  64,
+                  16,
+                  128
+                ]
+              },
+              "teacher_forced_attention_output_vs_materialized_two_state": {
+                "cosine": 0.9993101954460144,
+                "nmse": 0.001395983388647437,
+                "relative_l2": 0.03736285865306854
+              }
+            },
+            "total_loss_vs_full_affine_state": {
+              "cosine": 0.9849805235862732,
+              "nmse": 0.029857555404305458,
+              "relative_l2": 0.17279338836669922
             }
           }
         },
         "feature_budget": {
-          "constant_channels": 1,
-          "query_subspace_channels": 127
+          "constraint": "each output-row block can read only its own native state; feature slots are not a shared arbitrary 254-dimensional input subspace",
+          "per_native_state": {
+            "constant_channels": 1,
+            "query_feature_channels": 127
+          },
+          "two_state_total": {
+            "constant_channels": 2,
+            "query_feature_slots": 254
+          }
+        },
+        "native_pipeline_selection": {
+          "baseline": "query_pca_127_plus_dc",
+          "combined_pipeline_improved": true,
+          "compression_non_regressed": false,
+          "proposed": "rope_aligned_observable_127x2_plus_two_dc",
+          "rule": "strictly lower finite held-out combined native-transition/read mixer NMSE; intermediate stages remain diagnostics",
+          "selected": "rope_aligned_observable_127x2_plus_two_dc",
+          "status": "accepted",
+          "transition_non_regressed": false
+        },
+        "selection": {
+          "baseline": "query_pca_127_plus_dc",
+          "mixer_non_regressed": true,
+          "observable_improved": false,
+          "proposed": "future_read_observable_127_plus_dc",
+          "rule": "strictly lower held-out total affine-state NMSE and non-regressed held-out mixer NMSE",
+          "selected": "query_pca_127_plus_dc",
+          "status": "rejected"
         }
       }
     }
   },
   "provenance": {
     "activation_dtype": "torch.float32",
-    "calibration_rows": 4,
+    "calibration_rows": 8,
     "dataset": "/home/caizus/Datasets/fineweb-edu/87f09149ef4734204d70ed1d046ddc9ca3f2b8f9/qwen35-2b-70m.jsonl",
     "dataset_sha256": "302189332fce81c74bf7bfc01ec01d5518a214c77d84ceb33f756b9be11060a5",
     "device": "cuda",
     "device_name": "NVIDIA GB10",
     "gdn_layer": 0,
     "gqa_layer": 3,
-    "heldout_rows": 4,
+    "heldout_rows": 8,
     "loaded_layer_source_bytes": {
       "0": 117629536,
       "1": 117629536,
@@ -254,7 +1210,15 @@
       "fineweb-edu:<urn:uuid:c0b175bb-65fb-420e-a881-a80b91d00ecd>",
       "fineweb-edu:<urn:uuid:373cc951-d17e-4d57-b0f5-122effe3a054>",
       "fineweb-edu:<urn:uuid:78cbe1bd-1849-4138-b59a-5521e93122a3>",
-      "fineweb-edu:<urn:uuid:a63f6870-f496-4355-adfd-f3296c1577e5>"
+      "fineweb-edu:<urn:uuid:a63f6870-f496-4355-adfd-f3296c1577e5>",
+      "fineweb-edu:<urn:uuid:0428aaca-1b84-4407-9b6f-93b230a692b3>",
+      "fineweb-edu:<urn:uuid:6665d40b-fee1-4353-8a03-3268af4a76bb>",
+      "fineweb-edu:<urn:uuid:d55ba202-34fa-4fe6-b6ae-698c282eb244>",
+      "fineweb-edu:<urn:uuid:be22c535-4fcb-4d7e-9507-2ace71b51909>",
+      "fineweb-edu:<urn:uuid:3cd46b83-2936-49a0-9b1f-a7fc2baa9e50>",
+      "fineweb-edu:<urn:uuid:672e69ee-fd10-42dc-8e01-f4fde95914a0>",
+      "fineweb-edu:<urn:uuid:c63d3de8-6d63-4687-b45d-41b137a97594>",
+      "fineweb-edu:<urn:uuid:c183066d-32a9-42eb-91b6-191fdb0980c2>"
     ],
     "sequence_length": 64,
     "source": "/home/caizus/Weights/Qwen/Qwen3.5-2B",

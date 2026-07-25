@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib
 import json
+import math
 from pathlib import Path
 
 import torch
@@ -13,6 +15,7 @@ from transformers import AutoTokenizer
 from transformers.masking_utils import create_causal_mask
 
 from any2rwkv.checkpoint import read_checkpoint, sha256_file
+from any2rwkv.mixer import apply_partial_rope
 from any2rwkv.streamed_teacher import StreamedQwen35Teacher
 from any2rwkv.zero_step_probe import (
     affine_state_rollout,
@@ -21,13 +24,19 @@ from any2rwkv.zero_step_probe import (
     gdn_reference_scan,
     hazard_metrics,
     logit_taylor_hazards,
+    native_two_state_rollout,
     normalized_mse,
+    observable_query_bases,
     operator_input_bases,
+    probability_tangent_parameters,
     probability_taylor_hazards,
     query_input_bases,
     qwen35_l2_normalize,
+    rope_aligned_two_state_bases,
     rollout_hazards,
+    select_bias_free_projection,
     tensor_metrics,
+    two_state_projection,
     two_state_outputs,
     verify_gdn_mapping,
 )
@@ -173,6 +182,7 @@ def trace_gqa(
         "grouped_key": grouped_key.transpose(1, 2).float(),
         "grouped_value": grouped_value.transpose(1, 2).float(),
         "gate": torch.sigmoid(gate).float(),
+        "mixer_input": normalized.float(),
         "output_weight": mixer.o_proj.weight.float(),
         "output_bias": (
             None if mixer.o_proj.bias is None else mixer.o_proj.bias.float()
@@ -201,10 +211,45 @@ def heldout_metrics(
     )
 
 
+def tensor_sha256(value: Tensor) -> str:
+    contiguous = value.detach().cpu().contiguous()
+    return hashlib.sha256(contiguous.numpy().tobytes()).hexdigest()
+
+
+def rotate_native_read(
+    read: Tensor,
+    positions: Tensor,
+    *,
+    source_head_dim: int,
+    rotary_dim: int,
+    rope_theta: float,
+    inverse: bool,
+) -> Tensor:
+    if read.ndim != 4:
+        raise ValueError("native read must be [batch,time,head,feature]")
+    batch, tokens, _, _ = read.shape
+    flat_width = read.shape[2] * read.shape[3]
+    if flat_width % source_head_dim:
+        raise ValueError("native read width does not fit source RoPE heads")
+    source_heads = flat_width // source_head_dim
+    source_view = read.reshape(batch, tokens, source_heads, source_head_dim)
+    rotated = apply_partial_rope(
+        source_view,
+        -positions if inverse else positions,
+        rotary_dim=rotary_dim,
+        theta=rope_theta,
+    )
+    return rotated.reshape_as(read)
+
+
 def gqa_diagnostics(
     signals: dict[str, Tensor],
     *,
     calibration_rows: int,
+    positions: Tensor,
+    source_head_dim: int,
+    rotary_dim: int,
+    rope_theta: float,
 ) -> dict[str, object]:
     query = signals["query"]
     key = signals["key"]
@@ -296,6 +341,10 @@ def gqa_diagnostics(
         fit_rank_one_closure=True,
     )
     affine_mixer_output = project_gqa_mixer(affine.output, signals)
+    tangent_probability, tangent_slope = probability_tangent_parameters(
+        grouped_key,
+        group_center,
+    )
     affine_results: dict[str, object] = {
         "without_rank_one_closure": without_closure_metrics,
         "with_calibrated_rank_one_closure": {
@@ -330,30 +379,314 @@ def gqa_diagnostics(
         calibration_batches=calibration_rows,
         rank=query_subspace_rank,
     )
+    observable_basis = observable_query_bases(
+        affine.states,
+        affine.centered_query,
+        calibration_batches=calibration_rows,
+        rank=query_subspace_rank,
+    )
     coordinate_basis = torch.eye(
         query.shape[-1], device=query.device, dtype=torch.float32
     )[:, :query_subspace_rank].expand(query.shape[2], -1, -1)
     bias_by_head = affine.bias[:, :, head_to_group]
-    sketch_results: dict[str, object] = {}
-    full_matrix_output: Tensor | None = None
-    for name, basis in {
-        "first_127_coordinates_plus_dc": coordinate_basis,
-        "query_pca_127_plus_dc": query_basis,
-        "operator_svd_127_plus_dc": operator_basis,
-    }.items():
-        full_matrix, sketch_matrix = two_state_outputs(
-            affine.states,
-            affine.centered_query,
-            basis,
+    uncentered_bias = affine.bias - torch.einsum(
+        "btgod,gd->btgo",
+        affine.states,
+        group_center,
+    )
+    native_dim = query.shape[-1] // 2
+    disjoint_basis = torch.zeros(
+        query.shape[2],
+        2,
+        query.shape[-1],
+        native_dim - 1,
+        device=query.device,
+        dtype=torch.float32,
+    )
+    feature_identity = torch.eye(
+        native_dim - 1,
+        device=query.device,
+        dtype=torch.float32,
+    )
+    disjoint_basis[:, 0, : native_dim - 1] = feature_identity
+    disjoint_basis[
+        :,
+        1,
+        native_dim : 2 * native_dim - 1,
+    ] = feature_identity
+    rope_observable_basis = rope_aligned_two_state_bases(
+        affine.states,
+        affine.centered_query,
+        calibration_batches=calibration_rows,
+        native_dim=native_dim,
+        rotary_dim=rotary_dim,
+    )
+    full_matrix_outputs = []
+    for head in range(query.shape[2]):
+        group = head // group_width
+        full_matrix_outputs.append(
+            torch.einsum(
+                "btod,btd->bto",
+                affine.states[:, :, group],
+                affine.centered_query[:, :, head],
+            )
         )
-        if full_matrix_output is None:
-            full_matrix_output = full_matrix
-        full_affine = full_matrix + bias_by_head
-        sketch_affine = sketch_matrix + bias_by_head
+    full_matrix_output = torch.stack(full_matrix_outputs, dim=2)
+    full_affine = full_matrix_output + bias_by_head
+    sketch_results: dict[str, object] = {}
+    for name, (basis, projection_bias, projection_query, dc_indices) in {
+        "first_127_coordinates_plus_dc": (
+            coordinate_basis,
+            affine.bias,
+            affine.centered_query,
+            (0, 0),
+        ),
+        "query_pca_127_plus_dc": (
+            query_basis,
+            affine.bias,
+            affine.centered_query,
+            (0, 0),
+        ),
+        "future_read_observable_127_plus_dc": (
+            observable_basis,
+            affine.bias,
+            affine.centered_query,
+            (0, 0),
+        ),
+        "operator_svd_127_plus_dc": (
+            operator_basis,
+            affine.bias,
+            affine.centered_query,
+            (0, 0),
+        ),
+        "rope_aligned_disjoint_127x2_plus_two_dc": (
+            disjoint_basis,
+            uncentered_bias,
+            query,
+            (native_dim - 1, native_dim - 1),
+        ),
+        "rope_aligned_observable_127x2_plus_two_dc": (
+            rope_observable_basis,
+            uncentered_bias,
+            query,
+            (native_dim - 1, native_dim - 1),
+        ),
+    }.items():
+        materialized = two_state_projection(
+            affine.states,
+            projection_bias,
+            projection_query,
+            basis,
+            dc_indices=dc_indices,
+        )
+        sketch_affine = materialized.output
+        sketch_matrix = sketch_affine - bias_by_head
+        target_native_read = materialized.read.flatten(2, 3)
+        target_pre_rope_read = rotate_native_read(
+            target_native_read,
+            positions,
+            source_head_dim=source_head_dim,
+            rotary_dim=rotary_dim,
+            rope_theta=rope_theta,
+            inverse=True,
+        )
+        read_selection = select_bias_free_projection(
+            signals["mixer_input"],
+            target_pre_rope_read,
+            calibration_batches=calibration_rows,
+            ridges=(1e-4, 1e-3, 1e-2, 1e-1, 1.0, 10.0, 100.0),
+        )
+        read_projection = read_selection.projection
+        projected_native_read = rotate_native_read(
+            read_projection.prediction,
+            positions,
+            source_head_dim=source_head_dim,
+            rotary_dim=rotary_dim,
+            rope_theta=rope_theta,
+            inverse=False,
+        )
+        native_states = materialized.states.flatten(2, 3)
+        native_read_output = torch.einsum(
+            "bthod,bthd->btho",
+            native_states,
+            projected_native_read,
+        ).reshape_as(sketch_affine)
+        native_transition = native_two_state_rollout(
+            materialized,
+            tangent_probability,
+            tangent_slope,
+        )
+        teacher_forced_native_states = (
+            native_transition.teacher_forced_states.flatten(2, 3)
+        )
+        free_running_native_states = (
+            native_transition.free_running_states.flatten(2, 3)
+        )
+        teacher_forced_native_output = torch.einsum(
+            "bthod,bthd->btho",
+            teacher_forced_native_states,
+            target_native_read,
+        ).reshape_as(sketch_affine)
+        free_running_projected_read_output = torch.einsum(
+            "bthod,bthd->btho",
+            free_running_native_states,
+            projected_native_read,
+        ).reshape_as(sketch_affine)
+        requested_decay = native_transition.requested_decay
+        realized_decay = native_transition.decay
+        native_dc_indices = torch.tensor(
+            materialized.dc_indices,
+            device=query.device,
+            dtype=torch.long,
+        ).repeat(query.shape[2]).view(1, 1, -1, 1)
+        native_dc_indices = native_dc_indices.expand(
+            target_native_read.shape[0],
+            target_native_read.shape[1],
+            -1,
+            -1,
+        )
+        projected_dc = torch.gather(
+            projected_native_read,
+            -1,
+            native_dc_indices,
+        )
+        target_dc = torch.gather(
+            target_native_read,
+            -1,
+            native_dc_indices,
+        )
         sketch_results[name] = {
+            "materialized_state_shape": list(materialized.states.shape),
+            "materialized_read_shape": list(materialized.read.shape),
+            "dc_indices": list(materialized.dc_indices),
+            "native_bias_free_read_projection": {
+                "weight_shape": list(read_projection.weight.shape),
+                "weight_sha256": tensor_sha256(read_projection.weight),
+                "selected_ridge_multiplier": read_selection.ridge,
+                "absolute_ridge": read_selection.absolute_ridge,
+                "ridge_scale": read_selection.ridge_scale,
+                "calibration_selection_nmse_by_multiplier": {
+                    str(ridge): nmse
+                    for ridge, nmse in read_selection.selection_nmse.items()
+                },
+                "read_signal": heldout_metrics(
+                    projected_native_read,
+                    target_native_read,
+                    calibration_rows,
+                ),
+                "dc_channel": heldout_metrics(
+                    projected_dc,
+                    target_dc,
+                    calibration_rows,
+                ),
+                "attention_output_vs_materialized_two_state": heldout_metrics(
+                    native_read_output,
+                    sketch_affine,
+                    calibration_rows,
+                ),
+                "attention_output_vs_exact_softmax": heldout_metrics(
+                    native_read_output,
+                    exact.output,
+                    calibration_rows,
+                ),
+                "mixer_output_vs_exact_softmax": heldout_metrics(
+                    project_gqa_mixer(native_read_output, signals),
+                    exact_mixer_output,
+                    calibration_rows,
+                ),
+            },
+            "native_dynamic_signal_oracle": {
+                "scope": (
+                    "native-compatible k_k=1, k_a=0, scalar decay and "
+                    "channel-wise erase; source-to-weight fitting is not included"
+                ),
+                "signal_shapes": {
+                    "decay": list(native_transition.decay.shape),
+                    "erase": list(native_transition.erase.shape),
+                    "key": list(native_transition.key.shape),
+                    "value": list(native_transition.value.shape),
+                },
+                "requested_decay": {
+                    "minimum": float(requested_decay.min()),
+                    "median": float(requested_decay.median()),
+                    "maximum": float(requested_decay.max()),
+                    "clamped_fraction": float(
+                        (realized_decay != requested_decay).float().mean()
+                    ),
+                },
+                "realized_decay": {
+                    "minimum": float(realized_decay.min()),
+                    "median": float(realized_decay.median()),
+                    "maximum": float(realized_decay.max()),
+                },
+                "erase": {
+                    "minimum": float(native_transition.erase.min()),
+                    "median": float(native_transition.erase.median()),
+                    "maximum": float(native_transition.erase.max()),
+                    "zero_fraction": float(
+                        (native_transition.erase == 0).float().mean()
+                    ),
+                    "one_fraction": float(
+                        (native_transition.erase == 1).float().mean()
+                    ),
+                },
+                "teacher_forced_attention_output_vs_materialized_two_state": (
+                    heldout_metrics(
+                        teacher_forced_native_output,
+                        sketch_affine,
+                        calibration_rows,
+                    )
+                ),
+                "free_running_attention_output_vs_materialized_two_state": (
+                    heldout_metrics(
+                        native_transition.free_running_output,
+                        sketch_affine,
+                        calibration_rows,
+                    )
+                ),
+                "free_running_attention_output_vs_exact_softmax": (
+                    heldout_metrics(
+                        native_transition.free_running_output,
+                        exact.output,
+                        calibration_rows,
+                    )
+                ),
+                "free_running_mixer_output_vs_exact_softmax": heldout_metrics(
+                    project_gqa_mixer(
+                        native_transition.free_running_output,
+                        signals,
+                    ),
+                    exact_mixer_output,
+                    calibration_rows,
+                ),
+                "free_running_with_bias_free_read_vs_materialized_two_state": (
+                    heldout_metrics(
+                        free_running_projected_read_output,
+                        sketch_affine,
+                        calibration_rows,
+                    )
+                ),
+                "free_running_with_bias_free_read_vs_exact_softmax": (
+                    heldout_metrics(
+                        free_running_projected_read_output,
+                        exact.output,
+                        calibration_rows,
+                    )
+                ),
+                "free_running_with_bias_free_read_mixer_vs_exact_softmax": (
+                    heldout_metrics(
+                        project_gqa_mixer(
+                            free_running_projected_read_output,
+                            signals,
+                        ),
+                        exact_mixer_output,
+                        calibration_rows,
+                    )
+                ),
+            },
             "matrix_observable_loss_vs_full_affine_state": heldout_metrics(
                 sketch_matrix,
-                full_matrix,
+                full_matrix_output,
                 calibration_rows,
             ),
             "total_loss_vs_full_affine_state": heldout_metrics(
@@ -372,8 +705,54 @@ def gqa_diagnostics(
                 calibration_rows,
             ),
         }
-    if full_matrix_output is None:
-        raise AssertionError("GQA sketch loop produced no matrix output")
+    baseline_name = "query_pca_127_plus_dc"
+    proposed_name = "future_read_observable_127_plus_dc"
+    baseline_metrics = sketch_results[baseline_name]
+    proposed_metrics = sketch_results[proposed_name]
+    observable_improved = (
+        proposed_metrics["total_loss_vs_full_affine_state"]["nmse"]
+        < baseline_metrics["total_loss_vs_full_affine_state"]["nmse"]
+    )
+    mixer_non_regressed = (
+        proposed_metrics["mixer_output_vs_exact_softmax"]["nmse"]
+        <= baseline_metrics["mixer_output_vs_exact_softmax"]["nmse"]
+    )
+    selected_name = (
+        proposed_name
+        if observable_improved and mixer_non_regressed
+        else baseline_name
+    )
+    native_candidate_name = "rope_aligned_observable_127x2_plus_two_dc"
+    native_baseline = sketch_results[baseline_name]
+    native_candidate = sketch_results[native_candidate_name]
+    native_candidate_compression_non_regressed = (
+        native_candidate["total_loss_vs_full_affine_state"]["nmse"]
+        <= native_baseline["total_loss_vs_full_affine_state"]["nmse"]
+    )
+    native_candidate_transition_non_regressed = (
+        native_candidate["native_dynamic_signal_oracle"][
+            "free_running_mixer_output_vs_exact_softmax"
+        ]["nmse"]
+        <= native_baseline["native_dynamic_signal_oracle"][
+            "free_running_mixer_output_vs_exact_softmax"
+        ]["nmse"]
+    )
+    native_candidate_pipeline_nmse = native_candidate[
+        "native_dynamic_signal_oracle"
+    ]["free_running_with_bias_free_read_mixer_vs_exact_softmax"]["nmse"]
+    native_baseline_pipeline_nmse = native_baseline[
+        "native_dynamic_signal_oracle"
+    ]["free_running_with_bias_free_read_mixer_vs_exact_softmax"]["nmse"]
+    native_candidate_pipeline_improved = (
+        math.isfinite(native_candidate_pipeline_nmse)
+        and native_candidate_pipeline_nmse
+        < native_baseline_pipeline_nmse
+    )
+    native_selected_name = (
+        native_candidate_name
+        if native_candidate_pipeline_improved
+        else baseline_name
+    )
 
     four_state_outputs = []
     for head in range(query.shape[2]):
@@ -388,8 +767,56 @@ def gqa_diagnostics(
     compression_results = {
         "two_state_128x128": {
             "feature_budget": {
-                "constant_channels": 1,
-                "query_subspace_channels": query_subspace_rank,
+                "per_native_state": {
+                    "constant_channels": 1,
+                    "query_feature_channels": query_subspace_rank,
+                },
+                "two_state_total": {
+                    "constant_channels": 2,
+                    "query_feature_slots": query_subspace_rank * 2,
+                },
+                "constraint": (
+                    "each output-row block can read only its own native state; "
+                    "feature slots are not a shared arbitrary 254-dimensional "
+                    "input subspace"
+                ),
+            },
+            "selection": {
+                "baseline": baseline_name,
+                "proposed": proposed_name,
+                "selected": selected_name,
+                "status": (
+                    "accepted"
+                    if selected_name == proposed_name
+                    else "rejected"
+                ),
+                "rule": (
+                    "strictly lower held-out total affine-state NMSE and "
+                    "non-regressed held-out mixer NMSE"
+                ),
+                "observable_improved": observable_improved,
+                "mixer_non_regressed": mixer_non_regressed,
+            },
+            "native_pipeline_selection": {
+                "baseline": baseline_name,
+                "proposed": native_candidate_name,
+                "selected": native_selected_name,
+                "status": (
+                    "accepted"
+                    if native_selected_name == native_candidate_name
+                    else "rejected"
+                ),
+                "rule": (
+                    "strictly lower finite held-out combined native-transition/"
+                    "read mixer NMSE; intermediate stages remain diagnostics"
+                ),
+                "compression_non_regressed": (
+                    native_candidate_compression_non_regressed
+                ),
+                "transition_non_regressed": (
+                    native_candidate_transition_non_regressed
+                ),
+                "combined_pipeline_improved": native_candidate_pipeline_improved,
             },
             "bases": sketch_results,
         },
@@ -594,6 +1021,10 @@ def main() -> int:
             )
     if gdn_signals is None:
         raise SystemExit("requested GDN layer was not traversed before the GQA layer")
+    text_config = checkpoint.config.get("text_config", checkpoint.config)
+    if not isinstance(text_config, dict):
+        raise SystemExit("source text_config must be a JSON object")
+    source_head_dim = int(text_config["head_dim"])
 
     result = {
         "schema_version": 1,
@@ -627,6 +1058,13 @@ def main() -> int:
         "gqa": gqa_diagnostics(
             gqa_signals,
             calibration_rows=args.calibration_rows,
+            positions=position_ids,
+            source_head_dim=source_head_dim,
+            rotary_dim=int(
+                source_head_dim
+                * checkpoint.contract.partial_rotary_factor
+            ),
+            rope_theta=checkpoint.contract.rope_theta,
         ),
         "gdn": gdn_diagnostics(
             gdn_signals,
