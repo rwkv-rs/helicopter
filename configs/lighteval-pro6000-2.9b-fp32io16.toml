@@ -1,2 +1,0 @@
-wkv_mode = "fp32io16" # Pro 6000; scanned: 40, 80, 160, 320, 640, 1280, 2560
-batch_size = 2560

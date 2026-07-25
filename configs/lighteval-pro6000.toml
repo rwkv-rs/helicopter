@@ -1,0 +1,6 @@
+# Recommended batch_size on Pro 6000: 1.5B=2560/2560, 2.9B=2560/2560,
+# 7.2B=2560/1280, 13.3B=1280/640 (fp16/fp32io16).
+# Scanned: 40, 80, 160, 320, 640, 1280, 2560.
+# Defaults below match the default 7.2B checkpoint and fp16 entry.
+wkv_mode = "fp16"
+batch_size = 2560
