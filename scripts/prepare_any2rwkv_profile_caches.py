@@ -6,6 +6,9 @@ import json
 import os
 from pathlib import Path
 
+import torch
+
+from any2rwkv.distributed import DistributedContext
 from any2rwkv.distill_runner import prepare_performance_profile_caches
 
 
@@ -24,14 +27,18 @@ def main() -> None:
     parser.add_argument("--allow-proxy-layers", action="store_true")
     args = parser.parse_args()
 
-    result = prepare_performance_profile_caches(
-        source=args.source.resolve(),
-        run_dir=args.run_dir.resolve(),
-        dataset_manifest=args.dataset_manifest.resolve(),
-        training_config=args.training_config.resolve(),
-        recipe_id=args.recipe,
-        allow_proxy_layers=args.allow_proxy_layers,
-    )
+    try:
+        result = prepare_performance_profile_caches(
+            source=args.source.resolve(),
+            run_dir=args.run_dir.resolve(),
+            dataset_manifest=args.dataset_manifest.resolve(),
+            training_config=args.training_config.resolve(),
+            recipe_id=args.recipe,
+            allow_proxy_layers=args.allow_proxy_layers,
+        )
+    finally:
+        if torch.distributed.is_initialized():
+            DistributedContext.initialize().close()
     if int(os.environ.get("RANK", "0")) == 0:
         print(json.dumps(result, indent=2, sort_keys=True))
 
