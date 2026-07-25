@@ -21,11 +21,11 @@ $$\widehat S_t=\widehat S_{t-1}\operatorname{Diag}(\delta_t)-(\widehat S_{t-1}n_
 
 考虑 Qwen 的带 epsilon L2 normalization：
 
-$$k_t=\frac{\bar k_t}{c_{k,t}},\qquad c_{k,t}=\sqrt{\|\bar k_t\|_2^2+\epsilon},\qquad m_{k,t}=\|k_t\|_2.$$
+$$k_t=\frac{\bar k_t}{c_{k,t}},\qquad c_{k,t}=\sqrt{\|\bar k_t\|^2+\epsilon},\qquad m_{k,t}=\|k_t\|.$$
 
 对任意正数 $$\mu_t>0$$，取
 
-$$\begin{aligned}\delta_t&=d_t\mathbf 1,\\n_t&=\frac{k_t}{m_{k,t}},\\a_t&=d_t\beta_tm_{k,t}^2\mathbf 1,\\\kappa_t&=\mu_tk_t,\\u_t&=\frac{\beta_tv_t}{\mu_t},\end{aligned}$$
+$$\delta_t=d_t\mathbf1,\qquad n_t=\frac{k_t}{m_{k,t}},\qquad a_t=d_t\beta_tm_{k,t}^{2}\mathbf1,\qquad \kappa_t=\mu_tk_t,\qquad u_t=\frac{\beta_tv_t}{\mu_t}.$$
 
 便有
 
@@ -89,17 +89,17 @@ $$\Delta y_t=E_tr_t+S_t^G\Delta r_t.$$
 
 将归一化、gate 和 output projection 的局部 Jacobian 记为 $$C_t$$，直接求解
 
-$$\min_{\Delta\theta}\sum_t\left\|C_t\left(E_tr_t+S_t^G\Delta r_t\right)\right\|_2^2+\lambda\|\Delta\theta\|_2^2.$$
+$$\min_{\Delta\theta}\sum_t\left\|C_t\left(E_tr_t+S_t^G\Delta r_t\right)\right\|^2+\lambda\|\Delta\theta\|^2.$$
 
 这是基于 recurrence sufficient statistics 的线性正规方程。Gram 与 RHS 可以流式累计后闭式求解，不需要 LM loss、反向传播或优化器。
 
 由于逐头归一化会消除正尺度，内部轨迹使用 projective loss：
 
-$$\min_{\rho_{t,h}>0}\|\widehat y_{t,h}-\rho_{t,h}y_{t,h}\|_{M_{t,h}}^2,$$
+$$\min_{\rho_{t,h}>0}\left(\widehat y_{t,h}-\rho_{t,h}y_{t,h}\right)^{\top}M_{t,h}\left(\widehat y_{t,h}-\rho_{t,h}y_{t,h}\right),$$
 
 其中
 
-$$\rho_{t,h}^*=\frac{y_{t,h}^{\top}M_{t,h}\widehat y_{t,h}}{y_{t,h}^{\top}M_{t,h}y_{t,h}+\varepsilon}.$$
+$$\rho_{t,h}^{*}=\frac{y_{t,h}^{\top}M_{t,h}\widehat y_{t,h}}{y_{t,h}^{\top}M_{t,h}y_{t,h}+\varepsilon}.$$
 
 最终模型选择仍然只看独立 held-out 文本上的 full-mixer NMSE。这样 decay、erase、write 和 read 之间能够按照最终可见误差自动补偿。
 
@@ -135,7 +135,7 @@ $$d_h^R=\exp\left[-c_w\sigma(z_{w,h})\right],\qquad c_w=e^{-1/2}.$$
 
 因此 inverse-link target 应写成
 
-$$z_{w,h}^*=\operatorname{logit}\left(\operatorname{clip}\left(\frac{-\log d_h}{c_w},\varepsilon,1-\varepsilon\right)\right)=\operatorname{logit}\left(\operatorname{clip}\left(e^{1/2}[-\log d_h],\varepsilon,1-\varepsilon\right)\right).$$
+$$z_{w,h}^{*}=\operatorname{logit}\left(\operatorname{clip}\left(\frac{-\log d_h}{c_w},\varepsilon,1-\varepsilon\right)\right)=\operatorname{logit}\left(\operatorname{clip}\left(e^{1/2}[-\log d_h],\varepsilon,1-\varepsilon\right)\right).$$
 
 这一区分了两层事实：DPLR 状态算子允许令 $$\delta_t=d_t\mathbf1$$ 并精确嵌入；native decay link 的可达域则是
 
@@ -145,13 +145,15 @@ $$d_h^R\in\left[\exp(-e^{-1/2}),1\right),$$
 
 erase gate 的 target 为
 
-$$z_{a,h}^*=\operatorname{logit}\left(\operatorname{clip}\left(d_h\beta_hm_{k,h}^2,\varepsilon,1-\varepsilon\right)\right).$$
+$$z_{a,h}^{*}=\operatorname{logit}\left(\operatorname{clip}\left(d_h\beta_hm_{k,h}^2,\varepsilon,1-\varepsilon\right)\right).$$
 
 `w_lora` 的 down basis 由 source decay projection 的行空间及其 Jacobian 加权主方向构造；不同 tanh scale 用来逼近每个 head 的一维标量函数。
 
 `a_lora` 的 basis 应包含
 
-$$\operatorname{rowspan}(W_{\mathrm{decay}})+\operatorname{rowspan}(W_\beta)+\text{key-norm Jacobian directions}.$$
+$$\operatorname{rowspan}(W_{\mathrm{decay}})+\operatorname{rowspan}(W_\beta)+\mathcal K_{\mathrm{norm}}.$$
+
+这里 $$\mathcal K_{\mathrm{norm}}$$ 表示 key-norm Jacobian 的主要方向。
 
 Qwen3.5 每层只有 $$H$$ 个 decay driver 和 $$H$$ 个 beta driver。以 $$H=16$$ 为例，主要控制子空间至多约 $$2H=32$$ 维，可以自然装入 RWKV 的 rank-64 control subspace；up projection 通过加权 reduced-rank ridge 求出。
 
