@@ -1475,19 +1475,16 @@ table.pivot.bench-table tbody tr:hover .axis-kmetric {
   outline: 2px solid var(--accent);
   outline-offset: -3px;
 }
-.answer-detail-backdrop {
-  z-index: 80;
-  padding: 20px;
-}
-.answer-detail-modal {
-  width: min(1240px, calc(100vw - 40px));
-  max-height: calc(100vh - 40px);
+.answer-detail-panel {
+  width: 100%;
+  padding: 14px 16px 18px;
   border-color: #53617a;
   background: #0d141f;
 }
 .answer-detail-head {
-  flex: 0 0 auto;
-  padding: 14px 18px;
+  max-width: 1174px;
+  margin: 0 auto 10px;
+  padding: 0;
 }
 .answer-detail-head .card-title {
   margin-bottom: 5px;
@@ -1522,9 +1519,10 @@ table.pivot.bench-table tbody tr:hover .axis-kmetric {
 }
 .answer-tabs {
   display: grid;
-  flex: 0 0 auto;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  padding: 6px 18px 0;
+  max-width: 1174px;
+  margin: 0 auto;
+  padding: 6px 0 0;
   border-bottom: 1px solid #3b485d;
   background: #101824;
 }
@@ -1555,6 +1553,14 @@ table.pivot.bench-table tbody tr:hover .axis-kmetric {
   color: #ffffff;
   background: rgba(255, 255, 255, 0.035);
 }
+.answer-tab:disabled {
+  cursor: default;
+  opacity: 0.52;
+}
+.answer-tab:disabled:hover {
+  color: var(--text-muted);
+  background: transparent;
+}
 .answer-tab.active {
   color: #ffffff;
 }
@@ -1568,9 +1574,30 @@ table.pivot.bench-table tbody tr:hover .axis-kmetric {
   border-bottom-color: var(--warn);
 }
 .answer-detail-content {
-  min-height: 240px;
-  padding: 12px 18px 18px;
-  overflow-y: auto;
+  width: 100%;
+  max-width: 1174px;
+  min-height: 150px;
+  margin: 0 auto;
+  padding: 12px 0 0;
+}
+.answer-unselected-label {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.answer-unselected {
+  display: grid;
+  place-content: center;
+  gap: 5px;
+  min-height: 126px;
+  border: 1px dashed #3b485d;
+  border-radius: 8px;
+  background: #101824;
+  color: var(--text-muted);
+  text-align: center;
+}
+.answer-unselected strong {
+  color: var(--text-dim);
+  font-size: 15px;
 }
 .answer-sample-note {
   margin-bottom: 10px;
@@ -1664,13 +1691,6 @@ table.pivot.bench-table tbody tr:hover .axis-kmetric {
 }
 
 @media (max-width: 900px) {
-  .answer-detail-backdrop {
-    padding: 10px;
-  }
-  .answer-detail-modal {
-    width: calc(100vw - 20px);
-    max-height: calc(100vh - 20px);
-  }
   .answer-sample-grid {
     grid-template-columns: 1fr 1fr;
   }
@@ -1684,19 +1704,12 @@ table.pivot.bench-table tbody tr:hover .axis-kmetric {
 }
 
 @media (max-width: 600px) {
-  .answer-detail-backdrop {
-    padding: 0;
-  }
-  .answer-detail-modal {
-    width: 100vw;
-    max-height: 100dvh;
-    height: 100dvh;
-    border: 0;
-    border-radius: 0;
+  .answer-detail-panel {
+    padding: 11px 8px 12px;
   }
   .answer-detail-head {
     align-items: flex-start;
-    padding: 12px;
+    padding: 0 2px;
   }
   .answer-selection-summary {
     gap: 5px;
