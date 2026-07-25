@@ -32,7 +32,7 @@ def main() -> int:
     model, loading = AutoModelForCausalLM.from_pretrained(
         checkpoint,
         trust_remote_code=True,
-        torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+        dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
         output_loading_info=True,
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

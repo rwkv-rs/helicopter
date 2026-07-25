@@ -11,8 +11,13 @@ from types import SimpleNamespace
 import torch
 from torch import Tensor, nn
 
-from any2rwkv.evaluate import P0_REQUIRED
-from any2rwkv.calibration import file_sha256
+from any2rwkv.evaluate import (
+    P0_REQUIRED,
+    QualityMetrics,
+    QualityThresholdProfile,
+    quality_gate,
+)
+from any2rwkv.artifacts import file_sha256
 from any2rwkv.evaluator_runner import (
     EvaluationSample,
     EvaluatorConfig,
@@ -105,6 +110,37 @@ class EvaluatorRunnerTests(unittest.TestCase):
             smoke_new_tokens=3,
             bootstrap_samples=128,
         )
+        # Synthetic limits exercise gate mechanics only; production profiles are
+        # accepted exclusively through the hash-verified calibration loader.
+        self.thresholds = QualityThresholdProfile(
+            profile_id="test-only",
+            profile_sha256="e" * 64,
+            calibration_artifact_sha256="f" * 64,
+            values={
+                "P1": {
+                    "smoke_pass_rate_min": 0.9,
+                    "ppl_ratio_max": 1.5,
+                    "mean_token_kl_max": 1.0,
+                    "layer_mse_median_max": 0.25,
+                    "layer_cosine_median_min": 0.85,
+                    "layer_cosine_min": 0.7,
+                },
+                "P2": {
+                    "smoke_pass_rate_min": 0.9,
+                    "ppl_ratio_max": 1.2,
+                    "mean_token_kl_max": 0.25,
+                    "layer_cosine_median_min": 0.95,
+                    "layer_cosine_p05_min": 0.9,
+                    "layer_mse_median_max": 0.1,
+                    "layer_mse_p95_max": 0.25,
+                    "ruler_ci_lower_ratio_min": 0.85,
+                    "ruler_bucket_min_ratio_min": 0.8,
+                    "downstream_ci_lower_ratio_min": 0.9,
+                    "downstream_max_drop_points_max": 5.0,
+                },
+            },
+            evidence_verified=True,
+        )
 
     def test_real_metrics_are_hash_bound_and_missing_suites_fail_p2(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -117,6 +153,7 @@ class EvaluatorRunnerTests(unittest.TestCase):
                 smoke_prompts=self.prompts,
                 config=self.config,
                 p0_evidence={name: True for name in P0_REQUIRED},
+                quality_thresholds=self.thresholds,
                 output_path=output,
             )
             self.assertTrue(output.is_file())
@@ -136,6 +173,51 @@ class EvaluatorRunnerTests(unittest.TestCase):
             self.assertTrue(all(row["status"] == "run" for row in rows))
             self.assertTrue(all(row["normalized_mse"] == 0.0 for row in rows))
 
+    def test_direct_unverified_threshold_object_fails_closed(self) -> None:
+        unverified = QualityThresholdProfile(
+            profile_id="hand-written",
+            profile_sha256="e" * 64,
+            calibration_artifact_sha256="f" * 64,
+            values=self.thresholds.values,
+        )
+        result = quality_gate(
+            QualityMetrics(
+                ppl_ratio=1.0,
+                mean_token_kl=0.0,
+                layer_cosines=(1.0,),
+                layer_normalized_mse=(0.0,),
+                smoke_pass_rate=1.0,
+                ruler_ci_lower_ratio=1.0,
+                ruler_bucket_min_ratio=1.0,
+                downstream_ci_lower_ratio=1.0,
+                downstream_max_drop_points=0.0,
+            ),
+            level="P1",
+            thresholds=unverified,
+        )
+        self.assertFalse(result.passed)
+        self.assertEqual(result.failures, ("uncalibrated-threshold-profile",))
+
+    def test_candidate_checkpoint_cannot_calibrate_its_own_thresholds(self) -> None:
+        self_calibrated = QualityThresholdProfile(
+            profile_id=self.thresholds.profile_id,
+            profile_sha256=self.thresholds.profile_sha256,
+            calibration_artifact_sha256=self.thresholds.calibration_artifact_sha256,
+            values=self.thresholds.values,
+            evidence_verified=True,
+            calibration_student_sha256s=(self.config.student_sha256,),
+        )
+        with self.assertRaisesRegex(ValueError, "participated in threshold calibration"):
+            run_evaluator(
+                teacher=self.teacher,
+                student=self.student,
+                tokenizer=TinyTokenizer(),
+                samples=self.samples,
+                smoke_prompts=self.prompts,
+                config=self.config,
+                p0_evidence={name: True for name in P0_REQUIRED},
+                quality_thresholds=self_calibrated,
+            )
     def test_external_scores_preserve_bootstrap_inputs_and_enable_real_p2(self) -> None:
         scores = tuple(
             PairedSampleScore(f"score-{index}", 1.0, 0.98, "task-a" if index % 2 else "task-b")
@@ -149,6 +231,7 @@ class EvaluatorRunnerTests(unittest.TestCase):
             smoke_prompts=self.prompts,
             config=self.config,
             p0_evidence={name: True for name in P0_REQUIRED},
+            quality_thresholds=self.thresholds,
             ruler_scores=scores,
             downstream_scores=scores,
         )

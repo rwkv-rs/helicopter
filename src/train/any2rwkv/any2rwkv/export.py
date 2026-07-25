@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import shutil
 from pathlib import Path
 from typing import Callable, Iterator, Mapping
@@ -22,6 +23,11 @@ HF_RUNTIME_MODULES = (
     "mixer.py",
     "kernel.py",
     "errors.py",
+)
+
+BF16_VALUE_RESIDUAL_EPSILON = float(torch.finfo(torch.bfloat16).eps) ** 2
+BF16_VALUE_RESIDUAL_DISABLED_LOGIT = math.log(
+    BF16_VALUE_RESIDUAL_EPSILON / (1.0 - BF16_VALUE_RESIDUAL_EPSILON)
 )
 
 
@@ -60,6 +66,12 @@ def _seed(name: str, base_seed: int) -> int:
 
 def initialize_tensor(spec: TensorSpec, *, base_seed: int = 20260714) -> torch.Tensor:
     dtype = _dtype(spec.dtype)
+    if spec.initialization == "disabled-value-residual-logit-v1":
+        return torch.full(
+            spec.shape,
+            BF16_VALUE_RESIDUAL_DISABLED_LOGIT,
+            dtype=dtype,
+        )
     if spec.initialization.startswith("zero") or spec.name.endswith("g_norm.bias"):
         return torch.zeros(spec.shape, dtype=dtype)
     if spec.name.endswith("g_norm.weight") or spec.name.endswith("k_k") or spec.name.endswith("k_a"):

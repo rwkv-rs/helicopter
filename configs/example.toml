@@ -7,8 +7,9 @@
 enable_auto_tool_choice = false
 
 [any2rwkv]
-rwkv_hf_sha = "1e81ce7adf2c9aeec21ed43a2435f8aa3a81e043"
-rwkv_lm_sha = "39b1e8e0a6aaa7e32d1a12ac1111b68f2f98489b"
+recipe = "qwen35_to_rwkv7"
+rwkv_hf_sha = "15cd7d7e896efe852f6994a22c34fd14cb60c2c6"
+rwkv_lm_sha = "81908e5e3ad9ee45a57149758f7ef92a1b50b11d"
 precision = "fp32io16"
 
 [paths]

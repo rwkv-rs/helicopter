@@ -7,6 +7,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Iterable
 
+from .artifacts import file_sha256
 from .errors import CoverageError
 
 
@@ -158,8 +159,7 @@ def finalize_fitted_mapping(
     trainable = {
         str(entry["target"])
         for entry in plan.get("entries", [])
-        if entry.get("provenance") in {"fitted", "initialized"}
-        or entry.get("is_semantically_lossless") is False
+        if is_locally_trainable(entry)
     }
     targets = mapping.get("targets")
     if not isinstance(targets, list):
@@ -189,6 +189,111 @@ def finalize_fitted_mapping(
     }
     coverage["fitted_student_sha256"] = student_sha256
     coverage["active_layer_trace_sha256"] = trace_sha256
+    coverage_path.write_text(
+        json.dumps(coverage, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return coverage
+
+
+def is_locally_trainable(entry: dict[str, object]) -> bool:
+    explicit = entry.get("local_trainable")
+    if explicit is not None:
+        if not isinstance(explicit, bool):
+            raise CoverageError("warm-start local_trainable must be boolean or null")
+        return explicit
+    return (
+        entry.get("provenance") in {"fitted", "initialized"}
+        or entry.get("is_semantically_lossless") is False
+    )
+
+
+def finalize_trained_checkpoint_mapping(
+    checkpoint_dir: Path,
+    *,
+    evidence_root: Path,
+    mixer_overlay_fingerprint: str,
+) -> dict[str, object]:
+    """Bind final fitted provenance to the exact training and activation-fit evidence."""
+    trace_path = evidence_root / "layer-convergence.json"
+    if not trace_path.is_file():
+        raise CoverageError("trained checkpoint lacks layer-convergence evidence")
+    activation_root = evidence_root / "activation-fit"
+    report_rows: list[dict[str, object]] = []
+    if activation_root.is_dir():
+        for path in sorted(activation_root.glob("*.json")):
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise CoverageError(f"activation-fit report is not an object: {path}")
+            report_rows.append(
+                {
+                    "path": path.relative_to(evidence_root).as_posix(),
+                    "sha256": file_sha256(path),
+                    "layer": payload.get("layer"),
+                    "status": payload.get("status"),
+                    "boundary": payload.get("boundary"),
+                    "solver": payload.get("solver", payload.get("optimizer")),
+                    "train_cache_binding": payload.get("train_cache_binding"),
+                    "validation_cache_binding": payload.get(
+                        "validation_cache_binding"
+                    ),
+                    "selected_weight_sha256": payload.get(
+                        "selected_weight_sha256"
+                    ),
+                    "selected_parameter_sha256": payload.get(
+                        "selected_parameter_sha256"
+                    ),
+                    "selected_tensor_sha256": {
+                        key: payload[key]
+                        for key in (
+                            "selected_down_weight_sha256",
+                            "selected_up_weight_sha256",
+                            "selected_up_bias_sha256",
+                        )
+                        if payload.get(key) is not None
+                    },
+                }
+            )
+    provenance = {
+        "schema_version": 1,
+        "mixer_overlay_fingerprint": mixer_overlay_fingerprint,
+        "training_trace": {
+            "path": trace_path.name,
+            "sha256": file_sha256(trace_path),
+        },
+        "activation_fit_reports": report_rows,
+    }
+    canonical = json.dumps(
+        provenance, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    activation_manifest_sha256 = hashlib.sha256(canonical).hexdigest()
+    provenance["manifest_sha256"] = activation_manifest_sha256
+    provenance_path = checkpoint_dir / "activation-fit-provenance.json"
+    provenance_path.write_text(
+        json.dumps(provenance, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    coverage = finalize_fitted_mapping(
+        checkpoint_dir,
+        student_sha256=mixer_overlay_fingerprint,
+        trace_sha256=file_sha256(trace_path),
+    )
+    mapping_path = checkpoint_dir / "mapping.json"
+    mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
+    for entry in mapping.get("targets", []):
+        if entry.get("provenance") == TargetProvenance.FITTED.value:
+            entry["evidence"] = (
+                str(entry.get("evidence", ""))
+                + "; activation_fit_manifest_sha256="
+                + activation_manifest_sha256
+                + "; mixer_overlay_fingerprint="
+                + mixer_overlay_fingerprint
+            )
+    mapping_path.write_text(
+        json.dumps(mapping, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    coverage_path = checkpoint_dir / "mapping-coverage.json"
+    coverage["activation_fit_manifest_sha256"] = activation_manifest_sha256
+    coverage["mixer_overlay_fingerprint"] = mixer_overlay_fingerprint
     coverage_path.write_text(
         json.dumps(coverage, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )

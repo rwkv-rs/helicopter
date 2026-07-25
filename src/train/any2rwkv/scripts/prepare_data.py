@@ -29,8 +29,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=20260714)
     parser.add_argument("--split-ratios-json", help="JSON object overriding all six split ratios")
     parser.add_argument("--exact-duplicate-policy", choices=("drop", "reject"), default="drop")
-    parser.add_argument("--near-duplicate-policy", choices=("report", "reject"), default="report")
+    parser.add_argument("--near-duplicate-policy", choices=("drop", "report", "reject"), default="report")
     parser.add_argument("--near-duplicate-threshold", type=float, default=0.8)
+    parser.add_argument("--near-duplicate-ngram", type=int, default=3)
+    parser.add_argument("--minhash-permutations", type=int, default=32)
+    parser.add_argument("--minhash-bands", type=int, default=8)
+    parser.add_argument("--max-lsh-bucket-size", type=int, default=256)
     parser.add_argument("--id-field", default="sample_id")
     parser.add_argument("--text-field", default="text")
     return parser
@@ -49,6 +53,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "exact_duplicate_policy": args.exact_duplicate_policy,
         "near_duplicate_policy": args.near_duplicate_policy,
         "near_duplicate_threshold": args.near_duplicate_threshold,
+        "near_duplicate_ngram": args.near_duplicate_ngram,
+        "minhash_permutations": args.minhash_permutations,
+        "minhash_bands": args.minhash_bands,
+        "max_lsh_bucket_size": args.max_lsh_bucket_size,
         "id_field": args.id_field,
         "text_field": args.text_field,
     }

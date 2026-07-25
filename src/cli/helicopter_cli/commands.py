@@ -22,10 +22,9 @@ ANY2RWKV_ACTIONS = (
     "convert",
     "distill",
     "validate-p0",
-    "quantize",
     "evaluate",
 )
-ANY2RWKV_PRECISIONS = ("bf16", "fp16", "fp32io16", "nvfp4")
+ANY2RWKV_PRECISIONS = ("bf16", "fp32io16")
 
 
 @dataclass
@@ -34,6 +33,52 @@ class CommandPlan:
     cwd: Path
     shown_env: dict[str, str]
     env: dict[str, str]
+
+
+def any2rwkv_source_head_size(source: Path) -> int:
+    config_path = source / "config.json" if source.is_dir() else source
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise SystemExit(
+            f"cannot derive Any2RWKV head size from {config_path}: {error}"
+        ) from error
+    text = payload.get("text_config", payload)
+    if not isinstance(text, dict):
+        raise SystemExit("Any2RWKV source text_config must be an object")
+    layer_types = tuple(str(value) for value in text.get("layer_types", ()))
+    if "linear_attention" in layer_types:
+        key_geometry = (
+            int(text.get("linear_num_key_heads", 0)),
+            int(text.get("linear_key_head_dim", 0)),
+        )
+        value_geometry = (
+            int(text.get("linear_num_value_heads", 0)),
+            int(text.get("linear_value_head_dim", 0)),
+        )
+        attention_geometry = (
+            int(text.get("num_attention_heads", 0)),
+            int(text.get("head_dim", 0)),
+        )
+        if (
+            min(*key_geometry, *value_geometry, *attention_geometry) <= 0
+            or key_geometry[1] != value_geometry[1]
+            or value_geometry[0] % key_geometry[0]
+            or value_geometry[0] * value_geometry[1]
+            != attention_geometry[0] * attention_geometry[1]
+        ):
+            raise SystemExit(
+                "Any2RWKV source GDN geometry must preserve head size, use "
+                "integral key-head repeat, and match attention recurrent width"
+            )
+        return value_geometry[1]
+    attention_heads = int(text.get("num_attention_heads", 0))
+    attention_head_size = int(text.get("head_dim", 0))
+    if attention_heads <= 0 or attention_head_size <= 0:
+        raise SystemExit(
+            "Any2RWKV source attention geometry must be positive"
+        )
+    return attention_head_size
 
 
 def format_hydra_file_list(value: Any, *, root: Path, env: dict[str, str]) -> str:
@@ -690,6 +735,19 @@ def build_takeoff_plan(
 
 
 def _checkout_sha(path: Path, *, root: Path) -> str:
+    manifest_path = root / ".helicopter-dev/source-revisions.json"
+    if manifest_path.is_file():
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            key = path.resolve().relative_to(root.resolve()).as_posix()
+            revision = payload["submodules"][key]
+        except (OSError, KeyError, ValueError, json.JSONDecodeError) as error:
+            raise SystemExit(
+                f"managed revision manifest does not identify pinned checkout {path}: {error}"
+            ) from error
+        if not isinstance(revision, str) or len(revision) != 40:
+            raise SystemExit(f"invalid managed checkout SHA for {path}: {revision!r}")
+        return revision
     try:
         return subprocess.run(
             ["git", "-C", str(path), "rev-parse", "HEAD"],
@@ -698,7 +756,6 @@ def _checkout_sha(path: Path, *, root: Path) -> str:
             text=True,
         ).stdout.strip()
     except (OSError, subprocess.CalledProcessError) as error:
-        manifest_path = root / ".helicopter-dev/source-revisions.json"
         try:
             payload = json.loads(manifest_path.read_text(encoding="utf-8"))
             key = path.resolve().relative_to(root.resolve()).as_posix()
@@ -793,8 +850,9 @@ def build_any2rwkv_plan(
     precision = str(pick(args.precision, settings.get("precision"), default="fp32io16"))
     if precision not in ANY2RWKV_PRECISIONS:
         raise SystemExit(f"unsupported any2rwkv precision: {precision}")
-    if args.action == "quantize" and not args.calibration_manifest:
-        raise SystemExit("NVFP4 quantization requires an independent calibration manifest")
+    recipe = str(pick(getattr(args, "recipe", None), settings.get("recipe"), default=""))
+    if not recipe:
+        raise SystemExit("any2rwkv requires an explicit --recipe")
     if args.action == "distill" and (
         not getattr(args, "dataset_manifest", None)
         or not getattr(args, "training_config", None)
@@ -809,9 +867,11 @@ def build_any2rwkv_plan(
         or not getattr(args, "evaluation_manifest", None)
         or not getattr(args, "p0_evidence", None)
         or not getattr(args, "migration_baselines", None)
+        or not getattr(args, "quality_threshold_profile", None)
     ):
         raise SystemExit(
-            "evaluation requires --teacher, --evaluation-manifest, --p0-evidence, and --migration-baselines"
+            "evaluation requires --teacher, --evaluation-manifest, --p0-evidence, "
+            "--migration-baselines, and --quality-threshold-profile"
         )
     if not args.dry_run:
         required_files = []
@@ -830,10 +890,9 @@ def build_any2rwkv_plan(
                     args.evaluation_manifest,
                     args.p0_evidence,
                     args.migration_baselines,
+                    args.quality_threshold_profile,
                 )
             )
-        elif args.action == "quantize":
-            required_files.append(args.calibration_manifest)
         for value in required_files:
             path = resolve_path(str(value), root=root, env=env)
             if not path.is_file():
@@ -846,15 +905,14 @@ def build_any2rwkv_plan(
                 path = resolve_path(str(value), root=root, env=env)
                 if not path.is_file():
                     raise SystemExit(f"optional any2rwkv score manifest not found: {path}")
-    if args.action != "quantize" and precision == "nvfp4":
-        raise SystemExit("nvfp4 precision is only valid for the quantize action")
-
     python = python_executable(config, root=root, env=env, require_configured=not args.dry_run)
     command = [
         python,
         "-m",
         "any2rwkv.cli",
         args.action,
+        "--recipe",
+        recipe,
         "--source",
         str(source),
         "--output",
@@ -866,9 +924,17 @@ def build_any2rwkv_plan(
         "--rwkv-lm-sha",
         expected_lm_sha,
     ]
+    if args.action == "evaluate":
+        torchrun = str(Path(python).with_name("torchrun"))
+        command = [
+            torchrun,
+            "--standalone",
+            "--nproc-per-node=8",
+            "--no-python",
+            *command,
+        ]
     for option, value in (
         ("--contract", args.contract),
-        ("--calibration-manifest", args.calibration_manifest),
         ("--run-id", args.run_id),
         ("--dataset-manifest", getattr(args, "dataset_manifest", None)),
         ("--training-config", getattr(args, "training_config", None)),
@@ -878,6 +944,7 @@ def build_any2rwkv_plan(
         ("--evaluation-manifest", getattr(args, "evaluation_manifest", None)),
         ("--p0-evidence", getattr(args, "p0_evidence", None)),
         ("--migration-baselines", getattr(args, "migration_baselines", None)),
+        ("--quality-threshold-profile", getattr(args, "quality_threshold_profile", None)),
         ("--ruler-scores", getattr(args, "ruler_scores", None)),
         ("--downstream-scores", getattr(args, "downstream_scores", None)),
     ):
@@ -886,7 +953,7 @@ def build_any2rwkv_plan(
     if args.allow_proxy_layers:
         command.append("--allow-proxy-layers")
     shown_env = {
-        "VLLM_RWKV7_WKV_MODE": "fp32io16" if args.action != "quantize" else "fp16",
+        "WKV_MODE": "fp32io16",
         # fp32io16 is the recurrent-state/kernel policy; rwkv-lm's model I/O
         # dtype remains BF16 on the correctness path.
         "RWKV_FLOAT_MODE": (
@@ -894,12 +961,22 @@ def build_any2rwkv_plan(
         ),
     }
     if args.action == "distill":
+        source_config_path = source / "config.json" if source.is_dir() else source
+        if source_config_path.is_file():
+            recurrent_head_size = str(any2rwkv_source_head_size(source))
+        elif args.dry_run:
+            recurrent_head_size = "source-config-derived"
+        else:
+            raise SystemExit(
+                f"Any2RWKV source config not found: {source_config_path}"
+            )
         shown_env.update(
             {
                 "RWKV_JIT_ON": "0",
-                "RWKV_HEAD_SIZE": "64",
+                "RWKV_HEAD_SIZE": recurrent_head_size,
                 "RWKV_HEAD_L2WRAP_CE_CHUNK": "0",
                 "RWKV_MY_TESTING": "x070",
+                "RWKV_KERNEL": "",
                 "RWKV_TRAIN_TYPE": "infctx",
             }
         )

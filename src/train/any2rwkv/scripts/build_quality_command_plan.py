@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Materialize exact pinned RULERv2 and lm-eval commands for one served checkpoint."""
+"""Materialize pinned RULERv2 and lm-eval commands using Transformers directly."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from any2rwkv.calibration import file_sha256
+from any2rwkv.artifacts import file_sha256
 
 
 def checkout_sha(path: Path) -> str:
@@ -31,9 +31,8 @@ def main() -> None:
     parser.add_argument("--lm-eval-checkout", required=True, type=Path)
     parser.add_argument("--model", required=True)
     parser.add_argument("--tokenizer", required=True, type=Path)
-    parser.add_argument("--base-url", required=True)
     parser.add_argument("--cluster", required=True)
-    parser.add_argument("--role", required=True, choices=("teacher", "student", "bf16", "fp16", "nvfp4"))
+    parser.add_argument("--role", required=True, choices=("teacher", "student", "bf16"))
     parser.add_argument("--target", required=True, choices=("proxy", "scale"))
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
@@ -56,7 +55,7 @@ def main() -> None:
     lengths = ruler[f"{args.target}_required_lengths"]
     commands: list[dict[str, object]] = []
     model_name = args.model.rstrip("/").rsplit("/", 1)[-1]
-    server_gpus = 8 if args.target == "scale" else 1
+    ruler_runner = Path(__file__).with_name("run_ruler_transformers.py").resolve()
     for length in lengths:
         setup = f"{model_name}-{length}"
         data_dir = output / "ruler-data" / str(length)
@@ -79,14 +78,13 @@ def main() -> None:
                     "stage": "evaluate",
                     "length": length,
                     "argv": [
-                        "ns", "eval", f"--cluster={args.cluster}",
-                        f"--expname=ruler2-{args.role}-{setup}", f"--data_dir={data_dir}",
-                        f"--output_dir={result_dir}", f"--benchmarks=ruler2.{setup}",
-                        f"--model={args.model}", "--server_nodes=1", f"--server_gpus={server_gpus}",
-                        "--server_type=vllm",
-                        f"--server_args=--tensor-parallel-size {server_gpus} --max-model-len {length} --trust-remote-code",
-                        "++inference.tokens_to_generate=16384", "++inference.top_p=1.0",
-                        "++inference.temperature=0.0", "++skip_filled=True",
+                        "python", str(ruler_runner),
+                        "--model", args.model,
+                        "--tokenizer", str(args.tokenizer.resolve()),
+                        "--data-dir", str(data_dir),
+                        "--output-dir", str(result_dir),
+                        "--max-context-length", str(length),
+                        "--max-new-tokens", "16384",
                     ],
                 },
                 {
@@ -97,7 +95,6 @@ def main() -> None:
                 },
             )
         )
-    completions_url = args.base_url.rstrip("/") + "/v1/completions"
     for task in suite["downstream"]["tasks"]:
         task_output = output / "lm-eval" / args.role / task["name"]
         commands.append(
@@ -107,12 +104,11 @@ def main() -> None:
                 "task": task["name"],
                 "metric": task["metric"],
                 "argv": [
-                    "lm-eval", "run", "--model", "local-completions", "--model_args",
-                    f"model={args.model}", f"base_url={completions_url}",
-                    f"tokenizer={args.tokenizer}", "tokenizer_backend=huggingface",
-                    "tokenized_requests=False", "num_concurrent=16", "max_retries=3",
+                    "lm-eval", "run", "--model", "hf", "--model_args",
+                    f"pretrained={args.model},tokenizer={args.tokenizer},trust_remote_code=True,dtype=bfloat16",
                     "--tasks", task["name"], "--num_fewshot", str(task["num_fewshot"]),
-                    "--batch_size", "16", "--seed", str(suite["generation"]["seed"]),
+                    "--device", "cuda", "--batch_size", "auto",
+                    "--seed", str(suite["generation"]["seed"]),
                     "--apply_chat_template", "--log_samples", "--output_path", str(task_output),
                 ],
             }
@@ -124,7 +120,7 @@ def main() -> None:
         "revisions": revisions,
         "model": args.model,
         "tokenizer": str(args.tokenizer.resolve()),
-        "base_url": args.base_url,
+        "inference_backend": "transformers-direct",
         "role": args.role,
         "target": args.target,
         "commands": commands,

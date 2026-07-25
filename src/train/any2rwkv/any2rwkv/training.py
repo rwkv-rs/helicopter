@@ -9,12 +9,10 @@ import torch
 from torch import Tensor
 
 from .distill import (
-    DEFAULT_VOCAB_CHUNK_SIZE,
     ActiveLayerTrainer,
     BurnInWindow,
     LossBreakdown,
     LossWeights,
-    chunked_token_kl,
     normalized_mse,
 )
 from .errors import ContractError
@@ -29,7 +27,6 @@ class DistillationBatch:
     teacher_mixer_output: Tensor
     teacher_block_output: Tensor
     teacher_logits: Tensor
-    teacher_state: Tensor | None = None
     rollout_teacher: Tensor | None = None
 
 
@@ -42,14 +39,12 @@ class LayerwiseDistillationEngine:
         *,
         lr: float,
         trace_path: Path,
-        activation_checkpointing: bool = False,
         trace_binding: Mapping[str, str] | None = None,
     ) -> None:
         self.patcher = patcher
         self.adapters = [record.adapter for record in patcher.records]
         self.trainer = ActiveLayerTrainer(self.adapters, lr=lr)
         self.trace_path = trace_path
-        self.activation_checkpointing = activation_checkpointing
         self.trace_binding = dict(trace_binding or {})
         self.active_layer: int | None = None
         self.converted_prefix = 0
@@ -76,14 +71,12 @@ class LayerwiseDistillationEngine:
                 active_layer=layer,
                 converted_layers=set(range(len(self.adapters))),
                 reset_gradients=not resume_accumulation,
-                checkpoint_suffix=self.activation_checkpointing,
             )
         else:
             self.patcher.configure(
                 active_layer=layer,
                 converted_prefix=converted_prefix,
                 reset_gradients=not resume_accumulation,
-                checkpoint_suffix=self.activation_checkpointing,
             )
         if resume_accumulation:
             if self.trainer.accumulation_step <= 0 or self.trainer.active_layer != layer:
@@ -110,66 +103,31 @@ class LayerwiseDistillationEngine:
     def step(self, batch: DistillationBatch, *, accumulation_steps: int = 1) -> dict[str, object]:
         if self.active_layer is None:
             raise ContractError("begin_layer must be called before distillation step")
-        captured: dict[str, Tensor] = {}
-
-        def block_hook(module, args, output):
-            captured["block"] = output[0] if isinstance(output, tuple) else output
-
-        handle = self.patcher.layers[self.active_layer].register_forward_hook(block_hook)
-        try:
-            output = self.patcher.teacher(
+        adapter = self.adapters[self.active_layer]
+        student_mixer_all, student_block_all, teacher_mixer_all, teacher_block_all = (
+            self.patcher.forward_active_layer_local(
                 input_ids=batch.input_ids,
                 attention_mask=batch.attention_mask,
-                labels=None,
-                use_cache=False,
+                position_ids=(batch.attention_mask.long().cumsum(-1) - 1).clamp_min(0),
+                active_layer=self.active_layer,
             )
-        finally:
-            handle.remove()
-        adapter = self.adapters[self.active_layer]
-        if adapter.last_output is None or adapter.last_state is None or "block" not in captured:
+        )
+        if adapter.last_state is None:
             raise ContractError("active RWKV7 trace was not captured")
-        student_mixer = self._supervised(adapter.last_output)
-        teacher_mixer = self._supervised(batch.teacher_mixer_output.to(student_mixer.device))
-        student_block = self._supervised(captured["block"])
-        teacher_block = self._supervised(batch.teacher_block_output.to(student_block.device))
-        student_logits = self._supervised(output.logits)
-        teacher_logits = self._supervised(batch.teacher_logits.to(student_logits.device))
-        labels = self._supervised(batch.labels.to(student_logits.device))
+        student_mixer = self._supervised(student_mixer_all)
+        teacher_mixer = self._supervised(teacher_mixer_all.to(student_mixer.device))
+        student_block = self._supervised(student_block_all)
+        teacher_block = self._supervised(teacher_block_all.to(student_block.device))
         cosine = 1 - torch.nn.functional.cosine_similarity(
             student_block.flatten(0, -2), teacher_block.flatten(0, -2), dim=-1
         ).mean()
-        state_supervision = "not_available_for_source_mixer"
-        teacher_state = batch.teacher_state
-        if teacher_state is not None and tuple(teacher_state.shape) != tuple(adapter.last_state.shape):
-            transposed = teacher_state.transpose(-1, -2)
-            if tuple(transposed.shape) == tuple(adapter.last_state.shape):
-                teacher_state = transposed
-            else:
-                teacher_state = None
-                state_supervision = "source_target_state_geometry_mismatch"
-        if teacher_state is None:
-            state_mse = student_logits.new_zeros(())
-        else:
-            state_supervision = "aligned_final_state"
-            state_mse = normalized_mse(
-                adapter.last_state, teacher_state.to(adapter.last_state.device)
-            )
-        shifted_ce = torch.nn.functional.cross_entropy(
-            student_logits[:, :-1].reshape(-1, student_logits.shape[-1]), labels[:, 1:].reshape(-1)
-        )
-        rollout = student_logits.new_zeros(())
-        if batch.rollout_teacher is not None:
-            rollout = normalized_mse(student_logits, self._supervised(batch.rollout_teacher.to(student_logits.device)))
+        shifted_ce = student_block.new_zeros(())
+        rollout = student_block.new_zeros(())
         losses = LossBreakdown(
             intermediate_mse=normalized_mse(student_mixer, teacher_mixer),
-            state_mse=state_mse,
             block_mse=normalized_mse(student_block, teacher_block),
             cosine=cosine,
-            token_kl=chunked_token_kl(
-                student_logits,
-                teacher_logits,
-                vocab_chunk_size=DEFAULT_VOCAB_CHUNK_SIZE,
-            ),
+            token_kl=student_block.new_zeros(()),
             shifted_ce=shifted_ce,
             rollout=rollout,
         )
@@ -193,7 +151,6 @@ class LayerwiseDistillationEngine:
             "burn_in_tokens": self.window.burn_in_tokens,
             "supervised_tokens": self.window.supervised_tokens,
             "loss_weights": asdict(self.weights),
-            "state_supervision": state_supervision,
             "losses": {name: float(value.detach()) for name, value in losses.items()},
             "total_loss": float(total.detach()),
             "active_gradient_norm": float(gradient_norm),

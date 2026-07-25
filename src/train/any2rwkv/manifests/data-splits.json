@@ -7,7 +7,8 @@
     "repository": "HuggingFaceFW/fineweb-edu",
     "revision": "87f09149ef4734204d70ed1d046ddc9ca3f2b8f9",
     "subset": "sample-10BT",
-    "minimum_materialized_qwen_tokens": 65000000,
+    "materialization_target_qwen_tokens": 70000000,
+    "budget_role": "exploratory pilot corpus size; not a quality acceptance threshold",
     "local_input_files": "required: path, SHA-256, byte size",
     "combined_input_sha256": "required before training"
   },
@@ -28,8 +29,7 @@
     "algorithm": "sha256(any2rwkv-split-v1\\0seed\\0sample_id)",
     "seed": 20260714,
     "ratios": {
-      "distill_train": "0.94",
-      "nvfp4_calibration": "0.01",
+      "distill_train": "0.95",
       "validation": "0.02",
       "ruler": "0.01",
       "downstream": "0.01",
@@ -41,12 +41,11 @@
       "ruler",
       "smoke",
       "validation"
-    ],
-    "calibration_forbidden_from_quality_gates": true
+    ]
   },
   "deduplication": {
     "exact": "SHA-256 over NFKC and whitespace-normalized content; policy is drop or reject",
-    "near": "word-ngram bottom-k MinHash/LSH candidates followed by exact Jaccard; pair-level report required",
+    "near": "word-ngram 64-bit universal MinHash/LSH candidates followed by exact Jaccard; pair-level report required",
     "report": "deduplication-report.json with sample ids, split provenance, score, threshold, algorithm parameters and incomplete-candidate warning"
   },
   "required_before_run": [
@@ -56,7 +55,6 @@
     "chat template SHA-256",
     "split JSONL SHA-256, row count, token count and source sample-id digest",
     "exact and near-duplicate report SHA-256",
-    "empty calibration-quality-gate overlap",
     "teacher baseline",
     "frozen generation rubric and scorer revision"
   ]

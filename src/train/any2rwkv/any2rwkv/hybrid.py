@@ -1,11 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from types import MethodType
-
 import torch
 from torch import Tensor, nn
-from torch.utils.checkpoint import checkpoint
 
 from .errors import ContractError
 from .kernel import load_rwkv_lm_kernel
@@ -69,7 +66,7 @@ class QwenRWKV7MixerAdapter(nn.Module):
             output, candidate_v_first, state, signals = self.rwkv.forward_sequence(
                 hidden_states,
                 positions=position_ids,
-                kernel=load_rwkv_lm_kernel(),
+                kernel=load_rwkv_lm_kernel(self.rwkv.head_dim),
                 v_first=self.context.v_first,
             )
             output = torch.where(valid[..., None], output, torch.zeros_like(output))
@@ -99,7 +96,12 @@ class QwenRWKV7MixerAdapter(nn.Module):
             if self.rwkv.layer_idx:
                 v_first = self.context.v_first[:, token]
             else:
-                v_first = torch.zeros(batch, hidden, device=hidden_states.device, dtype=hidden_states.dtype)
+                v_first = torch.zeros(
+                    batch,
+                    self.rwkv.attention_hidden_size,
+                    device=hidden_states.device,
+                    dtype=hidden_states.dtype,
+                )
             old_state, old_previous = state, previous
             output, candidate_previous, candidate_state, candidate_v_first, signals = self.rwkv(
                 hidden_states[:, token],
@@ -139,8 +141,14 @@ class HybridRecurrentContext:
     v_first: Tensor | None = None
 
 
+class _StopAfterActiveLayer(RuntimeError):
+    def __init__(self, output: Tensor):
+        super().__init__("stop after active layer")
+        self.output = output
+
+
 class HybridModelPatcher:
-    """Patch teacher mixers in-place while retaining the frozen suffix graph."""
+    """Patch a frozen Qwen shell for suffix-free active-layer comparison."""
 
     def __init__(self, teacher: nn.Module, mixers: list[ProjectionBoundaryRWKV7Attention]):
         self.teacher = teacher.eval().requires_grad_(False)
@@ -183,7 +191,6 @@ class HybridModelPatcher:
         converted_prefix: int | None = None,
         converted_layers: set[int] | None = None,
         reset_gradients: bool = True,
-        checkpoint_suffix: bool = False,
     ) -> QwenRWKV7MixerAdapter:
         if not 0 <= active_layer < len(self.records):
             raise ContractError(f"active layer out of range: {active_layer}")
@@ -210,8 +217,6 @@ class HybridModelPatcher:
             if reset_gradients:
                 for parameter in record.adapter.parameters():
                     parameter.grad = None
-        if checkpoint_suffix:
-            self._checkpoint_frozen_suffix(active_layer)
         if active_layer > 0 and 0 not in frozen_students:
             shadow = self.records[0].adapter.rwkv
 
@@ -241,30 +246,97 @@ class HybridModelPatcher:
         ):
             layer.forward = original
 
-    def _checkpoint_frozen_suffix(self, active_layer: int) -> None:
-        """Recompute frozen suffix activations while every teacher module stays eval."""
-        for index in range(active_layer + 1, len(self.layers)):
-            layer = self.layers[index]
-            original = self._original_layer_forwards[index]
-
-            def checkpointed(_module, *args, _original=original, **kwargs):
-                if not torch.is_grad_enabled():
-                    return _original(*args, **kwargs)
-                return checkpoint(
-                    _original,
-                    *args,
-                    use_reentrant=False,
-                    **kwargs,
-                )
-
-            layer.forward = MethodType(checkpointed, layer)
-
     def restore(self) -> None:
         self._remove_v_first_shadow()
         self._restore_layer_forwards()
         for record in self.records:
             setattr(self.layers[record.index], record.attribute, record.original)
             record.adapter.requires_grad_(False)
+
+    def forward_active_layer_local(
+        self,
+        *,
+        input_ids: Tensor,
+        attention_mask: Tensor,
+        position_ids: Tensor,
+        active_layer: int,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """Run the frozen RWKV7 prefix and active layer, then stop before the suffix.
+
+        The source Qwen block target is evaluated on the exact same detached
+        student-prefix hidden state. No layer after ``active_layer`` executes.
+        """
+        record = self.records[active_layer]
+        layer = self.layers[active_layer]
+        captured: dict[str, Tensor] = {}
+
+        def source_target(_module, args, kwargs):
+            hidden = kwargs.get("hidden_states")
+            if hidden is None and args:
+                hidden = args[0]
+            if hidden is None:
+                raise ContractError("active layer input was not provided")
+            detached = hidden.detach()
+            with torch.inference_mode():
+                normalized = layer.input_layernorm(detached)
+                if record.source_kind == "linear_attention":
+                    teacher_mixer = record.original(
+                        hidden_states=normalized,
+                        cache_params=None,
+                        attention_mask=kwargs.get("attention_mask"),
+                        use_cache=False,
+                    )
+                else:
+                    teacher_mixer, _ = record.original(
+                        hidden_states=normalized,
+                        attention_mask=kwargs.get("attention_mask"),
+                        position_ids=kwargs.get("position_ids"),
+                        past_key_values=None,
+                        position_embeddings=kwargs.get("position_embeddings"),
+                        use_cache=False,
+                    )
+                teacher_block = detached + teacher_mixer
+                residual = teacher_block
+                teacher_block = layer.post_attention_layernorm(teacher_block)
+                teacher_block = layer.mlp(teacher_block)
+                if isinstance(teacher_block, tuple):
+                    teacher_block = teacher_block[0]
+                teacher_block = residual + teacher_block
+            captured["teacher_mixer"] = teacher_mixer.detach()
+            captured["teacher_block"] = teacher_block.detach()
+
+        def stop_after_layer(_module, _args, output):
+            value = output[0] if isinstance(output, tuple) else output
+            raise _StopAfterActiveLayer(value)
+
+        before = layer.register_forward_pre_hook(source_target, with_kwargs=True)
+        after = layer.register_forward_hook(stop_after_layer)
+        try:
+            base = self.teacher.model
+            if hasattr(base, "language_model"):
+                base = base.language_model
+            try:
+                base(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    use_cache=False,
+                )
+            except _StopAfterActiveLayer as stopped:
+                student_block = stopped.output
+            else:
+                raise ContractError("active-layer local forward unexpectedly executed the suffix")
+        finally:
+            before.remove()
+            after.remove()
+        if record.adapter.last_output is None or set(captured) != {"teacher_mixer", "teacher_block"}:
+            raise ContractError("active-layer local forward did not capture all targets")
+        return (
+            record.adapter.last_output,
+            student_block,
+            captured["teacher_mixer"],
+            captured["teacher_block"],
+        )
 
     def layout(
         self,

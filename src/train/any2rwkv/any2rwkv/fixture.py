@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Mapping
 
 import torch
 from safetensors.torch import save_file
@@ -130,9 +131,18 @@ def tiny_state_dict(config: dict[str, object], *, seed: int = 20260714) -> dict[
     return result
 
 
-def write_fixture(path: Path, *, layers: int = 60, moe: bool = True, seed: int = 20260714) -> Path:
+def write_fixture(
+    path: Path,
+    *,
+    layers: int = 60,
+    moe: bool = True,
+    seed: int = 20260714,
+    config_overrides: Mapping[str, object] | None = None,
+) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     config = tiny_qwen35_config(layers=layers, moe=moe)
+    if config_overrides is not None:
+        config.update(config_overrides)
     tensors = tiny_state_dict(config, seed=seed)
     (path / "config.json").write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     vocabulary = {"<pad>": 0, "<unk>": 1, "<eos>": 2}

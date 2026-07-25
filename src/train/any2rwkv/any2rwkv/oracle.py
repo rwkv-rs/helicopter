@@ -7,7 +7,11 @@ from pathlib import Path
 import torch
 from torch import Tensor
 
-from .migration import gdn_reference_scan, gdn_to_rwkv7_dynamics
+from .migration import (
+    gdn_reference_scan,
+    gdn_to_rwkv7_dynamics,
+    qwen35_l2_normalize,
+)
 from .recurrent import chunked_rwkv7_scan, native_decay_from_logit, rwkv7_scan
 
 
@@ -15,7 +19,6 @@ from .recurrent import chunked_rwkv7_scan, native_decay_from_logit, rwkv7_scan
 class OracleTolerance:
     output_relative_l2: float = 1e-12
     output_max_abs: float = 1e-12
-    state_relative_l2: float = 1e-12
     gradient_relative_l2: float = 1e-11
     gradient_cosine: float = 0.999999999999
     finite_difference_relative_error: float = 1e-6
@@ -47,37 +50,45 @@ def _clone_grad(values: tuple[Tensor, ...]) -> tuple[Tensor, ...]:
     return tuple(value.detach().clone().requires_grad_(True) for value in values)
 
 
-def _loss(output: Tensor, state: Tensor) -> Tensor:
-    return output.square().mean() + state.square().mean() * 0.1
+def _loss(output: Tensor) -> Tensor:
+    return output.square().mean()
 
 
-def run_gdn_oracle_case(*, seed: int, length: int, chunk_size: int, random_state: bool) -> dict[str, object]:
+def run_gdn_oracle_case(*, seed: int, length: int, chunk_size: int) -> dict[str, object]:
     generator = torch.Generator().manual_seed(seed)
     shape = (1, length, 2, 4)
     query = torch.randn(shape, generator=generator, dtype=torch.float64) * 0.2
-    key = torch.nn.functional.normalize(torch.randn(shape, generator=generator, dtype=torch.float64), dim=-1)
+    key = qwen35_l2_normalize(
+        torch.randn(shape, generator=generator, dtype=torch.float64)
+    )
     value = torch.randn(shape, generator=generator, dtype=torch.float64) * 0.2
     beta = torch.sigmoid(torch.randn((1, length, 2, 1), generator=generator, dtype=torch.float64))
     decay = native_decay_from_logit(
         torch.randn(shape[:-1] + (1,), generator=generator, dtype=torch.float64)
     )
-    state = (
-        torch.randn((1, 2, 4, 4), generator=generator, dtype=torch.float64) * 0.1
-        if random_state
-        else torch.zeros((1, 2, 4, 4), dtype=torch.float64)
+    state_shape = (1, 2, 4, 4)
+    source_state0 = torch.zeros(state_shape, dtype=torch.float64)
+    target_state0 = torch.zeros(state_shape, dtype=torch.float64)
+    source_values = _clone_grad((decay, beta, query, key, value))
+    target_values = _clone_grad((decay, beta, query, key, value))
+    source_decay, source_beta, source_query, source_key, source_value = source_values
+    source_output, _ = gdn_reference_scan(
+        source_state0,
+        source_decay,
+        source_beta,
+        qwen35_l2_normalize(source_query),
+        source_key,
+        source_value,
     )
-    source_values = _clone_grad((state, decay, beta, query, key, value))
-    target_values = _clone_grad((state, decay, beta, query, key, value))
-    source_output, source_state = gdn_reference_scan(*source_values)
-    target_state0, target_decay, target_beta, target_query, target_key, target_value = target_values
+    target_decay, target_beta, target_query, target_key, target_value = target_values
     r, mapped_decay, k, v, a, b = gdn_to_rwkv7_dynamics(
         target_decay, target_beta, target_query, target_key, target_value
     )
-    target_output, target_state = chunked_rwkv7_scan(
+    target_output, _ = chunked_rwkv7_scan(
         target_state0, r, mapped_decay, k, v, a, b, chunk_size=chunk_size
     )
-    source_grad = torch.autograd.grad(_loss(source_output, source_state), source_values)
-    target_grad = torch.autograd.grad(_loss(target_output, target_state), target_values)
+    source_grad = torch.autograd.grad(_loss(source_output), source_values)
+    target_grad = torch.autograd.grad(_loss(target_output), target_values)
     gradient_rows = [
         {
             "name": name,
@@ -87,13 +98,21 @@ def run_gdn_oracle_case(*, seed: int, length: int, chunk_size: int, random_state
             "target_l2": float(torch.linalg.vector_norm(right).detach()),
         }
         for name, left, right in zip(
-            ("state", "decay", "beta", "query", "key", "value"),
+            ("decay", "beta", "query", "key", "value"),
             source_grad,
             target_grad,
             strict=True,
         )
     ]
-    full_output, full_state = rwkv7_scan(target_state0.detach(), r.detach(), mapped_decay.detach(), k.detach(), v.detach(), a.detach(), b.detach())
+    full_output, _ = rwkv7_scan(
+        target_state0.detach(),
+        r.detach(),
+        mapped_decay.detach(),
+        k.detach(),
+        v.detach(),
+        a.detach(),
+        b.detach(),
+    )
     direction = torch.randn(query.shape, generator=generator, dtype=torch.float64)
     direction /= torch.linalg.vector_norm(direction)
     epsilon = 1e-6
@@ -103,14 +122,24 @@ def run_gdn_oracle_case(*, seed: int, length: int, chunk_size: int, random_state
         moved_r, moved_decay, moved_k, moved_v, moved_a, moved_b = gdn_to_rwkv7_dynamics(
             decay, beta, moved_query, key, value
         )
-        output, final = rwkv7_scan(state, moved_r, moved_decay, moved_k, moved_v, moved_a, moved_b)
-        return _loss(output, final)
+        output, _ = rwkv7_scan(
+            torch.zeros(state_shape, dtype=torch.float64),
+            moved_r,
+            moved_decay,
+            moved_k,
+            moved_v,
+            moved_a,
+            moved_b,
+        )
+        return _loss(output)
 
     finite = (directional_loss(epsilon) - directional_loss(-epsilon)) / (2 * epsilon)
     query_for_grad = query.detach().clone().requires_grad_(True)
     rr, dd, kk, vv, aa, bb = gdn_to_rwkv7_dynamics(decay, beta, query_for_grad, key, value)
-    oo, ss = rwkv7_scan(state, rr, dd, kk, vv, aa, bb)
-    analytic = torch.autograd.grad(_loss(oo, ss), query_for_grad)[0].mul(direction).sum()
+    oo, _ = rwkv7_scan(
+        torch.zeros(state_shape, dtype=torch.float64), rr, dd, kk, vv, aa, bb
+    )
+    analytic = torch.autograd.grad(_loss(oo), query_for_grad)[0].mul(direction).sum()
     finite_error = float(
         ((finite - analytic).abs() / torch.clamp(analytic.abs(), min=1e-30)).detach()
     )
@@ -118,14 +147,12 @@ def run_gdn_oracle_case(*, seed: int, length: int, chunk_size: int, random_state
         "seed": seed,
         "length": length,
         "chunk_size": chunk_size,
-        "initial_state": "random" if random_state else "zero",
+        "initial_state": "independent-reset",
         "output_relative_l2": relative_l2(source_output, target_output),
         "output_max_abs": float(
             (source_output - target_output).abs().max().detach()
         ),
-        "state_relative_l2": relative_l2(source_state, target_state),
         "chunk_output_relative_l2": relative_l2(full_output, target_output.detach()),
-        "chunk_state_relative_l2": relative_l2(full_state, target_state.detach()),
         "gradients": gradient_rows,
         "finite_difference_relative_error": finite_error,
     }
@@ -139,7 +166,6 @@ def run_gdn_oracle(*, seed: int = 20260714, tolerance: OracleTolerance = OracleT
             seed=seed + index,
             length=length,
             chunk_size=min(chunk, length),
-            random_state=bool(index % 2),
         )
         for index, (length, chunk) in enumerate((length, chunk) for length in lengths for chunk in chunks)
     ]
@@ -148,7 +174,6 @@ def run_gdn_oracle(*, seed: int = 20260714, tolerance: OracleTolerance = OracleT
         checks = (
             (case["output_relative_l2"] <= tolerance.output_relative_l2, "output_relative_l2"),
             (case["output_max_abs"] <= tolerance.output_max_abs, "output_max_abs"),
-            (case["state_relative_l2"] <= tolerance.state_relative_l2, "state_relative_l2"),
             (case["finite_difference_relative_error"] <= tolerance.finite_difference_relative_error, "finite_difference"),
         )
         failures.extend(f"case[{index}]:{name}" for passed, name in checks if not passed)
@@ -160,7 +185,7 @@ def run_gdn_oracle(*, seed: int = 20260714, tolerance: OracleTolerance = OracleT
             ):
                 failures.append(f"case[{index}]:gradient:{gradient['name']}")
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "fixture_count": len(cases),
         "seed": seed,
         "tolerance": tolerance.__dict__,

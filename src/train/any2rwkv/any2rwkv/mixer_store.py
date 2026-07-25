@@ -15,12 +15,15 @@ from .artifacts import file_sha256, write_json
 from .configuration_any2rwkv import Any2RWKV7Config, Any2RWKVProxyConfig
 from .errors import ContractError
 from .mixer import ProjectionBoundaryRWKV7Attention
+from .mapping import finalize_trained_checkpoint_mapping
 
 
 @dataclass(frozen=True)
 class RWKV7MixerFactory:
     config: Any2RWKV7Config | Any2RWKVProxyConfig
     source_layer_types: tuple[str, ...]
+    rope_num_heads: int
+    rope_head_dim: int
     rotary_dim: int
     rope_theta: float
 
@@ -46,14 +49,24 @@ class RWKV7MixerFactory:
         rope = source_text.get("rope_parameters", {})
         if not isinstance(rope, dict):
             rope = {}
+        rope_num_heads = int(
+            source_text.get("num_attention_heads", config.num_heads)
+        )
+        rope_head_dim = int(source_text.get("head_dim", config.head_dim))
+        if rope_num_heads * rope_head_dim != config.attention_hidden_size:
+            raise ContractError(
+                "source full-attention RoPE geometry does not cover recurrent width"
+            )
         rotary_dim = int(
-            source_text.get("head_dim", config.head_dim)
+            rope_head_dim
             * float(rope.get("partial_rotary_factor", source_text.get("partial_rotary_factor", 1.0)))
         )
         rotary_dim -= rotary_dim % 2
         return cls(
             config,
             source_layer_types,
+            rope_num_heads,
+            rope_head_dim,
             rotary_dim,
             float(rope.get("rope_theta", source_text.get("rope_theta", 10_000.0))),
         )
@@ -73,6 +86,8 @@ class RWKV7MixerFactory:
             source_used_rope=self.source_layer_types[layer_index] == "full_attention",
             rotary_dim=self.rotary_dim,
             rope_theta=self.rope_theta,
+            rope_num_heads=self.rope_num_heads,
+            rope_head_dim=self.rope_head_dim,
         ).to(device=device, dtype=dtype)
 
 
@@ -110,6 +125,26 @@ class RWKV7MixerLayerStore:
             raise ContractError(
                 f"mixer layer {layer_index} strict load failed: "
                 f"missing={incompatible.missing_keys} unexpected={incompatible.unexpected_keys}"
+            )
+        return mixer
+
+    def load_base_mixer(
+        self,
+        layer_index: int,
+        *,
+        device: torch.device | str,
+        dtype: torch.dtype,
+    ) -> ProjectionBoundaryRWKV7Attention:
+        """Load the immutable zero-step mixer, ignoring every trained overlay."""
+        mixer = self.factory.create(layer_index, device=device, dtype=dtype)
+        incompatible = mixer.load_state_dict(
+            self._load_base_layer_state(layer_index), strict=False
+        )
+        if incompatible.missing_keys or incompatible.unexpected_keys:
+            raise ContractError(
+                f"base mixer layer {layer_index} strict load failed: "
+                f"missing={incompatible.missing_keys} "
+                f"unexpected={incompatible.unexpected_keys}"
             )
         return mixer
 
@@ -293,6 +328,96 @@ class RWKV7MixerLayerStore:
         canonical = json.dumps(rows, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return hashlib.sha256(canonical).hexdigest()
 
+    def materialize_checkpoint(
+        self,
+        destination: Path,
+        *,
+        training_stage: str = "layerwise-local-complete",
+        fitted_evidence_root: Path | None = None,
+    ) -> Path:
+        """Atomically merge every trained mixer overlay into an HF checkpoint."""
+        destination = destination.resolve()
+        if destination.exists():
+            raise ContractError(f"materialized checkpoint already exists: {destination}")
+        overlay_fingerprint = self.fingerprint()
+        temporary = destination.with_name(destination.name + ".tmp")
+        if temporary.exists():
+            shutil.rmtree(temporary)
+        temporary.mkdir(parents=True)
+        for source in self.base_checkpoint_dir.iterdir():
+            if source.name.endswith(".safetensors"):
+                continue
+            target = temporary / source.name
+            if source.is_dir():
+                shutil.copytree(source, target)
+            else:
+                shutil.copy2(source, target)
+        shard_names = sorted(set(self.weight_map.values()))
+        for shard_name in shard_names:
+            source_shard = self.base_checkpoint_dir / shard_name
+            tensors: dict[str, torch.Tensor] = {}
+            with safe_open(source_shard, framework="pt", device="cpu") as base:
+                metadata = base.metadata()
+                for name in base.keys():
+                    layer_index = _mixer_layer_index(name)
+                    if layer_index is None:
+                        tensors[name] = base.get_tensor(name)
+                        continue
+                    overlay = self.overlay_dir / f"layer-{layer_index:03d}.safetensors"
+                    with safe_open(overlay, framework="pt", device="cpu") as trained:
+                        if name not in trained.keys():
+                            raise ContractError(
+                                f"trained mixer overlay lacks indexed tensor: {name}"
+                            )
+                        tensors[name] = trained.get_tensor(name)
+            save_file(tensors, temporary / shard_name, metadata=metadata)
+        config_path = temporary / "config.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        metadata = config.setdefault("any2rwkv", {})
+        metadata["training_stage"] = training_stage
+        metadata["mixer_overlay_fingerprint"] = overlay_fingerprint
+        write_json(config_path, config)
+        if fitted_evidence_root is not None:
+            for name in (
+                "mapping.json",
+                "mapping-coverage.json",
+                "warm-start-plan.json",
+            ):
+                target = temporary / name
+                if not target.is_file():
+                    source = fitted_evidence_root / name
+                    if not source.is_file():
+                        raise ContractError(
+                            f"trained checkpoint evidence lacks {name}: {source}"
+                        )
+                    shutil.copy2(source, target)
+            finalize_trained_checkpoint_mapping(
+                temporary,
+                evidence_root=fitted_evidence_root,
+                mixer_overlay_fingerprint=overlay_fingerprint,
+            )
+        manifest = {
+            "schema_version": 1,
+            "status": "materialized",
+            "training_stage": training_stage,
+            "base_checkpoint": str(self.base_checkpoint_dir),
+            "mixer_overlay_fingerprint": overlay_fingerprint,
+            "files": {
+                path.relative_to(temporary).as_posix(): file_sha256(path)
+                for path in sorted(temporary.rglob("*"))
+                if path.is_file()
+            },
+        }
+        write_json(temporary / "materialization.json", manifest)
+        _fsync_tree(temporary)
+        temporary.rename(destination)
+        descriptor = os.open(destination.parent, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        return destination
+
     def snapshot_fingerprint(self, source: Path) -> str:
         source = source.resolve()
         self._validate_snapshot(source)
@@ -346,6 +471,12 @@ class RWKV7MixerLayerStore:
                     for name in handle.keys()
                     if name.startswith(prefix)
                 }
+        return self._load_base_layer_state(layer_index)
+
+    def _load_base_layer_state(
+        self, layer_index: int
+    ) -> dict[str, torch.Tensor]:
+        prefix = f"model.layers.{layer_index}.attn."
         requested = {
             name: shard
             for name, shard in self.weight_map.items()
@@ -388,3 +519,13 @@ def _fsync_tree(root: Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _mixer_layer_index(name: str) -> int | None:
+    parts = name.split(".")
+    if len(parts) < 5 or parts[:2] != ["model", "layers"] or parts[3] != "attn":
+        return None
+    try:
+        return int(parts[2])
+    except ValueError as error:
+        raise ContractError(f"invalid indexed mixer tensor name: {name}") from error

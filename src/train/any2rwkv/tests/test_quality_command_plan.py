@@ -48,7 +48,7 @@ class QualityCommandPlanTests(unittest.TestCase):
                     sys.executable, str(package / "scripts" / "build_quality_command_plan.py"),
                     "--quality-suite", str(local_suite), "--ruler-checkout", str(checkouts["ruler"][0]),
                     "--nemo-skills-checkout", str(checkouts["nemo"][0]), "--lm-eval-checkout", str(checkouts["lm_eval"][0]),
-                    "--model", "fixture/model", "--tokenizer", str(tokenizer), "--base-url", "http://127.0.0.1:8000",
+                    "--model", "fixture/model", "--tokenizer", str(tokenizer),
                     "--cluster", "local", "--role", "student", "--target", "proxy", "--output", str(output),
                 ],
                 check=True,
@@ -59,6 +59,11 @@ class QualityCommandPlanTests(unittest.TestCase):
             self.assertEqual(len(ruler_eval), 4)
             self.assertEqual(len(downstream), 6)
             self.assertTrue(all("--log_samples" in row["argv"] for row in downstream))
+            self.assertTrue(all(row["argv"][row["argv"].index("--model") + 1] == "hf" for row in downstream))
+            encoded = json.dumps(plan).lower()
+            self.assertNotIn("vllm", encoded)
+            self.assertNotIn("base_url", encoded)
+            self.assertNotIn("local-completions", encoded)
 
 
 if __name__ == "__main__":

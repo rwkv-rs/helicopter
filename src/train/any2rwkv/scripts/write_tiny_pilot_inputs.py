@@ -16,8 +16,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tokens-per-row", type=int, default=96)
     parser.add_argument(
         "--execution-mode",
-        choices=("resident", "streamed_layer_store"),
-        default="resident",
+        choices=("streamed_layer_store",),
+        default="streamed_layer_store",
     )
     return parser
 
@@ -49,19 +49,35 @@ def main(argv: Sequence[str] | None = None) -> int:
                 + "\n"
             )
     plan = {
-        "schema_version": 1,
+        "schema_version": 3,
         "classification": "deterministic-60-layer-fixture-smoke-only",
+        "evidence_tier": "fixture",
         "seed": 20260714,
         "learning_rate": 0.0005,
         "burn_in_tokens": 16,
         "supervised_tokens": 16,
         "accumulation_steps": 1,
-        "activation_checkpointing": True,
+        "micro_batch_size": 2,
+        "cache_shard_rows": 4,
+        "checkpoint_interval_micro_batches": 4,
         "execution_mode": args.execution_mode,
-        "stage_tokens_per_layer": {"signals": 16, "block": 16, "global": 16},
+        "layer_min_epochs": 3,
+        "layer_max_epochs": 5,
+        "layer_min_delta": 0.01,
+        "layer_patience": 2,
         "corrective_min_sweeps": 1,
         "corrective_max_sweeps": 1,
         "corrective_min_delta": 0.0,
+        "local_loss_weights": {
+            "mixer_mse": 1.0,
+            "block_mse": 1.0,
+            "cosine": 0.1,
+        },
+        "global_loss_weights": {"token_kl": 1.0, "shifted_ce": 0.25},
+        "training_control_evidence": {
+            "status": "fixture-only",
+            "artifact_sha256": None,
+        },
     }
     plan_path = output / "distill-plan.json"
     plan_path.write_text(

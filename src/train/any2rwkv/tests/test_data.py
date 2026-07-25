@@ -10,6 +10,7 @@ from any2rwkv.data import (
     DataPreparationError,
     DuplicateSampleError,
     SPLIT_NAMES,
+    _minhash_signature,
     prepare_jsonl_dataset,
     prepare_rows,
     stable_split,
@@ -31,6 +32,14 @@ class TinyTokenizer:
 
 
 class DataPreparationTests(unittest.TestCase):
+    def test_minhash_has_one_real_value_per_permutation_for_short_documents(self) -> None:
+        left = _minhash_signature(frozenset({"alpha beta gamma"}), 112)
+        right = _minhash_signature(frozenset({"unrelated words here"}), 112)
+        self.assertEqual(len(left), 112)
+        self.assertEqual(len(right), 112)
+        self.assertNotEqual(left, right)
+        self.assertNotIn(2**64 - 1, left)
+
     def setUp(self) -> None:
         self.tokenizer = TinyTokenizer()
         self.config = DataPreparationConfig(
@@ -54,7 +63,7 @@ class DataPreparationTests(unittest.TestCase):
             stable_split("fixed-id", seed=71),
         )
 
-    def test_split_source_ids_are_mutually_exclusive_and_calibration_is_not_a_gate(self) -> None:
+    def test_split_source_ids_are_mutually_exclusive(self) -> None:
         rows = [
             {"sample_id": f"sample-{index:05d}", "text": "x" * 16 + str(index)}
             for index in range(2000)
@@ -66,16 +75,10 @@ class DataPreparationTests(unittest.TestCase):
             self.assertFalse(observed & ids)
             observed |= ids
             self.assertTrue(ids, f"expected deterministic fixture coverage for {split}")
-        calibration = set(report["split_sample_ids"]["nvfp4_calibration"])
-        quality = set().union(
-            *(set(report["split_sample_ids"][split]) for split in ("validation", "ruler", "downstream", "smoke"))
-        )
-        self.assertFalse(calibration & quality)
-        self.assertEqual(report["invariants"]["calibration_quality_gate_overlap"], [])
 
     def test_packing_has_fixed_burn_in_and_supervised_boundaries(self) -> None:
         ratios = {name: "0.0001" for name in SPLIT_NAMES}
-        ratios["distill_train"] = "0.9995"
+        ratios["distill_train"] = "0.9996"
         config = DataPreparationConfig(
             burn_in_tokens=3,
             supervised_tokens=5,
@@ -134,6 +137,28 @@ class DataPreparationTests(unittest.TestCase):
         self.assertGreaterEqual(pairs[0]["jaccard"], 0.7)
         self.assertIn("left_split", pairs[0])
         self.assertTrue(report["near_duplicates"]["candidate_search_complete"])
+
+    def test_near_duplicate_drop_is_deterministic_and_audited(self) -> None:
+        common = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda"
+        rows = [
+            {"sample_id": "near-b", "text": common.replace("lambda", "mu")},
+            {"sample_id": "near-a", "text": common},
+            {"sample_id": "other", "text": "completely unrelated words live in this row"},
+        ]
+        config = DataPreparationConfig(
+            burn_in_tokens=2,
+            supervised_tokens=4,
+            near_duplicate_policy="drop",
+            near_duplicate_threshold=0.7,
+        )
+        _, report = prepare_rows(rows, tokenizer=self.tokenizer, config=config)
+        self.assertEqual(report["near_duplicates"]["dropped_sample_ids"], ["near-b"])
+        retained = {
+            sample_id
+            for sample_ids in report["split_sample_ids"].values()
+            for sample_id in sample_ids
+        }
+        self.assertEqual(retained, {"near-a", "other"})
 
     def test_jsonl_output_records_source_tokenizer_template_and_file_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

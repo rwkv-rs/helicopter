@@ -5,13 +5,13 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 from torch import nn
 
 from any2rwkv.distill import (
     ActiveLayerTrainer,
-    HybridReplacementRunner,
     LossWeights,
     LossBreakdown,
     SweepController,
@@ -22,28 +22,42 @@ from any2rwkv.distill import (
     save_training_checkpoint,
 )
 from any2rwkv.errors import ContractError, CoverageError
-from any2rwkv.calibration import file_sha256
+from any2rwkv.artifacts import file_sha256
 from any2rwkv.distill_runner import (
-    _initial_trainable_names,
     _write_baseline_result,
     read_distillation_plan,
     read_distillation_texts,
     read_packed_token_rows,
+    validate_distributed_row_capacity,
+    validate_training_control_evidence,
 )
+from any2rwkv.recipes.qwen35_to_rwkv7 import Qwen35ToRWKV7Recipe
 from any2rwkv.mapping import MappingLedger, SourceDisposition, SourceEntry, TargetEntry, TargetProvenance, finalize_fitted_mapping
 
 
 class MappingTests(unittest.TestCase):
+    def test_eight_rank_plan_rejects_idle_or_overcommitted_row_sets(self) -> None:
+        rows = tuple((index, index + 1) for index in range(8))
+        plan = SimpleNamespace(distributed_world_size=8, activation_fit_rows=8)
+        validate_distributed_row_capacity(plan, rows, rows)
+        with self.assertRaisesRegex(ContractError, "distill_train"):
+            validate_distributed_row_capacity(plan, rows[:7], rows)
+        with self.assertRaisesRegex(ContractError, "validation"):
+            validate_distributed_row_capacity(plan, rows, rows[:7])
+        plan.activation_fit_rows = 9
+        with self.assertRaisesRegex(ContractError, "activation_fit_rows"):
+            validate_distributed_row_capacity(plan, rows, rows)
+
     def test_loss_breakdown_keeps_nonleaf_autograd_graph(self) -> None:
         leaf = torch.tensor(2.0, requires_grad=True)
         nonleaf = leaf.square()
-        losses = LossBreakdown(*(nonleaf for _ in range(7)))
+        losses = LossBreakdown(*(nonleaf for _ in range(6)))
         total = losses.weighted(LossWeights.for_stage("signals"))
         total.backward()
         self.assertIsNotNone(leaf.grad)
         self.assertGreater(float(leaf.grad), 0.0)
 
-    def test_resident_trainable_names_target_adapter_rwkv_namespace(self) -> None:
+    def test_streamed_trainable_names_use_native_mixer_namespace(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "warm-start-plan.json").write_text(
@@ -60,8 +74,35 @@ class MappingTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(
-                _initial_trainable_names(root, 1),
-                [{"rwkv.r_proj.weight"}],
+                Qwen35ToRWKV7Recipe._initial_trainable_names(root, 1),
+                [{"r_proj.weight"}],
+            )
+
+    def test_zero_bonus_is_not_trainable_during_local_distillation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "warm-start-plan.json").write_text(
+                json.dumps(
+                    {
+                        "entries": [
+                            {
+                                "target": "model.layers.0.attn.r_k",
+                                "provenance": "initialized",
+                                "local_trainable": False,
+                            },
+                            {
+                                "target": "model.layers.0.attn.r_proj.weight",
+                                "provenance": "initialized",
+                                "local_trainable": True,
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                Qwen35ToRWKV7Recipe._initial_trainable_names(root, 1),
+                [{"r_proj.weight"}],
             )
 
     def test_baseline_result_is_written_atomically_and_bound(self) -> None:
@@ -250,50 +291,212 @@ class DistillationInvariantTests(unittest.TestCase):
         self.assertEqual(LossWeights.for_stage("signals").token_kl, 0.0)
         self.assertGreater(LossWeights.for_stage("global").token_kl, 0.0)
 
-    def test_real_runner_freezes_ordered_stage_budgets_and_hashed_data(self) -> None:
+    def test_real_runner_freezes_layer_major_epochs_and_hashed_data(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             plan_path = root / "plan.json"
             plan_path.write_text(
                 json.dumps(
                     {
-                        "schema_version": 1,
+                        "schema_version": 3,
+                        "classification": "fixture-only",
+                        "evidence_tier": "fixture",
                         "seed": 7,
                         "learning_rate": 1e-4,
+                        "local_learning_rate_by_mixer_kind": {
+                            "linear_attention": 2e-5
+                        },
                         "burn_in_tokens": 2,
                         "supervised_tokens": 4,
                         "accumulation_steps": 2,
-                        "stage_tokens_per_layer": {
-                            "signals": 8,
-                            "block": 16,
-                            "global": 32,
-                        },
+                        "micro_batch_size": 2,
+                        "cache_shard_rows": 4,
+                        "checkpoint_interval_micro_batches": 8,
+                        "activation_fit_functional_steps": 8,
+                        "activation_fit_functional_learning_rate": 0.001,
+                        "layer_min_epochs": 3,
+                        "layer_max_epochs": 6,
+                        "layer_min_delta": 0.001,
+                        "layer_patience": 2,
                         "corrective_min_sweeps": 1,
                         "corrective_max_sweeps": 3,
                         "corrective_min_delta": 0.001,
-                        "cache_teacher_layers": True,
-                        "max_teacher_cache_bytes": 8000000000,
-                        "max_cuda_reserved_bytes": 90000000000,
+                        "local_loss_weights": {
+                            "mixer_mse": 1.0,
+                            "block_mse": 1.0,
+                            "cosine": 0.1,
+                        },
+                        "global_loss_weights": {
+                            "token_kl": 1.0,
+                            "shifted_ce": 0.25,
+                        },
+                        "training_control_evidence": {
+                            "status": "fixture-only",
+                            "artifact_sha256": None,
+                        },
+                        "cache_teacher_layers": False,
+                        "corrective_resident_model_max_bytes": 1_000_000_000,
                     }
                 ),
                 encoding="utf-8",
             )
             parsed_plan = read_distillation_plan(plan_path)
-            self.assertEqual(parsed_plan.stage_tokens_per_layer["global"], 32)
+            self.assertEqual(parsed_plan.layer_min_epochs, 3)
+            self.assertEqual(parsed_plan.layer_max_epochs, 6)
+            self.assertEqual(parsed_plan.layer_patience, 2)
             self.assertEqual(
-                tuple(parsed_plan.stage_tokens_per_layer),
-                ("signals", "block", "global"),
+                parsed_plan.local_learning_rate_by_mixer_kind,
+                (("linear_attention", 2e-5),),
             )
-            self.assertEqual(parsed_plan.execution_mode, "resident")
-            self.assertTrue(parsed_plan.cache_teacher_layers)
-            self.assertEqual(parsed_plan.max_teacher_cache_bytes, 8000000000)
-            self.assertEqual(parsed_plan.max_cuda_reserved_bytes, 90000000000)
+            invalid_profile_plan = json.loads(
+                plan_path.read_text(encoding="utf-8")
+            )
+            invalid_profile_plan["local_learning_rate_by_mixer_kind"] = {
+                "linear_attention": 0.0
+            }
+            plan_path.write_text(
+                json.dumps(invalid_profile_plan), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(
+                ContractError,
+                "local_learning_rate_by_mixer_kind",
+            ):
+                read_distillation_plan(plan_path)
+            invalid_profile_plan["local_learning_rate_by_mixer_kind"] = {
+                "linear_attention": 2e-5
+            }
+            plan_path.write_text(
+                json.dumps(invalid_profile_plan), encoding="utf-8"
+            )
+            self.assertEqual(parsed_plan.execution_mode, "streamed_layer_store")
+            self.assertFalse(parsed_plan.cache_teacher_layers)
+            self.assertFalse(
+                parsed_plan.activation_fit_attention_time_mix_ablation
+            )
+            self.assertIsNone(parsed_plan.exploratory_layer_limit)
+            self.assertEqual(
+                parsed_plan.corrective_resident_model_max_bytes,
+                1_000_000_000,
+            )
+            legacy_plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            legacy_plan.pop("activation_fit_functional_steps")
+            legacy_plan.pop("activation_fit_functional_learning_rate")
+            legacy_plan["activation_fit_time_mix_steps"] = 12
+            legacy_plan["activation_fit_time_mix_learning_rate"] = 5e-4
+            plan_path.write_text(json.dumps(legacy_plan), encoding="utf-8")
+            parsed_legacy_plan = read_distillation_plan(plan_path)
+            self.assertEqual(parsed_legacy_plan.activation_fit_functional_steps, 12)
+            self.assertEqual(
+                parsed_legacy_plan.activation_fit_functional_learning_rate,
+                5e-4,
+            )
+            conflicting_plan = dict(legacy_plan)
+            conflicting_plan["activation_fit_functional_steps"] = 16
+            plan_path.write_text(json.dumps(conflicting_plan), encoding="utf-8")
+            with self.assertRaisesRegex(ContractError, "aliases conflict"):
+                read_distillation_plan(plan_path)
+            legacy_plan.pop("activation_fit_time_mix_steps")
+            legacy_plan.pop("activation_fit_time_mix_learning_rate")
+            legacy_plan["activation_fit_functional_steps"] = 8
+            legacy_plan["activation_fit_functional_learning_rate"] = 0.001
+            plan_path.write_text(json.dumps(legacy_plan), encoding="utf-8")
+            validate_training_control_evidence(parsed_plan)
+            enabled_ablation_plan = json.loads(
+                plan_path.read_text(encoding="utf-8")
+            )
+            enabled_ablation_plan[
+                "activation_fit_attention_time_mix_ablation"
+            ] = True
+            plan_path.write_text(
+                json.dumps(enabled_ablation_plan), encoding="utf-8"
+            )
+            self.assertTrue(
+                read_distillation_plan(
+                    plan_path
+                ).activation_fit_attention_time_mix_ablation
+            )
+            enabled_ablation_plan[
+                "activation_fit_attention_time_mix_ablation"
+            ] = 1
+            plan_path.write_text(
+                json.dumps(enabled_ablation_plan), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(
+                ContractError, "attention_time_mix_ablation"
+            ):
+                read_distillation_plan(plan_path)
+            plan_path.write_text(json.dumps(legacy_plan), encoding="utf-8")
+            blocked_plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            blocked_plan["classification"] = "arbitrary-human-readable-label"
+            blocked_plan["evidence_tier"] = "p1"
+            blocked_plan["distributed_world_size"] = 8
+            blocked_plan["max_cached_layer_input_bytes_per_rank"] = 1_000_000
+            blocked_plan["learning_rate_schedule"] = "warmup-constant"
+            blocked_plan["optimizer"] = {
+                "name": "adamw",
+                "learning_rate": 1e-4,
+                "final_learning_rate": 1e-4,
+                "warmup_steps": 10,
+                "betas": [0.9, 0.99],
+                "epsilon": 1e-8,
+                "weight_decay": 0.1,
+            }
+            plan_path.write_text(json.dumps(blocked_plan), encoding="utf-8")
+            with self.assertRaisesRegex(
+                ContractError, "explicit activation-fit controls"
+            ):
+                read_distillation_plan(plan_path)
+            blocked_plan.update(
+                {
+                    "activation_fit_rows": 8,
+                    "activation_fit_ridge": 0.001,
+                    "activation_fit_functional_steps": 32,
+                    "activation_fit_functional_learning_rate": 0.0003,
+                }
+            )
+            blocked_limited_plan = dict(blocked_plan)
+            blocked_limited_plan["exploratory_layer_limit"] = 1
+            plan_path.write_text(
+                json.dumps(blocked_limited_plan), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(
+                ContractError, "only allowed for exploratory evidence"
+            ):
+                read_distillation_plan(plan_path)
+            invalid_null_plan = dict(blocked_plan)
+            invalid_null_plan["exploratory_layer_limit"] = None
+            plan_path.write_text(
+                json.dumps(invalid_null_plan), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(
+                ContractError, "must be a JSON integer"
+            ):
+                read_distillation_plan(plan_path)
+            plan_path.write_text(json.dumps(blocked_plan), encoding="utf-8")
+            with self.assertRaisesRegex(
+                ContractError, "training controls are calibrated"
+            ):
+                validate_training_control_evidence(
+                    read_distillation_plan(plan_path)
+                )
+            plan_path.write_text(json.dumps(blocked_plan), encoding="utf-8")
             invalid_plan = json.loads(plan_path.read_text(encoding="utf-8"))
-            del invalid_plan["max_teacher_cache_bytes"]
+            invalid_plan["stage_tokens_per_layer"] = {"signals": 8, "block": 16, "global": 32}
             plan_path.write_text(json.dumps(invalid_plan), encoding="utf-8")
             with self.assertRaisesRegex(
                 ContractError,
-                "invalid numeric limits",
+                "forbidden",
+            ):
+                read_distillation_plan(plan_path)
+
+            single_gpu_real_plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            single_gpu_real_plan.pop("stage_tokens_per_layer", None)
+            single_gpu_real_plan["evidence_tier"] = "exploratory"
+            single_gpu_real_plan["distributed_world_size"] = 1
+            plan_path.write_text(json.dumps(single_gpu_real_plan), encoding="utf-8")
+            with self.assertRaisesRegex(
+                ContractError,
+                "suffix-free layer-major contract",
             ):
                 read_distillation_plan(plan_path)
             data = root / "train.jsonl"
@@ -389,6 +592,24 @@ class DistillationInvariantTests(unittest.TestCase):
         self.assertTrue(second["stop"])
         self.assertEqual(second["selected_checkpoint"], "sweep-1")
 
+    def test_corrective_first_sweep_can_roll_back_to_pre_sweep_baseline(self) -> None:
+        controller = SweepController(
+            min_sweeps=1,
+            max_sweeps=1,
+            min_delta=0.01,
+            baseline_validation_kl=0.7,
+            baseline_checkpoint="pre-sweep",
+        )
+        result = controller.complete(
+            start_checkpoint="pre-sweep",
+            end_checkpoint="sweep-0",
+            validation_kl=0.8,
+            token_budget=100,
+        )
+        self.assertAlmostEqual(result["delta"], -0.1)
+        self.assertTrue(result["stop"])
+        self.assertEqual(result["selected_checkpoint"], "pre-sweep")
+
     def test_activation_fit_can_freeze_algebraic_parameters_by_name(self) -> None:
         layers = nn.ModuleList([nn.Sequential(nn.Linear(4, 4), nn.Linear(4, 4))])
         trainer = ActiveLayerTrainer(layers, lr=1e-2)
@@ -401,25 +622,6 @@ class DistillationInvariantTests(unittest.TestCase):
         self.assertIsNotNone(layers[0][1].weight.grad)
         torch.testing.assert_close(layers.state_dict()["0.0.weight"], before["0.0.weight"])
         torch.testing.assert_close(layers.state_dict()["0.0.bias"], before["0.0.bias"])
-
-    def test_frozen_teacher_suffix_keeps_global_gradient_bridge(self) -> None:
-        torch.manual_seed(9)
-        teachers = [nn.Linear(4, 4, bias=False) for _ in range(4)]
-        students = [nn.Linear(4, 4, bias=False) for _ in range(4)]
-        head = nn.Linear(4, 8, bias=False)
-        teacher_before = [copy.deepcopy(layer.state_dict()) for layer in teachers]
-        runner = HybridReplacementRunner(teachers, students, head)
-        for index, layer in enumerate(runner.student_layers):
-            layer.requires_grad_(index == 2)
-        active_output, logits = runner.isolated(torch.ones(2, 4), active_layer=2)
-        logits.square().mean().backward()
-        self.assertTrue(any(parameter.grad is not None and torch.count_nonzero(parameter.grad) for parameter in runner.student_layers[2].parameters()))
-        self.assertTrue(all(parameter.grad is None for layer in runner.teacher_layers for parameter in layer.parameters()))
-        self.assertTrue(all(parameter.grad is None for index, layer in enumerate(runner.student_layers) if index != 2 for parameter in layer.parameters()))
-        for index, layer in enumerate(runner.teacher_layers):
-            for name, value in layer.state_dict().items():
-                torch.testing.assert_close(value, teacher_before[index][name], rtol=0, atol=0)
-
 
 if __name__ == "__main__":
     unittest.main()

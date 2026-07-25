@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -58,6 +59,7 @@ def takeoff_args(**overrides: object) -> Namespace:
 def any2rwkv_args(**overrides: object) -> Namespace:
     values = {
         "action": "convert",
+        "recipe": "qwen35_to_rwkv7",
         "source": "/weights/Qwen3.5-397B-A17B",
         "output": "/outputs/any2rwkv/run-1",
         "dry_run": True,
@@ -65,7 +67,6 @@ def any2rwkv_args(**overrides: object) -> Namespace:
         "rwkv_hf_sha": None,
         "rwkv_lm_sha": None,
         "contract": None,
-        "calibration_manifest": None,
         "dataset_manifest": None,
         "training_config": None,
         "resume": None,
@@ -74,6 +75,7 @@ def any2rwkv_args(**overrides: object) -> Namespace:
         "evaluation_manifest": None,
         "p0_evidence": None,
         "migration_baselines": None,
+        "quality_threshold_profile": None,
         "ruler_scores": None,
         "downstream_scores": None,
         "scale_gate": None,
@@ -729,18 +731,10 @@ class Any2RWKVPlanTests(unittest.TestCase):
         )
         self.assertEqual(plan.command[1:3], ["-m", "any2rwkv.cli"])
         self.assertEqual(plan.command[3], "convert")
-        self.assertIn("1e81ce7adf2c9aeec21ed43a2435f8aa3a81e043", plan.command)
-        self.assertIn("39b1e8e0a6aaa7e32d1a12ac1111b68f2f98489b", plan.command)
-        self.assertEqual(plan.env["VLLM_RWKV7_WKV_MODE"], "fp32io16")
-
-    def test_quantize_requires_calibration_before_workload_launch(self) -> None:
-        with self.assertRaisesRegex(SystemExit, "calibration manifest"):
-            commands.build_any2rwkv_plan(
-                any2rwkv_args(action="quantize", precision="nvfp4"),
-                root=ROOT,
-                env={},
-                config=load_example_config(),
-            )
+        self.assertIn("15cd7d7e896efe852f6994a22c34fd14cb60c2c6", plan.command)
+        self.assertIn("81908e5e3ad9ee45a57149758f7ef92a1b50b11d", plan.command)
+        self.assertEqual(plan.env["WKV_MODE"], "fp32io16")
+        self.assertEqual(command_options(plan.command)["--recipe"], "qwen35_to_rwkv7")
 
     def test_distill_requires_frozen_data_and_schedule_before_launch(self) -> None:
         with self.assertRaisesRegex(SystemExit, "dataset-manifest"):
@@ -763,11 +757,12 @@ class Any2RWKVPlanTests(unittest.TestCase):
             config=load_example_config(),
         )
         self.assertEqual(plan.env["RWKV_TRAIN_TYPE"], "infctx")
-        self.assertEqual(plan.env["RWKV_HEAD_SIZE"], "64")
+        self.assertEqual(plan.env["RWKV_HEAD_SIZE"], "source-config-derived")
         self.assertEqual(plan.env["RWKV_HEAD_L2WRAP_CE_CHUNK"], "0")
         self.assertEqual(plan.env["RWKV_MY_TESTING"], "x070")
+        self.assertEqual(plan.env["RWKV_KERNEL"], "")
         self.assertEqual(plan.env["RWKV_FLOAT_MODE"], "bf16")
-        self.assertEqual(plan.env["VLLM_RWKV7_WKV_MODE"], "fp32io16")
+        self.assertEqual(plan.env["WKV_MODE"], "fp32io16")
 
     def test_p0_validation_requires_managed_native_kernel_evidence(self) -> None:
         with self.assertRaisesRegex(SystemExit, "--kernel-oracle"):
@@ -787,6 +782,28 @@ class Any2RWKVPlanTests(unittest.TestCase):
                 config=load_example_config(),
             )
 
+    def test_evaluate_plan_uses_all_eight_gpus(self) -> None:
+        plan = commands.build_any2rwkv_plan(
+            any2rwkv_args(
+                action="evaluate",
+                teacher="/weights/teacher",
+                evaluation_manifest="evaluation.json",
+                p0_evidence="p0.json",
+                migration_baselines="migration.json",
+                quality_threshold_profile="thresholds.json",
+            ),
+            root=ROOT,
+            env={},
+            config=load_example_config(),
+        )
+        self.assertEqual(
+            plan.command[1:5],
+            ["--standalone", "--nproc-per-node=8", "--no-python", str(ROOT / ".venv/bin/python")],
+        )
+        self.assertEqual(plan.command[5:8], ["-m", "any2rwkv.cli", "evaluate"])
+        self.assertIn("--quality-threshold-profile", plan.command)
+        self.assertIn(str(ROOT / "thresholds.json"), plan.command)
+
     def test_output_must_not_modify_or_nest_under_source(self) -> None:
         with self.assertRaisesRegex(SystemExit, "read-only source"):
             commands.build_any2rwkv_plan(
@@ -803,6 +820,28 @@ class Any2RWKVPlanTests(unittest.TestCase):
                 root=ROOT,
                 env={},
                 config=load_example_config(),
+            )
+
+    def test_checkout_sha_prefers_managed_remote_sync_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "src/train/rwkv-lm"
+            checkout.mkdir(parents=True)
+            manifest = root / ".helicopter-dev/source-revisions.json"
+            manifest.parent.mkdir()
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "product_commit": "1" * 40,
+                        "submodules": {"src/train/rwkv-lm": "2" * 40},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                commands._checkout_sha(checkout, root=root),
+                "2" * 40,
             )
 
 

@@ -1,6 +1,7 @@
 {
-  "schema_version": 1,
+  "schema_version": 3,
   "classification": "qwen35-397b-text-backbone-streamed-layer-distillation",
+  "evidence_tier": "scale",
   "execution_mode": "streamed_layer_store",
   "max_estimated_weight_bytes_moved": 1000000000000000,
   "seed": 20260714,
@@ -8,24 +9,35 @@
   "burn_in_tokens": 128,
   "supervised_tokens": 512,
   "accumulation_steps": 4,
-  "activation_checkpointing": true,
-  "stage_tokens_per_layer": {
-    "signals": 16384,
-    "block": 65536,
-    "global": 262144
-  },
+  "micro_batch_size": 1,
+  "distributed_world_size": 8,
+  "cache_shard_rows": 1,
+  "checkpoint_interval_micro_batches": 16,
+  "activation_fit_rows": 32,
+  "activation_fit_ridge": 0.001,
+  "activation_fit_functional_steps": 256,
+  "activation_fit_functional_learning_rate": 0.0003,
+  "max_layer_input_cache_bytes": 10000000000000,
+  "layer_min_epochs": 3,
+  "layer_max_epochs": 6,
+  "layer_min_delta": 0.001,
+  "layer_patience": 2,
   "corrective_min_sweeps": 1,
   "corrective_max_sweeps": 3,
   "corrective_min_delta": 0.001,
+  "local_loss_weights": {"mixer_mse": 1.0, "block_mse": 1.0, "cosine": 0.1},
+  "global_loss_weights": {"token_kl": 1.0, "shifted_ce": 0.25},
+  "training_control_evidence": {"status": "exploratory-unvalidated", "artifact_sha256": null},
   "resident_contract": {
     "source_decoder_layers": 1,
     "target_mixers": 1,
     "optimizers": 1,
     "source_checkpoint": "read-only",
     "teacher_signals": "bounded active-layer capture",
-    "frozen_suffix": "reentrant reload on backward",
-    "vocab_kl": "exact 8192-token chunks"
+    "qwen_suffix": "not loaded during layerwise training",
+    "global_objective": "separate fully recurrent corrective stage"
   },
   "execution_budget_note": "The current streamed_layer_store runner must fail before GPU launch when its conservative estimate exceeds 1 PB. A scale training run requires a distributed resident or expert-sharded backend; conversion-only preflight remains allowed.",
-  "gate": "May start only after the real proxy has passed P0, migration, P1, and BF16 serving acceptance."
+  "gate": "May start only after the real proxy has passed P0, migration, P1, and BF16 Transformers acceptance.",
+  "activation_fit_note": "256 steps/3e-4 is transferred only as a blocked initialization-priority scale-plan candidate from the corrected single-transaction 2B v30/v31 comparison; v33 showed stable layerwise convergence from that initialization under a fixed 12-epoch schedule horizon, so the earlier 2-epoch difference is not used as a convergence claim. 397B execution still requires calibrated multi-seed evidence and its own held-out atomic rollback."
 }

@@ -6,7 +6,6 @@ import os
 import platform
 import subprocess
 import tempfile
-from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -65,14 +64,17 @@ def default_contract_lock(product_root: Path | None = None) -> dict[str, Any]:
             "equation": "S_t = S_{t-1} A_t + B_t",
             "native_update": "S= S*diag(decay) + (S*a)b^T + v*k^T; y=S*r",
             "state_orientation": "batch,head,value,key",
-            "native_head_size": 64,
+            "native_head_size_policy": (
+                "preserve source GDN key/value head count and head size; "
+                "Qwen3.5-2B resolves to 16x128"
+            ),
             "kernel": "rwkv-lm/RWKV7_STATEPASSING_CLAMPW_CUDA",
             "gdn_condition": "Qwen3.5 head-scalar decay and normalized key with matching state/head geometry",
             "gdn_mapping": "w=d; a=-k; b=(d*beta)k; v'=beta*v; k'=k; r=q/sqrt(Dk)",
         },
         "oracle": {
             "reference": "any2rwkv.recurrent.rwkv7_scan",
-            "source_reference": "vllm/tests/kernels/mamba/cpu/test_cpu_gdn_ops.py::ref_gated_delta_rule",
+            "source_reference": "any2rwkv.oracle.gdn_reference_scan",
             "fixture_count": 32,
             "seed": 20260714,
             "lengths": [1, 2, 15, 16, 17, 31, 32, 65],
@@ -80,22 +82,24 @@ def default_contract_lock(product_root: Path | None = None) -> dict[str, Any]:
             "tolerances": {
                 "fp64_output_relative_l2": 1e-12,
                 "fp64_output_max_abs": 1e-12,
-                "fp64_state_relative_l2": 1e-12,
                 "gradient_relative_l2": 1e-11,
                 "gradient_cosine": 0.999999999999,
                 "finite_difference_relative_error": 1e-6,
             },
         },
         "burn_in": {"seed": 20260714, "reset": "document", "cold_and_warmed": True},
-        "corrective_sweeps": {"order": "59..0", "min_sweeps": 1, "max_sweeps": 3, "min_delta": 0.001},
+        "corrective_sweeps": {
+            "order": "N-1..0",
+            "controls": "bound from the hash-locked distillation plan",
+            "evidence": "same-structure pilot validation curves",
+        },
         "bootstrap": {"samples": 10000, "seed": 20260714, "method": "paired-percentile", "confidence": 0.95},
-        "serving": {
-            "warmups": 20,
-            "requests": 100,
-            "logprob_max_abs": 0.001,
-            "memory_drift": "max(2%,256MiB)",
-            "model_impl": "transformers",
-            "loader_contract": "generic-transformers-backend-not-pure-rwkv",
+        "inference": {
+            "backend": "transformers",
+            "loader": "AutoModelForCausalLM.from_pretrained",
+            "trust_remote_code": True,
+            "full_chunked_logit_tolerance": "hash-bound numerical parity profile",
+            "batch_isolation": True,
         },
     }
     if product_root is not None:
@@ -103,7 +107,6 @@ def default_contract_lock(product_root: Path | None = None) -> dict[str, Any]:
             "rwkv7_fp64": product_root / "src/train/any2rwkv/any2rwkv/recurrent.py",
             "gdn_mapping": product_root / "src/train/any2rwkv/any2rwkv/migration.py",
             "oracle_fixture": product_root / "src/train/any2rwkv/any2rwkv/oracle.py",
-            "qwen35_gdn_cpu": product_root / "src/infer/vllm-rwkv/tests/kernels/mamba/cpu/test_cpu_gdn_ops.py",
         }
         missing = [str(path) for path in references.values() if not path.is_file()]
         if missing:
@@ -142,20 +145,39 @@ def write_json(path: Path, payload: Any) -> None:
 
 
 def git_sha(path: Path) -> str:
+    resolved = path.resolve()
+    for root in (resolved, *resolved.parents):
+        manifest = root / ".helicopter-dev/source-revisions.json"
+        if not manifest.is_file():
+            continue
+        try:
+            revisions = json.loads(manifest.read_text(encoding="utf-8"))
+            if resolved == root:
+                revision = revisions["product_commit"]
+            else:
+                relative = resolved.relative_to(root).as_posix()
+                revision = revisions["submodules"][relative]
+        except (KeyError, ValueError, json.JSONDecodeError) as error:
+            raise RuntimeError(
+                f"managed revision manifest does not identify {resolved}: {error}"
+            ) from error
+        if not isinstance(revision, str) or len(revision) != 40:
+            raise RuntimeError(f"invalid managed revision for {resolved}: {revision!r}")
+        return revision
     try:
         return subprocess.run(
-            ["git", "-C", str(path), "rev-parse", "HEAD"],
+            ["git", "-C", str(resolved), "rev-parse", "HEAD"],
             check=True,
             capture_output=True,
             text=True,
         ).stdout.strip()
     except (OSError, subprocess.CalledProcessError) as error:
-        manifest = path / ".helicopter-dev/source-revisions.json"
+        manifest = resolved / ".helicopter-dev/source-revisions.json"
         try:
             revision = json.loads(manifest.read_text(encoding="utf-8"))["product_commit"]
         except (OSError, KeyError, json.JSONDecodeError) as manifest_error:
             raise RuntimeError(
-                f"cannot resolve product commit for {path}: {error}; "
+                f"cannot resolve product commit for {resolved}: {error}; "
                 f"managed revision manifest unavailable: {manifest_error}"
             ) from error
         if not isinstance(revision, str) or len(revision) != 40:
@@ -188,7 +210,7 @@ def initialize_run(
         "product_commit": git_sha(product_root),
         "submodules": {"rwkv-hf": rwkv_hf_sha, "rwkv-lm": rwkv_lm_sha},
         "precision": precision,
-        "wkv_mode": "fp32io16" if precision != "nvfp4" else "fp16",
+        "wkv_mode": "fp32io16",
         "state_dtype": "fp32",
         "io_dtype": "bf16/fp16",
         "command": command,
@@ -254,21 +276,19 @@ def verify_scale_gate(output: Path) -> dict[str, str]:
     p0_path = output / "p0-evidence.json"
     p0 = json.loads(p0_path.read_text(encoding="utf-8"))
     student_sha = str(p0.get("student_sha256", ""))
-    service_path = output / "vllm-service.json"
-    if not service_path.is_file():
-        raise ValueError("397B scale gate requires vllm-service.json")
-    service = json.loads(service_path.read_text(encoding="utf-8"))
+    inference_path = output / "transformers-inference.json"
+    if not inference_path.is_file():
+        raise ValueError("397B scale gate requires transformers-inference.json")
+    inference = json.loads(inference_path.read_text(encoding="utf-8"))
     if (
-        service.get("schema_version") != 1
-        or service.get("passed") is not True
-        or service.get("model_sha256") != student_sha
-        or service.get("warmups") != 20
-        or service.get("requests") != 100
-        or service.get("model_impl") != "transformers"
-        or service.get("loader_contract")
-        != "generic-transformers-backend-not-pure-rwkv"
+        inference.get("schema_version") != 1
+        or inference.get("passed") is not True
+        or inference.get("model_sha256") != student_sha
+        or inference.get("backend") != "transformers"
+        or inference.get("strict_reload") is not True
+        or inference.get("batch_isolation") is not True
     ):
-        raise ValueError("397B scale gate requires accepted student-bound BF16 serving evidence")
+        raise ValueError("397B scale gate requires accepted student-bound Transformers evidence")
     smoke_path = output / "smoke-rubric.json"
     if not smoke_path.is_file():
         raise ValueError("397B scale gate requires smoke-rubric.json")
@@ -279,6 +299,6 @@ def verify_scale_gate(output: Path) -> dict[str, str]:
         "student_sha256": student_sha,
         "quality_sha256": file_sha256(quality_path),
         "p0_sha256": file_sha256(p0_path),
-        "service_sha256": file_sha256(service_path),
+        "transformers_inference_sha256": file_sha256(inference_path),
         "smoke_rubric_sha256": file_sha256(smoke_path),
     }

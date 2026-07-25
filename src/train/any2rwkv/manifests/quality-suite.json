@@ -69,11 +69,10 @@
     "judge_revision": "15852e8c16360a2fea060d615a32b45270f8a8fc",
     "judge_temperature": 0.0,
     "judge_prompt": "Given PROMPT and RESPONSE, return one JSON object with boolean fields coherent and relevant. coherent means grammatical or otherwise intelligible, non-degenerate language without a dominant repetition loop. relevant means the response attempts to address or naturally continue the prompt. Judge only these two minimum usability properties; do not require factual correctness or a particular style.",
-    "minimum_pass_rate": 0.9
+    "threshold_source": "evidence-bound quality threshold profile; this suite records raw judgments only"
   },
   "quality_separation": {
     "ruler_and_downstream_are_quality_gate_data": true,
-    "nvfp4_calibration_use_forbidden": true,
     "teacher_and_student_use_identical_inputs": true
   }
 }

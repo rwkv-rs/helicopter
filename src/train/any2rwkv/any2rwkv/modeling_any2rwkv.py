@@ -119,8 +119,15 @@ class Any2RWKV7DecoderLayer(nn.Module):
         source_types = config.any2rwkv["source_layer_types"]
         source_used_rope = source_types[layer_idx] == "full_attention"
         source_head_dim = int(config.any2rwkv["source_text_config"].get("head_dim", config.head_dim))
+        source_num_heads = int(
+            config.any2rwkv["source_text_config"].get(
+                "num_attention_heads", config.num_heads
+            )
+        )
         rope = config.rope_parameters
-        rotary_dim = min(config.head_dim, int(source_head_dim * float(rope.get("partial_rotary_factor", 1.0))))
+        rotary_dim = int(
+            source_head_dim * float(rope.get("partial_rotary_factor", 1.0))
+        )
         rotary_dim -= rotary_dim % 2
         self.attn = ProjectionBoundaryRWKV7Attention(
             config,
@@ -128,6 +135,8 @@ class Any2RWKV7DecoderLayer(nn.Module):
             source_used_rope=source_used_rope,
             rotary_dim=rotary_dim,
             rope_theta=float(rope.get("rope_theta", 10_000.0)),
+            rope_num_heads=source_num_heads,
+            rope_head_dim=source_head_dim,
         )
 
     def step(
@@ -241,8 +250,15 @@ class Any2RWKV7ForCausalLM(PreTrainedModel, GenerationMixin):
 
     def _new_cache(self, batch: int, device: torch.device, dtype: torch.dtype) -> Any2RWKV7Cache:
         states = [
-            torch.zeros(batch, self.config.num_heads, self.config.head_dim, self.config.head_dim, device=device, dtype=torch.float32)
-            for _ in self.model.layers
+            torch.zeros(
+                batch,
+                layer.attn.num_heads,
+                layer.attn.head_dim,
+                layer.attn.head_dim,
+                device=device,
+                dtype=torch.float32,
+            )
+            for layer in self.model.layers
         ]
         previous = [
             torch.zeros(batch, self.config.hidden_size, device=device, dtype=dtype)
@@ -299,7 +315,12 @@ class Any2RWKV7ForCausalLM(PreTrainedModel, GenerationMixin):
         outputs: list[Tensor] = []
         for token_index in range(length):
             hidden = hidden_sequence[:, token_index]
-            v_first = torch.zeros_like(hidden)
+            v_first = torch.zeros(
+                batch,
+                self.config.attention_hidden_size,
+                device=hidden.device,
+                dtype=hidden.dtype,
+            )
             valid = attention_mask[:, token_index]
             for layer_index, layer in enumerate(self.model.layers):
                 hidden, cache.previous[layer_index], cache.states[layer_index], v_first, _ = layer.step(

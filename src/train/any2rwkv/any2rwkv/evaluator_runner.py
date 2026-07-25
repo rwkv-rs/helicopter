@@ -11,15 +11,18 @@ import torch
 from torch import Tensor, nn
 
 from .artifacts import checkpoint_sha256, write_json
-from .calibration import file_sha256
+from .artifacts import file_sha256
 from .evaluate import (
     P0_REQUIRED,
     QualityMetrics,
+    QualityThresholdProfile,
     migration_gate,
     p0_gate,
     paired_bootstrap_ratio_ci,
     quality_gate,
+    read_quality_threshold_profile,
 )
+from .distributed import DistributedContext
 
 
 @dataclass(frozen=True)
@@ -294,6 +297,7 @@ def _evaluate_mode(
     *,
     burn_in: int,
     warmed: bool,
+    distributed: DistributedContext | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     layer_count = len(_layers(teacher))
     if len(_layers(student)) != layer_count:
@@ -325,6 +329,38 @@ def _evaluate_mode(
                     unavailable[kind].add(index)
                     continue
                 accumulators[kind][index].add(student_signal, teacher_signal)
+    if distributed is not None and distributed.world_size > 1:
+        shards = distributed.all_gather_objects(
+            {
+                "totals": totals,
+                "rows": rows,
+                "unavailable": {
+                    kind: sorted(indices) for kind, indices in unavailable.items()
+                },
+                "accumulators": {
+                    kind: [asdict(value) for value in values]
+                    for kind, values in accumulators.items()
+                },
+            }
+        )
+        totals = {"tokens": 0, "teacher_nll": 0.0, "student_nll": 0.0, "kl": 0.0}
+        rows = []
+        accumulators = {
+            kind: [_PairAccumulator() for _ in range(layer_count)]
+            for kind in ("intermediate", "state", "output")
+        }
+        unavailable = {kind: set() for kind in accumulators}
+        for shard in shards:
+            for name in totals:
+                totals[name] += shard["totals"][name]
+            rows.extend(shard["rows"])
+            for kind in accumulators:
+                unavailable[kind].update(shard["unavailable"][kind])
+                for index, payload in enumerate(shard["accumulators"][kind]):
+                    target = accumulators[kind][index]
+                    for field, value in payload.items():
+                        setattr(target, field, getattr(target, field) + value)
+        rows.sort(key=lambda row: row["sample_id"])
     layer_metrics: dict[str, list[dict[str, Any]]] = {}
     for kind, values in accumulators.items():
         layer_metrics[kind] = []
@@ -345,13 +381,23 @@ def _evaluate_mode(
     return summary, rows
 
 
-def _smoke(student: nn.Module, tokenizer: Any, prompts: Sequence[str], config: EvaluatorConfig) -> dict[str, Any]:
-    if len(prompts) != 32:
+def _smoke(
+    student: nn.Module,
+    tokenizer: Any,
+    prompts: Sequence[str],
+    config: EvaluatorConfig,
+    *,
+    prompt_indices: Sequence[int] | None = None,
+    distributed: DistributedContext | None = None,
+) -> dict[str, Any]:
+    if prompt_indices is None:
+        prompt_indices = tuple(range(len(prompts)))
+    if distributed is None and len(prompts) != 32:
         raise ValueError("smoke evaluation requires exactly 32 prompts")
     rows: list[dict[str, Any]] = []
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(config.seed)
-        for index, prompt in enumerate(prompts):
+        for index, prompt in zip(prompt_indices, prompts, strict=True):
             row: dict[str, Any] = {"prompt_index": index, "prompt": prompt}
             try:
                 encoded = tokenizer(prompt, return_tensors="pt")
@@ -403,6 +449,12 @@ def _smoke(student: nn.Module, tokenizer: Any, prompts: Sequence[str], config: E
             except Exception as error:  # Keep all 32 raw outcomes for the smoke rubric.
                 row.update({"status": "failed", "error": f"{type(error).__name__}: {error}", "generated_token_ids": []})
             rows.append(row)
+    if distributed is not None and distributed.world_size > 1:
+        gathered = distributed.all_gather_objects(rows)
+        rows = [row for shard in gathered for row in shard]
+        rows.sort(key=lambda row: row["prompt_index"])
+    if len(rows) != 32 or [row["prompt_index"] for row in rows] != list(range(32)):
+        raise ValueError("distributed smoke evaluation must cover 32 prompts exactly once")
     passed = sum(row["status"] == "passed" for row in rows)
     return {
         "status": "run",
@@ -467,9 +519,19 @@ def run_evaluator(
     ruler_scores: Sequence[PairedSampleScore] | None = None,
     downstream_scores: Sequence[PairedSampleScore] | None = None,
     output_path: Path | None = None,
+    quality_thresholds: QualityThresholdProfile | None = None,
+    distributed: DistributedContext | None = None,
 ) -> dict[str, Any]:
     """Run a deterministic, hash-bound evaluator without inventing external scores."""
     config.validate()
+    if (
+        quality_thresholds is not None
+        and config.student_sha256 in quality_thresholds.calibration_student_sha256s
+    ):
+        raise ValueError(
+            "candidate checkpoint participated in threshold calibration; "
+            "quality evaluation must use an independent student"
+        )
     if not samples or len({sample.sample_id for sample in samples}) != len(samples):
         raise ValueError("evaluation samples must be non-empty with unique ids")
     if any(len(sample.input_ids) < config.burn_in_tokens + 2 for sample in samples):
@@ -492,11 +554,43 @@ def run_evaluator(
     input_sha256 = hashlib.sha256(
         json.dumps(input_payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+    local_samples = samples
+    local_prompts = smoke_prompts
+    local_prompt_indices: Sequence[int] | None = None
+    if distributed is not None and distributed.world_size > 1:
+        if len(samples) < distributed.world_size:
+            raise ValueError("distributed evaluation requires at least one sample per rank")
+        local_samples = samples[distributed.rank :: distributed.world_size]
+        local_prompt_indices = tuple(
+            range(distributed.rank, len(smoke_prompts), distributed.world_size)
+        )
+        local_prompts = tuple(smoke_prompts[index] for index in local_prompt_indices)
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(config.seed)
-        cold, cold_rows = _evaluate_mode(teacher, student, samples, burn_in=config.burn_in_tokens, warmed=False)
-        warmed, warmed_rows = _evaluate_mode(teacher, student, samples, burn_in=config.burn_in_tokens, warmed=True)
-        smoke = _smoke(student, tokenizer, smoke_prompts, config)
+        cold, cold_rows = _evaluate_mode(
+            teacher,
+            student,
+            local_samples,
+            burn_in=config.burn_in_tokens,
+            warmed=False,
+            distributed=distributed,
+        )
+        warmed, warmed_rows = _evaluate_mode(
+            teacher,
+            student,
+            local_samples,
+            burn_in=config.burn_in_tokens,
+            warmed=True,
+            distributed=distributed,
+        )
+        smoke = _smoke(
+            student,
+            tokenizer,
+            local_prompts,
+            config,
+            prompt_indices=local_prompt_indices,
+            distributed=distributed,
+        )
     ruler = _external_suite("RULER", ruler_scores, samples=config.bootstrap_samples, seed=config.seed)
     downstream = _external_suite("downstream", downstream_scores, samples=config.bootstrap_samples, seed=config.seed)
     output_layers = warmed["layers"]["output"]
@@ -533,7 +627,7 @@ def run_evaluator(
         warmed["ppl_ratio"], warmed["mean_token_kl"], layer_cosines, layer_mse,
         smoke["pass_rate"], 0.0, 0.0, 0.0, 0.0,
     )
-    p1 = quality_gate(p1_metrics, level="P1")
+    p1 = quality_gate(p1_metrics, level="P1", thresholds=quality_thresholds)
     migration = (
         None
         if migration_baselines is None
@@ -559,7 +653,7 @@ def run_evaluator(
             warmed["ppl_ratio"], warmed["mean_token_kl"], layer_cosines, layer_mse,
             smoke["pass_rate"], ruler_lower, ruler_bucket_min, downstream_lower, downstream_max_drop,
         )
-        p2 = quality_gate(p2_metrics, level="P2")
+        p2 = quality_gate(p2_metrics, level="P2", thresholds=quality_thresholds)
         if not p1.passed:
             p2 = type(p2)(
                 p2.name,
@@ -584,6 +678,15 @@ def run_evaluator(
             "layer_schedule": list(config.layer_schedule),
             "cold_and_warmed": True,
             "bootstrap_samples": config.bootstrap_samples,
+            "quality_threshold_profile": (
+                None
+                if quality_thresholds is None
+                else {
+                    "profile_id": quality_thresholds.profile_id,
+                    "profile_sha256": quality_thresholds.profile_sha256,
+                    "calibration_artifact_sha256": quality_thresholds.calibration_artifact_sha256,
+                }
+            ),
         },
         "metrics": {"cold": cold, "warmed": warmed, "quality_metrics": quality_payload},
         "raw_sample_metrics": {"cold": cold_rows, "warmed": warmed_rows},
@@ -600,8 +703,10 @@ def run_evaluator(
             "P2": p2_payload,
         },
     }
-    if output_path is not None:
+    if output_path is not None and distributed is None:
         write_json(output_path, result)
+    if distributed is not None:
+        distributed.barrier()
     return result
 
 
@@ -778,13 +883,20 @@ def evaluate_hf_checkpoints(
     manifest_path: Path,
     p0_evidence_path: Path,
     migration_baselines_path: Path,
+    quality_threshold_profile_path: Path,
     output_path: Path,
     ruler_scores_path: Path | None = None,
     downstream_scores_path: Path | None = None,
+    distributed: DistributedContext,
 ) -> dict[str, Any]:
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
+    if torch.cuda.is_available() and distributed.world_size != 8:
+        raise ValueError(
+            "real CUDA evaluation requires torchrun --nproc-per-node=8"
+        )
     samples, prompts, manifest = read_evaluation_manifest(manifest_path)
+    quality_thresholds = read_quality_threshold_profile(quality_threshold_profile_path)
     tokenizer_sha = combined_tokenizer_sha256(student_path)
     expected_tokenizer_sha = str(manifest.get("tokenizer_sha256", ""))
     if tokenizer_sha != expected_tokenizer_sha:
@@ -793,8 +905,8 @@ def evaluate_hf_checkpoints(
         )
     teacher_sha = checkpoint_sha256(teacher_path)
     student_sha = checkpoint_sha256(student_path)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.bfloat16 if device == "cuda" else torch.float32
+    device = str(distributed.device) if torch.cuda.is_available() else "cpu"
+    dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
     teacher = AutoModelForCausalLM.from_pretrained(
         teacher_path, torch_dtype=dtype, device_map=device
     ).eval()
@@ -804,7 +916,11 @@ def evaluate_hf_checkpoints(
         torch_dtype=dtype,
         device_map=device,
     ).eval()
-    tokenizer = AutoTokenizer.from_pretrained(student_path, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        student_path,
+        trust_remote_code=True,
+        fix_mistral_regex=True,
+    )
     p0_evidence = read_p0_evidence(
         p0_evidence_path,
         student_sha256=student_sha,
@@ -825,7 +941,7 @@ def evaluate_hf_checkpoints(
         smoke_new_tokens=int(manifest.get("smoke_new_tokens", 128)),
         bootstrap_samples=int(manifest.get("bootstrap_samples", 10_000)),
     )
-    return run_evaluator(
+    result = run_evaluator(
         teacher=teacher,
         student=student,
         tokenizer=tokenizer,
@@ -847,5 +963,8 @@ def evaluate_hf_checkpoints(
             teacher_sha256=teacher_sha,
             student_sha256=student_sha,
         ),
+        quality_thresholds=quality_thresholds,
         output_path=output_path,
+        distributed=distributed,
     )
+    return result

@@ -4,7 +4,7 @@ import hashlib
 import io
 import json
 import random
-from dataclasses import asdict, dataclass, fields
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
@@ -20,7 +20,6 @@ DEFAULT_VOCAB_CHUNK_SIZE = 8192
 @dataclass(frozen=True)
 class LossBreakdown:
     intermediate_mse: Tensor
-    state_mse: Tensor
     block_mse: Tensor
     cosine: Tensor
     token_kl: Tensor
@@ -41,7 +40,6 @@ class LossBreakdown:
 @dataclass(frozen=True)
 class LossWeights:
     intermediate_mse: float
-    state_mse: float
     block_mse: float
     cosine: float
     token_kl: float
@@ -51,10 +49,10 @@ class LossWeights:
     @classmethod
     def for_stage(cls, stage: str) -> "LossWeights":
         stages = {
-            "signals": cls(1.0, 1.0, 0.25, 0.1, 0.0, 0.0, 0.0),
-            "block": cls(0.25, 0.25, 1.0, 0.25, 0.1, 0.0, 0.0),
-            "global": cls(0.1, 0.1, 0.5, 0.1, 1.0, 0.25, 0.0),
-            "rollout": cls(0.0, 0.1, 0.25, 0.1, 0.5, 0.25, 1.0),
+            "signals": cls(1.0, 0.25, 0.1, 0.0, 0.0, 0.0),
+            "block": cls(0.25, 1.0, 0.25, 0.1, 0.0, 0.0),
+            "global": cls(0.1, 0.5, 0.1, 1.0, 0.25, 0.0),
+            "rollout": cls(0.0, 0.25, 0.1, 0.5, 0.25, 1.0),
         }
         try:
             return stages[stage]
@@ -63,14 +61,18 @@ class LossWeights:
 
 
 def normalized_mse(student: Tensor, teacher: Tensor) -> Tensor:
-    return torch.mean((student - teacher).square()) / torch.clamp(torch.mean(teacher.square()), min=1e-12)
+    student_fp32 = student.float()
+    teacher_fp32 = teacher.float()
+    return torch.mean((student_fp32 - teacher_fp32).square()) / torch.clamp(
+        torch.mean(teacher_fp32.square()), min=1e-12
+    )
 
 
 def token_kl(student_logits: Tensor, teacher_logits: Tensor) -> Tensor:
     teacher = torch.softmax(teacher_logits.float(), dim=-1)
     return torch.nn.functional.kl_div(
-        torch.log_softmax(student_logits.float(), dim=-1), teacher, reduction="batchmean"
-    )
+        torch.log_softmax(student_logits.float(), dim=-1), teacher, reduction="sum"
+    ) / student_logits[..., 0].numel()
 
 
 def chunked_token_kl(
@@ -105,15 +107,13 @@ def chunked_token_kl(
             teacher_log_probability.exp()
             * (teacher_log_probability - student_log_probability)
         )
-    return total / student_logits.shape[0]
+    return total / student_logits[..., 0].numel()
 
 
 def layerwise_losses(
     *,
     student_intermediate: Tensor,
     teacher_intermediate: Tensor,
-    student_state: Tensor,
-    teacher_state: Tensor,
     student_block: Tensor,
     teacher_block: Tensor,
     student_logits: Tensor,
@@ -129,7 +129,6 @@ def layerwise_losses(
     rollout = student_logits.new_zeros(()) if rollout_student is None else normalized_mse(rollout_student, rollout_teacher)
     return LossBreakdown(
         normalized_mse(student_intermediate, teacher_intermediate),
-        normalized_mse(student_state, teacher_state),
         normalized_mse(student_block, teacher_block),
         cosine,
         chunked_token_kl(
@@ -224,6 +223,23 @@ class ActiveLayerTrainer:
 
     def step(self, loss: Tensor) -> None:
         self.backward(loss)
+
+    def flush(self, *, accumulation_steps: int) -> bool:
+        """Commit a partial epoch tail without consuming a row twice."""
+        if accumulation_steps <= 0:
+            raise ContractError("accumulation_steps must be positive")
+        if self.accumulation_step == 0:
+            return False
+        scale = accumulation_steps / self.accumulation_step
+        for parameter in self.layers[self.active_layer].parameters():
+            if parameter.grad is not None:
+                parameter.grad.mul_(scale)
+        self.optimizers[self.active_layer].step()
+        self.schedulers[self.active_layer].step()
+        self.optimizer_step += 1
+        self.accumulation_step = 0
+        self.optimizers[self.active_layer].zero_grad(set_to_none=True)
+        return True
 
     def state_dict(self) -> dict[str, object]:
         return {
@@ -508,50 +524,6 @@ def _hidden(output: Tensor | tuple[Tensor, ...]) -> Tensor:
     return output[0] if isinstance(output, tuple) else output
 
 
-class HybridReplacementRunner(nn.Module):
-    """Teacher prefix / active student / teacher suffix with a live KL bridge."""
-
-    def __init__(
-        self,
-        teacher_layers: Sequence[nn.Module],
-        student_layers: Sequence[nn.Module],
-        teacher_lm_head: nn.Module,
-    ) -> None:
-        super().__init__()
-        if len(teacher_layers) != len(student_layers):
-            raise ContractError("teacher/student layer counts differ")
-        self.teacher_layers = nn.ModuleList(teacher_layers).eval().requires_grad_(False)
-        self.student_layers = nn.ModuleList(student_layers)
-        self.teacher_lm_head = teacher_lm_head.eval().requires_grad_(False)
-
-    def isolated(self, hidden: Tensor, *, active_layer: int) -> tuple[Tensor, Tensor]:
-        with torch.no_grad():
-            for layer in self.teacher_layers[:active_layer]:
-                hidden = _hidden(layer(hidden))
-        active_output = _hidden(self.student_layers[active_layer](hidden.detach()))
-        bridged = active_output
-        # Teacher suffix parameters are frozen, but this deliberately is not
-        # torch.no_grad(): logits loss must retain d(logits)/d(active_output).
-        for layer in self.teacher_layers[active_layer + 1 :]:
-            bridged = _hidden(layer(bridged))
-        return active_output, self.teacher_lm_head(bridged)
-
-    def progressive(self, hidden: Tensor, *, active_layer: int) -> tuple[Tensor, Tensor]:
-        for index in range(active_layer):
-            with torch.no_grad():
-                hidden = _hidden(self.student_layers[index](hidden))
-        active_output = _hidden(self.student_layers[active_layer](hidden.detach()))
-        bridged = active_output
-        for layer in self.teacher_layers[active_layer + 1 :]:
-            bridged = _hidden(layer(bridged))
-        return active_output, self.teacher_lm_head(bridged)
-
-    def fully_recurrent(self, hidden: Tensor) -> Tensor:
-        for layer in self.student_layers:
-            hidden = _hidden(layer(hidden))
-        return self.teacher_lm_head(hidden)
-
-
 @dataclass(frozen=True)
 class BaselineResult:
     name: str
@@ -593,18 +565,25 @@ class SweepController:
     min_sweeps: int = 1
     max_sweeps: int = 3
     min_delta: float = 0.001
+    order: str = "59..0"
     history: list[dict[str, object]] | None = None
+    baseline_validation_kl: float | None = None
+    baseline_checkpoint: str | None = None
 
     def __post_init__(self) -> None:
         self.history = [] if self.history is None else self.history
 
     def complete(self, *, start_checkpoint: str, end_checkpoint: str, validation_kl: float, token_budget: int) -> dict[str, object]:
         index = len(self.history)
-        previous = None if not self.history else float(self.history[-1]["validation_kl"])
+        previous = (
+            float(self.history[-1]["validation_kl"])
+            if self.history
+            else self.baseline_validation_kl
+        )
         delta = None if previous is None else previous - validation_kl
         row = {
             "sweep_index": index,
-            "order": "59..0",
+            "order": self.order,
             "start_checkpoint": start_checkpoint,
             "end_checkpoint": end_checkpoint,
             "token_budget": token_budget,
@@ -613,6 +592,13 @@ class SweepController:
         }
         self.history.append(row)
         best = min(self.history, key=lambda item: float(item["validation_kl"]))
+        selected_checkpoint = str(best["end_checkpoint"])
+        if (
+            self.baseline_validation_kl is not None
+            and self.baseline_checkpoint is not None
+            and self.baseline_validation_kl <= float(best["validation_kl"])
+        ):
+            selected_checkpoint = self.baseline_checkpoint
         completed = len(self.history)
         stop = completed >= self.max_sweeps or (
             completed >= self.min_sweeps and delta is not None and delta < self.min_delta
@@ -620,8 +606,8 @@ class SweepController:
         result = {
             **row,
             "stop": stop,
-            "selected_checkpoint": best["end_checkpoint"],
-            "rollback_checkpoint": best["end_checkpoint"],
+            "selected_checkpoint": selected_checkpoint,
+            "rollback_checkpoint": selected_checkpoint,
         }
         self.history[-1] = result
         return result

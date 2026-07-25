@@ -10,7 +10,7 @@ from torch import Tensor
 
 from .checkpoint import CheckpointManifest, sha256_file
 from .errors import ContractError
-from .export import initialize_tensor
+from .export import BF16_VALUE_RESIDUAL_DISABLED_LOGIT, initialize_tensor
 from .mapping import (
     MappingLedger,
     SourceDisposition,
@@ -34,13 +34,26 @@ class WarmStartVariant(StrEnum):
 
 class TensorOperation(StrEnum):
     INITIALIZE = "initialize"
+    ZERO = "zero"
     COPY = "copy"
     RESHAPE = "reshape"
     SLICE = "slice"
     HEADWISE_QUERY_SLICE = "headwise_query_slice"
+    HEADWISE_QUERY_GATE_SUBSAMPLE = "headwise_query_gate_subsample"
+    HEADWISE_QUERY_GATE_RECONSTRUCTION = "headwise_query_gate_reconstruction"
+    PAD_ROWS = "pad_rows"
+    HEAD_SCALAR_EXPAND = "head_scalar_expand"
+    GDN_ERASE_LINEAR_DOWN = "gdn_erase_linear_down"
+    GDN_ERASE_BIAS = "gdn_erase_bias"
+    GDN_CONV_TIME_MIX = "gdn_conv_time_mix"
+    EVEN_ROW_SUBSAMPLE = "even_row_subsample"
+    DECAY_LINEAR_UP = "decay_linear_up"
+    DECAY_BIAS = "decay_bias"
+    TILE = "tile"
     SCALE = "scale"
     KV_REPEAT = "kv_repeat"
     KV_EXPAND = "kv_expand"
+    DISABLED_SIGMOID_BIAS = "disabled_sigmoid_bias"
 
 
 @dataclass(frozen=True)
@@ -58,6 +71,8 @@ class WarmStartEntry:
     num_kv_heads: int | None = None
     scale: float | None = None
     is_semantically_lossless: bool = False
+    auxiliary_sources: tuple[str, ...] = ()
+    local_trainable: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -121,21 +136,24 @@ class WarmStartTensorProvider:
         if expected != spec:
             raise ContractError(f"warm-start provider received an unknown spec: {spec.name}")
         entry = self.entries[spec.name]
-        source_value = None
-        if entry.source is not None:
-            source_layer_index = layer_index(entry.source)
+        source_values: dict[str, Tensor] = {}
+        requested_sources = tuple(
+            name for name in (entry.source, *entry.auxiliary_sources) if name is not None
+        )
+        if requested_sources:
+            source_layer_index = layer_index(requested_sources[0])
             if source_layer_index is None:
-                source_value = self.tensor_store.load_named_tensors((entry.source,))[
-                    entry.source
-                ]
+                source_values = self.tensor_store.load_named_tensors(requested_sources)
             else:
                 if source_layer_index != self._cached_layer_index:
                     self._cached_layer_tensors = self.tensor_store.load_layer(
                         source_layer_index
                     )
                     self._cached_layer_index = source_layer_index
-                source_value = self._cached_layer_tensors[entry.source]
-        return _materialize_entry(spec, entry, source_value, seed=self.seed)
+                source_values = {
+                    name: self._cached_layer_tensors[name] for name in requested_sources
+                }
+        return _materialize_entry(spec, entry, source_values, seed=self.seed)
 
 
 @dataclass(frozen=True)
@@ -192,6 +210,12 @@ def plan_warm_start(
             )
         else:
             raise ContractError(f"unsupported source mixer at layer {index}: {mixer_kind}")
+        # Warm-start provenance constrains only the zero-step value. Once this
+        # layer becomes active, distillation must be able to use every native
+        # RWKV7 degree of freedom to absorb the residual architecture gap.
+        layer_entries = [
+            replace(entry, local_trainable=True) for entry in layer_entries
+        ]
         entries.extend(layer_entries)
         errors.extend(layer_errors)
 
@@ -232,14 +256,25 @@ def materialize_warm_start(
         raise ContractError("source checkpoint hashes changed after warm-start planning")
     tensors = _read_source_tensors(
         source,
-        {entry.source for entry in plan.entries if entry.source is not None},
+        {
+            name
+            for entry in plan.entries
+            for name in (entry.source, *entry.auxiliary_sources)
+            if name is not None
+        },
     )
     result: dict[str, Tensor] = {}
     for entry in plan.entries:
         spec = specs[entry.target]
-        source_value = None if entry.source is None else tensors.get(entry.source)
         result[entry.target] = _materialize_entry(
-            spec, entry, source_value, seed=seed
+            spec,
+            entry,
+            {
+                name: tensors[name]
+                for name in (entry.source, *entry.auxiliary_sources)
+                if name is not None
+            },
+            seed=seed,
         )
     return result
 
@@ -247,7 +282,7 @@ def materialize_warm_start(
 def _materialize_entry(
     spec: TensorSpec,
     entry: WarmStartEntry,
-    source_value: Tensor | None,
+    source_values: dict[str, Tensor],
     *,
     seed: int,
 ) -> Tensor:
@@ -255,7 +290,16 @@ def _materialize_entry(
         raise ContractError(f"stale target shape in warm-start plan: {entry.target}")
     if entry.operation == TensorOperation.INITIALIZE:
         value = initialize_tensor(spec, base_seed=seed)
+    elif entry.operation == TensorOperation.ZERO:
+        value = torch.zeros(spec.shape, dtype=_torch_dtype(spec.dtype))
+    elif entry.operation == TensorOperation.DISABLED_SIGMOID_BIAS:
+        value = torch.full(
+            entry.target_shape,
+            BF16_VALUE_RESIDUAL_DISABLED_LOGIT,
+            dtype=torch.float32,
+        )
     else:
+        source_value = source_values.get(entry.source) if entry.source is not None else None
         if entry.source is None or source_value is None:
             raise ContractError(f"warm-start source tensor is unavailable: {entry.source}")
         value = source_value
@@ -265,11 +309,159 @@ def _materialize_entry(
             value = value[entry.source_start : entry.source_stop]
         if entry.operation == TensorOperation.RESHAPE:
             value = value.reshape(entry.target_shape)
+        elif entry.operation == TensorOperation.PAD_ROWS:
+            if value.ndim != 2 or value.shape[1] != entry.target_shape[1]:
+                raise ContractError(f"cannot row-pad warm-start tensor: {entry.source}")
+            padded = torch.zeros(entry.target_shape, dtype=value.dtype)
+            padded[: value.shape[0]].copy_(value)
+            value = padded
+        elif entry.operation == TensorOperation.HEAD_SCALAR_EXPAND:
+            if value.ndim != 2 or entry.target_shape[1] < value.shape[0]:
+                raise ContractError(f"cannot expand GDN head scalar map: {entry.source}")
+            expanded = torch.zeros(entry.target_shape, dtype=value.dtype)
+            channels_per_head = entry.target_shape[0] // value.shape[0]
+            if channels_per_head * value.shape[0] != entry.target_shape[0]:
+                raise ContractError(f"GDN head scalar expansion is not divisible: {entry.source}")
+            for head in range(value.shape[0]):
+                expanded[
+                    head * channels_per_head : (head + 1) * channels_per_head,
+                    head,
+                ] = 1
+            value = expanded
+        elif entry.operation == TensorOperation.GDN_ERASE_LINEAR_DOWN:
+            if len(entry.auxiliary_sources) != 3:
+                raise ContractError(
+                    f"GDN erase linearization requires decay input, A_log, and dt_bias: {entry.target}"
+                )
+            gradient, _ = _gdn_erase_logit_linearization(
+                source_value.float(),
+                source_values[entry.auxiliary_sources[0]].float(),
+                source_values[entry.auxiliary_sources[1]].float(),
+                source_values[entry.auxiliary_sources[2]].float(),
+            )
+            if gradient.ndim != 2 or gradient.shape[1] != entry.target_shape[1]:
+                raise ContractError(
+                    f"GDN erase gradient cannot fit target a_lora down projection: {entry.target}"
+                )
+            value = torch.zeros(entry.target_shape, dtype=gradient.dtype)
+            value[: gradient.shape[0]].copy_(gradient)
+        elif entry.operation == TensorOperation.GDN_ERASE_BIAS:
+            if len(entry.auxiliary_sources) != 1:
+                raise ContractError(f"GDN erase bias requires dt_bias: {entry.target}")
+            _, per_head_bias = _gdn_erase_logit_linearization(
+                None,
+                None,
+                source_value.float(),
+                source_values[entry.auxiliary_sources[0]].float(),
+            )
+            repeats = entry.target_shape[0] // per_head_bias.numel()
+            if repeats * per_head_bias.numel() != entry.target_shape[0]:
+                raise ContractError(
+                    f"GDN erase bias cannot expand to target recurrent width: {entry.target}"
+                )
+            value = per_head_bias.repeat_interleave(repeats)
+        elif entry.operation == TensorOperation.GDN_CONV_TIME_MIX:
+            if len(entry.auxiliary_sources) != 1:
+                raise ContractError(
+                    f"GDN conv time-mix requires conv1d weights: {entry.target}"
+                )
+            conv = source_values[entry.auxiliary_sources[0]]
+            if entry.source_start is not None:
+                conv = conv[entry.source_start : entry.source_stop]
+            value = _gdn_conv_time_mix(
+                value.float(),
+                conv.float(),
+                target_shape=entry.target_shape,
+            )
+        elif entry.operation == TensorOperation.EVEN_ROW_SUBSAMPLE:
+            if value.ndim != 2 or tuple(value.shape[1:]) != entry.target_shape[1:]:
+                raise ContractError(
+                    f"cannot row-subsample warm-start tensor: {entry.source}"
+                )
+            target_rows = entry.target_shape[0]
+            indices = torch.linspace(
+                0,
+                value.shape[0] - 1,
+                target_rows,
+                dtype=torch.float64,
+            ).round().to(torch.long)
+            value = value.index_select(0, indices)
+        elif entry.operation in (
+            TensorOperation.DECAY_LINEAR_UP,
+            TensorOperation.DECAY_BIAS,
+        ):
+            if len(entry.auxiliary_sources) != 1:
+                raise ContractError(f"GDN decay mapping lacks dt_bias: {entry.target}")
+            dt_bias = source_values[entry.auxiliary_sources[0]].float()
+            a_scale = source_value.float().exp()
+            if a_scale.shape != dt_bias.shape or a_scale.ndim != 1:
+                raise ContractError(f"GDN decay vectors have incompatible shapes: {entry.target}")
+            rate = a_scale * torch.nn.functional.softplus(dt_bias)
+            raw_probability = rate / 0.606531
+            feasible = (raw_probability > 1e-4) & (raw_probability < 1 - 1e-4)
+            probability = raw_probability.clamp(1e-4, 1 - 1e-4)
+            if entry.operation == TensorOperation.DECAY_BIAS:
+                per_head = torch.logit(probability)
+                repeats = entry.target_shape[0] // per_head.numel()
+                if repeats * per_head.numel() != entry.target_shape[0]:
+                    raise ContractError(f"GDN decay bias cannot expand to target: {entry.target}")
+                value = per_head.repeat_interleave(repeats)
+            else:
+                derivative = (
+                    a_scale
+                    * torch.sigmoid(dt_bias)
+                    / (0.606531 * probability * (1 - probability))
+                ) * feasible
+                expanded = torch.zeros(entry.target_shape, dtype=derivative.dtype)
+                channels_per_head = entry.target_shape[0] // derivative.numel()
+                if channels_per_head * derivative.numel() != entry.target_shape[0]:
+                    raise ContractError(f"GDN decay slope cannot expand to target: {entry.target}")
+                for head, coefficient in enumerate(derivative):
+                    expanded[
+                        head * channels_per_head : (head + 1) * channels_per_head,
+                        head,
+                    ] = coefficient
+                value = expanded
+        elif entry.operation == TensorOperation.TILE:
+            if value.numel() == 0 or entry.target_shape[0] % value.numel():
+                raise ContractError(f"cannot tile warm-start tensor: {entry.source}")
+            value = value.reshape(-1).repeat(entry.target_shape[0] // value.numel())
         elif entry.operation == TensorOperation.HEADWISE_QUERY_SLICE:
             query_heads = int(entry.num_query_heads)
             head_dim = entry.target_shape[0] // query_heads
             value = value.reshape(query_heads, head_dim * 2, *value.shape[1:])[:, :head_dim]
             value = value.flatten(0, 1)
+        elif entry.operation == TensorOperation.HEADWISE_QUERY_GATE_SUBSAMPLE:
+            query_heads = int(entry.num_query_heads)
+            value = _packed_query_gate_rows(
+                value,
+                query_heads=query_heads,
+                source_name=entry.source,
+            )
+            target_rows = entry.target_shape[0]
+            indices = torch.linspace(
+                0,
+                value.shape[0] - 1,
+                target_rows,
+                dtype=torch.float64,
+            ).round().to(torch.long)
+            value = value.index_select(0, indices)
+        elif entry.operation == TensorOperation.HEADWISE_QUERY_GATE_RECONSTRUCTION:
+            query_heads = int(entry.num_query_heads)
+            source_gate = _packed_query_gate_rows(
+                value,
+                query_heads=query_heads,
+                source_name=entry.source,
+            )
+            if entry.target_shape[0] != source_gate.shape[0]:
+                raise ContractError(
+                    "native gate output width must equal the source gate width: "
+                    f"{entry.target}"
+                )
+            value = _constrained_source_row_reconstruction(
+                source_gate,
+                basis_rows=entry.target_shape[1],
+            )
         elif entry.operation == TensorOperation.SCALE:
             value = value * float(entry.scale)
         elif entry.operation == TensorOperation.KV_REPEAT:
@@ -296,6 +488,162 @@ def _materialize_entry(
     return value.to(dtype=_torch_dtype(spec.dtype)).contiguous()
 
 
+def _packed_query_gate_rows(
+    packed_query: Tensor,
+    *,
+    query_heads: int,
+    source_name: str | None,
+) -> Tensor:
+    if packed_query.ndim != 2 or packed_query.shape[0] % (query_heads * 2):
+        raise ContractError(
+            "packed query/gate rows are incompatible with source heads: "
+            f"{source_name}"
+        )
+    head_dim = packed_query.shape[0] // (query_heads * 2)
+    return (
+        packed_query.reshape(query_heads, head_dim * 2, packed_query.shape[1])[
+            :, head_dim:
+        ]
+        .flatten(0, 1)
+        .float()
+    )
+
+
+def _constrained_source_row_reconstruction(
+    source_gate: Tensor,
+    *,
+    basis_rows: int,
+) -> Tensor:
+    """Reconstruct source gate rows from a deterministic source-row basis.
+
+    The row-sum constraint preserves the source gate value at zero input:
+    ``A @ sigmoid(B @ 0) == 0.5``.  Selected source rows are restored to exact
+    one-hot coefficients, while all other rows use a scale-normalized ridge
+    solution.  Activation ridge fitting remains responsible for adapting this
+    algebraic weight-space start to the real hidden-state distribution.
+    """
+    if source_gate.ndim != 2 or basis_rows <= 0:
+        raise ContractError("source-row gate reconstruction has invalid geometry")
+    indices = torch.linspace(
+        0,
+        source_gate.shape[0] - 1,
+        basis_rows,
+        dtype=torch.float64,
+    ).round().to(torch.long)
+    basis = source_gate.index_select(0, indices).float()
+    gram = basis @ basis.T
+    ridge = (gram.diagonal().mean() * 1e-3).clamp_min(
+        torch.finfo(gram.dtype).eps
+    )
+    system = gram + torch.eye(basis_rows, dtype=gram.dtype) * ridge
+    cross = source_gate.float() @ basis.T
+    unconstrained = torch.linalg.solve(system, cross.T).T
+    ones = torch.ones(basis_rows, dtype=system.dtype)
+    constraint_direction = torch.linalg.solve(system, ones)
+    constraint_denominator = torch.dot(ones, constraint_direction)
+    if not torch.isfinite(constraint_denominator) or constraint_denominator <= 0:
+        raise ContractError("source-row gate reconstruction constraint is singular")
+    correction = (1.0 - unconstrained.sum(dim=1)) / constraint_denominator
+    reconstruction = (
+        unconstrained + correction[:, None] * constraint_direction[None, :]
+    )
+    for source_row in torch.unique(indices, sorted=True).tolist():
+        basis_column = int((indices == source_row).nonzero()[0].item())
+        reconstruction[source_row].zero_()
+        reconstruction[source_row, basis_column] = 1
+    if not torch.isfinite(reconstruction).all():
+        raise ContractError("source-row gate reconstruction produced non-finite weights")
+    return reconstruction
+
+
+def _gdn_erase_logit_linearization(
+    beta_weight: Tensor | None,
+    decay_input_weight: Tensor | None,
+    decay_log_scale: Tensor,
+    dt_bias: Tensor,
+) -> tuple[Tensor, Tensor]:
+    """Linearize ``logit(beta * decay)`` at the source GDN zero input."""
+    if decay_log_scale.ndim != 1 or dt_bias.shape != decay_log_scale.shape:
+        raise ContractError("GDN erase linearization received incompatible decay vectors")
+    rate_scale = decay_log_scale.exp()
+    zero_decay = torch.exp(
+        -rate_scale * torch.nn.functional.softplus(dt_bias)
+    )
+    zero_erase = (0.5 * zero_decay).clamp(1e-6, 1.0 - 1e-6)
+    bias = torch.logit(zero_erase)
+    if beta_weight is None or decay_input_weight is None:
+        return torch.empty(0, dtype=bias.dtype), bias
+    if (
+        beta_weight.ndim != 2
+        or decay_input_weight.shape != beta_weight.shape
+        or beta_weight.shape[0] != rate_scale.numel()
+    ):
+        raise ContractError("GDN erase linearization received incompatible projection rows")
+    denominator = 1.0 - zero_erase
+    beta_coefficient = 0.5 / denominator
+    decay_coefficient = -rate_scale * torch.sigmoid(dt_bias) / denominator
+    gradient = (
+        beta_coefficient.unsqueeze(-1) * beta_weight
+        + decay_coefficient.unsqueeze(-1) * decay_input_weight
+    )
+    if not torch.isfinite(gradient).all() or not torch.isfinite(bias).all():
+        raise ContractError("GDN erase linearization produced non-finite parameters")
+    return gradient, bias
+
+
+def _gdn_conv_time_mix(
+    projection: Tensor,
+    conv: Tensor,
+    *,
+    target_shape: tuple[int, ...],
+) -> Tensor:
+    """Project Qwen's depthwise causal conv onto RWKV7's two-tap time mix.
+
+    The source first applies one shared input projection per output channel and
+    then a channel-wise causal convolution.  Native RWKV7 can retain only the
+    current and immediately previous normalized hidden state, with one mixing
+    coefficient per input channel.  For every input channel we therefore find
+    the best non-negative two-tap direction in least squares over all output
+    rows.  Older source taps and the SiLU non-linearity remain explicitly for
+    activation fitting and layer-wise distillation.
+    """
+    if projection.ndim != 2:
+        raise ContractError("GDN conv time-mix projection must be rank two")
+    if conv.ndim == 3 and conv.shape[1] == 1:
+        conv = conv[:, 0]
+    if conv.ndim != 2 or conv.shape[0] != projection.shape[0]:
+        raise ContractError(
+            "GDN conv time-mix requires one depthwise kernel per projection row"
+        )
+    if conv.shape[1] < 1 or target_shape != (1, 1, projection.shape[1]):
+        raise ContractError("GDN conv time-mix target geometry is incompatible")
+    current = conv[:, -1].unsqueeze(1) * projection
+    previous = (
+        torch.zeros_like(current)
+        if conv.shape[1] == 1
+        else conv[:, -2].unsqueeze(1) * projection
+    )
+    current_energy = current.square().sum(dim=0)
+    previous_energy = previous.square().sum(dim=0)
+    cross = (current * previous).sum(dim=0)
+
+    # A fixed grid makes the materialization bitwise deterministic across CPU
+    # BLAS implementations and enforces the native [0, 1] interpolation prior.
+    candidates = torch.linspace(
+        0.0, 1.0, 257, dtype=projection.dtype, device=projection.device
+    ).unsqueeze(1)
+    current_fraction = 1.0 - candidates
+    denominator = current_fraction.square() + candidates.square()
+    explained = (
+        current_fraction.square() * current_energy.unsqueeze(0)
+        + candidates.square() * previous_energy.unsqueeze(0)
+        + 2.0 * current_fraction * candidates * cross.unsqueeze(0)
+    ) / denominator
+    best = explained.argmax(dim=0)
+    value = candidates.squeeze(1).index_select(0, best)
+    return value.reshape(target_shape)
+
+
 def apply_warm_start_plan(ledger: MappingLedger, plan: WarmStartPlan) -> None:
     """Replace structural placeholder provenance with the materialized plan."""
     canonical_sources: dict[str, str] = {}
@@ -313,16 +661,23 @@ def apply_warm_start_plan(ledger: MappingLedger, plan: WarmStartPlan) -> None:
             raise ContractError(
                 f"warm-start target is absent from mapping ledger: {entry.target}"
             )
-        if entry.source is None:
-            sources: tuple[str, ...] = ()
-        else:
-            raw_source = canonical_sources.get(entry.source)
+        requested_sources = tuple(
+            dict.fromkeys(
+                source
+                for source in (entry.source, *entry.auxiliary_sources)
+                if source is not None
+            )
+        )
+        resolved_sources: list[str] = []
+        for source in requested_sources:
+            raw_source = canonical_sources.get(source)
             if raw_source is None:
                 raise ContractError(
-                    f"warm-start source is absent from mapping ledger: {entry.source}"
+                    f"warm-start source is absent from mapping ledger: {source}"
                 )
-            sources = (raw_source,)
+            resolved_sources.append(raw_source)
             selected_targets[raw_source].append(entry.target)
+        sources = tuple(resolved_sources)
         ledger.targets[entry.target] = TargetEntry(
             entry.target,
             entry.provenance,
@@ -389,6 +744,40 @@ def _plan_gdn_layer(
     entries: list[WarmStartEntry] = []
     errors: list[WarmStartError] = []
     for spec in specs:
+        native_extra = _plan_source_compatible_native_extra(spec)
+        if native_extra is not None:
+            entries.append(native_extra)
+            continue
+        structured = _plan_gdn_structured_tensor(
+            spec,
+            prefix=prefix,
+            packed=packed,
+            source_shapes=source_shapes,
+            value_heads=value_heads,
+            value_dim=value_dim,
+            q_size=q_size,
+            k_size=k_size,
+            v_size=v_size,
+            variant=variant,
+        )
+        if structured is not None:
+            entries.append(structured)
+            if (
+                spec.name.endswith(".g_norm.weight")
+                and structured.provenance == TargetProvenance.INITIALIZED
+            ):
+                errors.extend(
+                    _partition_errors(
+                        index,
+                        "gdn",
+                        spec,
+                        "normalization_geometry_mismatch",
+                        "source per-head RMSNorm cannot be tiled into target GroupNorm geometry; activation fitting is required",
+                        source_shapes.get(f"{prefix}.norm.weight"),
+                        target.num_heads,
+                    )
+                )
+            continue
         role = _projection_role(spec.name)
         if role is None or variant in (
             WarmStartVariant.RANDOM,
@@ -486,6 +875,258 @@ def _plan_gdn_layer(
     return entries, errors
 
 
+def _plan_gdn_structured_tensor(
+    spec: TensorSpec,
+    *,
+    prefix: str,
+    packed: str,
+    source_shapes: dict[str, tuple[int, ...]],
+    value_heads: int,
+    value_dim: int,
+    q_size: int,
+    k_size: int,
+    v_size: int,
+    variant: WarmStartVariant,
+) -> WarmStartEntry | None:
+    if variant not in (WarmStartVariant.GDN_CONSTRAINED, WarmStartVariant.MAPPED):
+        return None
+    time_mix_role = next(
+        (
+            role
+            for role in ("r", "k", "v", "w", "a", "g")
+            if spec.name.endswith(f".x_{role}")
+        ),
+        None,
+    )
+    if time_mix_role in {"w", "a", "g"}:
+        return WarmStartEntry(
+            spec.name,
+            None,
+            spec.shape,
+            None,
+            TargetProvenance.ALGEBRAIC,
+            TensorOperation.ZERO,
+            "source GDN decay, erase, and gate projections consume only the current normalized token",
+            is_semantically_lossless=True,
+            local_trainable=True,
+        )
+    if time_mix_role in {"r", "k", "v"}:
+        projection_shape = source_shapes.get(packed)
+        conv = f"{prefix}.conv1d.weight"
+        conv_shape = source_shapes.get(conv)
+        start, stop = {
+            "r": (0, q_size),
+            "k": (q_size, q_size + k_size),
+            "v": (q_size + k_size, q_size + k_size + v_size),
+        }[time_mix_role]
+        if (
+            projection_shape is None
+            or projection_shape[0] < stop
+            or projection_shape[1] != spec.shape[-1]
+            or conv_shape is None
+            or conv_shape[0] < stop
+        ):
+            raise ContractError(
+                f"GDN {time_mix_role} conv/projection geometry cannot initialize native time mix"
+            )
+        return WarmStartEntry(
+            spec.name,
+            packed,
+            spec.shape,
+            projection_shape,
+            TargetProvenance.ALGEBRAIC,
+            TensorOperation.GDN_CONV_TIME_MIX,
+            "least-squares projection of the source depthwise causal conv current/previous taps into native RWKV7 time mix; older taps and SiLU remain for activation fitting",
+            source_start=start,
+            source_stop=stop,
+            auxiliary_sources=(conv,),
+            is_semantically_lossless=False,
+            local_trainable=True,
+        )
+    if spec.name.endswith(".k_k"):
+        return WarmStartEntry(
+            spec.name,
+            None,
+            spec.shape,
+            None,
+            TargetProvenance.ALGEBRAIC,
+            TensorOperation.INITIALIZE,
+            "fix native normalized-key scale to one for the source GDN key coordinates",
+            is_semantically_lossless=True,
+            local_trainable=True,
+        )
+    if spec.name.endswith(".k_a"):
+        return WarmStartEntry(
+            spec.name,
+            None,
+            spec.shape,
+            None,
+            TargetProvenance.ALGEBRAIC,
+            TensorOperation.ZERO,
+            "disable native write-key interpolation so the normalized source GDN key is used unchanged for writing",
+            is_semantically_lossless=True,
+            local_trainable=True,
+        )
+    beta = f"{prefix}.in_proj_b.weight"
+    decay_input = f"{prefix}.in_proj_a.weight"
+    decay_scale = f"{prefix}.A_log"
+    decay_bias = f"{prefix}.dt_bias"
+    gate = f"{prefix}.in_proj_z.weight"
+    norm = f"{prefix}.norm.weight"
+    if spec.name.endswith(".w_lora.lora.0.weight"):
+        source_shape = source_shapes.get(decay_input)
+        if source_shape != (value_heads, spec.shape[1]) or spec.shape[0] < value_heads:
+            raise ContractError(f"GDN decay projection cannot fit target w_lora rank: {decay_input}")
+        return WarmStartEntry(
+            spec.name,
+            decay_input,
+            spec.shape,
+            source_shape,
+            TargetProvenance.ALGEBRAIC,
+            TensorOperation.PAD_ROWS,
+            "embed source GDN input-dependent decay logits in target w_lora rank space",
+            is_semantically_lossless=True,
+            local_trainable=True,
+        )
+    if spec.name.endswith(".w_lora.lora.2.weight"):
+        source_shape = source_shapes.get(decay_scale)
+        dt_shape = source_shapes.get(decay_bias)
+        if source_shape != (value_heads,) or dt_shape != (value_heads,):
+            raise ContractError(f"GDN decay vectors are incompatible: {decay_scale}")
+        return WarmStartEntry(
+            spec.name,
+            decay_scale,
+            spec.shape,
+            source_shape,
+            TargetProvenance.ALGEBRAIC,
+            TensorOperation.DECAY_LINEAR_UP,
+            "first-order map of source exp(A_log)*softplus(a+dt_bias) into native RWKV7 decay logits",
+            is_semantically_lossless=False,
+            auxiliary_sources=(decay_bias,),
+        )
+    if spec.name.endswith(".w_lora.lora.2.bias"):
+        source_shape = source_shapes.get(decay_scale)
+        dt_shape = source_shapes.get(decay_bias)
+        if source_shape != (value_heads,) or dt_shape != (value_heads,):
+            raise ContractError(f"GDN decay vectors are incompatible: {decay_scale}")
+        return WarmStartEntry(
+            spec.name,
+            decay_scale,
+            spec.shape,
+            source_shape,
+            TargetProvenance.ALGEBRAIC,
+            TensorOperation.DECAY_BIAS,
+            "map source zero-input GDN decay into the bounded native RWKV7 decay parameterization",
+            is_semantically_lossless=False,
+            auxiliary_sources=(decay_bias,),
+        )
+    if spec.name.endswith(".a_lora.lora.0.weight"):
+        source_shape = source_shapes.get(beta)
+        if (
+            source_shape != (value_heads, spec.shape[1])
+            or source_shapes.get(decay_input) != source_shape
+            or source_shapes.get(decay_scale) != (value_heads,)
+            or source_shapes.get(decay_bias) != (value_heads,)
+            or spec.shape[0] < value_heads
+        ):
+            raise ContractError(
+                f"GDN beta/decay projections cannot fit target a_lora down projection: {beta}"
+            )
+        return WarmStartEntry(
+            spec.name,
+            beta,
+            spec.shape,
+            source_shape,
+            TargetProvenance.ALGEBRAIC,
+            TensorOperation.GDN_ERASE_LINEAR_DOWN,
+            "first-order zero-input map of source logit(beta * decay) into the native erase network",
+            is_semantically_lossless=False,
+            auxiliary_sources=(decay_input, decay_scale, decay_bias),
+        )
+    if spec.name.endswith(".a_lora.lora.2.weight"):
+        source_shape = source_shapes.get(beta)
+        if (
+            source_shape is None
+            or source_shape[0] != value_heads
+            or spec.shape[1] < value_heads
+        ):
+            raise ContractError(f"GDN beta head geometry is incompatible with target channels: {beta}")
+        if spec.shape[0] != value_heads * value_dim:
+            return _initialized_entry(
+                spec,
+                "source GDN beta channel expansion does not match the target recurrent width; "
+                "defer to activation fitting",
+            )
+        return WarmStartEntry(
+            spec.name,
+            beta,
+            spec.shape,
+            source_shape,
+            TargetProvenance.ALGEBRAIC,
+            TensorOperation.HEAD_SCALAR_EXPAND,
+            "repeat each first-order source GDN erase logit across its value-head channels",
+            is_semantically_lossless=False,
+        )
+    if spec.name.endswith(".a_lora.lora.2.bias"):
+        source_shape = source_shapes.get(decay_scale)
+        if source_shape != (value_heads,) or source_shapes.get(decay_bias) != (value_heads,):
+            raise ContractError(
+                f"GDN decay vectors cannot initialize target erase bias: {decay_scale}"
+            )
+        return WarmStartEntry(
+            spec.name,
+            decay_scale,
+            spec.shape,
+            source_shape,
+            TargetProvenance.ALGEBRAIC,
+            TensorOperation.GDN_ERASE_BIAS,
+            "install zero-input logit(beta * decay) as the native erase bias",
+            is_semantically_lossless=False,
+            auxiliary_sources=(decay_bias,),
+        )
+    if spec.name.endswith(".g_lora.lora.0.weight"):
+        source_shape = source_shapes.get(gate)
+        if (
+            source_shape is None
+            or len(source_shape) != 2
+            or source_shape[1] != spec.shape[1]
+        ):
+            raise ContractError(
+                f"GDN gate projection cannot initialize target g_lora basis: {gate}"
+            )
+        return WarmStartEntry(
+            spec.name,
+            gate,
+            spec.shape,
+            source_shape,
+            TargetProvenance.ALGEBRAIC,
+            TensorOperation.EVEN_ROW_SUBSAMPLE,
+            "deterministically sample source GDN gate preactivation directions (with repetition only when the native rank is wider) as the native low-rank gate basis; activation fitting learns their output combination",
+            is_semantically_lossless=False,
+            local_trainable=True,
+        )
+    if spec.name.endswith(".g_norm.weight"):
+        source_shape = source_shapes.get(norm)
+        if source_shape != (value_dim,):
+            raise ContractError(f"GDN gated norm source shape is malformed: {norm}")
+        if spec.shape != (value_heads * value_dim,):
+            return _initialized_entry(
+                spec,
+                "source per-head RMSNorm and target GroupNorm channel geometry differ; defer to activation fitting",
+            )
+        return WarmStartEntry(
+            spec.name,
+            norm,
+            spec.shape,
+            source_shape,
+            TargetProvenance.ALGEBRAIC,
+            TensorOperation.TILE,
+            "tile the shared source GDN per-head RMSNorm scale across value heads; target group boundaries remain lossy",
+            is_semantically_lossless=False,
+        )
+    return None
+
+
 def _plan_full_attention_layer(
     index: int,
     specs: list[TensorSpec],
@@ -504,6 +1145,44 @@ def _plan_full_attention_layer(
     entries: list[WarmStartEntry] = []
     errors: list[WarmStartError] = []
     for spec in specs:
+        if variant in (
+            WarmStartVariant.NAIVE_COPY,
+            WarmStartVariant.KV_REPEAT,
+            WarmStartVariant.KV_EXPAND,
+            WarmStartVariant.MAPPED,
+        ) and any(
+            spec.name.endswith(f".x_{role}")
+            for role in ("r", "w", "k", "v", "a", "g")
+        ):
+            entries.append(
+                WarmStartEntry(
+                    spec.name,
+                    None,
+                    spec.shape,
+                    None,
+                    TargetProvenance.ALGEBRAIC,
+                    TensorOperation.ZERO,
+                    "source full-attention projections consume only the current normalized token",
+                    is_semantically_lossless=True,
+                    local_trainable=True,
+                )
+            )
+            continue
+        source_compatible = _plan_full_attention_native_extra(
+            spec,
+            packed_query=names["r"],
+            source_shapes=source_shapes,
+            query_heads=query_heads,
+            head_dim=head_dim,
+            variant=variant,
+        )
+        if source_compatible is not None:
+            entries.append(source_compatible)
+            continue
+        native_extra = _plan_source_compatible_native_extra(spec)
+        if native_extra is not None:
+            entries.append(native_extra)
+            continue
         role = _projection_role(spec.name)
         if role is None or variant in (WarmStartVariant.RANDOM, WarmStartVariant.GDN_CONSTRAINED):
             entries.append(_initialized_entry(spec, f"{variant.value} does not map this full-attention tensor"))
@@ -636,6 +1315,127 @@ def _plan_full_attention_layer(
     return entries, errors
 
 
+def _plan_full_attention_native_extra(
+    spec: TensorSpec,
+    *,
+    packed_query: str,
+    source_shapes: dict[str, tuple[int, ...]],
+    query_heads: int,
+    head_dim: int,
+    variant: WarmStartVariant,
+) -> WarmStartEntry | None:
+    """Initialize the non-isomorphic RWKV7 core as causal linear attention.
+
+    Full attention has no exact finite-state RWKV7 parameter map.  The least
+    destructive zero-step boundary keeps the source Q/K/V coordinates, uses an
+    accumulating state (near-unit decay and near-zero erase), and disables the
+    native key interpolation and bonus until teacher-trace fitting can justify
+    them.
+    """
+    if variant not in (
+        WarmStartVariant.NAIVE_COPY,
+        WarmStartVariant.KV_REPEAT,
+        WarmStartVariant.KV_EXPAND,
+        WarmStartVariant.MAPPED,
+    ):
+        return None
+    if spec.name.endswith(".k_k"):
+        return WarmStartEntry(
+            spec.name,
+            None,
+            spec.shape,
+            None,
+            TargetProvenance.ALGEBRAIC,
+            TensorOperation.INITIALIZE,
+            "use unit normalized-key scale for the source attention coordinates",
+            is_semantically_lossless=False,
+            local_trainable=True,
+        )
+    if spec.name.endswith(".k_a") or spec.name.endswith(".r_k"):
+        role = "write-key interpolation" if spec.name.endswith(".k_a") else "bonus"
+        return WarmStartEntry(
+            spec.name,
+            None,
+            spec.shape,
+            None,
+            TargetProvenance.ALGEBRAIC,
+            TensorOperation.ZERO,
+            f"disable native {role} absent from source full attention",
+            is_semantically_lossless=False,
+            local_trainable=True,
+        )
+    if spec.name.endswith((".w_lora.lora.2.weight", ".a_lora.lora.2.weight")):
+        return WarmStartEntry(
+            spec.name,
+            None,
+            spec.shape,
+            None,
+            TargetProvenance.ALGEBRAIC,
+            TensorOperation.ZERO,
+            "start from input-independent recurrent controls while retaining a trainable latent basis",
+            is_semantically_lossless=False,
+            local_trainable=True,
+        )
+    if spec.name.endswith((".w_lora.lora.2.bias", ".a_lora.lora.2.bias")):
+        control = "decay rate" if ".w_lora." in spec.name else "erase rate"
+        return WarmStartEntry(
+            spec.name,
+            None,
+            spec.shape,
+            None,
+            TargetProvenance.ALGEBRAIC,
+            TensorOperation.DISABLED_SIGMOID_BIAS,
+            f"set the source-absent native {control} to BF16-epsilon squared",
+            is_semantically_lossless=False,
+            local_trainable=True,
+        )
+    if spec.name.endswith(".g_lora.lora.0.weight"):
+        source_shape = source_shapes.get(packed_query)
+        if source_shape != (
+            query_heads * head_dim * 2,
+            spec.shape[1],
+        ):
+            raise ContractError(
+                "packed full-attention query/gate projection cannot initialize "
+                f"native gate basis: {packed_query}"
+            )
+        return WarmStartEntry(
+            spec.name,
+            packed_query,
+            spec.shape,
+            source_shape,
+            TargetProvenance.ALGEBRAIC,
+            TensorOperation.HEADWISE_QUERY_GATE_SUBSAMPLE,
+            "extract Qwen3.5 q_proj gate channels per head and deterministically sample them as the native low-rank gate basis",
+            num_query_heads=query_heads,
+            is_semantically_lossless=False,
+            local_trainable=True,
+        )
+    if spec.name.endswith(".g_lora.lora.2.weight"):
+        source_shape = source_shapes.get(packed_query)
+        if source_shape != (
+            query_heads * head_dim * 2,
+            spec.shape[0],
+        ):
+            raise ContractError(
+                "packed full-attention query/gate projection cannot reconstruct "
+                f"native gate output: {packed_query}"
+            )
+        return WarmStartEntry(
+            spec.name,
+            packed_query,
+            spec.shape,
+            source_shape,
+            TargetProvenance.ALGEBRAIC,
+            TensorOperation.HEADWISE_QUERY_GATE_RECONSTRUCTION,
+            "reconstruct all Qwen3.5 sigmoid gate channels from the deterministic source-row basis while preserving the 0.5 zero-input gate",
+            num_query_heads=query_heads,
+            is_semantically_lossless=False,
+            local_trainable=True,
+        )
+    return None
+
+
 def _target_geometry(specs: list[TensorSpec], index: int) -> _HeadGeometry:
     r_k = next((spec for spec in specs if spec.name.endswith(".r_k")), None)
     if r_k is None or len(r_k.shape) != 2 or min(r_k.shape) <= 0:
@@ -659,7 +1459,51 @@ def _initialized_entry(spec: TensorSpec, evidence: str) -> WarmStartEntry:
         TargetProvenance.INITIALIZED,
         TensorOperation.INITIALIZE,
         evidence,
+        local_trainable=True,
     )
+
+
+def _plan_source_compatible_native_extra(
+    spec: TensorSpec,
+) -> WarmStartEntry | None:
+    if ".v_lora." not in spec.name:
+        return None
+    if spec.name.endswith(".v_lora.lora.0.weight"):
+        return WarmStartEntry(
+            spec.name,
+            None,
+            spec.shape,
+            None,
+            TargetProvenance.INITIALIZED,
+            TensorOperation.INITIALIZE,
+            "retain a deterministic latent basis while the source-incompatible native value-residual gate is disabled",
+            local_trainable=True,
+        )
+    if spec.name.endswith(".v_lora.lora.2.weight"):
+        return WarmStartEntry(
+            spec.name,
+            None,
+            spec.shape,
+            None,
+            TargetProvenance.ALGEBRAIC,
+            TensorOperation.ZERO,
+            "remove input-dependent layer-0 value mixing because the source mixer has no cross-layer value residual",
+            is_semantically_lossless=True,
+            local_trainable=True,
+        )
+    if spec.name.endswith(".v_lora.lora.2.bias"):
+        return WarmStartEntry(
+            spec.name,
+            None,
+            spec.shape,
+            None,
+            TargetProvenance.ALGEBRAIC,
+            TensorOperation.INITIALIZE,
+            "set the native value-residual coefficient to the logit of BF16 eps squared instead of the source-incompatible sigmoid(0)=0.5 default",
+            is_semantically_lossless=False,
+            local_trainable=True,
+        )
+    raise ContractError(f"unknown native value-residual tensor: {spec.name}")
 
 
 def _direct_entry(

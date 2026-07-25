@@ -77,6 +77,5 @@ def compare_fresh_process_manifests(left: dict[str, Any], right: dict[str, Any])
         raise ContractError("fresh-process loading diagnostics differ")
     if left["greedy_digest"] != right["greedy_digest"] or left["logits_digest"] != right["logits_digest"]:
         raise ContractError("fresh-process deterministic outputs differ")
-    denominator = max(abs(float(left["ppl"])), 1e-30)
-    if abs(float(left["ppl"]) - float(right["ppl"])) / denominator > 0.001:
-        raise ContractError("fresh-process PPL differs by more than 0.1%")
+    if float(left["ppl"]) != float(right["ppl"]):
+        raise ContractError("fresh-process deterministic PPL differs")

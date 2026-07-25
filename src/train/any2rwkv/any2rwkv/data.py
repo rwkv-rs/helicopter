@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import heapq
 import json
 import os
 import re
@@ -12,13 +11,15 @@ import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass, field
 from decimal import Decimal
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Protocol, Sequence
+
+import numpy as np
 
 
 SPLIT_NAMES = (
     "distill_train",
-    "nvfp4_calibration",
     "validation",
     "ruler",
     "downstream",
@@ -26,8 +27,7 @@ SPLIT_NAMES = (
 )
 QUALITY_GATE_SPLITS = frozenset(("validation", "ruler", "downstream", "smoke"))
 DEFAULT_SPLIT_RATIOS: Mapping[str, str] = {
-    "distill_train": "0.94",
-    "nvfp4_calibration": "0.01",
+    "distill_train": "0.95",
     "validation": "0.02",
     "ruler": "0.01",
     "downstream": "0.01",
@@ -103,8 +103,8 @@ class DataPreparationConfig:
             raise DataPreparationError("supervised_tokens must be positive")
         if self.exact_duplicate_policy not in {"drop", "reject"}:
             raise DataPreparationError("exact_duplicate_policy must be 'drop' or 'reject'")
-        if self.near_duplicate_policy not in {"report", "reject"}:
-            raise DataPreparationError("near_duplicate_policy must be 'report' or 'reject'")
+        if self.near_duplicate_policy not in {"drop", "report", "reject"}:
+            raise DataPreparationError("near_duplicate_policy must be 'drop', 'report' or 'reject'")
         if not 0 < self.near_duplicate_threshold < 1:
             raise DataPreparationError("near_duplicate_threshold must be between zero and one")
         if self.near_duplicate_ngram <= 0:
@@ -228,6 +228,17 @@ def prepare_rows(
                 "kind": "near_duplicate",
             }
         )
+    if config.near_duplicate_policy == "drop":
+        if not near_report["candidate_search_complete"]:
+            sizes = [bucket["member_count"] for bucket in near_report["oversized_buckets"]]
+            raise DataPreparationError(
+                "cannot deterministically drop near duplicates from an incomplete candidate search; "
+                f"oversized_bucket_count={len(sizes)} max_bucket_size={max(sizes, default=0)} "
+                f"configured_limit={config.max_lsh_bucket_size}"
+            )
+        samples, dropped_ids = _drop_near_duplicate_samples(samples, near_report["pairs"])
+        near_report["dropped_sample_ids"] = dropped_ids
+        near_report["retained_sample_count"] = len(samples)
 
     samples_by_split: dict[str, list[PreparedSample]] = {name: [] for name in SPLIT_NAMES}
     for sample in samples:
@@ -262,7 +273,6 @@ def prepare_rows(
         "packing": packing,
         "invariants": {
             "sample_ids_mutually_exclusive": True,
-            "calibration_quality_gate_overlap": [],
             "packed_row_tokens": config.packed_tokens,
         },
     }
@@ -344,7 +354,6 @@ def prepare_jsonl_dataset(
             "algorithm": "sha256(any2rwkv-split-v1\\0seed\\0sample_id)",
             "ratios": {name: str(value) for name, value in _decimal_ratios(config.split_ratios).items()},
             "sample_ids_mutually_exclusive": True,
-            "calibration_forbidden_from_quality_gates": True,
             "quality_gate_splits": sorted(QUALITY_GATE_SPLITS),
         },
         "deduplication": {
@@ -354,13 +363,17 @@ def prepare_jsonl_dataset(
             "near_policy": config.near_duplicate_policy,
             "exact_duplicate_pair_count": report["exact_duplicates"]["exact_duplicate_pair_count"],
             "near_duplicate_pair_count": report["near_duplicates"]["pair_count"],
+            "near_duplicate_cross_split_pair_count": report["near_duplicates"]["cross_split_pair_count"],
+            "near_duplicate_candidate_search_complete": report["near_duplicates"]["candidate_search_complete"],
+            "near_duplicate_dropped_sample_count": len(
+                report["near_duplicates"].get("dropped_sample_ids", [])
+            ),
         },
         "splits": split_metadata,
         "audit": {
             "input_row_count": report["input_row_count"],
             "accepted_sample_count": report["accepted_sample_count"],
             "packing": report["packing"],
-            "calibration_quality_gate_overlap": [],
         },
     }
     manifest["manifest_content_sha256"] = canonical_json_sha256(manifest)
@@ -581,7 +594,7 @@ def _near_duplicate_report(
                 }
             )
     return {
-        "algorithm": "word-ngram-bottom-k-minhash-lsh-candidates+exact-jaccard-v1",
+        "algorithm": "word-ngram-universal-minhash-lsh-candidates+exact-jaccard-v2",
         "policy": config.near_duplicate_policy,
         "threshold": config.near_duplicate_threshold,
         "word_ngram": config.near_duplicate_ngram,
@@ -597,6 +610,29 @@ def _near_duplicate_report(
     }
 
 
+def _drop_near_duplicate_samples(
+    samples: Sequence[PreparedSample], pairs: Sequence[Mapping[str, Any]]
+) -> tuple[list[PreparedSample], list[str]]:
+    """Keep the lexicographically first sample in every near-duplicate component."""
+    parent = {sample.sample_id: sample.sample_id for sample in samples}
+
+    def find(sample_id: str) -> str:
+        while parent[sample_id] != sample_id:
+            parent[sample_id] = parent[parent[sample_id]]
+            sample_id = parent[sample_id]
+        return sample_id
+
+    for pair in pairs:
+        left = find(str(pair["left_sample_id"]))
+        right = find(str(pair["right_sample_id"]))
+        if left != right:
+            canonical, duplicate = sorted((left, right))
+            parent[duplicate] = canonical
+    dropped = sorted(sample_id for sample_id in parent if find(sample_id) != sample_id)
+    dropped_set = set(dropped)
+    return [sample for sample in samples if sample.sample_id not in dropped_set], dropped
+
+
 def _word_shingles(text: str, ngram: int) -> frozenset[str]:
     words = normalize_text(text).casefold().split()
     if len(words) < ngram:
@@ -607,17 +643,31 @@ def _word_shingles(text: str, ngram: int) -> frozenset[str]:
 def _minhash_signature(shingles: frozenset[str], permutations: int) -> tuple[int, ...]:
     if not shingles:
         return tuple(0 for _ in range(permutations))
-    minima = heapq.nsmallest(
-        permutations,
+    hashes = np.fromiter(
         (
-            int.from_bytes(
-                hashlib.sha256(f"any2rwkv-minhash-v1\0{shingle}".encode("utf-8")).digest()[:8],
-                "big",
-            )
-            for shingle in shingles
+            int.from_bytes(hashlib.sha256(shingle.encode("utf-8")).digest()[:8], "big")
+            for shingle in sorted(shingles)
         ),
+        dtype=np.uint64,
+        count=len(shingles),
     )
-    return tuple(minima + [2**64 - 1] * (permutations - len(minima)))
+    multipliers, offsets = _minhash_coefficients(permutations)
+    minima = np.full(permutations, np.iinfo(np.uint64).max, dtype=np.uint64)
+    for start in range(0, len(hashes), 4096):
+        values = hashes[start : start + 4096, None] * multipliers[None, :] + offsets[None, :]
+        minima = np.minimum(minima, values.min(axis=0))
+    return tuple(int(value) for value in minima)
+
+
+@lru_cache(maxsize=None)
+def _minhash_coefficients(permutations: int) -> tuple[np.ndarray, np.ndarray]:
+    multipliers: list[int] = []
+    offsets: list[int] = []
+    for index in range(permutations):
+        digest = hashlib.sha256(f"any2rwkv-minhash-v2\0{index}".encode("utf-8")).digest()
+        multipliers.append(int.from_bytes(digest[:8], "big") | 1)
+        offsets.append(int.from_bytes(digest[8:16], "big"))
+    return np.asarray(multipliers, dtype=np.uint64), np.asarray(offsets, dtype=np.uint64)
 
 
 def _assert_mutually_exclusive(split_ids: Mapping[str, Sequence[str]]) -> None:
@@ -627,11 +677,6 @@ def _assert_mutually_exclusive(split_ids: Mapping[str, Sequence[str]]) -> None:
             previous = owner.setdefault(sample_id, split)
             if previous != split:
                 raise AssertionError(f"sample {sample_id!r} appears in both {previous} and {split}")
-    calibration = set(split_ids["nvfp4_calibration"])
-    quality = set().union(*(set(split_ids[split]) for split in QUALITY_GATE_SPLITS))
-    overlap = calibration & quality
-    if overlap:
-        raise AssertionError(f"calibration overlaps quality gates: {sorted(overlap)}")
 
 
 def _write_jsonl_atomic(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
