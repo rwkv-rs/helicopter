@@ -36,20 +36,22 @@ test("shows a fixed answer panel with ten samples for every outcome", async ({ p
     .click();
 
   await expect(panel.getByText("AIME24", { exact: true })).toBeVisible();
-  await expect(panel.getByText("模型架构", { exact: true })).toBeVisible();
+  await expect(panel.locator(".answer-summary-tag")).toHaveCount(8);
   await expect(panel.getByText("RWKV", { exact: true })).toBeVisible();
-  await expect(panel.getByText("模型代际", { exact: true })).toBeVisible();
   await expect(panel.getByText("G1G", { exact: true })).toBeVisible();
-  await expect(panel.getByText("参数量", { exact: true })).toBeVisible();
-  await expect(panel.getByText("n_samples", { exact: true })).toBeVisible();
-  await expect(panel.getByText("k_metrics", { exact: true })).toBeVisible();
-  await expect(panel.getByText("截断率", { exact: true })).toBeVisible();
-  await expect(panel.getByText("评估分数", { exact: true })).toBeVisible();
+  await expect(panel.getByText("1.5B", { exact: true })).toBeVisible();
+  await expect(panel.getByText("n=64", { exact: true })).toBeVisible();
+  await expect(panel.getByText("avg@32", { exact: true })).toBeVisible();
+  await expect(panel.getByText(/^截断率: \d+\.\d%$/)).toBeVisible();
+  await expect(panel.getByText(/^准确率: \d+\.\d%$/)).toBeVisible();
   await expect(panel.getByText("prompt_template", { exact: true })).toBeVisible();
   await expect(panel.getByText("sampling_config", { exact: true })).toBeVisible();
-  await expect(
-    panel.getByText("User✿{task.problem}✿\\nBot✿<think", { exact: true }),
-  ).toBeVisible();
+  await expect(panel.locator(".answer-template-code")).toHaveText(
+    "User✿{task.problem}✿\nBot✿<think",
+  );
+  await expect(panel.locator(".answer-sampling-parameters > div")).toHaveCount(5);
+  await expect(panel.getByText("temperature", { exact: true })).toBeVisible();
+  await expect(panel.getByText("max_tokens", { exact: true })).toBeVisible();
   await expect(panel.getByRole("tab", { name: /正确作答 10/ })).toBeVisible();
   await expect(panel.getByRole("tab", { name: /错误作答 10/ })).toBeVisible();
   await expect(panel.getByRole("tab", { name: /未能作答 10/ })).toBeVisible();

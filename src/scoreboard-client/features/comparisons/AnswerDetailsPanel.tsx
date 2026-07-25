@@ -17,39 +17,85 @@ const OUTCOMES: { id: AnswerOutcome; label: string }[] = [
 ];
 
 function SelectionSummary({ selection }: { selection: ScoreCellSelection }) {
-  const fields = [
-    ["模型架构", selection.architecture],
-    ["模型代际", selection.generation],
-    ["参数量", selection.parameterCount],
-    ["Benchmark", selection.benchmark],
-    ["n_samples", String(selection.samples)],
-    ["k_metrics", selection.metric],
-    ["截断率", `${selection.truncationRate.toFixed(1)}%`],
-    ["评估分数", `${selection.score.toFixed(1)}%`],
+  const tags = [
+    {
+      label: `模型架构 ${selection.architecture}`,
+      value: selection.architecture,
+    },
+    {
+      label: `模型代际 ${selection.generation}`,
+      value: selection.generation,
+    },
+    {
+      label: `参数量 ${selection.parameterCount}`,
+      value: selection.parameterCount,
+    },
+    {
+      label: `Benchmark ${selection.benchmark}`,
+      value: selection.benchmark,
+    },
+    {
+      label: `n_samples ${selection.samples}`,
+      value: `n=${selection.samples}`,
+    },
+    {
+      label: `k_metrics ${selection.metric}`,
+      value: selection.metric,
+    },
+    {
+      label: `截断率 ${selection.truncationRate.toFixed(1)}%`,
+      value: `截断率: ${selection.truncationRate.toFixed(1)}%`,
+      tone: "truncation",
+    },
+    {
+      label: `准确率 ${selection.score.toFixed(1)}%`,
+      value: `准确率: ${selection.score.toFixed(1)}%`,
+      tone: "score",
+    },
   ];
 
   return (
-    <dl className="answer-selection-summary">
-      {fields.map(([label, value]) => (
-        <div className="answer-summary-item" key={label}>
-          <dt>{label}</dt>
-          <dd>{value}</dd>
-        </div>
+    <div className="answer-selection-summary" aria-label="当前分数基础信息">
+      {tags.map(({ label, value, tone }) => (
+        <span
+          aria-label={label}
+          className={`answer-summary-tag${tone ? ` ${tone}` : ""}`}
+          key={label}
+        >
+          {value}
+        </span>
       ))}
-    </dl>
+    </div>
   );
 }
 
 function RuntimeConfig({ selection }: { selection: ScoreCellSelection }) {
+  const samplingParameters = [
+    ["temperature", selection.samplingConfig.temperature],
+    ["top_p", selection.samplingConfig.topP],
+    ["top_k", selection.samplingConfig.topK],
+    ["max_tokens", selection.samplingConfig.maxTokens],
+    ["seed", selection.samplingConfig.seed],
+  ];
+
   return (
     <div className="answer-runtime-config">
       <div className="answer-config-item prompt-template">
-        <span>prompt_template</span>
-        <code>{selection.promptTemplate}</code>
+        <span className="answer-config-label">prompt_template</span>
+        <code className="answer-template-code">
+          {selection.promptTemplate.replaceAll("\\n", "\n")}
+        </code>
       </div>
       <div className="answer-config-item">
-        <span>sampling_config</span>
-        <code>{JSON.stringify(selection.samplingConfig)}</code>
+        <span className="answer-config-label">sampling_config</span>
+        <dl className="answer-sampling-parameters">
+          {samplingParameters.map(([label, value]) => (
+            <div key={label}>
+              <dt>{label}</dt>
+              <dd>{value}</dd>
+            </div>
+          ))}
+        </dl>
       </div>
     </div>
   );
@@ -190,29 +236,29 @@ export function AnswerDetailsPanel() {
 
   return (
     <section aria-label="作答详情" className="card answer-detail-panel">
-      <header className="panel-head answer-detail-head">
-        <div className="answer-selection-block">
+      <header className="answer-detail-head">
+        <div className="answer-detail-title-row">
           <div className="card-title">作答详情</div>
           {selection ? (
-            <>
-              <SelectionSummary selection={selection} />
-              <RuntimeConfig selection={selection} />
-            </>
-          ) : (
-            <div className="answer-unselected-label">未选择 benchmark</div>
-          )}
+            <button
+              className="btn answer-close"
+              onClick={() =>
+                dispatch({ type: "select-score-cell", selection: null })
+              }
+              type="button"
+            >
+              清除选择
+            </button>
+          ) : null}
         </div>
         {selection ? (
-          <button
-            className="btn answer-close"
-            onClick={() =>
-              dispatch({ type: "select-score-cell", selection: null })
-            }
-            type="button"
-          >
-            清除选择
-          </button>
-        ) : null}
+          <div className="answer-selection-block">
+            <SelectionSummary selection={selection} />
+            <RuntimeConfig selection={selection} />
+          </div>
+        ) : (
+          <div className="answer-unselected-label">未选择 benchmark</div>
+        )}
       </header>
 
       <nav className="answer-tabs" aria-label="作答结果" role="tablist">
