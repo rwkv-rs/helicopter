@@ -18,12 +18,15 @@ from any2rwkv.checkpoint import read_checkpoint, sha256_file
 from any2rwkv.mixer import apply_partial_rope
 from any2rwkv.streamed_teacher import StreamedQwen35Teacher
 from any2rwkv.zero_step_probe import (
+    LowRankProjection,
     affine_state_rollout,
     causal_attention,
+    fit_low_rank_projection,
     four_state_block_output,
     gdn_reference_scan,
     hazard_metrics,
     logit_taylor_hazards,
+    native_signal_rollout,
     native_two_state_rollout,
     normalized_mse,
     observable_query_bases,
@@ -183,6 +186,9 @@ def trace_gqa(
         "grouped_value": grouped_value.transpose(1, 2).float(),
         "gate": torch.sigmoid(gate).float(),
         "mixer_input": normalized.float(),
+        "query_weight": mixer.q_proj.weight.float(),
+        "key_weight": mixer.k_proj.weight.float(),
+        "value_weight": mixer.v_proj.weight.float(),
         "output_weight": mixer.o_proj.weight.float(),
         "output_bias": (
             None if mixer.o_proj.bias is None else mixer.o_proj.bias.float()
@@ -240,6 +246,408 @@ def rotate_native_read(
         theta=rope_theta,
     )
     return rotated.reshape_as(read)
+
+
+def fit_native_weight_projection(
+    *,
+    mixer_input: Tensor,
+    target_read: Tensor,
+    native_transition,
+    positions: Tensor,
+    exact_mixer_output: Tensor,
+    calibration_rows: int,
+    source_head_dim: int,
+    rotary_dim: int,
+    rope_theta: float,
+    native_head_dim: int,
+    source_gate: Tensor,
+    query_basis: Tensor,
+    dc_indices: tuple[int, int],
+    source_query_weight: Tensor,
+    source_key_weight: Tensor,
+    source_value_weight: Tensor,
+    source_output_weight: Tensor,
+) -> dict[str, object]:
+    """Fit native-shaped parameters for FP32 signal-level emulation."""
+    ridges = (1e-4, 1e-3, 1e-2, 1e-1, 1.0, 10.0, 100.0)
+    target_pre_rope_read = rotate_native_read(
+        target_read,
+        positions,
+        source_head_dim=source_head_dim,
+        rotary_dim=rotary_dim,
+        rope_theta=rope_theta,
+        inverse=True,
+    )
+    target_pre_rope_key = rotate_native_read(
+        native_transition.key,
+        positions,
+        source_head_dim=source_head_dim,
+        rotary_dim=rotary_dim,
+        rope_theta=rope_theta,
+        inverse=True,
+    )
+    source_heads = query_basis.shape[0]
+    source_hidden = mixer_input.shape[-1]
+    if source_query_weight.shape != (
+        source_heads * source_head_dim * 2,
+        source_hidden,
+    ):
+        raise ValueError("packed source query/gate weight has unexpected shape")
+    query_weight = source_query_weight.reshape(
+        source_heads,
+        source_head_dim * 2,
+        source_hidden,
+    )[:, :source_head_dim]
+    read_prior = torch.zeros(
+        source_heads,
+        2,
+        native_head_dim,
+        source_hidden,
+        dtype=torch.float32,
+        device=mixer_input.device,
+    )
+    for head in range(source_heads):
+        for state_index, dc_index in enumerate(dc_indices):
+            feature_indices = [
+                index for index in range(native_head_dim) if index != dc_index
+            ]
+            read_prior[head, state_index, feature_indices] = (
+                query_basis[head, state_index].T @ query_weight[head]
+            )
+    read_prior = read_prior.flatten(0, 2)
+    grouped_width = source_key_weight.shape[0] // source_head_dim
+    if grouped_width <= 0 or source_heads % grouped_width:
+        raise ValueError("source GQA key heads do not divide query heads")
+    group_repeat = source_heads // grouped_width
+
+    def repeated_kv_prior(weight: Tensor) -> Tensor:
+        if weight.shape != (grouped_width * source_head_dim, source_hidden):
+            raise ValueError("source GQA KV weight has unexpected shape")
+        return (
+            weight.reshape(grouped_width, source_head_dim, source_hidden)
+            .repeat_interleave(group_repeat, dim=0)
+            .flatten(0, 1)
+        )
+
+    key_prior = repeated_kv_prior(source_key_weight)
+    value_prior = repeated_kv_prior(source_value_weight)
+
+    def select_ridge_center(target: Tensor, source_prior: Tensor):
+        candidates = {
+            "zero": select_bias_free_projection(
+                mixer_input,
+                target,
+                calibration_batches=calibration_rows,
+                ridges=ridges,
+            ),
+            "source-compatible": select_bias_free_projection(
+                mixer_input,
+                target,
+                calibration_batches=calibration_rows,
+                ridges=ridges,
+                prior_weight=source_prior,
+            ),
+        }
+        selected_name = min(
+            candidates,
+            key=lambda name: (
+                candidates[name].selection_nmse[candidates[name].ridge],
+                name,
+            ),
+        )
+        return candidates[selected_name], selected_name, {
+            name: candidate.selection_nmse[candidate.ridge]
+            for name, candidate in candidates.items()
+        }
+
+    read, read_center, read_center_nmse = select_ridge_center(
+        target_pre_rope_read,
+        read_prior,
+    )
+    key, key_center, key_center_nmse = select_ridge_center(
+        target_pre_rope_key,
+        key_prior,
+    )
+    value, value_center, value_center_nmse = select_ridge_center(
+        native_transition.value,
+        value_prior,
+    )
+    calibration_source = mixer_input[:calibration_rows].reshape(
+        -1, mixer_input.shape[-1]
+    ).float()
+    ridge_scale = float(
+        calibration_source.square().sum()
+        / max(1, calibration_source.shape[-1])
+    )
+    low_rank_ridge = max(
+        ridge_scale * 1e-3,
+        torch.finfo(torch.float32).tiny,
+    )
+    native_heads = native_transition.key.shape[2]
+    decay_channels = native_transition.decay.unsqueeze(-1).expand(
+        -1,
+        -1,
+        -1,
+        native_head_dim,
+    )
+    decay_probability = (
+        -torch.log(decay_channels.clamp_min(1e-12)) / math.exp(-0.5)
+    ).clamp(1e-6, 1 - 1e-6)
+    decay_logits = torch.logit(decay_probability)
+    erase_logits = torch.logit(
+        native_transition.erase.clamp(1e-6, 1 - 1e-6)
+    )
+    decay = fit_low_rank_projection(
+        mixer_input,
+        decay_logits,
+        calibration_batches=calibration_rows,
+        rank=min(64, mixer_input.shape[-1], decay_logits.shape[-1] * native_heads),
+        ridge=low_rank_ridge,
+        hidden_activation="tanh",
+    )
+    erase = fit_low_rank_projection(
+        mixer_input,
+        erase_logits,
+        calibration_batches=calibration_rows,
+        rank=min(64, mixer_input.shape[-1], erase_logits.shape[-1] * native_heads),
+        ridge=low_rank_ridge,
+        hidden_activation="identity",
+    )
+    gate_target = source_gate.reshape(
+        *source_gate.shape[:2],
+        native_heads,
+        native_head_dim,
+    )
+    source_gate_weight = source_query_weight.reshape(
+        source_heads,
+        source_head_dim * 2,
+        source_hidden,
+    )[:, source_head_dim:].flatten(0, 1)
+    gate_rank = min(
+        128,
+        source_gate_weight.shape[0],
+        mixer_input.shape[-1],
+    )
+    gate_basis_indices = torch.linspace(
+        0,
+        source_gate_weight.shape[0] - 1,
+        gate_rank,
+        dtype=torch.float64,
+        device=mixer_input.device,
+    ).round().to(torch.long)
+    gate_down_weight = source_gate_weight.index_select(
+        0,
+        gate_basis_indices,
+    )
+    gate_features = torch.sigmoid(mixer_input @ gate_down_weight.T)
+    gate_up = select_bias_free_projection(
+        gate_features,
+        gate_target,
+        calibration_batches=calibration_rows,
+        ridges=ridges,
+    )
+    gate = LowRankProjection(
+        down_weight=gate_down_weight,
+        up_weight=gate_up.projection.weight,
+        bias=torch.zeros(
+            gate_target.shape[-1] * native_heads,
+            dtype=torch.float32,
+            device=mixer_input.device,
+        ),
+        prediction=gate_up.projection.prediction,
+        hidden_activation="sigmoid",
+        output_bias=False,
+    )
+
+    predicted_read = rotate_native_read(
+        read.projection.prediction,
+        positions,
+        source_head_dim=source_head_dim,
+        rotary_dim=rotary_dim,
+        rope_theta=rope_theta,
+        inverse=False,
+    )
+    predicted_key = rotate_native_read(
+        key.projection.prediction,
+        positions,
+        source_head_dim=source_head_dim,
+        rotary_dim=rotary_dim,
+        rope_theta=rope_theta,
+        inverse=False,
+    )
+    predicted_decay = torch.exp(
+        -math.exp(-0.5) * torch.sigmoid(decay.prediction)
+    )
+    predicted_erase = torch.sigmoid(erase.prediction)
+    rollout = native_signal_rollout(
+        predicted_read,
+        predicted_decay,
+        predicted_key,
+        value.projection.prediction,
+        predicted_erase,
+    )
+    flat_recurrent = rollout.output.flatten(2)
+    normalized = functional.group_norm(
+        flat_recurrent.reshape(-1, flat_recurrent.shape[-1]),
+        num_groups=native_heads,
+        weight=None,
+        bias=None,
+        eps=native_head_dim * 1e-5,
+    ).reshape_as(flat_recurrent)
+    pre_output = normalized * gate.prediction.flatten(2)
+
+    def select_output_projection():
+        candidates = {
+            "zero": select_bias_free_projection(
+                pre_output,
+                exact_mixer_output,
+                calibration_batches=calibration_rows,
+                ridges=ridges,
+            ),
+            "source-compatible": select_bias_free_projection(
+                pre_output,
+                exact_mixer_output,
+                calibration_batches=calibration_rows,
+                ridges=ridges,
+                prior_weight=source_output_weight,
+            ),
+        }
+        selected_name = min(
+            candidates,
+            key=lambda name: (
+                candidates[name].selection_nmse[candidates[name].ridge],
+                name,
+            ),
+        )
+        return candidates[selected_name], selected_name, {
+            name: candidate.selection_nmse[candidate.ridge]
+            for name, candidate in candidates.items()
+        }
+
+    output, output_center, output_center_nmse = select_output_projection()
+
+    def direct_report(
+        selected,
+        target: Tensor,
+        *,
+        ridge_center: str,
+        center_selection_nmse: dict[str, float],
+    ) -> dict[str, object]:
+        return {
+            "weight_shape": list(selected.projection.weight.shape),
+            "weight_sha256": tensor_sha256(selected.projection.weight),
+            "selected_ridge_multiplier": selected.ridge,
+            "absolute_ridge": selected.absolute_ridge,
+            "selected_ridge_center": ridge_center,
+            "calibration_center_selection_nmse": center_selection_nmse,
+            "heldout_signal": heldout_metrics(
+                selected.projection.prediction,
+                target,
+                calibration_rows,
+            ),
+        }
+
+    def low_rank_report(projection, target: Tensor) -> dict[str, object]:
+        return {
+            "hidden_activation": projection.hidden_activation,
+            "output_bias": projection.output_bias,
+            "down_weight_shape": list(projection.down_weight.shape),
+            "up_weight_shape": list(projection.up_weight.shape),
+            "bias_shape": (
+                list(projection.bias.shape)
+                if projection.output_bias
+                else None
+            ),
+            "down_weight_sha256": tensor_sha256(projection.down_weight),
+            "up_weight_sha256": tensor_sha256(projection.up_weight),
+            "bias_sha256": (
+                tensor_sha256(projection.bias)
+                if projection.output_bias
+                else None
+            ),
+            "heldout_signal": heldout_metrics(
+                projection.prediction,
+                target,
+                calibration_rows,
+            ),
+        }
+
+    final_metrics = heldout_metrics(
+        output.projection.prediction,
+        exact_mixer_output,
+        calibration_rows,
+    )
+    gate_report = low_rank_report(gate, gate_target)
+    gate_report.update(
+        {
+            "basis": "deterministic-source-gate-rows",
+            "basis_row_indices": gate_basis_indices.tolist(),
+            "selected_ridge_multiplier": gate_up.ridge,
+            "absolute_ridge": gate_up.absolute_ridge,
+        }
+    )
+    return {
+        "status": "diagnostic-not-installed",
+        "scope": "fp32-signal-level-emulation",
+        "evaluation_split_role": (
+            "adaptive-development-heldout-not-final-generalization-estimate"
+        ),
+        "required_next_gate": (
+            "materialize tensors into ProjectionBoundaryRWKV7Attention, run "
+            "BF16 forward_sequence on previously unseen frozen sample IDs, "
+            "and compare against the frozen mapped baseline"
+        ),
+        "installation_rule": (
+            "install only when the complete held-out free-running mixer NMSE "
+            "is finite and strictly below the frozen mapped baseline"
+        ),
+        "native_parameterization": {
+            "x_r/x_w/x_k/x_v/x_a/x_g": "zero-current-token",
+            "k_k": "one",
+            "k_a": "zero",
+            "r_k": "zero",
+            "g_norm.weight": "one",
+            "g_norm.bias": "zero",
+            "v_lora": "disabled",
+        },
+        "ridge_center_selection": (
+            "choose zero or source-compatible center independently for each "
+            "bias-free projection using only the calibration validation split"
+        ),
+        "r_proj": direct_report(
+            read,
+            target_pre_rope_read,
+            ridge_center=read_center,
+            center_selection_nmse=read_center_nmse,
+        ),
+        "k_proj": direct_report(
+            key,
+            target_pre_rope_key,
+            ridge_center=key_center,
+            center_selection_nmse=key_center_nmse,
+        ),
+        "v_proj": direct_report(
+            value,
+            native_transition.value,
+            ridge_center=value_center,
+            center_selection_nmse=value_center_nmse,
+        ),
+        "w_lora": low_rank_report(decay, decay_logits),
+        "a_lora": low_rank_report(erase, erase_logits),
+        "g_lora": gate_report,
+        "o_proj": direct_report(
+            output,
+            exact_mixer_output,
+            ridge_center=output_center,
+            center_selection_nmse=output_center_nmse,
+        ),
+        "free_running_recurrent_output_vs_dynamic_oracle": heldout_metrics(
+            rollout.output,
+            native_transition.free_running_output.reshape_as(rollout.output),
+            calibration_rows,
+        ),
+        "complete_free_running_mixer_vs_exact_softmax": final_metrics,
+    }
 
 
 def gqa_diagnostics(
@@ -433,6 +841,7 @@ def gqa_diagnostics(
         )
     full_matrix_output = torch.stack(full_matrix_outputs, dim=2)
     full_affine = full_matrix_output + bias_by_head
+    native_candidate_name = "rope_aligned_observable_127x2_plus_two_dc"
     sketch_results: dict[str, object] = {}
     for name, (basis, projection_bias, projection_query, dc_indices) in {
         "first_127_coordinates_plus_dc": (
@@ -516,6 +925,27 @@ def gqa_diagnostics(
             tangent_probability,
             tangent_slope,
         )
+        native_weight_projection = None
+        if name == native_candidate_name:
+            native_weight_projection = fit_native_weight_projection(
+                mixer_input=signals["mixer_input"],
+                target_read=target_native_read,
+                native_transition=native_transition,
+                positions=positions,
+                exact_mixer_output=exact_mixer_output,
+                calibration_rows=calibration_rows,
+                source_head_dim=source_head_dim,
+                rotary_dim=rotary_dim,
+                rope_theta=rope_theta,
+                native_head_dim=native_dim,
+                source_gate=signals["gate"],
+                query_basis=materialized.query_basis,
+                dc_indices=materialized.dc_indices,
+                source_query_weight=signals["query_weight"],
+                source_key_weight=signals["key_weight"],
+                source_value_weight=signals["value_weight"],
+                source_output_weight=signals["output_weight"],
+            )
         teacher_forced_native_states = (
             native_transition.teacher_forced_states.flatten(2, 3)
         )
@@ -684,6 +1114,7 @@ def gqa_diagnostics(
                     )
                 ),
             },
+            "source_to_native_weight_projection": native_weight_projection,
             "matrix_observable_loss_vs_full_affine_state": heldout_metrics(
                 sketch_matrix,
                 full_matrix_output,
@@ -722,7 +1153,6 @@ def gqa_diagnostics(
         if observable_improved and mixer_non_regressed
         else baseline_name
     )
-    native_candidate_name = "rope_aligned_observable_127x2_plus_two_dc"
     native_baseline = sketch_results[baseline_name]
     native_candidate = sketch_results[native_candidate_name]
     native_candidate_compression_non_regressed = (

@@ -804,14 +804,228 @@ class SelectedBiasFreeProjection:
     selection_nmse: dict[float, float]
 
 
+@dataclass(frozen=True)
+class LowRankProjection:
+    down_weight: Tensor
+    up_weight: Tensor
+    bias: Tensor
+    prediction: Tensor
+    hidden_activation: str
+    output_bias: bool
+
+
+@dataclass(frozen=True)
+class NativeSignalRollout:
+    states: Tensor
+    output: Tensor
+
+
+def _ridge_affine_projection(
+    source: Tensor,
+    target: Tensor,
+    *,
+    ridge: float,
+) -> tuple[Tensor, Tensor]:
+    if source.ndim != 2 or target.ndim != 2 or source.shape[0] != target.shape[0]:
+        raise ValueError("affine projection inputs must be aligned matrices")
+    if ridge < 0:
+        raise ValueError("ridge must be non-negative")
+    source = source.float()
+    target = target.float()
+    source_mean = source.mean(dim=0)
+    target_mean = target.mean(dim=0)
+    centered_source = source - source_mean
+    centered_target = target - target_mean
+    if ridge == 0:
+        weight = torch.linalg.lstsq(
+            centered_source,
+            centered_target,
+        ).solution.T
+    elif centered_source.shape[0] >= centered_source.shape[1]:
+        gram = centered_source.T @ centered_source
+        gram = gram + torch.eye(
+            centered_source.shape[1],
+            dtype=gram.dtype,
+            device=gram.device,
+        ) * ridge
+        weight = torch.linalg.solve(
+            gram,
+            centered_source.T @ centered_target,
+        ).T
+    else:
+        gram = centered_source @ centered_source.T
+        gram = gram + torch.eye(
+            centered_source.shape[0],
+            dtype=gram.dtype,
+            device=gram.device,
+        ) * ridge
+        weight = (
+            centered_source.T @ torch.linalg.solve(gram, centered_target)
+        ).T
+    bias = target_mean - source_mean @ weight.T
+    return weight, bias
+
+
+def fit_low_rank_projection(
+    source: Tensor,
+    target: Tensor,
+    *,
+    calibration_batches: int,
+    rank: int,
+    ridge: float = 1e-3,
+    hidden_activation: str = "identity",
+    output_bias: bool = True,
+) -> LowRankProjection:
+    """Fit a native low-rank affine projection on calibration rows.
+
+    The source-to-target affine map supplies deterministic right-singular
+    feature directions.  The native hidden activation is then applied and the
+    up projection plus bias are re-solved, so the returned tensors correspond
+    to the actual ``down -> activation -> up+bias`` parameterization.
+    """
+    if source.ndim != 3 or target.ndim < 3:
+        raise ValueError("source and target must include batch and time")
+    if source.shape[:2] != target.shape[:2]:
+        raise ValueError("source and target batch/time dimensions must align")
+    if not 0 < calibration_batches <= source.shape[0]:
+        raise ValueError("calibration_batches must select a non-empty prefix")
+    if hidden_activation not in {"identity", "tanh", "sigmoid"}:
+        raise ValueError(f"unsupported hidden activation: {hidden_activation}")
+    source_width = source.shape[-1]
+    target_shape = target.shape[2:]
+    target_width = math.prod(target_shape)
+    maximum_rank = min(source_width, target_width)
+    if not 0 < rank <= maximum_rank:
+        raise ValueError("rank must fit source and target widths")
+    calibration_source = source[:calibration_batches].reshape(
+        -1, source_width
+    ).float()
+    calibration_target = target[:calibration_batches].reshape(
+        -1, target_width
+    ).float()
+    affine_weight, _ = _ridge_affine_projection(
+        calibration_source,
+        calibration_target,
+        ridge=ridge,
+    )
+    _, _, right = torch.linalg.svd(
+        affine_weight,
+        full_matrices=False,
+    )
+    down_weight = right[:rank].contiguous()
+    if hidden_activation == "tanh":
+        calibration_linear = calibration_source @ down_weight.T
+        maximum = calibration_linear.abs().max().clamp_min(1e-6)
+        down_weight = down_weight * (0.25 / maximum)
+
+    def hidden(value: Tensor) -> Tensor:
+        linear = value @ down_weight.T
+        if hidden_activation == "tanh":
+            return torch.tanh(linear)
+        if hidden_activation == "sigmoid":
+            return torch.sigmoid(linear)
+        return linear
+
+    calibration_features = hidden(calibration_source)
+    if output_bias:
+        up_weight, bias = _ridge_affine_projection(
+            calibration_features,
+            calibration_target,
+            ridge=ridge,
+        )
+    else:
+        fitted = fit_bias_free_projection(
+            calibration_features.unsqueeze(0),
+            calibration_target.unsqueeze(0),
+            calibration_batches=1,
+            ridge=ridge,
+        )
+        up_weight = fitted.weight
+        bias = torch.zeros(
+            target_width,
+            dtype=torch.float32,
+            device=source.device,
+        )
+    prediction = (
+        hidden(source.float().reshape(-1, source_width)) @ up_weight.T
+        + (bias if output_bias else 0)
+    ).reshape(*source.shape[:2], *target_shape)
+    return LowRankProjection(
+        down_weight=down_weight,
+        up_weight=up_weight,
+        bias=bias,
+        prediction=prediction,
+        hidden_activation=hidden_activation,
+        output_bias=output_bias,
+    )
+
+
+def native_signal_rollout(
+    read: Tensor,
+    decay: Tensor,
+    key: Tensor,
+    value: Tensor,
+    erase: Tensor,
+) -> NativeSignalRollout:
+    """Replay fitted native RWKV7 signals from a zero state."""
+    if read.ndim != 4:
+        raise ValueError("read must be [batch,time,head,feature]")
+    if key.shape != read.shape or value.shape != read.shape or erase.shape != read.shape:
+        raise ValueError("key, value, and erase must align with read")
+    if decay.shape != read.shape:
+        raise ValueError("decay must be expanded to every state input channel")
+    batch, sequence_length, heads, head_dim = read.shape
+    state = torch.zeros(
+        batch,
+        heads,
+        head_dim,
+        head_dim,
+        dtype=torch.float32,
+        device=read.device,
+    )
+    states = torch.empty(
+        batch,
+        sequence_length,
+        heads,
+        head_dim,
+        head_dim,
+        dtype=torch.float32,
+        device=read.device,
+    )
+    outputs = torch.empty_like(read, dtype=torch.float32)
+    for index in range(sequence_length):
+        normalized_key = torch.nn.functional.normalize(
+            key[:, index].float(),
+            dim=-1,
+        )
+        output, state = rwkv7_step(
+            state,
+            read[:, index].float(),
+            decay[:, index].float(),
+            key[:, index].float(),
+            value[:, index].float(),
+            -normalized_key,
+            normalized_key * erase[:, index].float(),
+        )
+        states[:, index] = state
+        outputs[:, index] = output
+    return NativeSignalRollout(states=states, output=outputs)
+
+
 def fit_bias_free_projection(
     source: Tensor,
     target: Tensor,
     *,
     calibration_batches: int,
     ridge: float = 1e-3,
+    prior_weight: Tensor | None = None,
 ) -> BiasFreeProjection:
-    """Fit a native bias-free linear projection on calibration batches."""
+    """Fit a native bias-free linear projection on calibration batches.
+
+    When ``prior_weight`` is provided, ridge is centered on that source-
+    compatible map rather than zero.  This preserves directions not identified
+    by a calibration matrix with fewer independent rows than hidden features.
+    """
     if source.ndim != 3 or target.ndim < 3:
         raise ValueError("source and target must include batch and time")
     if source.shape[:2] != target.shape[:2]:
@@ -829,6 +1043,18 @@ def fit_bias_free_projection(
     calibration_target = target[:calibration_batches].reshape(
         -1, target_width
     ).float()
+    if prior_weight is None:
+        prior = torch.zeros(
+            target_width,
+            source_width,
+            dtype=torch.float32,
+            device=source.device,
+        )
+    else:
+        if prior_weight.shape != (target_width, source_width):
+            raise ValueError("prior weight does not match projection geometry")
+        prior = prior_weight.float()
+    calibration_residual = calibration_target - calibration_source @ prior.T
     if calibration_source.shape[0] >= source_width:
         gram = calibration_source.T @ calibration_source
         if ridge:
@@ -837,8 +1063,8 @@ def fit_bias_free_projection(
                 dtype=gram.dtype,
                 device=gram.device,
             ) * ridge
-        rhs = calibration_source.T @ calibration_target
-        weight = torch.linalg.solve(gram, rhs).T
+        rhs = calibration_source.T @ calibration_residual
+        weight = prior + torch.linalg.solve(gram, rhs).T
     else:
         gram = calibration_source @ calibration_source.T
         if ridge:
@@ -847,8 +1073,8 @@ def fit_bias_free_projection(
                 dtype=gram.dtype,
                 device=gram.device,
             ) * ridge
-        coefficients = torch.linalg.solve(gram, calibration_target)
-        weight = (calibration_source.T @ coefficients).T
+        coefficients = torch.linalg.solve(gram, calibration_residual)
+        weight = prior + (calibration_source.T @ coefficients).T
     prediction = (source.float() @ weight.T).reshape(
         *source.shape[:2],
         *target_shape,
@@ -862,6 +1088,7 @@ def select_bias_free_projection(
     *,
     calibration_batches: int,
     ridges: tuple[float, ...],
+    prior_weight: Tensor | None = None,
 ) -> SelectedBiasFreeProjection:
     """Select a scale-relative ridge, then refit all calibration rows.
 
@@ -887,6 +1114,7 @@ def select_bias_free_projection(
             target[:calibration_batches],
             calibration_batches=fit_batches,
             ridge=ridge_multiplier * ridge_scale,
+            prior_weight=prior_weight,
         )
         selection_nmse[ridge_multiplier] = normalized_mse(
             candidate.prediction[fit_batches:calibration_batches],
@@ -902,6 +1130,7 @@ def select_bias_free_projection(
         target,
         calibration_batches=calibration_batches,
         ridge=selected_ridge,
+        prior_weight=prior_weight,
     )
     return SelectedBiasFreeProjection(
         projection=projection,

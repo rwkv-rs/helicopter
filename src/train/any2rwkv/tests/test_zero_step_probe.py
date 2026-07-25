@@ -3,13 +3,16 @@ from __future__ import annotations
 import torch
 import pytest
 
+from any2rwkv.recurrent import rwkv7_step
 from any2rwkv.zero_step_probe import (
     RWKV7_MINIMUM_DECAY,
     TwoStateProjection,
     causal_attention,
     fit_bias_free_projection,
+    fit_low_rank_projection,
     four_state_block_output,
     logit_taylor_hazards,
+    native_signal_rollout,
     native_two_state_rollout,
     observable_query_bases,
     probability_taylor_hazards,
@@ -297,6 +300,22 @@ def test_bias_free_projection_exposes_unreachable_constant_channel() -> None:
     torch.testing.assert_close(fitted.prediction, torch.zeros_like(target))
 
 
+def test_bias_free_projection_preserves_unidentified_prior_directions() -> None:
+    source = torch.zeros(2, 4, 3)
+    prior = torch.tensor([[1.0, -2.0, 3.0]])
+    target = torch.zeros(2, 4, 1)
+
+    fitted = fit_bias_free_projection(
+        source,
+        target,
+        calibration_batches=1,
+        ridge=1e-3,
+        prior_weight=prior,
+    )
+
+    torch.testing.assert_close(fitted.weight, prior)
+
+
 def test_bias_free_projection_uses_stable_dual_solution_when_underdetermined() -> None:
     generator = torch.Generator().manual_seed(20260725)
     source = torch.randn(4, 3, 32, generator=generator)
@@ -315,6 +334,93 @@ def test_bias_free_projection_uses_stable_dual_solution_when_underdetermined() -
     assert bool(torch.isfinite(selected.projection.prediction).all())
     assert selected.absolute_ridge == pytest.approx(
         selected.ridge * selected.ridge_scale
+    )
+
+
+def test_low_rank_projection_materializes_native_affine_parameters() -> None:
+    generator = torch.Generator().manual_seed(20260725)
+    source = torch.randn(4, 7, 6, generator=generator)
+    down = torch.randn(3, 6, generator=generator)
+    up = torch.randn(8, 3, generator=generator)
+    bias = torch.randn(8, generator=generator)
+    target = source @ down.T @ up.T + bias
+
+    fitted = fit_low_rank_projection(
+        source,
+        target,
+        calibration_batches=3,
+        rank=3,
+        ridge=1e-6,
+    )
+
+    assert fitted.down_weight.shape == (3, 6)
+    assert fitted.up_weight.shape == (8, 3)
+    assert fitted.bias.shape == (8,)
+    torch.testing.assert_close(
+        fitted.prediction,
+        target,
+        rtol=2e-3,
+        atol=2e-3,
+    )
+
+
+def test_low_rank_projection_can_match_bias_free_native_gate_contract() -> None:
+    generator = torch.Generator().manual_seed(20260725)
+    source = torch.randn(3, 8, 5, generator=generator)
+    target = torch.randn(3, 8, 7, generator=generator)
+
+    fitted = fit_low_rank_projection(
+        source,
+        target,
+        calibration_batches=2,
+        rank=4,
+        ridge=1e-3,
+        hidden_activation="sigmoid",
+        output_bias=False,
+    )
+
+    assert fitted.output_bias is False
+    torch.testing.assert_close(fitted.bias, torch.zeros_like(fitted.bias))
+    features = torch.sigmoid(source @ fitted.down_weight.T)
+    torch.testing.assert_close(
+        fitted.prediction,
+        features @ fitted.up_weight.T,
+    )
+
+
+def test_native_signal_rollout_replays_exact_rwkv7_signals() -> None:
+    generator = torch.Generator().manual_seed(20260725)
+    read = torch.randn(2, 5, 3, 4, generator=generator)
+    key = torch.randn(2, 5, 3, 4, generator=generator)
+    value = torch.randn(2, 5, 3, 4, generator=generator)
+    erase = torch.rand(2, 5, 3, 4, generator=generator)
+    decay = torch.rand(2, 5, 3, 4, generator=generator) * 0.4 + 0.55
+
+    actual = native_signal_rollout(read, decay, key, value, erase)
+    state = torch.zeros(2, 3, 4, 4)
+    expected_outputs = []
+    expected_states = []
+    for index in range(read.shape[1]):
+        normalized_key = torch.nn.functional.normalize(key[:, index], dim=-1)
+        output, state = rwkv7_step(
+            state,
+            read[:, index],
+            decay[:, index],
+            key[:, index],
+            value[:, index],
+            -normalized_key,
+            normalized_key * erase[:, index],
+        )
+        expected_outputs.append(output)
+        expected_states.append(state)
+
+    torch.testing.assert_close(
+        actual.output,
+        torch.stack(expected_outputs, dim=1),
+    )
+    torch.testing.assert_close(
+        actual.states,
+        torch.stack(expected_states, dim=1),
     )
 
 

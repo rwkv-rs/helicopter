@@ -314,6 +314,7 @@
                 "relative_l2": 0.0025346626061946154
               }
             },
+            "source_to_native_weight_projection": null,
             "total_loss_vs_full_affine_state": {
               "cosine": 0.9828422665596008,
               "nmse": 0.03407536447048187,
@@ -480,6 +481,7 @@
                 "relative_l2": 0.004427200183272362
               }
             },
+            "source_to_native_weight_projection": null,
             "total_loss_vs_full_affine_state": {
               "cosine": 0.9952005743980408,
               "nmse": 0.009604397229850292,
@@ -646,6 +648,7 @@
                 "relative_l2": 0.004416156094521284
               }
             },
+            "source_to_native_weight_projection": null,
             "total_loss_vs_full_affine_state": {
               "cosine": 0.9945408701896667,
               "nmse": 0.010898143984377384,
@@ -812,6 +815,7 @@
                 "relative_l2": 0.005144607275724411
               }
             },
+            "source_to_native_weight_projection": null,
             "total_loss_vs_full_affine_state": {
               "cosine": 0.995751142501831,
               "nmse": 0.008509337902069092,
@@ -978,6 +982,7 @@
                 "relative_l2": 0.03000061772763729
               }
             },
+            "source_to_native_weight_projection": null,
             "total_loss_vs_full_affine_state": {
               "cosine": 0.97420734167099,
               "nmse": 0.05107181891798973,
@@ -1142,6 +1147,309 @@
                 "cosine": 0.9993101954460144,
                 "nmse": 0.001395983388647437,
                 "relative_l2": 0.03736285865306854
+              }
+            },
+            "source_to_native_weight_projection": {
+              "a_lora": {
+                "bias_sha256": "82b913f23b269a5cfa06e88d0965eb458b41c866c53b9e825d1d1a800bbd341a",
+                "bias_shape": [
+                  2048
+                ],
+                "down_weight_sha256": "24a7452bc6b38b46025c924b6336a823a9804af87d24a69a07774207b247f167",
+                "down_weight_shape": [
+                  64,
+                  2048
+                ],
+                "heldout_signal": {
+                  "cosine": 0.9502312541007996,
+                  "nmse": 0.10618533939123154,
+                  "relative_l2": 0.3258609175682068
+                },
+                "hidden_activation": "identity",
+                "output_bias": true,
+                "up_weight_sha256": "a097140b43c9d5baa1c38dd9560df4e4f8cb0fd4b120bf45db569aceaaf6fa69",
+                "up_weight_shape": [
+                  2048,
+                  64
+                ]
+              },
+              "complete_free_running_mixer_vs_exact_softmax": {
+                "cosine": 0.5833719968795776,
+                "nmse": 0.6607347130775452,
+                "relative_l2": 0.8128558993339539
+              },
+              "evaluation_split_role": "adaptive-development-heldout-not-final-generalization-estimate",
+              "free_running_recurrent_output_vs_dynamic_oracle": {
+                "cosine": 0.9029529094696045,
+                "nmse": 0.35803788900375366,
+                "relative_l2": 0.5983626246452332
+              },
+              "g_lora": {
+                "absolute_ridge": 0.42965044975280764,
+                "basis": "deterministic-source-gate-rows",
+                "basis_row_indices": [
+                  0,
+                  16,
+                  32,
+                  48,
+                  64,
+                  81,
+                  97,
+                  113,
+                  129,
+                  145,
+                  161,
+                  177,
+                  193,
+                  210,
+                  226,
+                  242,
+                  258,
+                  274,
+                  290,
+                  306,
+                  322,
+                  338,
+                  355,
+                  371,
+                  387,
+                  403,
+                  419,
+                  435,
+                  451,
+                  467,
+                  484,
+                  500,
+                  516,
+                  532,
+                  548,
+                  564,
+                  580,
+                  596,
+                  612,
+                  629,
+                  645,
+                  661,
+                  677,
+                  693,
+                  709,
+                  725,
+                  741,
+                  758,
+                  774,
+                  790,
+                  806,
+                  822,
+                  838,
+                  854,
+                  870,
+                  886,
+                  903,
+                  919,
+                  935,
+                  951,
+                  967,
+                  983,
+                  999,
+                  1015,
+                  1032,
+                  1048,
+                  1064,
+                  1080,
+                  1096,
+                  1112,
+                  1128,
+                  1144,
+                  1161,
+                  1177,
+                  1193,
+                  1209,
+                  1225,
+                  1241,
+                  1257,
+                  1273,
+                  1289,
+                  1306,
+                  1322,
+                  1338,
+                  1354,
+                  1370,
+                  1386,
+                  1402,
+                  1418,
+                  1435,
+                  1451,
+                  1467,
+                  1483,
+                  1499,
+                  1515,
+                  1531,
+                  1547,
+                  1563,
+                  1580,
+                  1596,
+                  1612,
+                  1628,
+                  1644,
+                  1660,
+                  1676,
+                  1692,
+                  1709,
+                  1725,
+                  1741,
+                  1757,
+                  1773,
+                  1789,
+                  1805,
+                  1821,
+                  1837,
+                  1854,
+                  1870,
+                  1886,
+                  1902,
+                  1918,
+                  1934,
+                  1950,
+                  1966,
+                  1983,
+                  1999,
+                  2015,
+                  2031,
+                  2047
+                ],
+                "bias_sha256": null,
+                "bias_shape": null,
+                "down_weight_sha256": "4ae39a7481056f68c681601457b856230613d77f322c61618d315bd08f9e7a77",
+                "down_weight_shape": [
+                  128,
+                  2048
+                ],
+                "heldout_signal": {
+                  "cosine": 0.8792785406112671,
+                  "nmse": 0.22783438861370087,
+                  "relative_l2": 0.47731998562812805
+                },
+                "hidden_activation": "sigmoid",
+                "output_bias": false,
+                "selected_ridge_multiplier": 0.1,
+                "up_weight_sha256": "c8f5e284734e606a43edf384900c40732ee2b96b5bf979067c376a7dcc4b1a41",
+                "up_weight_shape": [
+                  2048,
+                  128
+                ]
+              },
+              "installation_rule": "install only when the complete held-out free-running mixer NMSE is finite and strictly below the frozen mapped baseline",
+              "k_proj": {
+                "absolute_ridge": 37.43376770019531,
+                "calibration_center_selection_nmse": {
+                  "source-compatible": 1220.6793212890625,
+                  "zero": 0.18532799184322357
+                },
+                "heldout_signal": {
+                  "cosine": 0.9164507985115051,
+                  "nmse": 0.16195915639400482,
+                  "relative_l2": 0.40244150161743164
+                },
+                "selected_ridge_center": "zero",
+                "selected_ridge_multiplier": 0.1,
+                "weight_sha256": "75323c2c7d15bdbcdca6343a9ce17d661557c7b14f7b84cac042bd40c1fee19c",
+                "weight_shape": [
+                  2048,
+                  2048
+                ]
+              },
+              "native_parameterization": {
+                "g_norm.bias": "zero",
+                "g_norm.weight": "one",
+                "k_a": "zero",
+                "k_k": "one",
+                "r_k": "zero",
+                "v_lora": "disabled",
+                "x_r/x_w/x_k/x_v/x_a/x_g": "zero-current-token"
+              },
+              "o_proj": {
+                "absolute_ridge": 40.6382942199707,
+                "calibration_center_selection_nmse": {
+                  "source-compatible": 0.928554356098175,
+                  "zero": 0.6931604146957397
+                },
+                "heldout_signal": {
+                  "cosine": 0.5833719968795776,
+                  "nmse": 0.6607347130775452,
+                  "relative_l2": 0.8128558993339539
+                },
+                "selected_ridge_center": "zero",
+                "selected_ridge_multiplier": 10.0,
+                "weight_sha256": "318c656f0b30481cd4b2d786d9d5817bb1a8f448d387909bb5903ed2ef57ac51",
+                "weight_shape": [
+                  2048,
+                  2048
+                ]
+              },
+              "r_proj": {
+                "absolute_ridge": 374.3376770019531,
+                "calibration_center_selection_nmse": {
+                  "source-compatible": 0.0369676798582077,
+                  "zero": 0.2458774894475937
+                },
+                "heldout_signal": {
+                  "cosine": 0.9866548776626587,
+                  "nmse": 0.027499960735440254,
+                  "relative_l2": 0.16583113372325897
+                },
+                "selected_ridge_center": "source-compatible",
+                "selected_ridge_multiplier": 1.0,
+                "weight_sha256": "4bca4ec7400c5291ed24145f917e3f928cdf77f885bd41478c17183917e04287",
+                "weight_shape": [
+                  2048,
+                  2048
+                ]
+              },
+              "required_next_gate": "materialize tensors into ProjectionBoundaryRWKV7Attention, run BF16 forward_sequence on previously unseen frozen sample IDs, and compare against the frozen mapped baseline",
+              "ridge_center_selection": "choose zero or source-compatible center independently for each bias-free projection using only the calibration validation split",
+              "scope": "fp32-signal-level-emulation",
+              "status": "diagnostic-not-installed",
+              "v_proj": {
+                "absolute_ridge": 374.3376770019531,
+                "calibration_center_selection_nmse": {
+                  "source-compatible": 0.13806837797164917,
+                  "zero": 0.5614662766456604
+                },
+                "heldout_signal": {
+                  "cosine": 0.9375454187393188,
+                  "nmse": 0.1250247359275818,
+                  "relative_l2": 0.35358837246894836
+                },
+                "selected_ridge_center": "source-compatible",
+                "selected_ridge_multiplier": 1.0,
+                "weight_sha256": "c946d2553ac7457e97ba70b851dbb9a73bb647691bcd0afb90d1ad695c1d3b2c",
+                "weight_shape": [
+                  2048,
+                  2048
+                ]
+              },
+              "w_lora": {
+                "bias_sha256": "c38020c5b769aad2ba2acba13650848a5030cb3e130b51115d18ae1d27a682f0",
+                "bias_shape": [
+                  2048
+                ],
+                "down_weight_sha256": "68de5d56c30c631b7aa16a07143f674d014bc7bd69adc27210991937abc2a26b",
+                "down_weight_shape": [
+                  64,
+                  2048
+                ],
+                "heldout_signal": {
+                  "cosine": 0.9265708923339844,
+                  "nmse": 0.15056689083576202,
+                  "relative_l2": 0.38802945613861084
+                },
+                "hidden_activation": "tanh",
+                "output_bias": true,
+                "up_weight_sha256": "5129710a5ea932d00da9e071d9db577d35b055fd0a324c17ca2b79154134eec1",
+                "up_weight_shape": [
+                  2048,
+                  64
+                ]
               }
             },
             "total_loss_vs_full_affine_state": {
