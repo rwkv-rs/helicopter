@@ -167,8 +167,13 @@ ensure_uv() {
     have curl || die "uv is missing and curl is not available to install it"
     run sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
     export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
-    have "$UV" || UV="$(command -v uv || true)"
-    [[ "${DRY_RUN:-0}" == "1" || -n "$UV" ]] || die "uv installation finished but uv is still not on PATH"
+    if ! have "$UV"; then
+      UV="$(command -v uv || true)"
+      [[ -n "$UV" ]] || {
+        [[ "${DRY_RUN:-0}" == "1" ]] && UV=uv ||
+          die "uv installation finished but uv is still not on PATH"
+      }
+    fi
   fi
 
   if [[ "$UPDATE_UV" == "1" ]]; then
@@ -297,7 +302,7 @@ sync_uv_env() {
 
 clean_legacy_lighteval_distributions() {
   component_enabled lighteval || return 0
-  [[ -x "$VENV/bin/python" ]] || return 0
+  [[ "${DRY_RUN:-0}" == "1" || -x "$VENV/bin/python" ]] || return 0
   run "$UV" pip uninstall --python "$VENV/bin/python" \
     helicopter-lighteval lighteval-runner litellm
 }
