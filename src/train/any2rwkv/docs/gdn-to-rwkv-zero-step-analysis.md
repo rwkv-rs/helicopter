@@ -27,45 +27,15 @@ $$k_t=\frac{\bar k_t}{c_{k,t}},\qquad c_{k,t}=\sqrt{\|\bar k_t\|^2+\epsilon},\qq
 
 $$\delta_t=d_t\mathbf1,\qquad n_t=\frac{k_t}{m_{k,t}},\qquad a_t=d_t\beta_tm_{k,t}^{2}\mathbf1,\qquad \kappa_t=\mu_tk_t,\qquad u_t=\frac{\beta_tv_t}{\mu_t}.$$
 
-便有
+代入后同时得到
 
-$$-(S_{t-1}n_t)(n_t\odot a_t)^{\top}=-d_t\beta_t(S_{t-1}k_t)k_t^{\top},$$
-
-以及
-
-$$u_t\kappa_t^{\top}=\beta_tv_tk_t^{\top}.$$
+$$-(S_{t-1}n_t)(n_t\odot a_t)^{\top}=-d_t\beta_t(S_{t-1}k_t)k_t^{\top},\qquad u_t\kappa_t^{\top}=\beta_tv_tk_t^{\top}.$$
 
 所以两边的状态递推逐项相等。这里的 $$\mu_t$$ 是 rank-one write 的尺度 gauge：它可以在 key 和 value 之间搬运任意正标量，而不改变状态更新。
 
-一个特别有用的选择是
+一个特别有用的选择是 $$\mu_t=c_{k,t}$$，此时 $$\kappa_t=\bar k_t,\ u_t=\beta_tv_t/c_{k,t}$$。若再取 native 静态参数 $$k_k=\mathbf1,\ k_a=\mathbf0$$，RWKV 的 raw key 就可以直接拟合 GDN 卷积后的未归一化 key；RWKV 自身的 key normalization 恢复 erase direction，动态 L2 范数则被搬到 value 侧。
 
-$$\mu_t=c_{k,t}.$$
-
-此时
-
-$$\kappa_t=\bar k_t,\qquad u_t=\frac{\beta_tv_t}{c_{k,t}}.$$
-
-若取 native 静态参数
-
-$$k_k=\mathbf 1,\qquad k_a=\mathbf 0,$$
-
-那么 RWKV 的 raw key 可以直接拟合 GDN 卷积后的未归一化 key；RWKV 自身的 key normalization 恢复 erase direction，动态 L2 范数则被搬到 value 侧。
-
-query 也有同样的自由度。令
-
-$$q_t=\frac{\bar q_t}{c_{q,t}},$$
-
-并取
-
-$$r_t=\lambda_t\frac{q_t}{\sqrt N}.$$
-
-这时 $$\widehat y_t=\lambda_ty_t$$。后续逐头归一化会消除正的逐头尺度，因此可以选择
-
-$$\lambda_t=c_{q,t}\sqrt N,$$
-
-从而得到
-
-$$r_t=\bar q_t.$$
+query 也有同样的自由度。令 $$q_t=\bar q_t/c_{q,t}$$，并取 $$r_t=\lambda_tq_t/\sqrt N$$，便有 $$\widehat y_t=\lambda_ty_t$$。后续逐头归一化会消除正的逐头尺度，因此选择 $$\lambda_t=c_{q,t}\sqrt N$$ 就得到 $$r_t=\bar q_t$$。
 
 这样，target 可以直接拟合未归一化 query，不需要用线性投影逼近动态 L2 normalization。
 
@@ -83,9 +53,7 @@ $$A_t^R=\operatorname{Diag}(\delta_t)-n_t(n_t\odot a_t)^{\top},\qquad B_t^R=u_t\
 
 真正需要拟合的是 $$(A_t,B_t,r_t)$$ 产生的完整可观测轨迹。令状态误差为 $$E_t$$，则一阶误差满足
 
-$$E_t=E_{t-1}A_t^G+S_{t-1}^G\Delta A_t+\Delta B_t,$$
-
-$$\Delta y_t=E_tr_t+S_t^G\Delta r_t.$$
+$$E_t=E_{t-1}A_t^G+S_{t-1}^G\Delta A_t+\Delta B_t,\qquad \Delta y_t=E_tr_t+S_t^G\Delta r_t.$$
 
 将归一化、gate 和 output projection 的局部 Jacobian 记为 $$C_t$$，直接求解
 
@@ -105,13 +73,9 @@ $$\rho_{t,h}^{*}=\frac{y_{t,h}^{\top}M_{t,h}\widehat y_{t,h}}{y_{t,h}^{\top}M_{t
 
 ## 3. 将四阶卷积投影为最优 time-mix
 
-GDN 的 q/k/v 信号可以写成
+GDN 的 q/k/v 信号与 RWKV time-mix 分别写成
 
-$$s_t=\operatorname{SiLU}\left(\sum_{j=0}^{3}D_jWx_{t-j}\right).$$
-
-RWKV time-mix 为
-
-$$\widehat s_t=W_R\big((1-\alpha)\odot x_t+\alpha\odot x_{t-1}\big).$$
+$$s_t=\operatorname{SiLU}\left(\sum_{j=0}^{3}D_jWx_{t-j}\right),\qquad \widehat s_t=W_R\big((1-\alpha)\odot x_t+\alpha\odot x_{t-1}\big).$$
 
 正确的初始化顺序是：
 
@@ -129,19 +93,13 @@ GDN 的控制信号为
 
 $$d_h(x)=\exp\left[-e^{A_{\log,h}}\operatorname{softplus}(p_h(x))\right],\qquad \beta_h(x)=\sigma(b_h(x)).$$
 
-native RWKV7 decay link 为
-
-$$d_h^R=\exp\left[-c_w\sigma(z_{w,h})\right],\qquad c_w=e^{-1/2}.$$
+native RWKV7 decay link 为 $$d_h^R=\exp[-c_w\sigma(z_{w,h})]$$，其中 $$c_w=e^{-1/2}$$。
 
 因此 inverse-link target 应写成
 
 $$z_{w,h}^{*}=\operatorname{logit}\left(\operatorname{clip}\left(\frac{-\log d_h}{c_w},\varepsilon,1-\varepsilon\right)\right)=\operatorname{logit}\left(\operatorname{clip}\left(e^{1/2}[-\log d_h],\varepsilon,1-\varepsilon\right)\right).$$
 
-这一区分了两层事实：DPLR 状态算子允许令 $$\delta_t=d_t\mathbf1$$ 并精确嵌入；native decay link 的可达域则是
-
-$$d_h^R\in\left[\exp(-e^{-1/2}),1\right),$$
-
-域外信号需要按最终可观测误差做 bounded projection。
+这一区分了两层事实：DPLR 状态算子允许令 $$\delta_t=d_t\mathbf1$$ 并精确嵌入；native decay link 的可达域是 $$d_h^R\in[\exp(-e^{-1/2}),1)$$，域外信号需要按最终可观测误差做 bounded projection。
 
 erase gate 的 target 为
 
@@ -157,13 +115,7 @@ $$\operatorname{rowspan}(W_{\mathrm{decay}})+\operatorname{rowspan}(W_\beta)+\ma
 
 Qwen3.5 每层只有 $$H$$ 个 decay driver 和 $$H$$ 个 beta driver。以 $$H=16$$ 为例，主要控制子空间至多约 $$2H=32$$ 维，可以自然装入 RWKV 的 rank-64 control subspace；up projection 通过加权 reduced-rank ridge 求出。
 
-gate 则从
-
-$$g^G=\operatorname{SiLU}(W_zx)$$
-
-编译成
-
-$$g^R=U_g\,\sigma(D_gx).$$
+gate 则从 $$g^G=\operatorname{SiLU}(W_zx)$$ 编译成 $$g^R=U_g\,\sigma(D_gx)$$。
 
 先对 source gate 的 output-weighted Jacobian 做广义 SVD，保留最影响 mixer output 的 128 个方向作为 $$D_g$$，再闭式求解 $$U_g$$。
 
@@ -173,11 +125,7 @@ $$g^R=U_g\,\sigma(D_gx).$$
 
 $$\widetilde S_t=U_hS_t,\qquad \widetilde v_t=U_hv_t,\qquad \widetilde y_t=U_hy_t.$$
 
-令
-
-$$e=\frac{\mathbf1}{\sqrt N}.$$
-
-GroupNorm 会丢掉 $$e$$ 方向，因此选择 $$U_h$$，使这个方向对应 source 中最不重要的 value direction：
+令 $$e=\mathbf1/\sqrt N$$。GroupNorm 会丢掉 $$e$$ 方向，因此选择 $$U_h$$，使这个方向对应 source 中最不重要的 value direction：
 
 $$u_{\star}=\arg\min_{u^{\top}\Sigma_hu=1}u^{\top}H_hu,\qquad U_hu_{\star}=e,$$
 
@@ -191,11 +139,7 @@ $$u_{\star}=\arg\min_{u^{\top}\Sigma_hu=1}u^{\top}H_hu,\qquad U_hu_{\star}=e,$$
 - `o_proj`；
 - `r_k`。
 
-native bonus 为
-
-$$b_t=\big((r_t\odot\kappa_t)^{\top}r_k\big)u_t.$$
-
-固定 recurrence signals 后，它关于 $$r_k$$ 是线性的，可以通过 ridge 解出，用来恢复 GroupNorm 丢失方向中可由当前写入解释的部分。
+native bonus 为 $$b_t=((r_t\odot\kappa_t)^{\top}r_k)u_t$$。固定 recurrence signals 后，它关于 $$r_k$$ 是线性的，可以通过 ridge 解出，用来恢复 GroupNorm 丢失方向中可由当前写入解释的部分。
 
 ## 6. 完整 zero-step 转换流程
 
