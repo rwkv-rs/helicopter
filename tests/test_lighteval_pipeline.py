@@ -25,7 +25,8 @@ def artifacts(limit=3):
 def test_layout_registry_passthrough_and_generation_contract():
     component = ROOT / "src/eval/lighteval"; assert list(component.glob("*.py")) == [component / "evaluate.py"] and not (component / "pyproject.toml").exists()
     assert not (ROOT / "configs/lighteval-pro6000.toml").exists()
-    assert all(text not in (component / "evaluate.py").read_text() for text in ("Question:", "DAPO")) and 'kwargs.setdefault("disable_log_stats", "VLLM_LOG_STATS_INTERVAL" not in os.environ)' in (ROOT / "src/infer/vllm-rwkv/vllm/entrypoints/llm.py").read_text()
+    llm_source = (ROOT / "src/infer/vllm-rwkv/vllm/entrypoints/llm.py").read_text()
+    assert all(text not in (component / "evaluate.py").read_text() for text in ("Question:", "DAPO")) and all(text in llm_source for text in ('kwargs.setdefault(', '"disable_log_stats", "VLLM_LOG_STATS_INTERVAL" not in os.environ'))
     assert Registry(tasks=evaluate.TASKS).load_tasks() and evaluate.DetectorFactory.seed == 0
     with pytest.raises(ValueError): Registry(tasks="definitely_unknown_task|0").load_tasks()
     params = evaluate._generation_parameters(); backend = params.to_vllm_dict()
@@ -132,7 +133,7 @@ def test_official_vllm_init_bridge_cache_and_sampling(tmp_path, monkeypatch):
     model = object.__new__(VLLMModel); model.config = config; model.data_parallel_size, model.model = 1, backend
     task = next(iter(Registry(tasks="aime24_gpassk|0").load_tasks().values()))
     model._generate(inputs=[[1]], max_new_tokens=13, stop_tokens=[], num_samples=max(task.num_samples)); params = captured["params"]
-    assert captured["prompts"] == [{"prompt_token_ids": [1]}] and (params.stop, params.stop_token_ids, params.ignore_eos) == (["\nUser:"], [0], False)
+    assert captured["prompts"] == [{"prompt_token_ids": [1]}] and (params.stop, params.stop_token_ids, params.ignore_eos) == (["\nUser:", "\n### User"], [0], False)
     assert (params.n, params.max_tokens, params.repetition_penalty, params.frequency_penalty, params.penalty_decay) == (48, 13, 0.1, 0.0, 0.988)
 def test_official_task_native_metrics_receive_raw_completions(monkeypatch):
     tokenizer = get_tokenizer("BlinkDL/rwkv7-g1", tokenizer_mode="rwkv"); cases = (("gsm8k|0", {"question": "1+1?", "answer": "work #### 2"}, "1+1?"), ("mmlu:abstract_algebra|0", {"subject": "abstract_algebra", "question": "1+1?", "choices": ["1", "2", "3", "4"], "answer": "B"}, "The following are multiple choice questions (with answers) about abstract algebra.\n1+1?\nA. 1\nB. 2\nC. 3\nD. 4"), ("math_500|0", {"problem": "Find 1+1.", "solution": "2"}, None), ("ifeval|0", {"prompt": "Use at least two words", "instruction_id_list": ["length_constraints:number_words"], "kwargs": [{"num_words": 2, "relation": "at least"}]}, None))
