@@ -1,37 +1,46 @@
-import { test, expect } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 
-test("renders the SSR scoreboard table", async ({ page }) => {
-  await page.goto("/?page=dashboard&view=benchmark_detail_latest&tab=math");
+test("shows every parameter scale for each comparison option", async ({ page }) => {
+  await page.goto("/?page=dashboard");
+
   await expect(page.getByRole("heading", { name: "RWKV Skills" })).toBeVisible();
-  await expect(page.getByText("gsm8k_test")).toBeVisible();
-  await expect(page.getByText("50.0%")).toBeVisible();
-  await page.getByRole("button", { name: "50.0%" }).click();
-  await expect(page.getByText("评测明细")).toBeVisible();
-  await expect(page.getByText("wrong arithmetic")).toBeVisible();
-  await page.getByRole("button", { name: /查看 context|What is/ }).first().click();
-  await expect(page.locator(".modal pre").filter({ hasText: "What is 1+1?" })).toBeVisible();
-  await page.locator(".modal").getByRole("button", { name: "关闭" }).click();
-  await page.getByRole("button", { name: "长截图" }).click();
-  await expect(page.getByText(/已保存：.*scoreboard-screenshots/)).toBeVisible({ timeout: 120_000 });
+  await expect(page.getByRole("navigation", { name: "对比维度" })).toBeVisible();
+  await expect(page.getByText("临时展示数据")).toBeVisible();
+  await expect(page.getByRole("columnheader", { name: "1.5B" })).toBeVisible();
+  await expect(page.getByRole("columnheader", { name: "2.9B" })).toBeVisible();
+  await expect(page.getByRole("columnheader", { name: "7.2B" })).toBeVisible();
+  await expect(page.getByRole("columnheader", { name: "13.3B" })).toBeVisible();
+  await expect(page.getByText("分数范围")).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "管理面板" })).toHaveCount(0);
 
-  await page.goto("/?page=dashboard&view=field_avg_latest&tab=math");
-  await expect(page.getByText("领域均分 · 领域均分（最新）")).toBeVisible();
-  await expect(page.getByText(/数学推理/)).toBeVisible();
+  await page.getByRole("button", { name: "Qwen3.5 vs RWKV" }).click();
+  await expect(page.getByText(/选择最接近参数量的 Qwen3.5/)).toBeVisible();
+  await expect(page.getByText("N/A").first()).toBeVisible();
 
-  await page.goto("/?page=dashboard&view=benchmark_detail_latest&tab=coding");
-  await expect(page.getByText("图表", { exact: true })).toBeVisible();
-  await expect(page.locator(".chart-panel").getByText("HUMANEVAL", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Prompt template" }).click();
+  await expect(page.getByText(/User✿\{task\.problem\}✿/)).toBeVisible();
+});
 
+test("renders score history and opens point provenance", async ({ page }) => {
   await page.goto("/?page=history");
-  await expect(page.getByText("分数来源", { exact: true })).toBeVisible();
-  await expect(page.getByText("共 1 条分数")).toBeVisible();
-  await page.getByRole("button", { name: /task #1/ }).click();
-  await expect(page.getByText(/metric=avg@1/)).toBeVisible();
 
+  await expect(page.getByText("分数来源", { exact: true })).toBeVisible();
+  await expect(page.locator(".history-card")).toHaveCount(4);
+  await expect(page.getByText("分数范围")).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "管理面板" })).toHaveCount(0);
+
+  await page.locator(".history-bar").first().click();
+  await expect(page.getByText("run_id", { exact: true })).toBeVisible();
+  await expect(page.getByText(/^mock-generation-/)).toBeVisible();
+
+  await page.getByRole("button", { name: "fp16 vs fp32io16" }).click();
+  await expect(page.getByText("1.5B · fp16 vs fp32io16")).toBeVisible();
+  await expect(page.locator(".history-card")).toHaveCount(4);
+  await expect(page.getByText("点击任意柱子查看分数来源。")).toBeVisible();
+});
+
+test("legacy admin URL falls back to the scoreboard", async ({ page }) => {
   await page.goto("/?page=admin");
-  await expect(page.getByText("评测配置 · 启动")).toBeVisible();
-  await expect(page.getByText("GPU / 推理 worker 遥测")).toBeVisible();
-  await expect(page.getByText("Scheduler control is not part of the migrated scoreboard server.").first()).toBeVisible();
-  await page.getByRole("button", { name: "启动评测" }).click();
-  await expect(page.getByText(/501: Scheduler control is not part/).first()).toBeVisible();
+  await expect(page.getByText("评测看板 · 全参数规模对比")).toBeVisible();
+  await expect(page.getByText("管理面板")).toHaveCount(0);
 });

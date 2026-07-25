@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "start": "next start -H 0.0.0.0 -p 3010",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "smoke": "playwright test"
