@@ -331,7 +331,7 @@ def test_failed_model_cleanup_never_unregisters_runtime(
     with pytest.raises(
         lighteval_adapter.UnsafeModelCleanupError,
         match="model cleanup failed",
-    ):
+    ) as raised:
         lighteval_adapter._finish_runtime(
             backend=Backend(),
             campaign_dir=campaign_dir,
@@ -339,6 +339,8 @@ def test_failed_model_cleanup_never_unregisters_runtime(
             on_runtime_finished=lambda: finished.append("finished"),
         )
 
+    assert "engine still active" not in str(raised.value)
+    assert "builtins.RuntimeError" in str(raised.value)
     assert finished == []
     assert removed == []
     assert runtime_dir.is_dir()
@@ -356,6 +358,7 @@ def test_failed_model_construction_is_an_unsafe_lifecycle_stop() -> None:
         lighteval_adapter._construct_backend(Model, object())
 
     assert "must-not-be-reported" not in str(raised.value)
+    assert "builtins.RuntimeError" in str(raised.value)
 
 
 def test_generation_keeps_doc_stop_while_reusing_chat_prompt_manager(

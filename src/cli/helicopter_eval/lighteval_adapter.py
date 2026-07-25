@@ -659,12 +659,14 @@ def _finish_runtime(
         try:
             backend.close_unit()
         except Exception as error:
-            raise UnsafeModelCleanupError(f"model cleanup failed: {error}") from error
+            raise UnsafeModelCleanupError(
+                f"model cleanup failed: {_exception_type(error)}"
+            ) from error
     try:
         _remove_runtime_directory(campaign_dir, runtime_dir)
     except Exception as error:
         raise UnsafeModelCleanupError(
-            f"runtime directory cleanup failed: {error}"
+            f"runtime directory cleanup failed: {_exception_type(error)}"
         ) from error
     if on_runtime_finished is not None:
         on_runtime_finished()
@@ -677,7 +679,8 @@ def _construct_backend(model_type, model_config):
         raise
     except Exception as error:
         raise UnsafeModelCleanupError(
-            "model construction failed before lifecycle ownership could be proven safe"
+            "model construction failed before lifecycle ownership could be proven "
+            f"safe: {_exception_type(error)}"
         ) from error
 
 

@@ -856,8 +856,8 @@ def run_campaign(
             )
         except UnsafeModelCleanupError as error:
             raise ManifestError(
-                "model lifecycle cleanup failed; campaign stopped before "
-                "starting another weight or WKV mode"
+                "model lifecycle could not be proven safe; campaign stopped "
+                f"before starting another weight or WKV mode: {error}"
             ) from error
         except ManifestError:
             raise
