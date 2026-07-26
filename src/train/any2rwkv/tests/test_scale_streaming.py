@@ -13,7 +13,7 @@ from any2rwkv.artifacts import write_json
 from any2rwkv.configuration_any2rwkv import Any2RWKVProxyConfig
 from any2rwkv.contract import build_target_config
 from any2rwkv.distill import chunked_token_kl, normalized_mse, token_kl
-from any2rwkv.distributed import _gradient_buckets
+from any2rwkv.distributed import DistributedContext, _gradient_buckets
 from any2rwkv.fixture import write_fixture
 from any2rwkv.export import export_hf_checkpoint
 from any2rwkv.errors import ContractError
@@ -82,6 +82,39 @@ class LayerTensorStoreTests(unittest.TestCase):
         buckets = _gradient_buckets(gradients, max_bytes=20)
         self.assertEqual([len(bucket) for bucket in buckets], [1, 1, 1])
         self.assertIs(buckets[0][0], gradients[0])
+
+    def test_distributed_reductions_preserve_strided_in_place_semantics(
+        self,
+    ) -> None:
+        context = DistributedContext(rank=0, local_rank=0, world_size=8)
+        source = torch.arange(36, dtype=torch.float64).reshape(2, 3, 6)
+        summed = source.clone().transpose(1, 2)
+        maximized = source.clone().transpose(1, 2)
+        expected_sum = summed.clone() + 7
+        self.assertEqual(summed.stride(), (18, 1, 6))
+        self.assertFalse(summed.is_contiguous())
+        self.assertFalse(maximized.is_contiguous())
+
+        def reduce(contiguous, *, op):
+            self.assertTrue(contiguous.is_contiguous())
+            if op is torch.distributed.ReduceOp.SUM:
+                contiguous.add_(7)
+            elif op is torch.distributed.ReduceOp.MAX:
+                contiguous.fill_(5)
+            else:
+                self.fail(f"unexpected reduction: {op}")
+
+        with mock.patch(
+            "any2rwkv.distributed.dist.all_reduce",
+            side_effect=reduce,
+        ):
+            summed_returned = context.all_reduce_sum(summed)
+            maximized_returned = context.all_reduce_max(maximized)
+
+        self.assertIs(summed_returned, summed)
+        self.assertIs(maximized_returned, maximized)
+        torch.testing.assert_close(summed, expected_sum)
+        torch.testing.assert_close(maximized, torch.full_like(maximized, 5))
 
     def test_fixture_layers_are_indexed_and_loaded_without_mutating_source(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

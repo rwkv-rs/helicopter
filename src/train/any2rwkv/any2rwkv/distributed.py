@@ -141,13 +141,13 @@ class DistributedContext:
     def all_reduce_sum(self, value: torch.Tensor) -> torch.Tensor:
         """Sum an additive sufficient statistic across every training rank."""
         if self.world_size > 1:
-            dist.all_reduce(value, op=dist.ReduceOp.SUM)
+            _all_reduce_contiguous(value, op=dist.ReduceOp.SUM)
         return value
 
     def all_reduce_max(self, value: torch.Tensor) -> torch.Tensor:
         """Take an elementwise maximum across every training rank."""
         if self.world_size > 1:
-            dist.all_reduce(value, op=dist.ReduceOp.MAX)
+            _all_reduce_contiguous(value, op=dist.ReduceOp.MAX)
         return value
 
     def broadcast_tensor(self, value: torch.Tensor, *, source_rank: int = 0) -> torch.Tensor:
@@ -235,3 +235,17 @@ def _gradient_buckets(
     if current:
         buckets.append(tuple(current))
     return tuple(buckets)
+
+
+def _all_reduce_contiguous(
+    value: torch.Tensor,
+    *,
+    op: dist.ReduceOp.RedOpType,
+) -> None:
+    """Preserve in-place semantics for collectives over strided statistics."""
+    if value.is_contiguous():
+        dist.all_reduce(value, op=op)
+        return
+    contiguous = value.contiguous()
+    dist.all_reduce(contiguous, op=op)
+    value.copy_(contiguous)
