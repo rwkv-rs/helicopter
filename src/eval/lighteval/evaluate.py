@@ -257,8 +257,8 @@ def _evaluate(
                 self.use_chat_template = uses_chat_template
 
     class RWKVPipeline(Pipeline):
-        def _init_tasks_and_requests(self, tasks_spec: str):
-            super()._init_tasks_and_requests(tasks_spec)
+        def _init_tasks_and_requests(self, tasks: str):
+            super()._init_tasks_and_requests(tasks)
             for task in self.tasks_dict.values():
                 task.config = copy.copy(task.config)
                 original_docs = self.documents_dict[task.full_name]
