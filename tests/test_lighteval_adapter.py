@@ -72,6 +72,21 @@ def test_task_failure_record_uses_only_exception_type() -> None:
     assert "do-not-record" not in failure_type
 
 
+def test_task_failure_site_uses_only_module_and_function() -> None:
+    def raise_secret() -> None:
+        raise RuntimeError("credential=do-not-record")
+
+    try:
+        raise_secret()
+    except RuntimeError as error:
+        failure_site = lighteval_adapter._exception_site(error)
+
+    assert failure_site.endswith(
+        "test_task_failure_site_uses_only_module_and_function.<locals>.raise_secret"
+    )
+    assert "do-not-record" not in failure_site
+
+
 def test_model_length_reserves_checkpoint_context_and_full_output_budget() -> None:
     assert lighteval_adapter.evaluation_max_model_length(8192) == 16384
     assert lighteval_adapter.evaluation_max_model_length(10240) == 18432

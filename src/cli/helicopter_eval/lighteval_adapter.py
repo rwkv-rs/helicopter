@@ -104,6 +104,8 @@ class ShardFailure:
     shard: EvaluationShard
     path: Path
     error_type: str
+    error_phase: str
+    error_site: str
     message: str
 
 
@@ -114,6 +116,17 @@ class UnsafeModelCleanupError(RuntimeError):
 def _exception_type(error: BaseException) -> str:
     error_type = type(error)
     return f"{error_type.__module__}.{error_type.__qualname__}"
+
+
+def _exception_site(error: BaseException) -> str:
+    traceback = error.__traceback__
+    if traceback is None:
+        return "unknown"
+    while traceback.tb_next is not None:
+        traceback = traceback.tb_next
+    frame = traceback.tb_frame
+    module = frame.f_globals.get("__name__", "unknown")
+    return f"{module}.{frame.f_code.co_qualname}"
 
 
 @contextmanager
@@ -763,6 +776,7 @@ def _evaluate_unit(
             shard_dir.mkdir(parents=True)
             pipeline = None
             evaluation_error: Exception | None = None
+            error_phase = "pipeline-construction"
             try:
                 tracker = types["EvaluationTracker"](
                     output_dir=str(shard_dir),
@@ -780,7 +794,9 @@ def _evaluate_unit(
                     evaluation_tracker=tracker,
                     model=backend,
                 )
+                error_phase = "evaluation"
                 pipeline.evaluate()
+                error_phase = "artifact-save"
                 pipeline.save_and_push_results()
             except Exception as error:
                 evaluation_error = error
@@ -794,10 +810,12 @@ def _evaluate_unit(
                 except Exception as error:
                     if evaluation_error is None:
                         evaluation_error = error
+                        error_phase = "backend-reset"
                     else:
                         evaluation_error = RuntimeError(
                             f"{evaluation_error}; shard reset failed: {error}"
                         )
+                        error_phase = "evaluation-and-backend-reset"
             if evaluation_error is None:
                 evaluation = ShardEvaluation(shard, shard_dir, execution)
                 outputs.append(evaluation)
@@ -810,7 +828,10 @@ def _evaluate_unit(
                     shard,
                     shard_dir,
                     error_type,
-                    f"{shard.shard_id} [{task_names}]: {error_type}",
+                    error_phase,
+                    _exception_site(evaluation_error),
+                    f"{shard.shard_id} [{task_names}]: {error_type} "
+                    f"at {error_phase}/{_exception_site(evaluation_error)}",
                 )
                 failures.append(failure)
                 if on_shard_failed is not None:
