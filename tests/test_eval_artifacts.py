@@ -1,4 +1,5 @@
 import copy
+from dataclasses import replace
 import hashlib
 import math
 from pathlib import Path
@@ -66,14 +67,14 @@ def _standard(root: Path):
             },
         },
         "results": {
-            "gsm8k:0": {
+            "gsm8k|0": {
                 "extractive_match": 1.0,
                 "extractive_match_stderr": 0.0,
             },
             "all": {"extractive_match": 1.0},
         },
         "config_tasks": {
-            "gsm8k:0": {
+            "gsm8k|0": {
                 "generation_size": 8192,
                 "original_num_docs": 1,
                 "effective_num_docs": 1,
@@ -171,13 +172,87 @@ def test_standard_parser_accepts_multiple_native_rows_for_one_document(
     assert [detail["document_index"] for detail in details] == [0, 0]
 
 
+def test_standard_parser_accepts_only_registry_proven_superset_expansion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_unit, _ = _unit(tmp_path)
+    root_task = replace(
+        _task(),
+        identity="bbq|0",
+        name="bbq",
+        module_family="bbq",
+        module="lighteval.tasks.tasks.bbq",
+        dataset="lighteval/bbq_helm",
+        subset="all",
+    )
+    child_task = replace(
+        root_task,
+        identity="bbq:Age|0",
+        name="bbq:Age",
+        subset="Age",
+    )
+    shard = EvaluationShard("bbq:002-of-002", "bbq", (root_task,))
+    unit = EvaluationUnit(base_unit.weight, base_unit.wkv_mode, (shard,))
+    results, rows, result_path, detail_paths = _standard(tmp_path)
+    native_aggregate = results["results"].pop("gsm8k|0")
+    task_config = results["config_tasks"].pop("gsm8k|0")
+    results["results"].update(
+        {
+            "bbq|0": copy.deepcopy(native_aggregate),
+            "bbq:Age|0": copy.deepcopy(native_aggregate),
+            "bbq:_average|0": copy.deepcopy(native_aggregate),
+        }
+    )
+    results["config_tasks"].update(
+        {
+            "bbq|0": copy.deepcopy(task_config),
+            "bbq:Age|0": copy.deepcopy(task_config),
+        }
+    )
+    rows[0]["doc"]["task_name"] = "bbq|0"
+    child_row = copy.deepcopy(rows[0])
+    child_row["doc"]["task_name"] = "bbq:Age|0"
+    rows.append(child_row)
+    standard = results, rows, result_path, detail_paths
+    monkeypatch.setattr(artifacts, "_standard_artifacts", lambda _path: standard)
+
+    publications = artifacts.publications_from_shard(
+        shard_dir=tmp_path,
+        campaign_id="11111111-1111-1111-1111-111111111111",
+        unit=unit,
+        shard=shard,
+        model_execution=_model(unit),
+        registry_tasks=(root_task, child_task),
+    )
+
+    assert len(publications) == 1
+    assert publications[0][0].endswith(":bbq|0")
+    assert {detail["doc"]["task_name"] for detail in publications[0][1]["details"]} == {
+        "bbq|0"
+    }
+
+    with pytest.raises(
+        artifacts.ArtifactError,
+        match="task set does not match deterministic shard",
+    ):
+        artifacts.publications_from_shard(
+            shard_dir=tmp_path,
+            campaign_id="11111111-1111-1111-1111-111111111111",
+            unit=unit,
+            shard=shard,
+            model_execution=_model(unit),
+            registry_tasks=(root_task,),
+        )
+
+
 def test_standard_parser_never_selects_stderr_as_primary_metric(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     unit, shard = _unit(tmp_path)
     standard = _standard(tmp_path)
-    standard[0]["results"]["gsm8k:0"] = {
+    standard[0]["results"]["gsm8k|0"] = {
         "stderr": 0.01,
         "extractive_match": 1.0,
     }
@@ -200,7 +275,7 @@ def test_standard_parser_rejects_non_numeric_native_aggregate(
 ) -> None:
     unit, shard = _unit(tmp_path)
     standard = _standard(tmp_path)
-    standard[0]["results"]["gsm8k:0"]["unexpected"] = "not-a-number"
+    standard[0]["results"]["gsm8k|0"]["unexpected"] = "not-a-number"
     monkeypatch.setattr(artifacts, "_standard_artifacts", lambda _path: standard)
 
     with pytest.raises(artifacts.ArtifactError, match="aggregate is invalid"):
@@ -357,7 +432,7 @@ def test_standard_parser_rejects_nonfinite_and_partial_data(
 ) -> None:
     unit, shard = _unit(tmp_path)
     result = _standard(tmp_path)
-    result[0]["results"]["gsm8k:0"]["extractive_match"] = math.nan
+    result[0]["results"]["gsm8k|0"]["extractive_match"] = math.nan
     monkeypatch.setattr(artifacts, "_standard_artifacts", lambda _path: result)
     with pytest.raises(artifacts.ArtifactError, match="not finite"):
         artifacts.publications_from_shard(
@@ -369,7 +444,7 @@ def test_standard_parser_rejects_nonfinite_and_partial_data(
         )
 
     result = _standard(tmp_path)
-    result[0]["config_tasks"]["gsm8k:0"]["effective_num_docs"] = 0
+    result[0]["config_tasks"]["gsm8k|0"]["effective_num_docs"] = 0
     monkeypatch.setattr(artifacts, "_standard_artifacts", lambda _path: result)
     with pytest.raises(artifacts.ArtifactError, match="full evaluation split"):
         artifacts.publications_from_shard(

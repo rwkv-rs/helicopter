@@ -483,6 +483,7 @@ def _publish_shard(
         unit=unit,
         shard=shard,
         model_execution=model_execution,
+        registry_tasks=plan.registry.tasks,
     )
     for identity, payload, digest in publications:
         known = manifest.pending_task_digests.get(identity)

@@ -8,6 +8,7 @@ from typing import Any
 
 from .manifest import ManifestError, validate_campaign_child
 from .plan import EvaluationShard, EvaluationUnit
+from .registry import RegistryTask
 
 
 class ArtifactError(RuntimeError):
@@ -344,6 +345,35 @@ def _is_uncertainty_aggregate(name: str) -> bool:
     return name == "stderr" or name.endswith("_stderr")
 
 
+def _standard_task_sets(
+    shard: EvaluationShard,
+    registry_tasks: tuple[RegistryTask, ...],
+) -> tuple[set[str], set[str]]:
+    config_names = {task.identity for task in shard.tasks}
+    aggregate_names = set(config_names)
+    registry_names = {task.identity for task in registry_tasks}
+    for task in shard.tasks:
+        task_name, separator, few_shot = task.identity.rpartition("|")
+        if not separator or ":" in task_name:
+            continue
+        # LightEval treats a root name with colon-qualified siblings as a
+        # superset selector. Derive that exact expansion from the locked
+        # registry instead of accepting arbitrary extra result tasks.
+        members: set[str] = set()
+        for identity in registry_names:
+            registry_task_name = identity.rpartition("|")[0]
+            if registry_task_name == task_name or registry_task_name.startswith(
+                f"{task_name}:"
+            ):
+                members.add(f"{registry_task_name}|{few_shot}")
+        if len(members) <= 1:
+            continue
+        config_names.update(members)
+        aggregate_names.add(f"{task_name}:_average|{few_shot}")
+    aggregate_names.update(config_names)
+    return config_names, aggregate_names
+
+
 def publications_from_shard(
     *,
     shard_dir: Path,
@@ -351,6 +381,7 @@ def publications_from_shard(
     unit: EvaluationUnit,
     shard: EvaluationShard,
     model_execution: dict[str, object],
+    registry_tasks: tuple[RegistryTask, ...] | None = None,
 ) -> list[tuple[str, dict[str, object], str]]:
     _validate_model_execution(model_execution, unit)
     results, rows, result_file, detail_files = _standard_artifacts(shard_dir)
@@ -365,17 +396,21 @@ def publications_from_shard(
     ):
         raise ArtifactError("standard result does not prove max_samples=None")
     expected = {task.identity: task for task in shard.tasks}
-    standard_names = {identity.replace("|", ":"): identity for identity in expected}
-    if len(standard_names) != len(expected):
-        raise ArtifactError("task identities collide in standard result names")
+    standard_config_names, standard_aggregate_names = _standard_task_sets(
+        shard,
+        registry_tasks or shard.tasks,
+    )
     result_names = {name for name in raw_task_results if name != "all"}
-    if result_names != set(standard_names) or set(raw_task_configs) != set(
-        standard_names
+    if (
+        result_names != standard_aggregate_names
+        or set(raw_task_configs) != standard_config_names
     ):
         raise ArtifactError(
             "standard result task set does not match deterministic shard"
         )
-    rows_by_task: dict[str, list[dict[str, Any]]] = {name: [] for name in expected}
+    rows_by_task: dict[str, list[dict[str, Any]]] = {
+        name: [] for name in standard_config_names
+    }
     for row in rows:
         if (
             not isinstance(row.get("doc"), dict)
@@ -392,32 +427,15 @@ def publications_from_shard(
         if task_name not in rows_by_task:
             raise ArtifactError(f"unexpected detail task: {task_name}")
         rows_by_task[task_name].append(row)
-    sampling = _sampling_config(results)
-    dependency_versions = model_execution.get("dependency_versions")
-    lighteval_version = (
-        dependency_versions.get("lighteval")
-        if isinstance(dependency_versions, dict)
-        else None
-    )
-    if not isinstance(lighteval_version, str) or not lighteval_version:
-        raise ArtifactError("model execution lacks the LightEval version")
-    artifact = {
-        "lighteval_version": lighteval_version,
-        "results_path": str(result_file.relative_to(shard_dir)),
-        "details_paths": [str(path.relative_to(shard_dir)) for path in detail_files],
-    }
-    publications: list[tuple[str, dict[str, object], str]] = []
-    for task_name in sorted(expected):
-        standard_name = task_name.replace("|", ":")
-        task_config = raw_task_configs[standard_name]
-        aggregates = raw_task_results[standard_name]
-        task_rows = rows_by_task[task_name]
-        if not isinstance(task_config, dict) or not isinstance(aggregates, dict):
-            raise ArtifactError(f"invalid task result/config for {task_name}")
+    document_indices_by_task: dict[str, list[int]] = {}
+    for task_name in sorted(standard_config_names):
+        task_config = raw_task_configs[task_name]
+        if not isinstance(task_config, dict):
+            raise ArtifactError(f"invalid task config for {task_name}")
         original_docs = task_config.get("original_num_docs")
         effective_docs = task_config.get("effective_num_docs")
         document_indices: list[int] = []
-        for row in task_rows:
+        for row in rows_by_task[task_name]:
             try:
                 document_index = row["doc"]["specific"]["helicopter_document_index"]
             except (KeyError, TypeError) as error:
@@ -442,6 +460,29 @@ def publications_from_shard(
             raise ArtifactError(
                 f"task detail count does not prove full evaluation split: {task_name}"
             )
+        document_indices_by_task[task_name] = document_indices
+    sampling = _sampling_config(results)
+    dependency_versions = model_execution.get("dependency_versions")
+    lighteval_version = (
+        dependency_versions.get("lighteval")
+        if isinstance(dependency_versions, dict)
+        else None
+    )
+    if not isinstance(lighteval_version, str) or not lighteval_version:
+        raise ArtifactError("model execution lacks the LightEval version")
+    artifact = {
+        "lighteval_version": lighteval_version,
+        "results_path": str(result_file.relative_to(shard_dir)),
+        "details_paths": [str(path.relative_to(shard_dir)) for path in detail_files],
+    }
+    publications: list[tuple[str, dict[str, object], str]] = []
+    for task_name in sorted(expected):
+        task_config = raw_task_configs[task_name]
+        aggregates = raw_task_results[task_name]
+        task_rows = rows_by_task[task_name]
+        document_indices = document_indices_by_task[task_name]
+        if not isinstance(task_config, dict) or not isinstance(aggregates, dict):
+            raise ArtifactError(f"invalid task result/config for {task_name}")
         numeric: dict[str, float] = {}
         for key, value in aggregates.items():
             if (
