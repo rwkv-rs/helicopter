@@ -224,7 +224,11 @@ def prepare_performance_profile_caches(
         loaded_layer = teacher.loader.load_layer(
             layer_index, device=device, dtype=dtype
         )
-        mixer = store.load_mixer(layer_index, device=device, dtype=dtype)
+        mixer = store.load_base_mixer(
+            layer_index,
+            device=device,
+            dtype=dtype,
+        )
         next_prefix_fingerprint = _profile_advance_prefix_fingerprint(
             prefix_fingerprint,
             zero_step_checkpoint_sha256=base_binding[
@@ -410,7 +414,7 @@ def run_gqa_zero_step_validation(
     store = RWKV7MixerLayerStore(zero_step_dir, run_dir / "mixer-overlays")
     prefix_fingerprint = _profile_initial_prefix_fingerprint(source_manifest)
     for prefix_layer in range(layer_index):
-        prefix_mixer = store.load_mixer(
+        prefix_mixer = store.load_base_mixer(
             prefix_layer,
             device=device,
             dtype=dtype,

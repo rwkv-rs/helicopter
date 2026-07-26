@@ -36,6 +36,8 @@ from any2rwkv.recipes.qwen35_to_rwkv7.layer_major_runner import (
     _gqa_native_validation_improves,
     _module_state_hashes,
     _load_generation_state,
+    _profile_advance_prefix_fingerprint,
+    _profile_initial_prefix_fingerprint,
     _require_independent_activation_fit_caches,
     _require_frozen_parameter_sha256,
     _retain_gate_fit_candidate,
@@ -504,6 +506,22 @@ def test_gqa_native_zero_step_runs_in_formal_layer_transaction(
         tuple((token + 17) % 64 for token in row)
         for row in rows[:4]
     )
+    store = RWKV7MixerLayerStore(
+        zero_step,
+        zero_step / "mixer-overlays",
+    )
+    overlay = store.load_base_mixer(
+        0,
+        device="cpu",
+        dtype=torch.float32,
+    )
+    with torch.no_grad():
+        next(overlay.parameters()).add_(0.25)
+    store.save_mixer(
+        0,
+        overlay,
+        cursor={"fixture": "must-not-affect-zero-step-prefix"},
+    )
     prepare_performance_profile_caches(
         source_manifest=source,
         run_dir=zero_step,
@@ -522,6 +540,40 @@ def test_gqa_native_zero_step_runs_in_formal_layer_transaction(
         device=torch.device("cpu"),
         dtype=torch.float32,
     )
+    layer_zero_binding = json.loads(
+        (
+            zero_step
+            / "performance-profile-cache"
+            / "layer-000"
+            / "distill_train"
+            / "manifest.json"
+        ).read_text(encoding="utf-8")
+    )["binding"]
+    expected_prefix = _profile_initial_prefix_fingerprint(source)
+    for prefix_layer in range(3):
+        base_mixer = store.load_base_mixer(
+            prefix_layer,
+            device="cpu",
+            dtype=torch.float32,
+        )
+        expected_prefix = _profile_advance_prefix_fingerprint(
+            expected_prefix,
+            zero_step_checkpoint_sha256=layer_zero_binding[
+                "zero_step_checkpoint_sha256"
+            ],
+            layer_index=prefix_layer,
+            mixer=base_mixer,
+        )
+    layer_three_binding = json.loads(
+        (
+            zero_step
+            / "performance-profile-cache"
+            / "layer-003"
+            / "distill_train"
+            / "manifest.json"
+        ).read_text(encoding="utf-8")
+    )["binding"]
+    assert layer_three_binding["prefix_fingerprint"] == expected_prefix
     run_dir = tmp_path / "gqa-fit-run"
     outcome = run_gqa_zero_step_validation(
         source_manifest=source,
