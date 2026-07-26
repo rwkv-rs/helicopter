@@ -381,7 +381,7 @@ def publications_from_shard(
     unit: EvaluationUnit,
     shard: EvaluationShard,
     model_execution: dict[str, object],
-    registry_tasks: tuple[RegistryTask, ...] | None = None,
+    registry_tasks: tuple[RegistryTask, ...],
 ) -> list[tuple[str, dict[str, object], str]]:
     _validate_model_execution(model_execution, unit)
     results, rows, result_file, detail_files = _standard_artifacts(shard_dir)
@@ -398,7 +398,7 @@ def publications_from_shard(
     expected = {task.identity: task for task in shard.tasks}
     standard_config_names, standard_aggregate_names = _standard_task_sets(
         shard,
-        registry_tasks or shard.tasks,
+        registry_tasks,
     )
     result_names = {name for name in raw_task_results if name != "all"}
     if (

@@ -171,6 +171,7 @@ async def test_standard_artifact_to_database_query_contract(
                     unit=unit,
                     shard=shard,
                     model_execution=model_execution,
+                    registry_tasks=plan.registry.tasks,
                 )
                 assert len(publications) == 1
                 identity, publication, digest = publications[0]

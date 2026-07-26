@@ -52,7 +52,7 @@
       }
     },
     "results": {
-      "gsm8k:0": {
+      "gsm8k|0": {
         "exact_match": 1.0,
         "exact_match_stderr": 0.0
       },
@@ -61,7 +61,7 @@
       }
     },
     "config_tasks": {
-      "gsm8k:0": {
+      "gsm8k|0": {
         "generation_size": 8192,
         "original_num_docs": 2,
         "effective_num_docs": 2

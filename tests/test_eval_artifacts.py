@@ -135,6 +135,7 @@ def test_standard_parser_preserves_native_metrics_and_multi_completion(
         unit=unit,
         shard=shard,
         model_execution=_model(unit),
+        registry_tasks=shard.tasks,
     )
     identity, payload, digest = publications[0]
     assert identity.endswith(":gsm8k|0")
@@ -165,6 +166,7 @@ def test_standard_parser_accepts_multiple_native_rows_for_one_document(
         unit=unit,
         shard=shard,
         model_execution=_model(unit),
+        registry_tasks=shard.tasks,
     )
 
     details = publications[0][1]["details"]
@@ -264,6 +266,7 @@ def test_standard_parser_never_selects_stderr_as_primary_metric(
         unit=unit,
         shard=shard,
         model_execution=_model(unit),
+        registry_tasks=shard.tasks,
     )[0][1]
 
     assert publication["primary_metric"] == "extractive_match"
@@ -285,6 +288,7 @@ def test_standard_parser_rejects_non_numeric_native_aggregate(
             unit=unit,
             shard=shard,
             model_execution=_model(unit),
+            registry_tasks=shard.tasks,
         )
 
 
@@ -325,6 +329,7 @@ def test_standard_parser_accepts_logprob_rows_with_output_token_evidence(
         unit=unit,
         shard=shard,
         model_execution=_model(unit),
+        registry_tasks=shard.tasks,
     )[0][1]
 
     assert publication["diagnostics"]["samples"] == 1
@@ -354,6 +359,7 @@ def test_standard_parser_rejects_misaligned_postprocessed_completions(
             unit=unit,
             shard=shard,
             model_execution=_model(unit),
+            registry_tasks=shard.tasks,
         )
 
 
@@ -382,6 +388,7 @@ def test_standard_parser_rejects_misaligned_logprob_token_evidence(
             unit=unit,
             shard=shard,
             model_execution=_model(unit),
+            registry_tasks=shard.tasks,
         )
 
     standard = _standard(tmp_path)
@@ -402,6 +409,7 @@ def test_standard_parser_rejects_misaligned_logprob_token_evidence(
             unit=unit,
             shard=shard,
             model_execution=_model(unit),
+            registry_tasks=shard.tasks,
         )
 
     standard = _standard(tmp_path)
@@ -423,6 +431,7 @@ def test_standard_parser_rejects_misaligned_logprob_token_evidence(
             unit=unit,
             shard=shard,
             model_execution=_model(unit),
+            registry_tasks=shard.tasks,
         )
 
 
@@ -441,6 +450,7 @@ def test_standard_parser_rejects_nonfinite_and_partial_data(
             unit=unit,
             shard=shard,
             model_execution=_model(unit),
+            registry_tasks=shard.tasks,
         )
 
     result = _standard(tmp_path)
@@ -453,6 +463,7 @@ def test_standard_parser_rejects_nonfinite_and_partial_data(
             unit=unit,
             shard=shard,
             model_execution=_model(unit),
+            registry_tasks=shard.tasks,
         )
 
 
@@ -494,6 +505,7 @@ def test_standard_parser_validates_sampling_and_model_execution_locally(
             unit=unit,
             shard=shard,
             model_execution=_model(unit),
+            registry_tasks=shard.tasks,
         )
 
     model_execution = _model(unit)
@@ -508,4 +520,5 @@ def test_standard_parser_validates_sampling_and_model_execution_locally(
             unit=unit,
             shard=shard,
             model_execution=model_execution,
+            registry_tasks=shard.tasks,
         )

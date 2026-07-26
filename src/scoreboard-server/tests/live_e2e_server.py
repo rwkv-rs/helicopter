@@ -146,6 +146,7 @@ async def _seed(app, temporary_root: Path) -> None:
                 unit=unit,
                 shard=shard,
                 model_execution=model_execution,
+                registry_tasks=plan.registry.tasks,
             )
             if len(publications) != 1:
                 raise RuntimeError("live E2E shard did not produce one task")
