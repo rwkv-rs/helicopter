@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from helicopter_eval import lighteval_adapter
+from helicopter_lighteval import lighteval_adapter
 
 
 @pytest.mark.parametrize(

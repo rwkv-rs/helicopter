@@ -5,8 +5,10 @@ ROOT = Path(__file__).parents[1]
 
 
 def test_eval_has_one_product_entrypoint_and_simple_selector_config() -> None:
-    source = ROOT / "src/cli/helicopter_eval"
+    source = ROOT / "src/eval/lighteval/src/helicopter_lighteval"
     assert source.is_dir()
+    assert not (ROOT / "src/cli/helicopter_eval").exists()
+    assert not (ROOT / "src/cli/helicopter_lighteval").exists()
     assert not (ROOT / "src/eval/lighteval/evaluate.py").exists()
     assert not list(ROOT.glob("src/**/lighteval/**/evaluate.py"))
 
@@ -27,14 +29,16 @@ def test_eval_uses_http_publication_and_removed_classification_is_not_product_da
 ):
     eval_source = "\n".join(
         path.read_text(encoding="utf-8")
-        for path in (ROOT / "src/cli/helicopter_eval").glob("*.py")
+        for path in (
+            ROOT / "src/eval/lighteval/src/helicopter_lighteval"
+        ).glob("*.py")
     )
     assert "asyncpg" not in eval_source
     assert "Content-Encoding" in eval_source
     assert "Idempotency-Key" in eval_source
 
     product_paths = [
-        ROOT / "src/cli/helicopter_eval",
+        ROOT / "src/eval/lighteval/src/helicopter_lighteval",
         ROOT / "src/scoreboard-server/scoreboard_server",
         ROOT / "src/scoreboard-client/app",
         ROOT / "src/scoreboard-client/components",
@@ -67,5 +71,9 @@ def test_eval_uses_http_publication_and_removed_classification_is_not_product_da
         "benchmark_" + "catalog",
     ):
         assert removed not in product_source
-    assert not (ROOT / "src/cli/helicopter_eval/domains.py").exists()
-    assert not (ROOT / "src/cli/helicopter_eval/catalog.py").exists()
+    assert not (
+        ROOT / "src/eval/lighteval/src/helicopter_lighteval/domains.py"
+    ).exists()
+    assert not (
+        ROOT / "src/eval/lighteval/src/helicopter_lighteval/catalog.py"
+    ).exists()

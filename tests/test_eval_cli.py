@@ -9,18 +9,18 @@ from types import SimpleNamespace
 
 import pytest
 
-import helicopter_eval
+import helicopter_lighteval
 from helicopter_cli import __main__ as helicopter_main
-from helicopter_eval import runner as evaluation_runner
-from helicopter_eval.config import (
+from helicopter_lighteval import runner as evaluation_runner
+from helicopter_lighteval.config import (
     EvaluationConfigurationError,
     load_evaluation_config,
     load_evaluation_environment,
     resolve_weights,
     verify_weight_identity,
 )
-from helicopter_eval.plan import WKV_MODES, build_plan, build_shards
-from helicopter_eval.registry import (
+from helicopter_lighteval.plan import WKV_MODES, build_plan, build_shards
+from helicopter_lighteval.registry import (
     RegistrySnapshot,
     RegistryTask,
     _inventory,
@@ -28,7 +28,7 @@ from helicopter_eval.registry import (
     _snapshot_registry,
     load_configured_registry,
 )
-from helicopter_eval.runner import run
+from helicopter_lighteval.runner import run
 
 
 def _environment(tmp_path: Path, token: str = "do-not-print") -> dict[str, str]:
@@ -270,7 +270,7 @@ def test_environment_rejects_product_root_as_staging(
 ) -> None:
     env = _environment(tmp_path)
     env["HELICOPTER_EVAL_STAGING_ROOT"] = str(
-        Path(helicopter_eval.__file__).resolve().parents[3]
+        Path(__file__).resolve().parents[1]
     )
 
     with pytest.raises(
@@ -470,7 +470,7 @@ def test_eval_cli_resolves_config_relative_to_invocation_directory(
         lambda _root, _path, **_kwargs: ({"PRIVATE": "value"}, None),
     )
     monkeypatch.setattr(
-        helicopter_eval,
+        helicopter_lighteval,
         "run",
         lambda **kwargs: captured.update(kwargs) or 0,
     )
@@ -639,11 +639,11 @@ def test_dry_run_redacts_token_and_does_not_create_staging(
         skipped_selectors=("missing",),
     )
     monkeypatch.setattr(
-        "helicopter_eval.runner.load_configured_registry",
+        "helicopter_lighteval.runner.load_configured_registry",
         lambda selectors: registry,
     )
     monkeypatch.setattr(
-        "helicopter_eval.runner.run_preflight",
+        "helicopter_lighteval.runner.run_preflight",
         lambda environment: {
             "scoreboard": {
                 "url": environment.scoreboard_url,

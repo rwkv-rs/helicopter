@@ -15,10 +15,10 @@ import pyarrow.parquet as parquet
 import pytest
 import pytest_asyncio
 
-from helicopter_eval import artifacts, campaign
-from helicopter_eval.config import EvaluationConfig, WeightIdentity
-from helicopter_eval.plan import build_plan
-from helicopter_eval.registry import RegistrySnapshot, RegistryTask
+from helicopter_lighteval import artifacts, campaign
+from helicopter_lighteval.config import EvaluationConfig, WeightIdentity
+from helicopter_lighteval.plan import build_plan
+from helicopter_lighteval.registry import RegistrySnapshot, RegistryTask
 from scoreboard_server.application import create_app
 from scoreboard_server.db.settings import DatabaseSettings
 
@@ -38,7 +38,7 @@ def _maintenance_kwargs() -> dict[str, str]:
 
 @pytest_asyncio.fixture()
 async def e2e_database() -> DatabaseSettings:
-    database = f"helicopter_eval_e2e_{uuid.uuid4().hex[:12]}"
+    database = f"helicopter_lighteval_e2e_{uuid.uuid4().hex[:12]}"
     kwargs = _maintenance_kwargs()
     connection = await asyncpg.connect(**kwargs)
     try:

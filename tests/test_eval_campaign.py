@@ -8,21 +8,21 @@ from types import SimpleNamespace
 
 import pytest
 
-from helicopter_eval import campaign
-from helicopter_eval.config import (
+from helicopter_lighteval import campaign
+from helicopter_lighteval.config import (
     EvaluationConfig,
     EvaluationEnvironment,
     WeightIdentity,
 )
-from helicopter_eval.manifest import (
+from helicopter_lighteval.manifest import (
     ManifestError,
     ManifestStore,
     campaign_directory,
     remove_acknowledged_shard,
     remove_campaign_child_directory,
 )
-from helicopter_eval.plan import build_plan
-from helicopter_eval.registry import RegistrySnapshot, RegistryTask
+from helicopter_lighteval.plan import build_plan
+from helicopter_lighteval.registry import RegistrySnapshot, RegistryTask
 
 
 def _plan(tmp_path: Path, *, prompt_template: str = "bot"):
@@ -324,7 +324,7 @@ def test_manifest_store_wraps_atomic_persistence_failures(
         raise OSError("disk unavailable")
 
     monkeypatch.setattr(
-        "helicopter_eval.manifest._write_json_atomic",
+        "helicopter_lighteval.manifest._write_json_atomic",
         fail_write,
     )
 
@@ -529,7 +529,7 @@ def test_backend_commit_before_local_ack_recovers_without_recompute(
     monkeypatch.setattr(campaign, "ScoreboardClient", FakeClient)
     monkeypatch.setattr(campaign, "publications_from_shard", fake_publications)
     monkeypatch.setattr(
-        "helicopter_eval.lighteval_adapter.evaluate_unit",
+        "helicopter_lighteval.lighteval_adapter.evaluate_unit",
         fake_evaluate_unit,
     )
 
@@ -670,7 +670,7 @@ def test_publication_failure_reuses_persisted_artifact_without_recompute(
     monkeypatch.setattr(campaign, "ScoreboardClient", FakeClient)
     monkeypatch.setattr(campaign, "publications_from_shard", fake_publications)
     monkeypatch.setattr(
-        "helicopter_eval.lighteval_adapter.evaluate_unit",
+        "helicopter_lighteval.lighteval_adapter.evaluate_unit",
         fake_evaluate_unit,
     )
 

@@ -17,10 +17,10 @@ import pyarrow as pa
 import pyarrow.parquet as parquet
 import uvicorn
 
-from helicopter_eval import artifacts, campaign
-from helicopter_eval.config import EvaluationConfig, WeightIdentity
-from helicopter_eval.plan import build_plan
-from helicopter_eval.registry import RegistrySnapshot, RegistryTask
+from helicopter_lighteval import artifacts, campaign
+from helicopter_lighteval.config import EvaluationConfig, WeightIdentity
+from helicopter_lighteval.plan import build_plan
+from helicopter_lighteval.registry import RegistrySnapshot, RegistryTask
 from scoreboard_server.application import create_app
 from scoreboard_server.db.settings import DatabaseSettings
 

@@ -202,19 +202,6 @@ clean_vllm_cmake_cache() {
   done < <(find "$VLLM/.deps" -maxdepth 1 -type d -name '*-subbuild' -print | LC_ALL=C sort)
 }
 
-remove_obsolete_lighteval_tree() {
-  local obsolete="$ROOT/src/eval/lighteval"
-  [[ -e "$obsolete" || -L "$obsolete" ]] || return 0
-  [[ "$obsolete" == "$ROOT/src/eval/lighteval" ]] ||
-    die "refusing to remove unexpected obsolete evaluator path: $obsolete"
-  [[ -d "$obsolete" && ! -L "$obsolete" ]] ||
-    die "obsolete evaluator path is not a regular directory: $obsolete"
-  run rm -rf -- "$obsolete"
-  [[ "${DRY_RUN:-0}" == "1" || ! -e "$obsolete" ]] ||
-    die "obsolete evaluator tree remains after cleanup: $obsolete"
-  rmdir "$ROOT/src/eval" 2>/dev/null || true
-}
-
 ensure_uv() {
   if ! have "$UV"; then
     have curl || die "uv is missing and curl is not available to install it"
@@ -561,7 +548,6 @@ check_python_packages() {
 
 configure_network
 configure_build_dirs
-remove_obsolete_lighteval_tree
 clean_submodule_venvs
 python_component_enabled && ensure_uv
 check_compiler_env

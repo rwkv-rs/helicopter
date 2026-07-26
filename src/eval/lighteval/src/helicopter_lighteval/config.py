@@ -138,7 +138,7 @@ def load_evaluation_environment(env: Mapping[str, str]) -> EvaluationEnvironment
         )
     weight_root = raw_weight_root.resolve()
     staging_root = raw_staging_root.resolve()
-    product_root = Path(__file__).resolve().parents[3]
+    product_root = Path(__file__).resolve().parents[5]
     if not weight_root.is_dir():
         raise EvaluationConfigurationError(
             f"WEIGHT_PATH is not a directory: {weight_root}"

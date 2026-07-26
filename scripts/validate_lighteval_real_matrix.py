@@ -16,21 +16,21 @@ from pathlib import Path
 from typing import Any
 
 from helicopter_cli.env import load_env
-from helicopter_eval.artifacts import publications_from_shard
-from helicopter_eval.config import (
+from helicopter_lighteval.artifacts import publications_from_shard
+from helicopter_lighteval.config import (
     load_evaluation_config,
     load_evaluation_environment,
     resolve_weights,
 )
-from helicopter_eval.lighteval_adapter import (
+from helicopter_lighteval.lighteval_adapter import (
     STOP_SEQUENCE,
     _temporary_environment,
     evaluate_unit,
     evaluation_max_model_length,
 )
-from helicopter_eval.plan import WKV_MODES, EvaluationUnit, build_plan
-from helicopter_eval.registry import load_configured_registry
-from helicopter_eval.runner import _process_environment
+from helicopter_lighteval.plan import WKV_MODES, EvaluationUnit, build_plan
+from helicopter_lighteval.registry import load_configured_registry
+from helicopter_lighteval.runner import _process_environment
 
 
 SUCCESS_TASKS = frozenset({"aime24|0", "aime25|0"})

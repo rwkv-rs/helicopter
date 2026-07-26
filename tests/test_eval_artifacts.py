@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from helicopter_eval import artifacts
-from helicopter_eval.config import WeightIdentity
-from helicopter_eval.plan import EvaluationShard, EvaluationUnit
-from helicopter_eval.registry import RegistryTask
+from helicopter_lighteval import artifacts
+from helicopter_lighteval.config import WeightIdentity
+from helicopter_lighteval.plan import EvaluationShard, EvaluationUnit
+from helicopter_lighteval.registry import RegistryTask
 
 
 def _task() -> RegistryTask:

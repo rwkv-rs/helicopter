@@ -141,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         except (OSError, UnicodeError) as error:
             parser.error(f"cannot securely read eval private environment file: {error}")
-        from helicopter_eval import run as run_evaluation
+        from helicopter_lighteval import run as run_evaluation
 
         config_path = Path(args.config).expanduser()
         if not config_path.is_absolute():

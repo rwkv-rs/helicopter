@@ -2,11 +2,11 @@ from pathlib import Path
 
 import pytest
 
-from helicopter_eval.config import (
+from helicopter_lighteval.config import (
     EvaluationConfigurationError,
     EvaluationEnvironment,
 )
-from helicopter_eval import preflight
+from helicopter_lighteval import preflight
 
 
 def _environment(tmp_path: Path) -> EvaluationEnvironment:

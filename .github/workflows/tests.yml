@@ -43,7 +43,7 @@ jobs:
 
       - name: Run lightweight tests
         env:
-          PYTHONPATH: src/cli:src/scoreboard-server
+          PYTHONPATH: src/cli:src/eval/lighteval/src:src/scoreboard-server
         run: |
           source .venv/bin/activate
           python -m unittest discover -s tests

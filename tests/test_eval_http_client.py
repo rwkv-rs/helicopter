@@ -4,8 +4,8 @@ from urllib.error import HTTPError
 
 import pytest
 
-from helicopter_eval.config import EvaluationEnvironment
-from helicopter_eval.http_client import (
+from helicopter_lighteval.config import EvaluationEnvironment
+from helicopter_lighteval.http_client import (
     ScoreboardClient,
     ScoreboardConflict,
     ScoreboardError,

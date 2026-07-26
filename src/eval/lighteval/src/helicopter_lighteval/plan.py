@@ -90,8 +90,15 @@ def build_shards(registry: RegistrySnapshot) -> tuple[EvaluationShard, ...]:
 
 
 def _implementation_digest() -> str:
-    repository = Path(__file__).resolve().parents[3]
-    evaluator_root = repository / "src" / "cli" / "helicopter_eval"
+    repository = Path(__file__).resolve().parents[5]
+    evaluator_root = (
+        repository
+        / "src"
+        / "eval"
+        / "lighteval"
+        / "src"
+        / "helicopter_lighteval"
+    )
     sources = sorted(evaluator_root.glob("*.py"))
     sources.extend(
         repository / "src" / "infer" / "vllm-rwkv" / relative

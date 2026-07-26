@@ -7,7 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_lighteval_is_a_locked_root_group_without_a_child_package() -> None:
+def test_lighteval_uses_the_locked_root_group_and_domain_source_tree() -> None:
     manifest = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     group = manifest["dependency-groups"]["lighteval"]
 
@@ -16,6 +16,9 @@ def test_lighteval_is_a_locked_root_group_without_a_child_package() -> None:
     assert not any(
         "git+" in str(item) or str(item).startswith("vllm") for item in group[1:]
     )
+    source = ROOT / "src/eval/lighteval/src/helicopter_lighteval"
+    assert source.is_dir()
+    assert (source / "__init__.py").is_file()
     assert not (ROOT / "src/eval/lighteval/pyproject.toml").exists()
     assert not (ROOT / "src/eval/lighteval/uv.lock").exists()
 
@@ -64,7 +67,7 @@ def test_installer_exports_an_absolute_native_build_tmpdir() -> None:
     assert 'export TMPDIR="$BUILD_TMPDIR"' in local
 
 
-def test_installer_pins_workspace_bun_and_removes_the_obsolete_evaluator() -> None:
+def test_installer_pins_workspace_bun_and_preserves_the_evaluator() -> None:
     local = (ROOT / "scripts/install_local.sh").read_text(encoding="utf-8")
 
     assert 'BUN_VERSION="1.3.14"' in local
@@ -85,9 +88,8 @@ def test_installer_pins_workspace_bun_and_removes_the_obsolete_evaluator() -> No
         '"$VENV/bin/bun" run --cwd "$SCOREBOARD_CLIENT" playwright install chromium'
         in local
     )
-    assert 'obsolete="$ROOT/src/eval/lighteval"' in local
-    assert 'run rm -rf -- "$obsolete"' in local
-    assert local.index("remove_obsolete_lighteval_tree") < local.index("sync_uv_env")
+    assert "remove_obsolete_lighteval_tree" not in local
+    assert 'rm -rf -- "$ROOT/src/eval/lighteval"' not in local
 
 
 def test_full_install_profile_remains_disabled() -> None:

@@ -116,5 +116,5 @@ package = true
 default-groups = []
 
 [tool.setuptools.packages.find]
-where = ["src/cli"]
-include = ["helicopter_cli*", "helicopter_eval*"]
+where = ["src/cli", "src/eval/lighteval/src"]
+include = ["helicopter_cli*", "helicopter_lighteval*"]
