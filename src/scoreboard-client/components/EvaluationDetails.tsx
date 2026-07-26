@@ -223,7 +223,7 @@ export function EvaluationDetails() {
         <span>module: {selected.task.module_family}</span>
         <span>prompt template: {selected.model.prompt_template}</span>
         <span>
-          official tags:{" "}
+          tags:{" "}
           {selected.task.upstream_tags.length
             ? selected.task.upstream_tags.join(", ")
             : "—"}

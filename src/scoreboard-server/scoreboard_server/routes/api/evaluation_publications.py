@@ -34,7 +34,7 @@ async def _publication_json(request: Request) -> dict:
                 raise ValueError
             if parsed_content_length > MAX_COMPRESSED_BYTES:
                 raise HTTPException(
-                    status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    status.HTTP_413_CONTENT_TOO_LARGE,
                     "compressed publication exceeds size limit",
                 )
         except ValueError as error:
@@ -59,7 +59,7 @@ async def _publication_json(request: Request) -> dict:
         compressed_size += len(chunk)
         if compressed_size > MAX_COMPRESSED_BYTES:
             raise HTTPException(
-                status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                status.HTTP_413_CONTENT_TOO_LARGE,
                 "compressed publication exceeds size limit",
             )
         chunks.append(chunk)
@@ -77,13 +77,13 @@ async def _publication_json(request: Request) -> dict:
         or not decompressor.eof
     ):
         raise HTTPException(
-            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            status.HTTP_413_CONTENT_TOO_LARGE,
             "publication exceeds uncompressed size limit",
         )
     body = decoded
     if len(body) > MAX_UNCOMPRESSED_BYTES:
         raise HTTPException(
-            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            status.HTTP_413_CONTENT_TOO_LARGE,
             "publication exceeds uncompressed size limit",
         )
     try:

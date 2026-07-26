@@ -75,8 +75,8 @@ class ExpectedTask(Contract):
 
 
 class CampaignCreate(Contract):
-    schema_version: Literal["lighteval-campaign-v2"]
-    resume_key: str = Field(pattern=r"^[0-9a-f]{64}$")
+    schema_version: Literal["lighteval-campaign-v3"]
+    run_key: str = Field(pattern=r"^[0-9a-f]{64}$")
     config_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     registry_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     eval_contract_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -154,7 +154,7 @@ class CampaignCreate(Contract):
 
 class CampaignReceipt(Contract):
     campaign_id: str
-    disposition: Literal["created", "resumed"]
+    disposition: Literal["created", "unchanged"]
     status: Literal["incomplete", "complete"]
     expected_task_count: int = Field(ge=1)
     acknowledged_task_digests: dict[str, str]
@@ -163,7 +163,7 @@ class CampaignReceipt(Contract):
 class PublicationPreflight(Contract):
     status: Literal["ready"]
     publisher_principal: str
-    schema_version: Literal["lighteval-campaign-v2"]
+    schema_version: Literal["lighteval-campaign-v3"]
     lighteval_version: Literal["0.13.0"]
 
 

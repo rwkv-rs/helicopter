@@ -137,7 +137,7 @@ export function EvaluationMatrix() {
             <tr>
               <th rowSpan={2}>task</th>
               <th rowSpan={2}>module</th>
-              <th rowSpan={2}>official tags</th>
+              <th rowSpan={2}>tags</th>
               {weights.map(([sha, name]) => (
                 <th colSpan={MODES.length} key={sha} title={sha}>
                   {name}

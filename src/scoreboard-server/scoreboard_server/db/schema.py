@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS evaluation_schema_metadata (
     contract_version integer NOT NULL
 );
 INSERT INTO evaluation_schema_metadata (singleton, contract_version)
-VALUES (true, 2)
+VALUES (true, 3)
 ON CONFLICT (singleton) DO NOTHING;
 DO $$
 BEGIN
@@ -26,7 +26,7 @@ BEGIN
         SELECT contract_version
         FROM evaluation_schema_metadata
         WHERE singleton = true
-    ) <> 2 THEN
+    ) <> 3 THEN
         RAISE EXCEPTION
             'unsupported evaluation schema version; create a fresh Scoreboard database';
     END IF;
@@ -35,7 +35,7 @@ $$;
 
 CREATE TABLE IF NOT EXISTS evaluation_campaign (
     id uuid PRIMARY KEY,
-    resume_key text NOT NULL CHECK (resume_key ~ '^[0-9a-f]{64}$'),
+    run_key text NOT NULL CHECK (run_key ~ '^[0-9a-f]{64}$'),
     status text NOT NULL CHECK (status IN ('incomplete', 'complete')),
     config_digest text NOT NULL CHECK (config_digest ~ '^[0-9a-f]{64}$'),
     registry_digest text NOT NULL CHECK (registry_digest ~ '^[0-9a-f]{64}$'),
@@ -54,9 +54,8 @@ CREATE TABLE IF NOT EXISTS evaluation_campaign (
     )
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS evaluation_campaign_incomplete_resume_idx
-    ON evaluation_campaign(resume_key)
-    WHERE status = 'incomplete';
+CREATE UNIQUE INDEX IF NOT EXISTS evaluation_campaign_run_key_idx
+    ON evaluation_campaign(run_key);
 
 CREATE TABLE IF NOT EXISTS evaluation_task (
     id uuid PRIMARY KEY,

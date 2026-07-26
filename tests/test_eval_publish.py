@@ -1,121 +1,45 @@
-import copy
-from io import BytesIO
-from dataclasses import replace
-import hashlib
-import math
-from pathlib import Path
-from urllib.error import HTTPError
+from __future__ import annotations
 
+import gzip
+import json
+import stat
+from pathlib import Path
+
+import pyarrow as pa
+import pyarrow.parquet as parquet
 import pytest
 
 from helicopter_lighteval import publish
-from helicopter_lighteval.publish import (
-    ScoreboardClient,
-    ScoreboardConflict,
-    ScoreboardError,
-)
-from helicopter_lighteval.config import EvaluationEnvironment, WeightIdentity
-from helicopter_lighteval.config import EvaluationShard, EvaluationUnit
-from helicopter_lighteval.config import RegistryTask
+from helicopter_lighteval.publish import PublicationError
 
 
-def _task() -> RegistryTask:
-    return RegistryTask(
-        selector="gsm8k",
-        identity="gsm8k|0",
-        name="gsm8k",
-        version="0",
-        module_family="gsm8k",
-        module="lighteval.tasks.tasks.gsm8k",
-        dataset="openai/gsm8k",
-        subset="main",
-        evaluation_splits=("test",),
-        languages=("english",),
-        upstream_tags=("math",),
-    )
+CAMPAIGN_ID = "11111111-1111-1111-1111-111111111111"
 
 
-def _unit(tmp_path: Path) -> tuple[EvaluationUnit, EvaluationShard]:
-    weight = tmp_path / "weight.pth"
-    weight.write_bytes(b"weight")
-    task = _task()
-    shard = EvaluationShard("gsm8k:001-of-001", "gsm8k", (task,))
-    unit = EvaluationUnit(
-        WeightIdentity(
-            configured_path="weight.pth",
-            path=weight,
-            display_name="weight.pth",
-            sha256=hashlib.sha256(b"weight").hexdigest(),
-        ),
-        "fp16",
-        (shard,),
-        "assistant",
-    )
-    return unit, shard
-
-
-def _standard(root: Path):
-    result_path = root / "results/model/results_stamp.json"
-    details_path = root / "details/model/stamp/details_gsm8k_stamp.parquet"
-    results = {
-        "config_general": {
-            "max_samples": None,
-            "model_config": {
-                "seed": 1234,
-                "generation_parameters": {
-                    "temperature": 0.96,
-                    "top_p": 0.76,
-                    "top_k": 32,
-                    "presence_penalty": 1.0,
-                    "frequency_penalty": 0.1,
-                    "penalty_decay": 0.988,
-                    "max_new_tokens": 8192,
-                    "stop_tokens": ["\nUser:"],
-                },
-            },
-        },
-        "results": {
-            "gsm8k|0": {
-                "extractive_match": 1.0,
-                "extractive_match_stderr": 0.0,
-            },
-            "all": {"extractive_match": 1.0},
-        },
-        "config_tasks": {
-            "gsm8k|0": {
-                "generation_size": 8192,
-                "original_num_docs": 1,
-                "effective_num_docs": 1,
-                "skipped_multiselect_docs": 0,
-            }
-        },
-    }
-    rows = [
-        {
-            "doc": {
-                "id": "0",
-                "task_name": "gsm8k|0",
-                "query": "1+1?",
-                "specific": {"helicopter_document_index": 0},
-            },
-            "metric": {"extractive_match": 1.0},
-            "model_response": {
-                "input": "1+1?",
-                "input_tokens": [1, 2],
-                "text": ["<think>x</think>2", "bad\nUser:"],
-                "text_post_processed": ["2", "bad"],
-                "output_tokens": [[3, 4], [5]],
-            },
-        }
-    ]
-    return results, rows, result_path, [details_path]
-
-
-def _model(unit: EvaluationUnit) -> dict[str, object]:
+def _task() -> dict[str, object]:
     return {
-        "weight_sha256": unit.weight.sha256,
-        "weight_display_name": unit.weight.display_name,
-        "wkv_mode": unit.wkv_mode,
+        "identity": f"{'a' * 64}:fp16:gsm8k|0",
+        "weight_sha256": "a" * 64,
+        "weight_display_name": "model.pth",
+        "wkv_mode": "fp16",
+        "selector": "gsm8k",
+        "task_name": "gsm8k|0",
+        "task_version": "0",
+        "module_family": "gsm8k",
+        "module": "lighteval.tasks.tasks.gsm8k",
+        "dataset": "openai/gsm8k",
+        "subset": "main",
+        "evaluation_splits": ["test"],
+        "languages": ["english"],
+        "upstream_tags": ["math"],
+    }
+
+
+def _model() -> dict[str, object]:
+    return {
+        "weight_sha256": "a" * 64,
+        "weight_display_name": "model.pth",
+        "wkv_mode": "fp16",
         "prompt_template": "assistant",
         "gemm_policy": "fp16-accumulation",
         "gpu": "fixture",
@@ -129,509 +53,164 @@ def _model(unit: EvaluationUnit) -> dict[str, object]:
     }
 
 
-def test_standard_parser_preserves_native_metrics_and_multi_completion(
+def _sampling() -> dict[str, object]:
+    return {
+        "temperature": 0.96,
+        "top_p": 0.76,
+        "top_k": 32,
+        "presence_penalty": 1.0,
+        "frequency_penalty": 0.1,
+        "repetition_penalty": 1.0,
+        "penalty_decay": 0.988,
+        "max_new_tokens": 8192,
+        "stop": ["\nUser:"],
+        "ignore_eos": False,
+    }
+
+
+def _standard() -> tuple[dict[str, object], list[dict[str, object]], dict[str, object]]:
+    return (
+        {
+            "results": {
+                "gsm8k|0": {
+                    "exact_match": 1.0,
+                    "exact_match_stderr": 0.0,
+                }
+            },
+            "config_tasks": {
+                "gsm8k|0": {
+                    "original_num_docs": 1,
+                    "effective_num_docs": 1,
+                    "skipped_multiselect_docs": 0,
+                }
+            },
+        },
+        [
+            {
+                "doc": {
+                    "task_name": "gsm8k|0",
+                    "query": "1+1?",
+                    "specific": {"helicopter_document_index": 0},
+                },
+                "metric": {"exact_match": 1.0},
+                "model_response": {
+                    "input": "1+1?",
+                    "input_tokens": [1, 2],
+                    "text": ["<think>x</think>2", "bad\nUser:"],
+                    "text_post_processed": ["2", "bad"],
+                    "output_tokens": [[3, 4], [5]],
+                },
+            }
+        ],
+        {
+            "lighteval_version": "0.13.0",
+            "results_path": "results/model/results_stamp.json",
+            "details_paths": ["details/model/stamp/details_gsm8k_stamp.parquet"],
+        },
+    )
+
+
+class RecordingClient:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, dict[str, object]]] = []
+
+    def publish_task(
+        self,
+        campaign_id: str,
+        identity: str,
+        payload: dict[str, object],
+    ) -> None:
+        self.calls.append((campaign_id, identity, payload))
+
+
+def test_publish_results_preserves_native_data_and_diagnostics(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    unit, shard = _unit(tmp_path)
-    monkeypatch.setattr(
-        publish,
-        "_standard_artifacts",
-        lambda _path: _standard(tmp_path),
+    monkeypatch.setattr(publish, "_read_standard_results", lambda _path: _standard())
+    client = RecordingClient()
+
+    count = publish.publish_results(
+        output_dir=tmp_path,
+        campaign_id=CAMPAIGN_ID,
+        expected_tasks=[_task()],
+        model=_model(),
+        sampling_config=_sampling(),
+        client=client,
     )
-    publications = publish.publications_from_shard(
-        shard_dir=tmp_path,
-        campaign_id="11111111-1111-1111-1111-111111111111",
-        unit=unit,
-        shard=shard,
-        model_execution=_model(unit),
-        registry_tasks=shard.tasks,
-    )
-    identity, payload, digest = publications[0]
-    assert identity.endswith(":gsm8k|0")
-    assert len(digest) == 64
+
+    assert count == 1
+    campaign_id, identity, payload = client.calls[0]
+    assert campaign_id == CAMPAIGN_ID
+    assert identity == _task()["identity"]
     assert payload["aggregates"] == {
-        "extractive_match": 1.0,
-        "extractive_match_stderr": 0.0,
+        "exact_match": 1.0,
+        "exact_match_stderr": 0.0,
     }
+    assert payload["primary_metric"] == "exact_match"
     assert payload["diagnostics"]["completions"] == 2
     assert payload["diagnostics"]["turn_boundary_violations"] == 1
     assert len(payload["details"][0]["model_response"]["text"]) == 2
 
 
-def test_standard_parser_accepts_multiple_native_rows_for_one_document(
+def test_publish_results_fails_closed_on_incomplete_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    unit, shard = _unit(tmp_path)
-    standard = _standard(tmp_path)
-    second_sampling_category = copy.deepcopy(standard[1][0])
-    second_sampling_category["metric"] = {"extractive_match": 0.0}
-    standard[1].append(second_sampling_category)
-    monkeypatch.setattr(publish, "_standard_artifacts", lambda _path: standard)
-
-    publications = publish.publications_from_shard(
-        shard_dir=tmp_path,
-        campaign_id="11111111-1111-1111-1111-111111111111",
-        unit=unit,
-        shard=shard,
-        model_execution=_model(unit),
-        registry_tasks=shard.tasks,
+    results, rows, artifact = _standard()
+    results["results"] = {}
+    monkeypatch.setattr(
+        publish,
+        "_read_standard_results",
+        lambda _path: (results, rows, artifact),
     )
 
-    details = publications[0][1]["details"]
-    assert [detail["sample_index"] for detail in details] == [0, 1]
-    assert [detail["document_index"] for detail in details] == [0, 0]
-
-
-def test_standard_parser_accounts_for_skipped_multiselect_documents(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    unit, shard = _unit(tmp_path)
-    standard = _standard(tmp_path)
-    task_config = standard[0]["config_tasks"]["gsm8k|0"]
-    task_config["original_num_docs"] = 2
-    task_config["effective_num_docs"] = 1
-    task_config["skipped_multiselect_docs"] = 1
-    monkeypatch.setattr(publish, "_standard_artifacts", lambda _path: standard)
-
-    publications = publish.publications_from_shard(
-        shard_dir=tmp_path,
-        campaign_id="11111111-1111-1111-1111-111111111111",
-        unit=unit,
-        shard=shard,
-        model_execution=_model(unit),
-        registry_tasks=shard.tasks,
-    )
-
-    assert publications[0][1]["task_config"]["skipped_multiselect_docs"] == 1
-
-
-def test_standard_parser_accepts_only_registry_proven_superset_expansion(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    base_unit, _ = _unit(tmp_path)
-    root_task = replace(
-        _task(),
-        identity="bbq|0",
-        name="bbq",
-        selector="bbq",
-        module_family="bbq",
-        module="lighteval.tasks.tasks.bbq",
-        dataset="lighteval/bbq_helm",
-        subset="all",
-    )
-    child_task = replace(
-        root_task,
-        identity="bbq:Age|0",
-        name="bbq:Age",
-        subset="Age",
-    )
-    shard = EvaluationShard("bbq:002-of-002", "bbq", (root_task,))
-    unit = EvaluationUnit(
-        base_unit.weight,
-        base_unit.wkv_mode,
-        (shard,),
-        base_unit.prompt_template,
-    )
-    results, rows, result_path, detail_paths = _standard(tmp_path)
-    native_aggregate = results["results"].pop("gsm8k|0")
-    task_config = results["config_tasks"].pop("gsm8k|0")
-    results["results"].update(
-        {
-            "bbq|0": copy.deepcopy(native_aggregate),
-            "bbq:Age|0": copy.deepcopy(native_aggregate),
-            "bbq:_average|0": copy.deepcopy(native_aggregate),
-        }
-    )
-    results["config_tasks"].update(
-        {
-            "bbq|0": copy.deepcopy(task_config),
-            "bbq:Age|0": copy.deepcopy(task_config),
-        }
-    )
-    rows[0]["doc"]["task_name"] = "bbq|0"
-    child_row = copy.deepcopy(rows[0])
-    child_row["doc"]["task_name"] = "bbq:Age|0"
-    rows.append(child_row)
-    standard = results, rows, result_path, detail_paths
-    monkeypatch.setattr(publish, "_standard_artifacts", lambda _path: standard)
-
-    publications = publish.publications_from_shard(
-        shard_dir=tmp_path,
-        campaign_id="11111111-1111-1111-1111-111111111111",
-        unit=unit,
-        shard=shard,
-        model_execution=_model(unit),
-        registry_tasks=(root_task, child_task),
-    )
-
-    assert len(publications) == 1
-    assert publications[0][0].endswith(":bbq|0")
-    assert {detail["doc"]["task_name"] for detail in publications[0][1]["details"]} == {
-        "bbq|0"
-    }
-
-    with pytest.raises(
-        publish.ArtifactError,
-        match="task set does not match deterministic shard",
-    ):
-        publish.publications_from_shard(
-            shard_dir=tmp_path,
-            campaign_id="11111111-1111-1111-1111-111111111111",
-            unit=unit,
-            shard=shard,
-            model_execution=_model(unit),
-            registry_tasks=(root_task,),
+    with pytest.raises(PublicationError, match="missing an expected task"):
+        publish.publish_results(
+            output_dir=tmp_path,
+            campaign_id=CAMPAIGN_ID,
+            expected_tasks=[_task()],
+            model=_model(),
+            sampling_config=_sampling(),
+            client=RecordingClient(),
         )
 
 
-def test_standard_parser_never_selects_stderr_as_primary_metric(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    unit, shard = _unit(tmp_path)
-    standard = _standard(tmp_path)
-    standard[0]["results"]["gsm8k|0"] = {
-        "stderr": 0.01,
-        "extractive_match": 1.0,
-    }
-    monkeypatch.setattr(publish, "_standard_artifacts", lambda _path: standard)
+def test_standard_result_reader_uses_results_and_details_pair(tmp_path: Path) -> None:
+    results, rows, _artifact = _standard()
+    result_path = tmp_path / "results/model/results_stamp.json"
+    detail_path = tmp_path / "details/model/stamp" / "details_gsm8k|0_stamp.parquet"
+    result_path.parent.mkdir(parents=True)
+    detail_path.parent.mkdir(parents=True)
+    result_path.write_text(json.dumps(results), encoding="utf-8")
+    parquet.write_table(pa.Table.from_pylist(rows), detail_path)
 
-    publication = publish.publications_from_shard(
-        shard_dir=tmp_path,
-        campaign_id="11111111-1111-1111-1111-111111111111",
-        unit=unit,
-        shard=shard,
-        model_execution=_model(unit),
-        registry_tasks=shard.tasks,
-    )[0][1]
+    loaded_results, loaded_rows, artifact = publish._read_standard_results(tmp_path)
 
-    assert publication["primary_metric"] == "extractive_match"
-
-
-def test_standard_parser_rejects_non_numeric_native_aggregate(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    unit, shard = _unit(tmp_path)
-    standard = _standard(tmp_path)
-    standard[0]["results"]["gsm8k|0"]["unexpected"] = "not-a-number"
-    monkeypatch.setattr(publish, "_standard_artifacts", lambda _path: standard)
-
-    with pytest.raises(publish.ArtifactError, match="aggregate is invalid"):
-        publish.publications_from_shard(
-            shard_dir=tmp_path,
-            campaign_id="11111111-1111-1111-1111-111111111111",
-            unit=unit,
-            shard=shard,
-            model_execution=_model(unit),
-            registry_tasks=shard.tasks,
-        )
-
-
-def test_standard_parser_rejects_symlink_result_file(tmp_path: Path) -> None:
-    outside = tmp_path / "outside.json"
-    outside.write_text("{}", encoding="utf-8")
-    result_dir = tmp_path / "shard" / "results" / "model"
-    result_dir.mkdir(parents=True)
-    (result_dir / "results_stamp.json").symlink_to(outside)
-
-    with pytest.raises(
-        publish.ArtifactError,
-        match="safe shard child|regular non-symlink",
-    ):
-        publish._standard_artifacts(tmp_path / "shard")
-
-
-def test_standard_parser_accepts_logprob_rows_with_output_token_evidence(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    unit, shard = _unit(tmp_path)
-    standard = _standard(tmp_path)
-    standard[1][0]["model_response"] = {
-        "input": "1+1?",
-        "input_tokens": [1, 2],
-        "text": [],
-        "text_post_processed": None,
-        "output_tokens": [[3], [4, 5]],
-        "logprobs": [-0.1, -0.2],
-        "argmax_logits_eq_gold": [True, False],
-    }
-    monkeypatch.setattr(publish, "_standard_artifacts", lambda _path: standard)
-
-    publication = publish.publications_from_shard(
-        shard_dir=tmp_path,
-        campaign_id="11111111-1111-1111-1111-111111111111",
-        unit=unit,
-        shard=shard,
-        model_execution=_model(unit),
-        registry_tasks=shard.tasks,
-    )[0][1]
-
-    assert publication["diagnostics"]["samples"] == 1
-    assert publication["diagnostics"]["completions"] == 0
-    assert publication["details"][0]["model_response"]["output_tokens"] == [
-        [3],
-        [4, 5],
+    assert loaded_results == results
+    assert loaded_rows == rows
+    assert artifact["results_path"] == "results/model/results_stamp.json"
+    assert artifact["details_paths"] == [
+        "details/model/stamp/details_gsm8k|0_stamp.parquet"
     ]
 
 
-def test_standard_parser_rejects_misaligned_postprocessed_completions(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    unit, shard = _unit(tmp_path)
-    standard = _standard(tmp_path)
-    standard[1][0]["model_response"]["text_post_processed"] = ["2"]
-    monkeypatch.setattr(publish, "_standard_artifacts", lambda _path: standard)
+def test_prepare_staging_creates_private_owned_directory(tmp_path: Path) -> None:
+    staging = tmp_path / "private" / "eval"
+    resolved = publish.prepare_staging(staging)
 
-    with pytest.raises(
-        publish.ArtifactError,
-        match="text_post_processed must align",
-    ):
-        publish.publications_from_shard(
-            shard_dir=tmp_path,
-            campaign_id="11111111-1111-1111-1111-111111111111",
-            unit=unit,
-            shard=shard,
-            model_execution=_model(unit),
-            registry_tasks=shard.tasks,
-        )
+    assert resolved == staging.resolve()
+    assert stat.S_IMODE(staging.stat().st_mode) == 0o700
+
+    staging.chmod(0o755)
+    with pytest.raises(PublicationError, match="0700"):
+        publish.prepare_staging(staging)
 
 
-def test_standard_parser_rejects_misaligned_logprob_token_evidence(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    unit, shard = _unit(tmp_path)
-    standard = _standard(tmp_path)
-    standard[1][0]["model_response"] = {
-        "input": "1+1?",
-        "input_tokens": [1, 2],
-        "text": [],
-        "output_tokens": [[3]],
-        "logprobs": [-0.1, -0.2],
-    }
-    monkeypatch.setattr(publish, "_standard_artifacts", lambda _path: standard)
-
-    with pytest.raises(
-        publish.ArtifactError,
-        match="log-likelihood evidence and output-token counts differ",
-    ):
-        publish.publications_from_shard(
-            shard_dir=tmp_path,
-            campaign_id="11111111-1111-1111-1111-111111111111",
-            unit=unit,
-            shard=shard,
-            model_execution=_model(unit),
-            registry_tasks=shard.tasks,
-        )
-
-    standard = _standard(tmp_path)
-    standard[1][0]["model_response"] = {
-        "input": "1+1?",
-        "input_tokens": [1, 2],
-        "text": [],
-        "logprobs": [-0.1, -0.2],
-    }
-    monkeypatch.setattr(publish, "_standard_artifacts", lambda _path: standard)
-    with pytest.raises(
-        publish.ArtifactError,
-        match="output_tokens must be a non-empty array",
-    ):
-        publish.publications_from_shard(
-            shard_dir=tmp_path,
-            campaign_id="11111111-1111-1111-1111-111111111111",
-            unit=unit,
-            shard=shard,
-            model_execution=_model(unit),
-            registry_tasks=shard.tasks,
-        )
-
-    standard = _standard(tmp_path)
-    standard[1][0]["model_response"] = {
-        "input": "1+1?",
-        "input_tokens": [1, 2],
-        "text": [],
-        "output_tokens": [[]],
-        "logprobs": [-0.1],
-    }
-    monkeypatch.setattr(publish, "_standard_artifacts", lambda _path: standard)
-    with pytest.raises(
-        publish.ArtifactError,
-        match="output token groups must be non-empty",
-    ):
-        publish.publications_from_shard(
-            shard_dir=tmp_path,
-            campaign_id="11111111-1111-1111-1111-111111111111",
-            unit=unit,
-            shard=shard,
-            model_execution=_model(unit),
-            registry_tasks=shard.tasks,
-        )
-
-
-def test_standard_parser_rejects_nonfinite_and_partial_data(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    unit, shard = _unit(tmp_path)
-    result = _standard(tmp_path)
-    result[0]["results"]["gsm8k|0"]["extractive_match"] = math.nan
-    monkeypatch.setattr(publish, "_standard_artifacts", lambda _path: result)
-    with pytest.raises(publish.ArtifactError, match="not finite"):
-        publish.publications_from_shard(
-            shard_dir=tmp_path,
-            campaign_id="11111111-1111-1111-1111-111111111111",
-            unit=unit,
-            shard=shard,
-            model_execution=_model(unit),
-            registry_tasks=shard.tasks,
-        )
-
-    result = _standard(tmp_path)
-    result[0]["config_tasks"]["gsm8k|0"]["effective_num_docs"] = 0
-    monkeypatch.setattr(publish, "_standard_artifacts", lambda _path: result)
-    with pytest.raises(publish.ArtifactError, match="full evaluation split"):
-        publish.publications_from_shard(
-            shard_dir=tmp_path,
-            campaign_id="11111111-1111-1111-1111-111111111111",
-            unit=unit,
-            shard=shard,
-            model_execution=_model(unit),
-            registry_tasks=shard.tasks,
-        )
-
-
-def test_standard_parser_rejects_non_standard_results_json(
-    tmp_path: Path,
-) -> None:
-    result_path = tmp_path / "results/model/results_stamp.json"
-    detail_path = tmp_path / "details/model/stamp/details_gsm8k_stamp.parquet"
-    result_path.parent.mkdir(parents=True)
-    detail_path.parent.mkdir(parents=True)
-    result_path.write_text('{"results": {"score": NaN}}', encoding="utf-8")
-    detail_path.touch()
-
-    with pytest.raises(
-        publish.ArtifactError,
-        match="standard results JSON is invalid",
-    ):
-        publish._standard_artifacts(tmp_path)
-
-
-def test_standard_parser_validates_sampling_and_model_execution_locally(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    unit, shard = _unit(tmp_path)
-    standard = _standard(tmp_path)
-    standard[0]["config_general"]["model_config"]["generation_parameters"][
-        "temperature"
-    ] = 0.0
-    monkeypatch.setattr(publish, "_standard_artifacts", lambda _path: standard)
-
-    with pytest.raises(
-        publish.ArtifactError,
-        match="sampling contract: temperature",
-    ):
-        publish.publications_from_shard(
-            shard_dir=tmp_path,
-            campaign_id="11111111-1111-1111-1111-111111111111",
-            unit=unit,
-            shard=shard,
-            model_execution=_model(unit),
-            registry_tasks=shard.tasks,
-        )
-
-    model_execution = _model(unit)
-    model_execution["weight_sha256"] = "f" * 64
-    with pytest.raises(
-        publish.ArtifactError,
-        match="planned unit: weight_sha256",
-    ):
-        publish.publications_from_shard(
-            shard_dir=tmp_path,
-            campaign_id="11111111-1111-1111-1111-111111111111",
-            unit=unit,
-            shard=shard,
-            model_execution=model_execution,
-            registry_tasks=shard.tasks,
-        )
-
-    model_execution = _model(unit)
-    model_execution["prompt_template"] = "bot"
-    with pytest.raises(
-        publish.ArtifactError,
-        match="planned unit: prompt_template",
-    ):
-        publish.publications_from_shard(
-            shard_dir=tmp_path,
-            campaign_id="11111111-1111-1111-1111-111111111111",
-            unit=unit,
-            shard=shard,
-            model_execution=model_execution,
-            registry_tasks=shard.tasks,
-        )
-
-
-def _client(tmp_path: Path) -> ScoreboardClient:
-    return ScoreboardClient(
-        EvaluationEnvironment(
-            weight_root=tmp_path,
-            scoreboard_url="https://scoreboard.example.test",
-            scoreboard_token="private-token",
-            staging_root=tmp_path / "staging",
-        )
-    )
-
-
-@pytest.mark.parametrize("invalid", [float("nan"), object()])
-def test_request_wraps_non_json_publication_payload(
-    tmp_path: Path,
-    invalid: object,
-) -> None:
-    with pytest.raises(ScoreboardError, match="Scoreboard request failed"):
-        _client(tmp_path)._request(
-            "POST",
-            "/api/v1/evaluation-campaigns",
-            payload={"invalid": invalid},
-        )
-
-
-@pytest.mark.parametrize(
-    ("status", "error_type"),
-    [
-        (400, ScoreboardError),
-        (409, ScoreboardConflict),
-        (500, ScoreboardError),
-    ],
-)
-def test_http_error_never_exposes_backend_body(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    status: int,
-    error_type: type[ScoreboardError],
-) -> None:
-    client = _client(tmp_path)
-    transformed_secret = "private\\u002dtoken"
-
-    def fail(*_args, **_kwargs):
-        raise HTTPError(
-            client.base_url,
-            status,
-            "failed",
-            {},
-            BytesIO(f'{{"detail":"credential={transformed_secret}"}}'.encode()),
-        )
-
-    monkeypatch.setattr(client._opener, "open", fail)
-    with pytest.raises(error_type) as raised:
-        client._request("GET", "/api/v1/evaluation-publication-preflight")
-
-    assert "credential" not in str(raised.value)
-    assert transformed_secret not in str(raised.value)
+def test_canonical_json_is_stable_rejects_nan_and_gzips() -> None:
+    assert publish.canonical_json({"b": 2, "a": 1}) == b'{"a":1,"b":2}'
+    assert json.loads(
+        gzip.decompress(gzip.compress(publish.canonical_json({"a": 1})))
+    ) == {"a": 1}
+    with pytest.raises(PublicationError, match="canonical JSON"):
+        publish.canonical_json({"metric": float("nan")})

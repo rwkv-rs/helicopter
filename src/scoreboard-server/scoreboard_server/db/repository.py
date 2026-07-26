@@ -49,7 +49,7 @@ class ScoreboardRepository:
         async with pool.acquire() as connection, connection.transaction():
             await connection.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-                campaign.resume_key,
+                campaign.run_key,
             )
             existing = await connection.fetchrow(
                 """
@@ -58,9 +58,9 @@ class ScoreboardRepository:
                        configured_selectors, resolved_selectors,
                        skipped_selectors, expected_tasks, publisher_principal
                 FROM evaluation_campaign
-                WHERE resume_key = $1 AND status = 'incomplete'
+                WHERE run_key = $1
                 """,
-                campaign.resume_key,
+                campaign.run_key,
             )
             expected = [
                 task.model_dump(mode="json") for task in campaign.expected_tasks
@@ -68,7 +68,7 @@ class ScoreboardRepository:
             if existing is not None:
                 if existing["publisher_principal"] != publisher_principal:
                     raise CampaignContractError(
-                        "incomplete campaign belongs to another publisher principal"
+                        "run key belongs to another publisher principal"
                     )
                 values = {
                     "config_digest": campaign.config_digest,
@@ -85,7 +85,7 @@ class ScoreboardRepository:
                 ]
                 if mismatched:
                     raise CampaignContractError(
-                        "resume key contract mismatch: " + ", ".join(mismatched)
+                        "run key contract mismatch: " + ", ".join(mismatched)
                     )
                 task_rows = await connection.fetch(
                     """
@@ -97,8 +97,8 @@ class ScoreboardRepository:
                 )
                 return CampaignReceipt(
                     campaign_id=str(existing["id"]),
-                    disposition="resumed",
-                    status="incomplete",
+                    disposition="unchanged",
+                    status=existing["status"],
                     expected_task_count=len(expected),
                     acknowledged_task_digests={
                         row["task_identity"]: row["content_digest"] for row in task_rows
@@ -109,7 +109,7 @@ class ScoreboardRepository:
             await connection.execute(
                 """
                 INSERT INTO evaluation_campaign (
-                    id, resume_key, status, config_digest, registry_digest,
+                    id, run_key, status, config_digest, registry_digest,
                     eval_contract_digest, lighteval_version,
                     configured_selectors, resolved_selectors, skipped_selectors,
                     expected_tasks, publisher_principal
@@ -118,7 +118,7 @@ class ScoreboardRepository:
                 )
                 """,
                 campaign_id,
-                campaign.resume_key,
+                campaign.run_key,
                 campaign.config_digest,
                 campaign.registry_digest,
                 campaign.eval_contract_digest,

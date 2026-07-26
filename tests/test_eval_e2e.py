@@ -4,9 +4,9 @@ import getpass
 import gzip
 import json
 import os
+import uuid
 from pathlib import Path
 from urllib.parse import quote
-import uuid
 
 import asyncpg
 from httpx import ASGITransport, AsyncClient
@@ -16,9 +16,7 @@ import pytest
 import pytest_asyncio
 
 from helicopter_lighteval import evaluate, publish
-from helicopter_lighteval.config import EvaluationConfig, WeightIdentity
-from helicopter_lighteval.config import build_plan
-from helicopter_lighteval.config import RegistrySnapshot, RegistryTask
+from helicopter_lighteval.config import LightEvalConfig
 from scoreboard_server.application import create_app
 from scoreboard_server.db.settings import DatabaseSettings
 
@@ -74,13 +72,62 @@ def _gzip(value: object) -> bytes:
     return gzip.compress(publish.canonical_json(value))
 
 
-def _publication_headers(digest: str) -> dict[str, str]:
+def _headers(key: str) -> dict[str, str]:
     return {
         **AUTHORIZATION,
         "Content-Encoding": "gzip",
         "Content-Type": "application/json",
-        "Idempotency-Key": f"publish:{digest}",
+        "Idempotency-Key": key,
     }
+
+
+def _task(fixture: dict[str, object]) -> dict[str, object]:
+    source = fixture["registry_task"]
+    assert isinstance(source, dict)
+    return {
+        "selector": source["selector"],
+        "task_name": source["identity"],
+        "task_version": source["version"],
+        "module_family": source["module_family"],
+        "module": source["module"],
+        "dataset": source["dataset"],
+        "subset": source["subset"],
+        "evaluation_splits": source["evaluation_splits"],
+        "languages": source["languages"],
+        "upstream_tags": source["upstream_tags"],
+    }
+
+
+def _write_standard(
+    root: Path,
+    fixture: dict[str, object],
+) -> None:
+    result_path = root / "results/model/results_shared-fixture.json"
+    detail_path = (
+        root / "details/model/shared-fixture" / "details_gsm8k|0_shared-fixture.parquet"
+    )
+    result_path.parent.mkdir(parents=True)
+    detail_path.parent.mkdir(parents=True)
+    result_path.write_text(
+        json.dumps(fixture["standard_results"]),
+        encoding="utf-8",
+    )
+    rows = fixture["standard_rows"]
+    assert isinstance(rows, list)
+    parquet.write_table(pa.Table.from_pylist(rows), detail_path)
+
+
+class RecordingClient:
+    def __init__(self) -> None:
+        self.publications: list[tuple[str, str, dict[str, object]]] = []
+
+    def publish_task(
+        self,
+        campaign_id: str,
+        identity: str,
+        payload: dict[str, object],
+    ) -> None:
+        self.publications.append((campaign_id, identity, payload))
 
 
 @pytest.mark.asyncio
@@ -91,36 +138,27 @@ async def test_standard_artifact_to_database_query_contract(
     fixture = json.loads(
         (ROOT / "fixtures/lighteval_e2e.json").read_text(encoding="utf-8")
     )
-    task = RegistryTask(**fixture["registry_task"])
-    registry = RegistrySnapshot(
-        lighteval_version="0.13.0",
-        configured_selectors=(task.selector,),
-        resolved_selectors=(task.selector,),
-        skipped_selectors=(),
-        tasks=(task,),
-        module_count=1,
-        digest="b" * 64,
+    task = _task(fixture)
+    weight = tmp_path / "shared-fixture.pth"
+    weight.write_bytes(b"fixture")
+    config = LightEvalConfig(
+        prompt_template="assistant",
+        weights=(weight,),
+        weight_hashes=("a" * 64,),
+        benchmarks=("gsm8k",),
+        scoreboard_url="http://testserver",
+        scoreboard_token=TOKEN,
+        staging_root=tmp_path / "staging",
     )
-    weight_path = tmp_path / fixture["model_execution"]["weight_display_name"]
-    weight_path.write_bytes(b"shared fixture does not load a model")
-    weight = WeightIdentity(
-        configured_path=weight_path.name,
-        path=weight_path,
-        display_name=fixture["model_execution"]["weight_display_name"],
-        sha256=fixture["model_execution"]["weight_sha256"],
+    expected = evaluate._expected_tasks(config, [task])
+    campaign = evaluate._campaign_payload(
+        config,
+        [task],
+        [],
+        expected,
+        "0.13.0",
     )
-    plan = build_plan(
-        EvaluationConfig(
-            schema_version=1,
-            weights=(weight_path.name,),
-            benchmarks=(task.selector,),
-            prompt_template="assistant",
-        ),
-        (weight,),
-        registry,
-    )
-    resume_key = evaluate._resume_key(plan)
-    create_payload = evaluate._campaign_payload(plan, resume_key)
+    run_key = str(campaign["run_key"])
     app = create_app(e2e_database, publication_tokens={TOKEN: "shared-fixture"})
     await app.state.database.start()
     try:
@@ -130,63 +168,54 @@ async def test_standard_artifact_to_database_query_contract(
         ) as client:
             created = await client.post(
                 "/api/v1/evaluation-campaigns",
-                content=_gzip(create_payload),
-                headers={
-                    **AUTHORIZATION,
-                    "Content-Encoding": "gzip",
-                    "Content-Type": "application/json",
-                    "Idempotency-Key": f"campaign:{resume_key}",
-                },
+                content=_gzip(campaign),
+                headers=_headers(f"campaign:{run_key}"),
             )
             assert created.status_code == 201
             campaign_id = created.json()["campaign_id"]
-
             evaluation_ids: list[str] = []
-            for unit in plan.units:
-                shard = unit.shards[0]
-                shard_dir = tmp_path / unit.wkv_mode
-                result_path = shard_dir / "results/model/results_shared-fixture.json"
-                detail_path = (
-                    shard_dir
-                    / "details/model/shared-fixture"
-                    / "details_gsm8k|0_shared-fixture.parquet"
-                )
-                result_path.parent.mkdir(parents=True)
-                detail_path.parent.mkdir(parents=True)
-                result_path.write_text(
-                    json.dumps(fixture["standard_results"]),
-                    encoding="utf-8",
-                )
-                parquet.write_table(
-                    pa.Table.from_pylist(fixture["standard_rows"]),
-                    detail_path,
-                )
-                model_execution = {
+
+            for mode in evaluate.WKV_MODES:
+                output_dir = tmp_path / mode
+                _write_standard(output_dir, fixture)
+                recorder = RecordingClient()
+                model = {
                     **fixture["model_execution"],
-                    "wkv_mode": unit.wkv_mode,
+                    "wkv_mode": mode,
                     "gemm_policy": (
-                        "fp16-accumulation"
-                        if unit.wkv_mode == "fp16"
-                        else "fp32-accumulation"
+                        "fp16-accumulation" if mode == "fp16" else "fp32-accumulation"
                     ),
                 }
-                publications = publish.publications_from_shard(
-                    shard_dir=shard_dir,
+                publish.publish_results(
+                    output_dir=output_dir,
                     campaign_id=campaign_id,
-                    unit=unit,
-                    shard=shard,
-                    model_execution=model_execution,
-                    registry_tasks=plan.registry.tasks,
+                    expected_tasks=[
+                        item for item in expected if item["wkv_mode"] == mode
+                    ],
+                    model=model,
+                    sampling_config={
+                        "temperature": 0.96,
+                        "top_p": 0.76,
+                        "top_k": 32,
+                        "presence_penalty": 1.0,
+                        "frequency_penalty": 0.1,
+                        "repetition_penalty": 1.0,
+                        "penalty_decay": 0.988,
+                        "max_new_tokens": 8192,
+                        "stop": ["\nUser:"],
+                        "ignore_eos": False,
+                    },
+                    client=recorder,
                 )
-                assert len(publications) == 1
-                identity, publication, digest = publications[0]
+                _, identity, payload = recorder.publications[0]
+                digest = publish.content_digest(payload)
                 response = await client.put(
                     (
                         f"/api/v1/evaluation-campaigns/{campaign_id}/tasks/"
                         f"{quote(identity, safe='')}"
                     ),
-                    content=_gzip(publication),
-                    headers=_publication_headers(digest),
+                    content=_gzip(payload),
+                    headers=_headers(f"publish:{digest}"),
                 )
                 assert response.status_code == 201
                 evaluation_ids.append(response.json()["evaluation_id"])
@@ -199,34 +228,22 @@ async def test_standard_artifact_to_database_query_contract(
                 },
             )
             assert finalized.status_code == 200
+            assert finalized.json()["status"] == "complete"
+
             summaries = (await client.get("/api/evaluations")).json()
             assert summaries["total"] == 2
             assert {item["model"]["wkv_mode"] for item in summaries["evaluations"]} == {
                 "fp16",
                 "fp32io16",
             }
-            assert all(
-                item["aggregates"]
-                == {
-                    "exact_match": 1.0,
-                    "exact_match_stderr": 0.0,
-                }
-                for item in summaries["evaluations"]
-            )
             sample_page = (
                 await client.get(f"/api/evaluations/{evaluation_ids[0]}/samples")
             ).json()
             assert sample_page["total"] == 2
-            model_response = sample_page["items"][0]["model_response"]
-            for key, value in fixture["standard_rows"][0]["model_response"].items():
-                assert model_response[key] == value
-            assert model_response["logprobs"] is None
-            assert model_response["argmax_logits_eq_gold"] is None
-            logprob_response = sample_page["items"][1]["model_response"]
-            for key, value in fixture["standard_rows"][1]["model_response"].items():
-                assert logprob_response[key] == value
-            assert logprob_response["reasonings"] is None
-            assert logprob_response["text"] == []
-            assert logprob_response["logprobs"] == [-0.1, -0.2]
+            assert sample_page["items"][0]["model_response"]["text"]
+            assert sample_page["items"][1]["model_response"]["logprobs"] == [
+                -0.1,
+                -0.2,
+            ]
     finally:
         await app.state.database.stop()

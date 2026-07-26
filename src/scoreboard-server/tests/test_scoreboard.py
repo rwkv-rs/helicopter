@@ -95,8 +95,8 @@ def _expected(
 
 def _campaign() -> dict:
     return {
-        "schema_version": "lighteval-campaign-v2",
-        "resume_key": "1" * 64,
+        "schema_version": "lighteval-campaign-v3",
+        "run_key": "1" * 64,
         "config_digest": "2" * 64,
         "registry_digest": "3" * 64,
         "eval_contract_digest": "5" * 64,
@@ -230,7 +230,7 @@ def _campaign_headers(campaign: dict) -> dict[str, str]:
         **AUTH,
         "Content-Encoding": "gzip",
         "Content-Type": "application/json",
-        "Idempotency-Key": f"campaign:{campaign['resume_key']}",
+        "Idempotency-Key": f"campaign:{campaign['run_key']}",
     }
 
 
@@ -265,7 +265,7 @@ async def test_publication_rejects_non_standard_json_constants_before_validation
                 },
                 content=gzip.compress(
                     (
-                        '{"schema_version":"lighteval-campaign-v2","unexpected":NaN}'
+                        '{"schema_version":"lighteval-campaign-v3","unexpected":NaN}'
                     ).encode()
                 ),
             )
@@ -620,7 +620,7 @@ async def test_campaign_publication_finalize_and_complete_queries(
             assert preflight.json() == {
                 "status": "ready",
                 "publisher_principal": "lighteval-production",
-                "schema_version": "lighteval-campaign-v2",
+                "schema_version": "lighteval-campaign-v3",
                 "lighteval_version": "0.13.0",
             }
             unauthorized = await client.post(
@@ -648,14 +648,14 @@ async def test_campaign_publication_finalize_and_complete_queries(
             )
             assert hidden_from_other.status_code == 404
 
-            resumed = await client.post(
+            unchanged = await client.post(
                 "/api/v1/evaluation-campaigns",
                 content=_body(campaign),
                 headers=_campaign_headers(campaign),
             )
-            assert resumed.status_code == 200
-            assert resumed.json()["disposition"] == "resumed"
-            assert resumed.json()["campaign_id"] == campaign_id
+            assert unchanged.status_code == 200
+            assert unchanged.json()["disposition"] == "unchanged"
+            assert unchanged.json()["campaign_id"] == campaign_id
 
             assert (await client.get("/api/evaluations")).json()["evaluations"] == []
             incomplete = await client.post(
@@ -790,10 +790,11 @@ async def test_campaign_publication_finalize_and_complete_queries(
             assert second_page["next_offset"] is None
             assert second_page["items"][0]["sample_index"] == 1
 
+            new_run = {**campaign, "run_key": "9" * 64}
             next_campaign = await client.post(
                 "/api/v1/evaluation-campaigns",
-                content=_body(campaign),
-                headers=_campaign_headers(campaign),
+                content=_body(new_run),
+                headers=_campaign_headers(new_run),
             )
             assert next_campaign.status_code == 201
             assert next_campaign.json()["campaign_id"] != campaign_id

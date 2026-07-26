@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from helicopter_cli import commands, config, env
+from helicopter_cli.__main__ import build_parser
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -180,6 +181,25 @@ class DotenvTests(unittest.TestCase):
                     use_fallbacks=False,
                     require_private=True,
                 )
+
+
+class EvaluationCliTests(unittest.TestCase):
+    def test_eval_accepts_only_config_env_file_and_dry_run(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "eval",
+                "--config",
+                "./configs/eval/lighteval.toml",
+                "--env-file",
+                ".env.remote",
+                "--dry-run",
+            ]
+        )
+
+        self.assertEqual(args.command, "eval")
+        self.assertEqual(args.config, "./configs/eval/lighteval.toml")
+        self.assertEqual(args.env_file, ".env.remote")
+        self.assertTrue(args.dry_run)
 
 
 class ConfigResolutionTests(unittest.TestCase):

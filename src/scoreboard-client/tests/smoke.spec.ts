@@ -161,7 +161,7 @@ test("shows two weights, both WKV modes, native metrics and missing pairs", asyn
   await expect(page.getByText(/结果等级|trusted|non-official/i)).toHaveCount(0);
 });
 
-test("filters official tags and pages faithful multi-completion details", async ({ page }) => {
+test("filters tags and pages faithful multi-completion details", async ({ page }) => {
   await serveApi(page);
   await page.goto("/?page=dashboard");
   await expect(page.getByText("untagged|0", { exact: true })).toBeVisible();

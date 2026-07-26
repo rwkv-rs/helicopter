@@ -72,7 +72,7 @@ class EvaluationPublicationService:
         return PublicationPreflight(
             status="ready",
             publisher_principal=self.principal_for_authorization(authorization),
-            schema_version="lighteval-campaign-v2",
+            schema_version="lighteval-campaign-v3",
             lighteval_version="0.13.0",
         )
 
@@ -94,9 +94,9 @@ class EvaluationPublicationService:
     ) -> CampaignReceipt:
         principal = self.principal_for_authorization(authorization)
         campaign: CampaignCreate = self._validate(CampaignCreate, raw)
-        if idempotency_key != f"campaign:{campaign.resume_key}":
+        if idempotency_key != f"campaign:{campaign.run_key}":
             raise PublicationPayloadError(
-                "Idempotency-Key does not match campaign resume key"
+                "Idempotency-Key does not match campaign run key"
             )
         try:
             return await self.repository.create_campaign(

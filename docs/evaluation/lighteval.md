@@ -6,17 +6,12 @@
 helicopter eval --config ./configs/eval/lighteval.toml
 ```
 
-该命令对配置中的每个权重依次运行 `fp16` 和 `fp32io16`，每种 mode 都评估
-`benchmarks` 中全部可解析的 LightEval selectors。superset selector 由 LightEval
-展开成实际 task，因此不用在配置中抄写展开后的数百项。当前 LightEval release
-找不到的 selector 会在计划中明确列为 `skipped_selectors`，不进入预期 task；
-已经解析出的 task 若因 dataset、metric 或运行前提失败，campaign 仍保持
-incomplete 并非零退出。
+命令按配置顺序处理每个权重，并固定运行 `fp16`、`fp32io16` 两种 WKV mode。
+每个 weight/mode 使用一次 LightEval 官方 `Pipeline`，评估 `benchmarks` 中全部可解析
+的 task 或 superset selector。不存在于固定 LightEval 版本中的 selector 会报告为
+skipped；已解析 task 的 dataset、metric、模型或发布失败则使整个命令失败。
 
-产品不接受 exclude、`max_samples`、生成参数、WKV mode、shard、并发或 capacity
-字段。每个解析出的 task 使用完整 evaluation split，`max_samples=None`。
-
-## 最小配置
+## 配置
 
 ```toml
 schema_version = 1
@@ -35,36 +30,36 @@ benchmarks = [
 ]
 ```
 
-`prompt_template` 为整个 campaign 选择一种 vLLM-RWKV 官方模板，只接受
-`bot`、`assistant` 或 `function_calling`。模板同时决定 prompt 渲染和 turn stop：
-分别为 `✿`、`\nUser:` 与 `\n### User`；两者始终成对传递并随结果入库。
-省略时使用 vLLM-RWKV 官方默认值 `bot`。除原生 `PERPLEXITY` task 仍直接评估
-原始 query 外，LightEval task prompt 均使用该模板。
+配置只有四项：
 
-`benchmarks` 是一个普通字符串数组。每个值直接是 LightEval task identity 或
-superset selector；没有显示名映射、family 对象、状态字段或第二份配置。
-仓库当前启用范围只以
-[`configs/eval/lighteval.toml`](../../configs/eval/lighteval.toml) 为准，覆盖本轮
-Knowledge、Math / Reasoning、Coding 和 Instruction Following 清单。当前延期的
-GPQA-Extended 与三项 SWE-bench 不写入数组；它们不是隐式 exclude，也不会由另一份
-目录或映射表维护。
-`--config` 的相对路径按命令调用目录解析，因此
-`helicopter eval --config ./path/to/lighteval.toml` 可直接使用普通 shell 路径语义。
-权重路径相对 `WEIGHT_PATH` 解析。产品拒绝绝对路径、越界、symlink、重复路径和
-重复内容，并以文件 basename 作为展示名称、SHA-256 作为稳定身份。
+- `schema_version`：固定为 `1`。
+- `prompt_template`：可省略，默认 `bot`；也可选 `assistant` 或
+  `function_calling`。
+- `weights`：相对私有环境变量 `WEIGHT_PATH` 的权重路径，可配置多个。
+- `benchmarks`：直接写 LightEval task 或 superset selector，不维护名字映射。
+
+superset 由 LightEval 自己展开，所以配置不需要列出展开后的数百个 task。仓库默认
+清单见 [`configs/eval/lighteval.toml`](../../configs/eval/lighteval.toml)；不支持的
+小众 benchmark 不写入清单，当前 LightEval release 缺少的 selector 自动跳过。
+产品不提供 exclude、`max_samples`、生成参数、WKV mode、并发、shard 或 capacity
+配置。所有解析出的 task 使用完整 evaluation split。
+
+三个 prompt template 来自 vLLM-RWKV：
+
+| `prompt_template` | assistant prefix | turn stop |
+| --- | --- | --- |
+| `bot` | `\nBot✿` | `✿` |
+| `assistant` | `\n\nAssistant: ` | `\nUser:` |
+| `function_calling` | `\n### Assistant` | `\n### User` |
+
+同一 campaign 只使用一种 template。模板、stop 和实际生成参数随结果入库。
+
+权重解析会拒绝绝对路径、`..` 越界、symlink、缺失文件和重复内容。数据库使用
+SHA-256 作为权重身份，使用文件 basename 作为展示名。
 
 ## 私有环境
 
-以下值只写入 workspace 私有的 `.env.local` 或 `.env.remote`，不得写入 TOML；
-包含这些值的 env 文件必须由当前用户所有、权限严格为 `0600`，且不能是 symlink。
-其中 Bearer token 是密钥，不会由 evaluator 写入日志、错误、manifest、标准
-artifact、控制 metadata 或 publication payload；权重根、Scoreboard URL 与 staging
-根会出现在 redacted dry-run/readiness 输出中：
-
-```bash
-cp .env.example .env.local
-chmod 600 .env.local
-```
+以下值只写入 workspace 私有的 `.env.local` 或 `.env.remote`，不能写进 TOML：
 
 ```dotenv
 WEIGHT_PATH=/home/caizus/Weights
@@ -73,56 +68,71 @@ HELICOPTER_SCOREBOARD_TOKEN=replace-with-private-token
 HELICOPTER_EVAL_STAGING_ROOT=/home/caizus/Projects/MachineLearning/helicopter/.tmp/eval
 ```
 
-`eval` 默认只读取明确的 `.env.local`，不会回退到通用 `.env`。远端私有文件需显式
-传入：
+env 文件必须由当前用户所有、权限为 `0600`，且不能是 symlink。默认读取
+`.env.local`；远端运行可显式指定：
 
 ```bash
 helicopter eval \
   --env-file .env.remote \
-  --config configs/eval/lighteval.toml
+  --config ./configs/eval/lighteval.toml
 ```
 
-命令会在当前进程内临时叠加该私有文件的全部键，使 Hugging Face endpoint、代理、
-dataset/service 凭据等 task-native 前提能被 LightEval 与 vLLM 直接读取；命令结束
-或异常退出当前作用域时会恢复原进程环境。既有命令环境值优先。evaluator 不会把
-私有环境整体序列化到 manifest、标准 artifacts 或发布 payload；task-native
-失败只记录 task identity 与异常类型，不回显第三方异常原文。
-Scoreboard HTTP 失败也只报告状态码或内部异常类型；客户端会有界读取但不会把
-后端错误 body 拼进 CLI 错误，从而避免后端以转义或变形形式回显密钥。
+`HELICOPTER_EVAL_STAGING_ROOT` 是 LightEval 标准 results/details 的临时保存目录。
+目录不存在时以 `0700` 创建；已存在时必须由当前用户所有、权限严格为 `0700`，
+且不能是 symlink。不要把它配置为权重目录或共享目录。
 
-Scoreboard server 通过 `SCOREBOARD_PUBLICATION_TOKENS` 把 token 映射成仅用于审计
-provenance 的 principal，例如：
+## 查看计划
 
-```dotenv
-SCOREBOARD_PUBLICATION_TOKENS={"private-token":"rwkv-eval-worker"}
+```bash
+helicopter eval \
+  --config ./configs/eval/lighteval.toml \
+  --dry-run
 ```
 
-运行前的只读 preflight 会验证 Scoreboard 认证、staging 可写性、LightEval
-`0.13.0` 和当前 repository submodule 的 editable vLLM 来源。任一条件不满足都在
-加载 dataset 或模型之前失败。
+dry-run 会校验配置和权重、展开 selector、检查 Scoreboard publication API，并输出
+weight SHA、resolved/skipped selector、实际 task 和执行单元数。它不会加载 dataset
+或模型，也不会创建 campaign。Bearer token 始终显示为 `[REDACTED]`。
 
-`HELICOPTER_EVAL_STAGING_ROOT` 不存在时由 evaluator 以 `0700` 创建；如果目录已
-存在，它必须由当前用户所有且权限已经严格为 `0700`。evaluator 不会修改已有目录
-的权限。新建前最近的已有父目录也必须由当前用户所有，且不能由 group/other
-写入。不要把 `/tmp`、workspace 根目录、权重根目录或其他共享目录本身配置为
-staging root，应先准备一个当前用户独占的父目录，再配置其专用私有子目录。
+## 评估规则
 
-## 安装和启动 Scoreboard
+每个 weight/mode 都把全部已解析 task 交给 LightEval 官方 Python API：
+`EvaluationTracker`、`PipelineParameters`、model config 和 `Pipeline`。LightEval
+保存标准 results JSON 与 details parquet，Helicopter 只做 RWKV 必需的 model/prompt
+适配和发布。
 
-通过仓库安装器准备完整 eval、server 和 client 依赖：
+生成固定最多 8192 个 token。`max_model_len` 使用 checkpoint context 加 8192，
+capacity 由 vLLM-RWKV 根据模型、GPU 和 WKV mode 自动选择，不接受用户覆盖。
+`fp16` 记录 FP16 WKV state/FP16 accumulation，`fp32io16` 记录 FP32 WKV
+state/FP32 accumulation。
+
+唯一正确选项的选择题转换为生成式答案。包含多个正确选项的题目直接跳过；标准
+task config 会记录 `original_num_docs`、`effective_num_docs` 和
+`skipped_multiselect_docs`，后端和前端均使用实际评估题数。
+
+## 强制入库和清理
+
+正式运行先创建 Scoreboard campaign，然后对每个 weight/mode：
+
+1. 运行完整 LightEval Pipeline，并把标准结果写到 staging。
+2. 读取标准 results/details，逐 task 请求 Scoreboard 入库。
+3. 所有预期 task 入库后，请求后端原子 finalize campaign。
+4. 后端确认 campaign complete 后，安全删除本次 campaign 的整个本地目录。
+
+只有第四步完成才返回 `0`。配置、评估、网络、认证、冲突、部分入库、finalize 或
+安全清理失败都会非零退出，并保留本次本地 LightEval 内容供排查。因此成功运行后
+完整结果只保留在 PostgreSQL；失败运行不会因自动清理而丢失证据。新命令始终创建
+新 campaign，不实现本地 manifest、自动 resume、quarantine 或结果等级。
+
+## 后端和前端
+
+安装完整组件：
 
 ```bash
 INSTALL_COMPONENTS=lighteval,scoreboard-server,scoreboard-client,dev \
   scripts/install_local.sh
 ```
 
-安装器会把固定 Bun 版本写入当前 workspace 的 `.venv/bin/bun`，并把
-Scoreboard smoke test 所需的 Chromium 写入
-`.venv/playwright-browsers`；不会依赖用户级 Bun 或 Playwright browser cache。
-
-Scoreboard 只接受空的或 contract version 2 的 PostgreSQL 数据库；发现旧
-`evaluation_result` 或未版本化 evaluation schema 时会拒绝启动，不执行隐式迁移。
-server 运行环境至少需要：
+Scoreboard server 还需要 PostgreSQL 连接和 publication token：
 
 ```dotenv
 SCOREBOARD_DB_HOST=127.0.0.1
@@ -132,17 +142,14 @@ SCOREBOARD_DB_NAME=helicopter_scoreboard
 SCOREBOARD_PUBLICATION_TOKENS={"private-token":"rwkv-eval-worker"}
 ```
 
-启动 API：
+API 启动命令：
 
 ```bash
-.venv/bin/python -m uvicorn \
-  scoreboard_server.application:app \
-  --host 0.0.0.0 \
-  --port 7860
+.venv/bin/python -m uvicorn scoreboard_server.application:app \
+  --host 0.0.0.0 --port 7860
 ```
 
-构建并启动前端时，把 server 基址写入进程环境；浏览器的 `/api/*` 请求由 Next
-rewrite 到同一后端：
+前端构建时指定同一 API：
 
 ```bash
 cd src/scoreboard-client
@@ -150,122 +157,13 @@ SCOREBOARD_API_BASE_URL=http://127.0.0.1:7860 bun run build
 SCOREBOARD_API_BASE_URL=http://127.0.0.1:7860 bun run start -- -p 3000
 ```
 
-## 先查看计划
-
-```bash
-helicopter eval \
-  --config ./configs/eval/lighteval.toml \
-  --dry-run
-```
-
-`--dry-run` 会计算权重 SHA、展开 selectors，并输出 configured/resolved/skipped
-selectors、weight/mode、task/module、官方 tags 和 deterministic shard。
-它会进行只读 Scoreboard preflight，但不会加载 dataset/模型、创建 campaign 或写入
-评估内容；token 始终显示为 `[REDACTED]`。
-
-## 执行、续跑和退出
-
-正式运行的固定顺序是配置中的 weight 顺序，每个 weight 按 `fp16`、`fp32io16`
-执行。内部先按 LightEval module、再按稳定 task identity 确定性分为单 task
-shard，使 dataset/prerequisite 失败只影响对应 task。分片只控制 dataset/Doc 的
-host-memory 生命周期。同一个
-weight/mode 只加载一次模型，vLLM-RWKV 根据模型规模、GPU 显存与 WKV mode 解析
-4×4×2 active-capacity matrix；评估层不提供 capacity 参数。
-registry discovery 可能在主进程先初始化 CUDA，因此 adapter 在每个 model
-unit 内固定 `VLLM_WORKER_MULTIPROC_METHOD=spawn`，避免从已经初始化 CUDA 的
-父进程 fork worker；退出 unit 后恢复原环境。
-`fp16` 记录 FP16 WKV state/FP16 accumulation，`fp32io16` 记录 FP32 WKV
-state/FP32 accumulation；数据库会校验 mode 与 GEMM policy 一致。
-checkpoint 文件名的 `ctx<N>` 是 prompt context 上限，不是 prompt 与 completion
-共用的总预算。评估固定保留 8192 个输出 token，因此传给 recurrent RWKV7 的
-`max_model_len` 为 `N + 8192`；例如 `ctx8192` 使用总长度 16384，但 prompt 仍最多
-保留 8192 token。adapter 只在单个 RWKV evaluation unit 的进程作用域内设置
-`VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`，绕过只适用于位置编码模型的通用长度保护；
-退出该 unit 后恢复原环境。该规则固定在产品中，不能通过 TOML 覆盖。
-
-配置也可以选择 Wikitext 等原生 `PERPLEXITY` task。这类 task 不是对话生成：
-adapter 直接对 task 给出的原始 document query 做滚动 log-likelihood，不添加
-User/Assistant template 或生成参数。窗口受 checkpoint `ctx<N>` 约束，每个 token
-恰好计分一次；相应标准 detail 保存逐 token logprobs 和 output token evidence，
-但不会伪装成 completion 或进入 truncation/turn-boundary 分母。
-
-每个单 task shard 使用 LightEval 公开 `Pipeline` 与标准 results JSON/details
-parquet。缺少某个 task 自身需要的 dataset、可选依赖、服务、凭据、硬件或安全
-前提时，其他独立 shard
-继续执行，但预期 task 不会从 campaign 中消失，命令最终非零且 campaign 保持
-incomplete。
-
-选择题只评估唯一正确选项的题目：`gold_index` 为单个整数或单元素列表时转换为
-生成式答案；包含多个正确选项的题目直接跳过，不发起 generation 或 logprob
-请求。标准 task config 同时记录 `original_num_docs`、
-`effective_num_docs` 和 `skipped_multiselect_docs`，且必须满足
-`original_num_docs = effective_num_docs + skipped_multiselect_docs`。后端会再次
-校验该等式和连续 document index，前端详情页展示实际评估题数与跳过数。
-
-本地 manifest 只记录 digest、有序 weight SHA、selector 状态、registry task identity
-快照、backend identity 和精确 staging child，不复制 Doc、metric、completion 或
-token。相同命令会恢复匹配的 incomplete campaign：
-后端已确认相同 identity/digest 的 task 不会重复计算；digest 冲突立即失败并保留
-本地证据。已完成 campaign 不会作为下一次运行的 cache。
-若后端已 finalize、但本地仍有匹配 manifest，说明上一次命令只在本地清理前中断；
-续跑完成精确清理后直接成功返回，不会误建新 campaign。只有已经没有 manifest 的
-后续新调用才会创建新的完整评估 campaign。
-
-无法解析或与当前 config、权重、selector/registry 或 eval contract 不匹配的
-普通 manifest 会被移动到 `campaigns/quarantine/`；隔离只移动 manifest，不读取、
-复用、覆盖或删除它原先指向的 run 内容。若后端随后恢复到同一个 campaign id，而
-本地存在没有匹配 manifest 登记的非空 run 目录，命令会保留该目录并立即失败，要求
-人工审计，绝不猜测其归属。
-
-退出码：
-
-- `0`：所有 weight/mode/task 已入库、campaign 已 finalize，内容 staging 已清理。
-- 非 `0`：配置、preflight、评估、publication、finalize 或安全清理未完成。
-
-## 强制入库与 DB-only 清理
-
-Scoreboard publication 是成功条件，不是可选后处理。evaluator 通过 Bearer HTTP
-发送 gzip canonical JSON，并以 canonical SHA-256 作为幂等键。server 严格验证
-campaign/task 归属、完整 Doc/metric/multi-completion/input-output tokens，并从
-raw completion 与 output tokens 重算 truncation 和 turn-boundary diagnostics。
-无 completion text 的 LOGPROBS/PERPLEXITY row 会改按有限 logprobs、argmax 与
-output token 数量对齐校验；生成行的 `text_post_processed` 则必须与 raw `text`
-一一对应。
-
-只有后端明确返回相同 task identity/digest 的 `created` 或 `unchanged` 后，runner
-才删除该 shard 在 manifest 中记录的精确 child。网络错误、认证错误、冲突、部分
-确认或未知状态都会保留内容。若后端 commit 后进程中断，下一次运行先查询后端
-digest，一致后才补写本地确认并清理。
-
-每个 weight/mode 的模型 runtime 固定为
-`runtime/<weight_sha256>/<wkv_mode>`，并在模型构造前写入 manifest。正常模型
-cleanup 完成后才移除该记录；若进程中断，续跑只清理这个已登记且重新通过
-campaign-child 与 symlink 边界校验的目录，不扫描或猜测其他路径。
-模型 cleanup、runtime 安全删除或 manifest 持久化失败时，命令保留登记并立即
-非零退出，不会继续加载下一个 weight/mode。
-
-全部 task 确认后，server 原子 finalize campaign；runner 删除标准
-results/details、失败 attempt、模型 runtime 与 manifest。
-`HELICOPTER_EVAL_STAGING_ROOT/control`
-只保留不含评估内容和密钥的 campaign 摘要。成功评估的 Doc、metric、completion
-与 tokens 最终只存在于 PostgreSQL。
-
-## 查询与前端展示
-
 普通查询只返回 complete campaign：
 
-- `GET /api/evaluations?offset=0&limit=5000`：weight、WKV mode、selector、
-  module、官方 tags、全部 native aggregates、诊断和 campaign provenance；响应中的
-  `next_offset` 与 `generated_at` 分别用于下一页的 `offset` 与
-  `completed_before`，前端会在同一 complete-campaign 快照内自动拉完全部页。
-- `GET /api/evaluations/{evaluation_id}/samples?offset=0&limit=25`：按稳定
-  evaluation identity 分页读取全部 sample；可加
-  `outcome=correct|incorrect|unanswered|undetermined`。
+- `GET /api/evaluations?offset=0&limit=5000`：所有 task 的 native metrics、
+  WKV mode、selector、prompt template 和诊断。
+- `GET /api/evaluations/{evaluation_id}/samples?offset=0&limit=25`：完整
+  Doc、reference、sample metric、completion 和 token 详情。
 
-dashboard 只取最新 complete campaign，按 weight × WKV mode 展开其中每个
-benchmark task，并从官方 LightEval tags 动态生成 `[All] + tag Tabs`；一个 task
-可出现在多个 tag Tabs，无 tag task 只出现在 `All`。history 页面保留全部 complete
-campaign。两者原样展示 native metrics、缺失 mode，并可按稳定 evaluation identity
-打开 Doc/reference、sample metric、多 completion、reasoning/answer、input/output
-tokens、logprobs/argmax、truncation 与 turn-boundary。tags 只用于浏览；
-数值始终来自各 task 的 native metric，不跨 benchmark 或 tag 合成总分。
+dashboard 展示最新 complete campaign，history 保留历史 complete campaign。
+页面按 weight、WKV mode 和 LightEval tag 浏览 native metrics，不计算跨 benchmark
+的自定义总分，也不再区分 official/non-official 或任何结果等级。

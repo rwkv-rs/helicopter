@@ -70,19 +70,16 @@ def build_parser() -> argparse.ArgumentParser:
         "eval",
         help="run configured LightEval benchmarks and publish them",
         description=(
-            "Expand the configured LightEval task/superset selectors for each "
-            "weight, evaluate them in fp16 and fp32io16, then publish and "
-            "finalize one Scoreboard campaign."
+            "Run every configured LightEval selector for each weight in fp16 "
+            "and fp32io16, then publish one complete Scoreboard campaign."
         ),
         epilog=(
-            "Config keys: schema_version = 1, optional prompt_template set to "
-            "bot (the default), assistant, or function_calling, a non-empty weights array, and "
-            "a non-empty benchmarks string array. Weight paths are relative "
-            "to WEIGHT_PATH. Selectors absent from the locked LightEval release "
-            "are reported as skipped. Sample limits, generation, WKV, shard, "
-            "concurrency, and capacity settings are not configurable. Exit 0 means the "
-            "campaign was finalized and standard local evaluation content was "
-            "cleaned; every incomplete or unsafe outcome exits non-zero."
+            "The TOML contains schema_version = 1, an optional prompt_template "
+            "(bot, assistant, or function_calling), weights relative to "
+            "WEIGHT_PATH, and direct LightEval task or superset selectors in "
+            "benchmarks. Missing selectors are skipped. Exit 0 means every "
+            "resolved task was stored, the campaign was finalized, and its "
+            "local LightEval results were removed."
         ),
     )
     evaluate.add_argument(
@@ -101,7 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument(
         "--dry-run",
         action="store_true",
-        help="validate and print the full redacted plan without loading data or models",
+        help="validate, resolve selectors, and print a redacted plan",
     )
 
     return parser

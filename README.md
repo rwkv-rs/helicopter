@@ -227,8 +227,8 @@ Copy `.env.example` to the private eval environment file and run
 `chmod 600 .env.local` before using it. The file must be owned by the current
 user and must not be a symlink.
 See [docs/evaluation/lighteval.md](docs/evaluation/lighteval.md) for private
-environment variables, resume behavior, failure semantics, query endpoints, and
-the DB-only cleanup contract.
+environment variables, failure semantics, query endpoints, and the DB-only
+cleanup contract.
 
 `takeoff` requires the project Python executable to exist. By default it uses
 the configured `.venv/bin/python`; set `HELICOPTER_PYTHON` or `paths.python` only

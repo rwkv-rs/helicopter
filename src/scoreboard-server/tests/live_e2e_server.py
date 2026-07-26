@@ -6,10 +6,10 @@ import gzip
 import hashlib
 import json
 import os
-from pathlib import Path
 import tempfile
-from urllib.parse import quote
 import uuid
+from pathlib import Path
+from urllib.parse import quote
 
 import asyncpg
 from httpx import ASGITransport, AsyncClient
@@ -18,9 +18,7 @@ import pyarrow.parquet as parquet
 import uvicorn
 
 from helicopter_lighteval import evaluate, publish
-from helicopter_lighteval.config import EvaluationConfig, WeightIdentity
-from helicopter_lighteval.config import build_plan
-from helicopter_lighteval.config import RegistrySnapshot, RegistryTask
+from helicopter_lighteval.config import LightEvalConfig
 from scoreboard_server.application import create_app
 from scoreboard_server.db.settings import DatabaseSettings
 
@@ -42,126 +40,158 @@ def _gzip(value: object) -> bytes:
     return gzip.compress(publish.canonical_json(value))
 
 
-def _headers(idempotency_key: str) -> dict[str, str]:
+def _headers(key: str) -> dict[str, str]:
     return {
         **AUTHORIZATION,
         "Content-Encoding": "gzip",
         "Content-Type": "application/json",
-        "Idempotency-Key": idempotency_key,
+        "Idempotency-Key": key,
     }
 
 
-def _response_json(response, expected_status: int) -> dict:
-    if response.status_code != expected_status:
+def _checked(response, expected: int) -> dict[str, object]:
+    if response.status_code != expected:
         raise RuntimeError(
             f"live E2E seed failed ({response.status_code}): {response.text}"
         )
     return response.json()
 
 
+def _task(fixture: dict[str, object]) -> dict[str, object]:
+    source = fixture["registry_task"]
+    return {
+        "selector": source["selector"],
+        "task_name": source["identity"],
+        "task_version": source["version"],
+        "module_family": source["module_family"],
+        "module": source["module"],
+        "dataset": source["dataset"],
+        "subset": source["subset"],
+        "evaluation_splits": source["evaluation_splits"],
+        "languages": source["languages"],
+        "upstream_tags": source["upstream_tags"],
+    }
+
+
+def _write_standard(
+    root: Path,
+    fixture: dict[str, object],
+) -> None:
+    result = root / "results/model/results_shared-fixture.json"
+    details = (
+        root / "details/model/shared-fixture" / "details_gsm8k|0_shared-fixture.parquet"
+    )
+    result.parent.mkdir(parents=True)
+    details.parent.mkdir(parents=True)
+    result.write_text(json.dumps(fixture["standard_results"]), encoding="utf-8")
+    parquet.write_table(pa.Table.from_pylist(fixture["standard_rows"]), details)
+
+
+class Recorder:
+    def __init__(self) -> None:
+        self.items: list[tuple[str, str, dict[str, object]]] = []
+
+    def publish_task(
+        self,
+        campaign_id: str,
+        identity: str,
+        payload: dict[str, object],
+    ) -> None:
+        self.items.append((campaign_id, identity, payload))
+
+
 async def _seed(app, temporary_root: Path) -> None:
     fixture = json.loads(
-        (REPOSITORY / "fixtures" / "lighteval_e2e.json").read_text(encoding="utf-8")
+        (REPOSITORY / "fixtures/lighteval_e2e.json").read_text(encoding="utf-8")
     )
-    task = RegistryTask(**fixture["registry_task"])
-    registry = RegistrySnapshot(
-        lighteval_version="0.13.0",
-        configured_selectors=(task.selector,),
-        resolved_selectors=(task.selector,),
-        skipped_selectors=(),
-        tasks=(task,),
-        module_count=1,
-        digest="b" * 64,
-    )
-    identities: list[WeightIdentity] = []
+    task = _task(fixture)
+    weights: list[Path] = []
+    hashes: list[str] = []
     for name, content in (
         ("small.pth", b"live-e2e-small"),
         ("large.pth", b"live-e2e-large"),
     ):
         path = temporary_root / name
         path.write_bytes(content)
-        identities.append(
-            WeightIdentity(
-                configured_path=name,
-                path=path,
-                display_name=name,
-                sha256=hashlib.sha256(content).hexdigest(),
-            )
-        )
-    plan = build_plan(
-        EvaluationConfig(
-            schema_version=1,
-            weights=tuple(identity.configured_path for identity in identities),
-            benchmarks=(task.selector,),
-            prompt_template="assistant",
-        ),
-        tuple(identities),
-        registry,
+        weights.append(path)
+        hashes.append(hashlib.sha256(content).hexdigest())
+    config = LightEvalConfig(
+        prompt_template="assistant",
+        weights=tuple(weights),
+        weight_hashes=tuple(hashes),
+        benchmarks=("gsm8k",),
+        scoreboard_url="http://live-e2e",
+        scoreboard_token=TOKEN,
+        staging_root=temporary_root / "staging",
     )
-    resume_key = evaluate._resume_key(plan)
-    transport = ASGITransport(app=app)
+    expected = evaluate._expected_tasks(config, [task])
+    campaign = evaluate._campaign_payload(
+        config,
+        [task],
+        [],
+        expected,
+        "0.13.0",
+    )
+    run_key = str(campaign["run_key"])
+
     async with AsyncClient(
-        transport=transport,
+        transport=ASGITransport(app=app),
         base_url="http://live-e2e",
     ) as client:
         created = await client.post(
             "/api/v1/evaluation-campaigns",
-            content=_gzip(evaluate._campaign_payload(plan, resume_key)),
-            headers=_headers(f"campaign:{resume_key}"),
+            content=_gzip(campaign),
+            headers=_headers(f"campaign:{run_key}"),
         )
-        campaign_id = _response_json(created, 201)["campaign_id"]
-        for unit in plan.units:
-            shard = unit.shards[0]
-            shard_dir = (
-                temporary_root / "artifacts" / unit.weight.sha256 / unit.wkv_mode
-            )
-            result_path = shard_dir / "results/model/results_shared-fixture.json"
-            detail_path = (
-                shard_dir
-                / "details/model/shared-fixture"
-                / "details_gsm8k|0_shared-fixture.parquet"
-            )
-            result_path.parent.mkdir(parents=True)
-            detail_path.parent.mkdir(parents=True)
-            result_path.write_text(
-                json.dumps(fixture["standard_results"]),
-                encoding="utf-8",
-            )
-            parquet.write_table(
-                pa.Table.from_pylist(fixture["standard_rows"]),
-                detail_path,
-            )
-            model_execution = {
-                **fixture["model_execution"],
-                "weight_sha256": unit.weight.sha256,
-                "weight_display_name": unit.weight.display_name,
-                "wkv_mode": unit.wkv_mode,
-                "gemm_policy": (
-                    "fp16-accumulation"
-                    if unit.wkv_mode == "fp16"
-                    else "fp32-accumulation"
-                ),
-            }
-            publications = publish.publications_from_shard(
-                shard_dir=shard_dir,
-                campaign_id=campaign_id,
-                unit=unit,
-                shard=shard,
-                model_execution=model_execution,
-                registry_tasks=plan.registry.tasks,
-            )
-            if len(publications) != 1:
-                raise RuntimeError("live E2E shard did not produce one task")
-            identity, publication, digest = publications[0]
-            published = await client.put(
-                (
-                    f"/api/v1/evaluation-campaigns/{campaign_id}/tasks/"
-                    f"{quote(identity, safe='')}"
-                ),
-                content=_gzip(publication),
-                headers=_headers(f"publish:{digest}"),
-            )
-            _response_json(published, 201)
+        campaign_id = str(_checked(created, 201)["campaign_id"])
+        for weight, weight_hash in zip(weights, hashes, strict=True):
+            for mode in evaluate.WKV_MODES:
+                output = temporary_root / "artifacts" / weight_hash / mode
+                _write_standard(output, fixture)
+                recorder = Recorder()
+                model = {
+                    **fixture["model_execution"],
+                    "weight_sha256": weight_hash,
+                    "weight_display_name": weight.name,
+                    "wkv_mode": mode,
+                    "gemm_policy": (
+                        "fp16-accumulation" if mode == "fp16" else "fp32-accumulation"
+                    ),
+                }
+                publish.publish_results(
+                    output_dir=output,
+                    campaign_id=campaign_id,
+                    expected_tasks=[
+                        item
+                        for item in expected
+                        if item["weight_sha256"] == weight_hash
+                        and item["wkv_mode"] == mode
+                    ],
+                    model=model,
+                    sampling_config={
+                        "temperature": 0.96,
+                        "top_p": 0.76,
+                        "top_k": 32,
+                        "presence_penalty": 1.0,
+                        "frequency_penalty": 0.1,
+                        "repetition_penalty": 1.0,
+                        "penalty_decay": 0.988,
+                        "max_new_tokens": 8192,
+                        "stop": ["\nUser:"],
+                        "ignore_eos": False,
+                    },
+                    client=recorder,
+                )
+                _, identity, payload = recorder.items[0]
+                response = await client.put(
+                    (
+                        f"/api/v1/evaluation-campaigns/{campaign_id}/tasks/"
+                        f"{quote(identity, safe='')}"
+                    ),
+                    content=_gzip(payload),
+                    headers=_headers(f"publish:{publish.content_digest(payload)}"),
+                )
+                _checked(response, 201)
         finalized = await client.post(
             f"/api/v1/evaluation-campaigns/{campaign_id}/finalize",
             headers={
@@ -169,7 +199,7 @@ async def _seed(app, temporary_root: Path) -> None:
                 "Idempotency-Key": f"finalize:{campaign_id}",
             },
         )
-        _response_json(finalized, 200)
+        _checked(finalized, 200)
 
 
 async def _drop_database(database: str, maintenance: dict[str, str]) -> None:

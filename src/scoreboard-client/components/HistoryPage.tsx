@@ -35,7 +35,7 @@ export function HistoryPage() {
                 <th>WKV</th>
                 <th>task</th>
                 <th>module</th>
-                <th>official tags</th>
+                <th>tags</th>
                 <th>native metric</th>
               </tr>
             </thead>

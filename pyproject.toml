@@ -121,3 +121,6 @@ packages = ["helicopter_cli", "helicopter_lighteval"]
 [tool.setuptools.package-dir]
 helicopter_cli = "src/cli/helicopter_cli"
 helicopter_lighteval = "src/eval/lighteval"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
