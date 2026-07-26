@@ -866,6 +866,7 @@ def test_dapo_maxrl_config_matches_paper_and_remote_contract():
     assert "dynamic_microbatching" not in config["execution"]
     assert "train_token_budget_per_gpu" not in config["execution"]
     assert "context_tokens" not in config["model"]
+    assert config["model"]["prompt_template"] == "\nBot✿"
     assert "max_prompt_tokens" not in config["data"]["train"]
     assert config["execution"]["rollout"]["replicas"] == 8
     assert "gpu_memory_utilization" not in config["execution"]["rollout"]

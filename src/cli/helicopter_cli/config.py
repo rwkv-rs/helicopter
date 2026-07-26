@@ -419,6 +419,11 @@ def compile_config(config: dict[str, Any]) -> dict[str, Any]:
     )
     _put_if_present(
         takeoff,
+        "rwkv_prompt_template",
+        model.get("prompt_template"),
+    )
+    _put_if_present(
+        takeoff,
         "validation_data_dir",
         evaluation.get("output_directory"),
     )

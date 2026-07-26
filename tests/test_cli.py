@@ -8,6 +8,8 @@ from argparse import Namespace
 from pathlib import Path
 from unittest import mock
 
+from hydra.core.override_parser.overrides_parser import OverridesParser
+
 from helicopter_cli import commands, config, env
 
 
@@ -690,7 +692,8 @@ class CommandPlanTests(unittest.TestCase):
     def test_takeoff_config_sets_validation_sampling_for_non_greedy_eval(self) -> None:
         loaded_config = load_example_config()
 
-        overrides = hydra_map(build_takeoff_plan(loaded_config))
+        plan = build_takeoff_plan(loaded_config)
+        overrides = hydra_map(plan)
 
         self.assertEqual(
             {
@@ -706,6 +709,9 @@ class CommandPlanTests(unittest.TestCase):
                     "actor_rollout_ref.rollout.val_kwargs.n",
                     "+data.apply_chat_template_kwargs.rwkv_generation_prompt",
                     "+data.val_apply_chat_template_kwargs.rwkv_generation_prompt",
+                    "+data.apply_chat_template_kwargs.rwkv_prompt_template",
+                    "+data.val_apply_chat_template_kwargs.rwkv_prompt_template",
+                    "actor_rollout_ref.rollout.rwkv_prompt_template",
                 )
             },
             {
@@ -719,8 +725,20 @@ class CommandPlanTests(unittest.TestCase):
                 "actor_rollout_ref.rollout.val_kwargs.n": "4",
                 "+data.apply_chat_template_kwargs.rwkv_generation_prompt": "open_think",
                 "+data.val_apply_chat_template_kwargs.rwkv_generation_prompt": "open_think",
+                "+data.apply_chat_template_kwargs.rwkv_prompt_template": '"\nBot✿"',
+                "+data.val_apply_chat_template_kwargs.rwkv_prompt_template": '"\nBot✿"',
+                "actor_rollout_ref.rollout.rwkv_prompt_template": '"\nBot✿"',
             },
         )
+        parser = OverridesParser.create()
+        prompt_template_keys = (
+            "+data.apply_chat_template_kwargs.rwkv_prompt_template",
+            "+data.val_apply_chat_template_kwargs.rwkv_prompt_template",
+            "actor_rollout_ref.rollout.rwkv_prompt_template",
+        )
+        for key in prompt_template_keys:
+            override = next(item for item in plan.command if item.startswith(f"{key}="))
+            self.assertEqual(parser.parse_overrides([override])[0].value(), "\nBot✿")
 
     def test_takeoff_config_can_override_validation_generation_prompt(self) -> None:
         loaded_config = load_example_config()

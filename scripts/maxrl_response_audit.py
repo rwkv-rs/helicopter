@@ -21,6 +21,10 @@ from math_verify.grader import verify
 from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig, parse
 from vllm import LLM, SamplingParams
 from vllm.sampling_params import RepetitionDetectionParams
+from vllm.tokenizers.rwkv_defaults import (
+    RWKV_DEFAULT_PROMPT_TEMPLATE,
+    resolve_rwkv_prompt_template,
+)
 
 from verl.utils.ngram_repetition import (
     ConsecutiveRepetitionDetector,
@@ -214,12 +218,17 @@ def main() -> None:
     )
     tokenizer = llm.get_tokenizer()
     messages = row["source_prompt"]
+    prompt_template = resolve_rwkv_prompt_template(
+        prompt_template=RWKV_DEFAULT_PROMPT_TEMPLATE,
+        messages=messages,
+    )
     if args.prompt_audit_json is None:
         rendered_prompt = tokenizer.apply_chat_template(
             messages,
             tokenize=False,
             add_generation_prompt=True,
             rwkv_generation_prompt="open_think",
+            rwkv_prompt_template=prompt_template.name,
         )
         prompt_token_ids = list(
             tokenizer.apply_chat_template(
@@ -227,6 +236,7 @@ def main() -> None:
                 tokenize=True,
                 add_generation_prompt=True,
                 rwkv_generation_prompt="open_think",
+                rwkv_prompt_template=prompt_template.name,
             )
         )
         prompt_replay = None
@@ -258,6 +268,7 @@ def main() -> None:
         temperature=1.0,
         top_k=-1,
         top_p=0.95,
+        stop=[prompt_template.stop],
         max_tokens=max_tokens,
         ignore_eos=False,
         repetition_detection=RepetitionDetectionParams(**repetition_config),
@@ -360,6 +371,8 @@ def main() -> None:
             "chat_template_options": {
                 "add_generation_prompt": True,
                 "rwkv_generation_prompt": "open_think",
+                "rwkv_prompt_template": prompt_template.name,
+                "stop": prompt_template.stop,
             },
             "prompt_replay": prompt_replay,
             "rendered_prompt": rendered_prompt,

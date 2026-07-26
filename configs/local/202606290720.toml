@@ -8,6 +8,7 @@ optimizer_steps = 200
 name = "g1g-1.5b"
 checkpoint = "${WEIGHT_PATH}/rwkv7-g1g-1.5b-20260526-ctx8192.pth"
 prompt_mode = "open_think"
+prompt_template = "\nBot✿"
 
 [data.train]
 files = ["${DATASETS_PATH}/gsm8k/train.parquet"]

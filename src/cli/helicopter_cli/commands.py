@@ -45,6 +45,10 @@ def format_hydra_value(value: Any) -> str:
     return str(value)
 
 
+def format_hydra_quoted_string(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def prepend_venv_path(env: dict[str, str], root: Path, config: dict[str, Any]) -> None:
     paths = table(config, "paths")
     venv_value = pick(
@@ -146,11 +150,21 @@ def takeoff_value(
 
 
 def append_hydra_override(
-    overrides: list[str], key: str, value: Any, *, optional: bool = False
+    overrides: list[str],
+    key: str,
+    value: Any,
+    *,
+    optional: bool = False,
+    quote_string: bool = False,
 ) -> None:
     if optional and (value is None or str(value) == ""):
         return
-    overrides.append(f"{key}={format_hydra_value(value)}")
+    formatted = (
+        format_hydra_quoted_string(str(value))
+        if quote_string
+        else format_hydra_value(value)
+    )
+    overrides.append(f"{key}={formatted}")
 
 
 def append_rwkv_lm_engine_override(
@@ -253,7 +267,6 @@ def validate_strict_on_policy_overrides(
         "data.max_response_length": "null",
         "data.train_prompt_key": train_prompt_key,
         "data.val_prompt_key": val_prompt_key,
-        "data.prompt_prefix_token_id": "0",
         "data.truncation": "error",
     }
     for key, expected in required.items():
@@ -482,6 +495,12 @@ def build_grpo_hydra_overrides(
         "val_rwkv_generation_prompt",
         "VAL_RWKV_GENERATION_PROMPT",
     )
+    rwkv_prompt_template = takeoff_value(
+        takeoff,
+        env,
+        "rwkv_prompt_template",
+        "RWKV_PROMPT_TEMPLATE",
+    )
     if rwkv_infctx:
         try:
             rwkv_chunk_ctx = int(rwkv_chunk_ctx)
@@ -514,7 +533,6 @@ def build_grpo_hydra_overrides(
         "data.max_prompt_length=null",
         "data.max_response_length=null",
         f"+data.model_context_length={format_hydra_value(rwkv_ctx_len)}",
-        "+data.prompt_prefix_token_id=0",
         "data.filter_overlong_prompts=False",
         "data.truncation=error",
         # Verl still exposes fixed prompt/response envelope fields internally.
@@ -659,6 +677,27 @@ def build_grpo_hydra_overrides(
         "+data.val_apply_chat_template_kwargs.rwkv_generation_prompt",
         val_rwkv_generation_prompt,
         optional=True,
+    )
+    append_hydra_override(
+        overrides,
+        "+data.apply_chat_template_kwargs.rwkv_prompt_template",
+        rwkv_prompt_template,
+        optional=True,
+        quote_string=True,
+    )
+    append_hydra_override(
+        overrides,
+        "+data.val_apply_chat_template_kwargs.rwkv_prompt_template",
+        rwkv_prompt_template,
+        optional=True,
+        quote_string=True,
+    )
+    append_hydra_override(
+        overrides,
+        "actor_rollout_ref.rollout.rwkv_prompt_template",
+        rwkv_prompt_template,
+        optional=True,
+        quote_string=True,
     )
     append_rwkv_lm_engine_override(overrides, "ctx_len", rwkv_ctx_len, optional=True)
     append_rwkv_lm_engine_override(overrides, "infctx", rwkv_infctx)
