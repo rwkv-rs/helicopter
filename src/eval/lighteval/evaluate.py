@@ -93,7 +93,9 @@ def run(*, config_path: Path, env: Mapping[str, str], dry_run: bool) -> int:
             raise SystemExit(str(error)) from error
         except Exception as error:
             name = f"{type(error).__module__}.{type(error).__qualname__}"
-            raise SystemExit(f"evaluation failed: {name}") from error
+            detail = str(error).strip()
+            suffix = f": {detail}" if detail else ""
+            raise SystemExit(f"evaluation failed: {name}{suffix}") from error
 
 
 def _run_campaign(
@@ -389,6 +391,7 @@ def _evaluate(
     with _process_environment(
         {
             "VLLM_RWKV7_WKV_MODE": wkv_mode,
+            "VLLM_USE_V2_MODEL_RUNNER": "1",
             "VLLM_USE_RAPID_SAMPLER": "1",
             "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
             "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
