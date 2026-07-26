@@ -765,7 +765,28 @@ def test_formal_gqa_code_binding_rejects_dirty_code_scope(
     linked.symlink_to(module.name)
     with pytest.raises(
         ContractError,
-        match="contains symlinked runtime files",
+        match="contains symlinks",
+    ):
+        _formal_gqa_code_binding(repo, require_clean=True)
+    linked.unlink()
+
+    directory = package / "directory"
+    directory.mkdir()
+    (directory / "__init__.py").write_text("", encoding="utf-8")
+    linked_directory = package / "linked_directory"
+    linked_directory.symlink_to(directory.name)
+    with pytest.raises(
+        ContractError,
+        match="contains symlinks",
+    ):
+        _formal_gqa_code_binding(repo, require_clean=True)
+    linked_directory.unlink()
+
+    broken = package / "broken.py"
+    broken.symlink_to("missing.py")
+    with pytest.raises(
+        ContractError,
+        match="contains symlinks",
     ):
         _formal_gqa_code_binding(repo, require_clean=True)
 

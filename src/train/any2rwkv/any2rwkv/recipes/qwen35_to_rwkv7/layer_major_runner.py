@@ -2600,28 +2600,26 @@ def _formal_gqa_code_binding(
         clean = None
 
     scope_root = product_root / scope
-    runtime_paths = tuple(
-        sorted(
-            path
-            for path in scope_root.rglob("*")
-            if path.is_file()
-            and "__pycache__" not in path.parts
-            and path.suffix not in {".pyc", ".pyo"}
-        )
-    )
-    if not runtime_paths:
-        raise ContractError("formal GQA validation code scope is empty")
+    descendants = tuple(sorted(scope_root.rglob("*")))
     symlink_paths = tuple(
         path.relative_to(product_root).as_posix()
-        for path in runtime_paths
+        for path in descendants
         if path.is_symlink()
     )
     if symlink_paths:
         raise ContractError(
-            "formal GQA validation code scope contains symlinked runtime "
-            "files: "
+            "formal GQA validation code scope contains symlinks: "
             + "; ".join(symlink_paths[:8])
         )
+    runtime_paths = tuple(
+        path
+        for path in descendants
+        if path.is_file()
+            and "__pycache__" not in path.parts
+            and path.suffix not in {".pyc", ".pyo"}
+    )
+    if not runtime_paths:
+        raise ContractError("formal GQA validation code scope is empty")
     tree_entries = []
     for absolute_path in runtime_paths:
         relative_path = absolute_path.relative_to(product_root)
