@@ -430,6 +430,7 @@ def _control_metadata(
         "implementation_digest": plan.implementation_digest,
         "registry_digest": plan.registry.digest,
         "eval_contract_digest": plan.eval_contract_digest,
+        "prompt_template": plan.prompt_template,
         "configured_selectors": list(plan.registry.configured_selectors),
         "resolved_selectors": list(plan.registry.resolved_selectors),
         "skipped_selectors": list(plan.registry.skipped_selectors),

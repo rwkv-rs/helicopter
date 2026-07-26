@@ -14,7 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Iterator, Mapping
 
-from .config import verify_weight_identity
+from .config import PROMPT_TEMPLATE_STOPS, PromptTemplate, verify_weight_identity
 from .manifest import (
     remove_campaign_child_directory,
     validate_campaign_child,
@@ -24,7 +24,6 @@ from .plan import EvaluationShard, EvaluationUnit
 
 MAX_NEW_TOKENS = 8192
 PERPLEXITY_WINDOW_BATCH_SIZE = 32
-STOP_SEQUENCE = "\nUser:"
 _MARKUP = re.compile(r"\*\*|__|`+")
 _BOXED = re.compile(
     r"\\boxed\{\s*(?:([A-Z])|\\(?:text|mathrm)\{\s*([A-Z])\s*\})\s*\}",
@@ -111,6 +110,30 @@ class ShardFailure:
 
 class UnsafeModelCleanupError(RuntimeError):
     """The process must stop because a model lifecycle was not closed safely."""
+
+
+def _official_prompt_template(
+    prompt_template: PromptTemplate,
+) -> tuple[str, str]:
+    from vllm.tokenizers.rwkv_defaults import RWKV_PROMPT_TEMPLATES
+
+    matches = [
+        template
+        for template in RWKV_PROMPT_TEMPLATES.values()
+        if template.style == prompt_template
+    ]
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"vLLM-RWKV does not expose exactly one {prompt_template} prompt template"
+        )
+    template = matches[0]
+    expected_stop = PROMPT_TEMPLATE_STOPS[prompt_template]
+    if template.stop != expected_stop:
+        raise RuntimeError(
+            f"vLLM-RWKV {prompt_template} prompt stop does not match "
+            "the Helicopter evaluation contract"
+        )
+    return template.name, template.stop
 
 
 def _exception_type(error: BaseException) -> str:
@@ -207,8 +230,24 @@ def _build_runtime_classes(types: dict[str, Any]):
         generation_parameters: RWKVGenerationParameters
         wkv_mode: str
         checkpoint_context_length: int
+        rwkv_prompt_template: str
+        rwkv_stop_sequence: str
         max_num_seqs: int | None = None
         max_num_batched_tokens: int | None = None
+
+    class RWKVPromptRenderer:
+        def __init__(self, tokenizer, prompt_template: str):
+            self._tokenizer = tokenizer
+            self._prompt_template = prompt_template
+
+        def apply_chat_template(self, *args, **kwargs):
+            requested = kwargs.get("rwkv_prompt_template")
+            if requested is not None and requested != self._prompt_template:
+                raise RuntimeError(
+                    "LightEval attempted to override the campaign prompt template"
+                )
+            kwargs["rwkv_prompt_template"] = self._prompt_template
+            return self._tokenizer.apply_chat_template(*args, **kwargs)
 
     class RWKVVLLMModel(VLLMModel):
         def __init__(self, config):
@@ -217,6 +256,10 @@ def _build_runtime_classes(types: dict[str, Any]):
                 raise ValueError("RWKV checkpoint context length must be at least 3")
             self._checkpoint_context_length = config.checkpoint_context_length
             super().__init__(config)
+            self.prompt_manager.tokenizer = RWKVPromptRenderer(
+                self.tokenizer,
+                config.rwkv_prompt_template,
+            )
             self._cache = None
 
         def _create_auto_model(self, config):
@@ -527,6 +570,7 @@ def _build_runtime_classes(types: dict[str, Any]):
             model = kwargs.get("model")
             if model is None:
                 raise ValueError("RWKVPipeline requires the campaign-owned model")
+            self._rwkv_stop_sequence = model.config.rwkv_stop_sequence
             model._cache = RegistryOnlyCache()
             try:
                 super().__init__(*args, **kwargs)
@@ -601,7 +645,7 @@ def _build_runtime_classes(types: dict[str, Any]):
                 for doc in docs:
                     if SamplingMethod.GENERATIVE in doc.sampling_methods:
                         doc.generation_size = MAX_NEW_TOKENS
-                        doc.stop_sequences = [STOP_SEQUENCE]
+                        doc.stop_sequences = [self._rwkv_stop_sequence]
                     for method in doc.sampling_methods:
                         self.sampling_docs[method].append(doc)
             self.evaluation_tracker.task_config_logger.log(self.tasks_dict)
@@ -661,7 +705,10 @@ def _actual_capacity(backend) -> tuple[int, int]:
     return max_num_seqs, max_num_batched_tokens
 
 
-def _model_execution(unit: EvaluationUnit, backend) -> dict[str, object]:
+def _model_execution(
+    unit: EvaluationUnit,
+    backend,
+) -> dict[str, object]:
     import torch
 
     max_num_seqs, max_num_batched_tokens = _actual_capacity(backend)
@@ -669,6 +716,7 @@ def _model_execution(unit: EvaluationUnit, backend) -> dict[str, object]:
         "weight_sha256": unit.weight.sha256,
         "weight_display_name": unit.weight.display_name,
         "wkv_mode": unit.wkv_mode,
+        "prompt_template": unit.prompt_template,
         "gemm_policy": (
             "fp16-accumulation" if unit.wkv_mode == "fp16" else "fp32-accumulation"
         ),
@@ -762,6 +810,9 @@ def _evaluate_unit(
         Pipeline,
         _,
     ) = _build_runtime_classes(types)
+    rwkv_prompt_template, stop_sequence = _official_prompt_template(
+        unit.prompt_template
+    )
     runtime_dir = campaign_dir / "runtime" / unit.weight.sha256 / unit.wkv_mode
     checkpoint_config = build_rwkv7_config_from_pth(str(unit.weight.path))
     if checkpoint_config is None:
@@ -770,6 +821,8 @@ def _evaluate_unit(
         model_name=unit.weight.path.as_uri(),
         cache_dir=str(runtime_dir / "disabled-sample-cache"),
         wkv_mode=unit.wkv_mode,
+        rwkv_prompt_template=rwkv_prompt_template,
+        rwkv_stop_sequence=stop_sequence,
         checkpoint_context_length=(checkpoint_config.max_position_embeddings),
         dtype="float16",
         max_model_length=evaluation_max_model_length(
@@ -786,7 +839,7 @@ def _evaluate_unit(
             presence_penalty=1.0,
             frequency_penalty=0.1,
             penalty_decay=0.988,
-            stop_tokens=[STOP_SEQUENCE],
+            stop_tokens=[stop_sequence],
             max_new_tokens=MAX_NEW_TOKENS,
         ),
     )

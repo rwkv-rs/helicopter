@@ -93,6 +93,7 @@ async def _seed(app, temporary_root: Path) -> None:
             schema_version=1,
             weights=tuple(identity.configured_path for identity in identities),
             benchmarks=(task.selector,),
+            prompt_template="assistant",
         ),
         tuple(identities),
         registry,

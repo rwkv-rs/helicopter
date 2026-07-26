@@ -6,11 +6,18 @@ import os
 from pathlib import Path
 import stat
 import tomllib
-from typing import Mapping
+from typing import Literal, Mapping, cast
 from urllib.parse import urlsplit
 
 
-CONFIG_KEYS = frozenset({"schema_version", "weights", "benchmarks"})
+PromptTemplate = Literal["bot", "assistant", "function_calling"]
+PROMPT_TEMPLATE_STOPS: dict[PromptTemplate, str] = {
+    "bot": "✿",
+    "assistant": "\nUser:",
+    "function_calling": "\n### User",
+}
+CONFIG_KEYS = frozenset({"schema_version", "prompt_template", "weights", "benchmarks"})
+REQUIRED_CONFIG_KEYS = frozenset({"schema_version", "weights", "benchmarks"})
 SCHEMA_VERSION = 1
 
 
@@ -23,6 +30,7 @@ class EvaluationConfig:
     schema_version: int
     weights: tuple[str, ...]
     benchmarks: tuple[str, ...]
+    prompt_template: PromptTemplate = "bot"
 
 
 @dataclass(frozen=True)
@@ -55,7 +63,7 @@ def load_evaluation_config(path: Path) -> EvaluationConfig:
         raise EvaluationConfigurationError(
             "unknown eval config fields: " + ", ".join(unknown)
         )
-    missing = sorted(CONFIG_KEYS - set(raw))
+    missing = sorted(REQUIRED_CONFIG_KEYS - set(raw))
     if missing:
         raise EvaluationConfigurationError(
             "missing eval config fields: " + ", ".join(missing)
@@ -63,10 +71,19 @@ def load_evaluation_config(path: Path) -> EvaluationConfig:
     version = raw["schema_version"]
     if isinstance(version, bool) or version != SCHEMA_VERSION:
         raise EvaluationConfigurationError(f"schema_version must be {SCHEMA_VERSION}")
+    prompt_template = raw.get("prompt_template", "bot")
+    if (
+        not isinstance(prompt_template, str)
+        or prompt_template not in PROMPT_TEMPLATE_STOPS
+    ):
+        raise EvaluationConfigurationError(
+            "prompt_template must be one of: " + ", ".join(PROMPT_TEMPLATE_STOPS)
+        )
     weights = _string_array(raw["weights"], name="weights")
     benchmarks = _string_array(raw["benchmarks"], name="benchmarks")
     return EvaluationConfig(
         schema_version=SCHEMA_VERSION,
+        prompt_template=cast(PromptTemplate, prompt_template),
         weights=weights,
         benchmarks=benchmarks,
     )

@@ -133,6 +133,7 @@ def _publication(campaign_id: str, task: dict) -> dict:
             "weight_sha256": task["weight_sha256"],
             "weight_display_name": task["weight_display_name"],
             "wkv_mode": task["wkv_mode"],
+            "prompt_template": "assistant",
             "gemm_policy": (
                 "fp16-accumulation"
                 if task["wkv_mode"] == "fp16"
@@ -402,6 +403,29 @@ def test_contract_rejects_result_level_and_forged_diagnostics() -> None:
     payload["aggregates"][" invalid"] = 0.5
     with pytest.raises(ValidationError, match="native metric names"):
         TaskPublication.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("prompt_template", "stop"),
+    [
+        ("bot", "✿"),
+        ("assistant", "\nUser:"),
+        ("function_calling", "\n### User"),
+    ],
+)
+def test_contract_validates_each_prompt_template_stop(
+    prompt_template: str,
+    stop: str,
+) -> None:
+    payload = _publication(str(uuid.uuid4()), _expected(task_name="gsm8k|0"))
+    payload["model"]["prompt_template"] = prompt_template
+    payload["sampling_config"]["stop"] = [stop]
+    payload["details"][0]["model_response"]["text"][1] = f"<think>y</think>2{stop} bad"
+
+    publication = TaskPublication.model_validate(payload)
+
+    assert publication.model.prompt_template == prompt_template
+    assert publication.diagnostics.turn_boundary_violations == 1
 
 
 def test_contract_accepts_logprob_rows_with_output_token_evidence() -> None:

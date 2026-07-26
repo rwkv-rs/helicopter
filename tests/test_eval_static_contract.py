@@ -11,9 +11,10 @@ def test_eval_has_one_product_entrypoint_and_simple_selector_config() -> None:
     assert not list(ROOT.glob("src/**/lighteval/**/evaluate.py"))
 
     config = (source / "config.py").read_text(encoding="utf-8")
-    assert 'frozenset({"schema_version", "weights", "benchmarks"})' in config
+    assert '"prompt_template"' in config
     example = (ROOT / "configs/eval/lighteval.toml").read_text(encoding="utf-8")
     assert "schema_version = 1" in example
+    assert 'prompt_template = "bot"' in example
     assert "weights = [" in example
     assert "benchmarks = [" in example
     assert example.count('"rwkv7/pth/') == 2

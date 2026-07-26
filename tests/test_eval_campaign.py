@@ -25,7 +25,7 @@ from helicopter_eval.plan import build_plan
 from helicopter_eval.registry import RegistrySnapshot, RegistryTask
 
 
-def _plan(tmp_path: Path):
+def _plan(tmp_path: Path, *, prompt_template: str = "bot"):
     weight_path = tmp_path / "weight.pth"
     weight_path.write_bytes(b"weight")
     weight = WeightIdentity(
@@ -61,6 +61,7 @@ def _plan(tmp_path: Path):
             schema_version=1,
             weights=("weight.pth",),
             benchmarks=("gsm8k",),
+            prompt_template=prompt_template,
         ),
         (weight,),
         registry,
@@ -91,6 +92,15 @@ def test_resume_key_includes_resolved_weight_digest(tmp_path: Path) -> None:
 
     assert changed_weight_plan.config_digest == plan.config_digest
     assert campaign._resume_key(changed_weight_plan) != campaign._resume_key(plan)
+
+
+def test_prompt_template_changes_campaign_identity(tmp_path: Path) -> None:
+    bot = _plan(tmp_path, prompt_template="bot")
+    assistant = _plan(tmp_path, prompt_template="assistant")
+
+    assert bot.config_digest != assistant.config_digest
+    assert bot.eval_contract_digest != assistant.eval_contract_digest
+    assert campaign._resume_key(bot) != campaign._resume_key(assistant)
 
 
 def test_cleanup_only_removes_exact_campaign_child(tmp_path: Path) -> None:
@@ -483,6 +493,7 @@ def test_backend_commit_before_local_ack_recovers_without_recompute(
         on_runtime_started,
         on_runtime_finished,
     ):
+        assert unit.prompt_template == plan.prompt_template
         evaluated.append(unit.wkv_mode)
         runtime_dir = campaign_dir / "runtime" / unit.weight.sha256 / unit.wkv_mode
         on_runtime_started(runtime_dir)
@@ -622,6 +633,7 @@ def test_publication_failure_reuses_persisted_artifact_without_recompute(
         on_runtime_started,
         on_runtime_finished,
     ):
+        assert unit.prompt_template == plan.prompt_template
         evaluated.append(unit.wkv_mode)
         runtime_dir = campaign_dir / "runtime" / unit.weight.sha256 / unit.wkv_mode
         on_runtime_started(runtime_dir)

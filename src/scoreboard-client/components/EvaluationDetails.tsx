@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import type {
   AnswerOutcome,
+  PromptTemplate,
   SampleDetail,
   SamplePage,
 } from "../lib/evaluation_types";
@@ -56,7 +57,17 @@ function reference(doc: Record<string, unknown>): string {
   return "null";
 }
 
-function completionRows(sample: SampleDetail, limit: number) {
+const PROMPT_STOPS: Record<PromptTemplate, string> = {
+  bot: "✿",
+  assistant: "\nUser:",
+  function_calling: "\n### User",
+};
+
+function completionRows(
+  sample: SampleDetail,
+  limit: number,
+  turnBoundary: string,
+) {
   const raw = strings(sample.model_response.text);
   const processed = strings(sample.model_response.text_post_processed);
   const reasonings = reasoningRows(sample.model_response.reasonings);
@@ -74,13 +85,21 @@ function completionRows(sample: SampleDetail, limit: number) {
       answer: processed[index] ?? (split.length === 2 ? split[1] : null),
       tokens: tokens[index] ?? [],
       truncated: (tokens[index]?.length ?? 0) >= limit,
-      boundaryViolation: text.includes("\nUser:"),
+      boundaryViolation: text.includes(turnBoundary),
     };
   });
 }
 
-function SampleCard({ sample, limit }: { sample: SampleDetail; limit: number }) {
-  const completions = completionRows(sample, limit);
+function SampleCard({
+  sample,
+  limit,
+  turnBoundary,
+}: {
+  sample: SampleDetail;
+  limit: number;
+  turnBoundary: string;
+}) {
+  const completions = completionRows(sample, limit, turnBoundary);
   const logprobs = sample.model_response.logprobs;
   const argmax = sample.model_response.argmax_logits_eq_gold;
   const hasLogprobEvidence =
@@ -202,6 +221,7 @@ export function EvaluationDetails() {
         <span>campaign: {selected.campaign_id}</span>
         <span>selector: {selected.task.selector}</span>
         <span>module: {selected.task.module_family}</span>
+        <span>prompt template: {selected.model.prompt_template}</span>
         <span>
           official tags:{" "}
           {selected.task.upstream_tags.length
@@ -249,7 +269,12 @@ export function EvaluationDetails() {
       {error ? <p className="error-bar">加载失败：{error}</p> : null}
       {!page && !error ? <p>正在加载样本…</p> : null}
       {page?.items.map((sample) => (
-        <SampleCard key={sample.id} limit={outputLimit} sample={sample} />
+        <SampleCard
+          key={sample.id}
+          limit={outputLimit}
+          sample={sample}
+          turnBoundary={PROMPT_STOPS[selected.model.prompt_template]}
+        />
       ))}
       {page ? (
         <footer className="pager">

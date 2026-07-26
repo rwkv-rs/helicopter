@@ -1,4 +1,5 @@
 export type WkvMode = "fp16" | "fp32io16";
+export type PromptTemplate = "bot" | "assistant" | "function_calling";
 export type AnswerOutcome =
   | "correct"
   | "incorrect"
@@ -26,6 +27,7 @@ export interface ModelExecution {
   weight_sha256: string;
   weight_display_name: string;
   wkv_mode: WkvMode;
+  prompt_template: PromptTemplate;
   gemm_policy: string;
   gpu: string;
   max_num_seqs: number;

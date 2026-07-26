@@ -22,6 +22,7 @@
     "weight_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "weight_display_name": "shared-fixture.pth",
     "wkv_mode": "fp16",
+    "prompt_template": "assistant",
     "gemm_policy": "fp16-accumulation",
     "gpu": "CPU fixture",
     "max_num_seqs": 2560,

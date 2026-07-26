@@ -50,6 +50,7 @@ function evaluation(
       weight_sha256: sha,
       weight_display_name: weight,
       wkv_mode: mode,
+      prompt_template: "assistant",
       gemm_policy:
         mode === "fp16" ? "fp16-accumulation" : "fp32-accumulation",
       gpu: "NVIDIA RTX PRO 6000",
@@ -173,6 +174,7 @@ test("filters official tags and pages faithful multi-completion details", async 
 
   const details = page.getByRole("region", { name: "评估详情" });
   await expect(details.getByText("publisher audit: eval-worker")).toBeVisible();
+  await expect(details.getByText("prompt template: assistant")).toBeVisible();
   await expect(details.getByText("questions: 2 / 2")).toBeVisible();
   await expect(details.getByText("skipped multi-select: 0")).toBeVisible();
   await expect(details.getByText("completion 1")).toBeVisible();

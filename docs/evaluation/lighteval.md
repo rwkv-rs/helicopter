@@ -20,6 +20,8 @@ incomplete 并非零退出。
 
 ```toml
 schema_version = 1
+prompt_template = "bot"
+
 weights = [
   "rwkv7/model-a.pth",
   "rwkv7/model-b.pth",
@@ -32,6 +34,12 @@ benchmarks = [
   "ifeval",
 ]
 ```
+
+`prompt_template` 为整个 campaign 选择一种 vLLM-RWKV 官方模板，只接受
+`bot`、`assistant` 或 `function_calling`。模板同时决定 prompt 渲染和 turn stop：
+分别为 `✿`、`\nUser:` 与 `\n### User`；两者始终成对传递并随结果入库。
+省略时使用 vLLM-RWKV 官方默认值 `bot`。除原生 `PERPLEXITY` task 仍直接评估
+原始 query 外，LightEval task prompt 均使用该模板。
 
 `benchmarks` 是一个普通字符串数组。每个值直接是 LightEval task identity 或
 superset selector；没有显示名映射、family 对象、状态字段或第二份配置。

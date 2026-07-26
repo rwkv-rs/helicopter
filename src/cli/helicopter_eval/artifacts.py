@@ -6,6 +6,7 @@ import math
 from pathlib import Path
 from typing import Any
 
+from .config import PROMPT_TEMPLATE_STOPS
 from .manifest import ManifestError, validate_campaign_child
 from .plan import EvaluationShard, EvaluationUnit
 from .registry import RegistryTask
@@ -91,6 +92,7 @@ def _completion_diagnostics(
     rows: list[dict[str, Any]],
     *,
     effective_limit: int,
+    turn_boundary: str,
 ) -> dict[str, int | float]:
     completions = 0
     truncated = 0
@@ -125,7 +127,7 @@ def _completion_diagnostics(
             _validate_token_group(token_ids)
             completions += 1
             truncated += int(len(token_ids) >= effective_limit)
-            violations += int("\nUser:" in text)
+            violations += int(turn_boundary in text)
     return {
         "samples": len(rows),
         "completions": completions,
@@ -218,7 +220,11 @@ def _validate_loglikelihood_response(response: dict[str, Any]) -> None:
     )
 
 
-def _sampling_config(results: dict[str, Any]) -> dict[str, Any]:
+def _sampling_config(
+    results: dict[str, Any],
+    *,
+    prompt_template: object,
+) -> dict[str, Any]:
     try:
         config = results["config_general"]["model_config"]
         generation = config["generation_parameters"]
@@ -240,6 +246,11 @@ def _sampling_config(results: dict[str, Any]) -> dict[str, Any]:
         "ignore_eos": False,
         "seed": config.get("seed"),
     }
+    if (
+        not isinstance(prompt_template, str)
+        or prompt_template not in PROMPT_TEMPLATE_STOPS
+    ):
+        raise ArtifactError("model execution has an invalid prompt template")
     required = {
         "temperature": 0.96,
         "top_p": 0.76,
@@ -249,7 +260,7 @@ def _sampling_config(results: dict[str, Any]) -> dict[str, Any]:
         "backend_frequency_penalty": 0.0,
         "penalty_decay": 0.988,
         "max_new_tokens": 8192,
-        "stop": ["\nUser:"],
+        "stop": [PROMPT_TEMPLATE_STOPS[prompt_template]],
         "ignore_eos": False,
     }
     mismatched = [
@@ -274,6 +285,7 @@ def _validate_model_execution(
         "weight_sha256": unit.weight.sha256,
         "weight_display_name": unit.weight.display_name,
         "wkv_mode": unit.wkv_mode,
+        "prompt_template": unit.prompt_template,
         "gemm_policy": expected_gemm_policy,
     }
     mismatched = [
@@ -283,6 +295,8 @@ def _validate_model_execution(
         raise ArtifactError(
             "model execution does not match the planned unit: " + ", ".join(mismatched)
         )
+    if unit.prompt_template not in PROMPT_TEMPLATE_STOPS:
+        raise ArtifactError("planned unit has an invalid prompt template")
     for key in ("max_num_seqs", "max_num_batched_tokens"):
         value = model_execution.get(key)
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
@@ -384,6 +398,7 @@ def publications_from_shard(
     registry_tasks: tuple[RegistryTask, ...],
 ) -> list[tuple[str, dict[str, object], str]]:
     _validate_model_execution(model_execution, unit)
+    prompt_template = unit.prompt_template
     results, rows, result_file, detail_files = _standard_artifacts(shard_dir)
     raw_task_results = results.get("results")
     raw_task_configs = results.get("config_tasks")
@@ -466,7 +481,10 @@ def publications_from_shard(
                 f"split: {task_name}"
             )
         document_indices_by_task[task_name] = document_indices
-    sampling = _sampling_config(results)
+    sampling = _sampling_config(
+        results,
+        prompt_template=prompt_template,
+    )
     dependency_versions = model_execution.get("dependency_versions")
     lighteval_version = (
         dependency_versions.get("lighteval")
@@ -531,6 +549,7 @@ def publications_from_shard(
             "diagnostics": _completion_diagnostics(
                 task_rows,
                 effective_limit=_effective_limit(sampling, task_config),
+                turn_boundary=PROMPT_TEMPLATE_STOPS[prompt_template],
             ),
             "details": details,
         }

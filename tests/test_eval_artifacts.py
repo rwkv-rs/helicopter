@@ -42,6 +42,7 @@ def _unit(tmp_path: Path) -> tuple[EvaluationUnit, EvaluationShard]:
         ),
         "fp16",
         (shard,),
+        "assistant",
     )
     return unit, shard
 
@@ -108,6 +109,7 @@ def _model(unit: EvaluationUnit) -> dict[str, object]:
         "weight_sha256": unit.weight.sha256,
         "weight_display_name": unit.weight.display_name,
         "wkv_mode": unit.wkv_mode,
+        "prompt_template": "assistant",
         "gemm_policy": "fp16-accumulation",
         "gpu": "fixture",
         "max_num_seqs": 1280,
@@ -221,7 +223,12 @@ def test_standard_parser_accepts_only_registry_proven_superset_expansion(
         subset="Age",
     )
     shard = EvaluationShard("bbq:002-of-002", "bbq", (root_task,))
-    unit = EvaluationUnit(base_unit.weight, base_unit.wkv_mode, (shard,))
+    unit = EvaluationUnit(
+        base_unit.weight,
+        base_unit.wkv_mode,
+        (shard,),
+        base_unit.prompt_template,
+    )
     results, rows, result_path, detail_paths = _standard(tmp_path)
     native_aggregate = results["results"].pop("gsm8k|0")
     task_config = results["config_tasks"].pop("gsm8k|0")
@@ -539,6 +546,21 @@ def test_standard_parser_validates_sampling_and_model_execution_locally(
     with pytest.raises(
         artifacts.ArtifactError,
         match="planned unit: weight_sha256",
+    ):
+        artifacts.publications_from_shard(
+            shard_dir=tmp_path,
+            campaign_id="11111111-1111-1111-1111-111111111111",
+            unit=unit,
+            shard=shard,
+            model_execution=model_execution,
+            registry_tasks=shard.tasks,
+        )
+
+    model_execution = _model(unit)
+    model_execution["prompt_template"] = "bot"
+    with pytest.raises(
+        artifacts.ArtifactError,
+        match="planned unit: prompt_template",
     ):
         artifacts.publications_from_shard(
             shard_dir=tmp_path,

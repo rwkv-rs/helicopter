@@ -13,6 +13,12 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 AnswerOutcome = Literal["correct", "incorrect", "unanswered", "undetermined"]
 WkvMode = Literal["fp16", "fp32io16"]
+PromptTemplate = Literal["bot", "assistant", "function_calling"]
+PROMPT_TEMPLATE_STOPS: dict[str, str] = {
+    "bot": "✿",
+    "assistant": "\nUser:",
+    "function_calling": "\n### User",
+}
 
 
 class Contract(BaseModel):
@@ -173,6 +179,7 @@ class ModelExecution(Contract):
     weight_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     weight_display_name: str = Field(min_length=1, max_length=500)
     wkv_mode: WkvMode
+    prompt_template: PromptTemplate
     gemm_policy: Literal["fp16-accumulation", "fp32-accumulation"]
     gpu: str = Field(min_length=1, max_length=500)
     max_num_seqs: int = Field(gt=0)
@@ -323,7 +330,7 @@ class TaskPublication(Contract):
             "backend_frequency_penalty": 0.0,
             "penalty_decay": 0.988,
             "max_new_tokens": 8192,
-            "stop": ["\nUser:"],
+            "stop": [PROMPT_TEMPLATE_STOPS[self.model.prompt_template]],
             "ignore_eos": False,
         }
         mismatched = [
@@ -477,7 +484,9 @@ def compute_diagnostics(publication: TaskPublication) -> Diagnostics:
             _validate_token_group(tokens)
             completions += 1
             truncated += int(len(tokens) >= limit)
-            violations += int("\nUser:" in text)
+            violations += int(
+                PROMPT_TEMPLATE_STOPS[publication.model.prompt_template] in text
+            )
     return Diagnostics(
         samples=len(publication.details),
         completions=completions,

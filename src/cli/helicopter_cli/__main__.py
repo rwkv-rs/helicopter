@@ -75,7 +75,8 @@ def build_parser() -> argparse.ArgumentParser:
             "finalize one Scoreboard campaign."
         ),
         epilog=(
-            "Config keys: schema_version = 1, a non-empty weights array, and "
+            "Config keys: schema_version = 1, optional prompt_template set to "
+            "bot (the default), assistant, or function_calling, a non-empty weights array, and "
             "a non-empty benchmarks string array. Weight paths are relative "
             "to WEIGHT_PATH. Selectors absent from the locked LightEval release "
             "are reported as skipped. Sample limits, generation, WKV, shard, "
@@ -87,7 +88,10 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument(
         "--config",
         required=True,
-        help="TOML containing schema_version, weights, and benchmarks",
+        help=(
+            "TOML containing schema_version, optional prompt_template, weights, "
+            "and benchmarks"
+        ),
     )
     evaluate.add_argument(
         "--env-file",

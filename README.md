@@ -203,8 +203,10 @@ helicopter takeoff g1g-1.5b grpo \
 
 ### Run configured LightEval benchmarks
 
-The public TOML contains a schema version, weight paths, and a simple
-`benchmarks` string array of direct LightEval task/superset selectors:
+The public TOML contains a schema version, one campaign-wide vLLM-RWKV
+`prompt_template` (`bot`, `assistant`, or `function_calling`), weight paths,
+and a simple `benchmarks` string array of direct LightEval task/superset
+selectors. Omitting `prompt_template` uses the upstream `bot` default:
 
 ```bash
 helicopter eval \

@@ -8,6 +8,61 @@ import pytest
 from helicopter_eval import lighteval_adapter
 
 
+@pytest.mark.parametrize(
+    ("style", "name", "stop"),
+    [
+        ("bot", "\nBot✿", "✿"),
+        ("assistant", "\n\nAssistant: ", "\nUser:"),
+        ("function_calling", "\n### Assistant", "\n### User"),
+    ],
+)
+def test_official_prompt_templates_bind_rendering_and_stop(
+    style: str,
+    name: str,
+    stop: str,
+) -> None:
+    assert lighteval_adapter._official_prompt_template(style) == (name, stop)
+
+
+@pytest.mark.parametrize(
+    "prompt_template",
+    ["\nBot✿", "\n\nAssistant: ", "\n### Assistant"],
+)
+def test_model_prompt_manager_passes_campaign_template(
+    monkeypatch: pytest.MonkeyPatch,
+    prompt_template: str,
+) -> None:
+    types = lighteval_adapter._runtime_types()
+    _, _, Model, _, _ = lighteval_adapter._build_runtime_classes(types)
+    observed = {}
+
+    class Tokenizer:
+        def apply_chat_template(self, *args, **kwargs):
+            observed.update(args=args, kwargs=kwargs)
+            return "rendered"
+
+    def fake_model_init(self, _config):
+        self._tokenizer = Tokenizer()
+        self.prompt_manager = SimpleNamespace(tokenizer=self._tokenizer)
+
+    monkeypatch.setattr(types["VLLMModel"], "__init__", fake_model_init)
+    model = Model(
+        SimpleNamespace(
+            checkpoint_context_length=8192,
+            rwkv_prompt_template=prompt_template,
+        )
+    )
+
+    assert (
+        model.prompt_manager.tokenizer.apply_chat_template(
+            [{"role": "user", "content": "Question"}],
+            tokenize=False,
+        )
+        == "rendered"
+    )
+    assert observed["kwargs"]["rwkv_prompt_template"] == prompt_template
+
+
 def test_runtime_environment_is_restored_after_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -33,7 +88,7 @@ def test_evaluation_scopes_recurrent_total_length_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     observed: dict[str, str] = {}
-    unit = SimpleNamespace(weight=object(), wkv_mode="fp16")
+    unit = SimpleNamespace(weight=object(), wkv_mode="fp16", prompt_template="bot")
     monkeypatch.setenv("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "before")
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
     monkeypatch.setattr(
@@ -293,6 +348,8 @@ def test_generation_contract_maps_logical_penalty_once() -> None:
         model_name="model",
         wkv_mode="fp16",
         checkpoint_context_length=8192,
+        rwkv_prompt_template="\nBot✿",
+        rwkv_stop_sequence="✿",
         generation_parameters=parameters,
     )
     assert config.max_num_seqs is None
@@ -325,7 +382,10 @@ def test_pipeline_uses_registry_only_cache_during_construction(
         model._cache._init_registry(object())
 
     monkeypatch.setattr(types["Pipeline"], "__init__", fake_init)
-    model = SimpleNamespace(_cache=None)
+    model = SimpleNamespace(
+        _cache=None,
+        config=SimpleNamespace(rwkv_stop_sequence="\nUser:"),
+    )
     Pipeline(
         tasks="task|0",
         pipeline_parameters=object(),
@@ -424,7 +484,7 @@ def test_generation_keeps_doc_stop_while_reusing_chat_prompt_manager(
     )
     model = object.__new__(Model)
     model.use_chat_template = True
-    docs = [SimpleNamespace(stop_sequences=[lighteval_adapter.STOP_SEQUENCE])]
+    docs = [SimpleNamespace(stop_sequences=["\nUser:"])]
 
     assert model._greedy_until(docs) is docs
     assert observed == [False]
@@ -490,6 +550,7 @@ def test_mixed_choice_docs_preserve_native_metric_names_and_aggregator(
         sampling_methods=[sampling.LOGPROBS],
     )
     pipeline = object.__new__(Pipeline)
+    pipeline._rwkv_stop_sequence = "\nUser:"
     pipeline.tasks_dict = {"mixed|0": task}
     pipeline.documents_dict = {"mixed|0": [eligible, ineligible]}
     pipeline.sampling_docs = collections.defaultdict(list)
@@ -514,7 +575,7 @@ def test_mixed_choice_docs_preserve_native_metric_names_and_aggregator(
     assert pipeline.sampling_docs[sampling.GENERATIVE] == [eligible]
     assert pipeline.sampling_docs[sampling.LOGPROBS] == [ineligible]
     assert eligible.generation_size == lighteval_adapter.MAX_NEW_TOKENS
-    assert eligible.stop_sequences == [lighteval_adapter.STOP_SEQUENCE]
+    assert eligible.stop_sequences == ["\nUser:"]
 
 
 def test_singleton_gold_index_list_is_a_uniquely_resolved_choice(
@@ -556,6 +617,7 @@ def test_singleton_gold_index_list_is_a_uniquely_resolved_choice(
         sampling_methods=[sampling.LOGPROBS],
     )
     pipeline = object.__new__(Pipeline)
+    pipeline._rwkv_stop_sequence = "\nUser:"
     pipeline.tasks_dict = {task.full_name: task}
     pipeline.documents_dict = {task.full_name: [document]}
     pipeline.sampling_docs = collections.defaultdict(list)
@@ -619,6 +681,7 @@ def test_multiselect_choice_documents_are_skipped_and_counted(
         sampling_methods=[sampling.LOGPROBS],
     )
     pipeline = object.__new__(Pipeline)
+    pipeline._rwkv_stop_sequence = "\nUser:"
     pipeline.tasks_dict = {task.full_name: task}
     pipeline.documents_dict = {task.full_name: [single_choice, multiselect]}
     pipeline.sampling_docs = collections.defaultdict(list)
@@ -683,6 +746,7 @@ def test_choice_conversion_does_not_replace_native_generative_semantics(
         sampling_methods=[sampling.LOGPROBS, sampling.GENERATIVE],
     )
     pipeline = object.__new__(Pipeline)
+    pipeline._rwkv_stop_sequence = "\nUser:"
     pipeline.tasks_dict = {task.full_name: task}
     pipeline.documents_dict = {task.full_name: [document]}
     pipeline.sampling_docs = collections.defaultdict(list)
@@ -755,6 +819,7 @@ def test_choice_conversion_does_not_add_metrics_to_mixed_generative_task(
         sampling_methods=[sampling.LOGPROBS, sampling.GENERATIVE],
     )
     pipeline = object.__new__(Pipeline)
+    pipeline._rwkv_stop_sequence = "\nUser:"
     pipeline.tasks_dict = {task.full_name: task}
     pipeline.documents_dict = {task.full_name: [choice, generative]}
     pipeline.sampling_docs = collections.defaultdict(list)
@@ -771,4 +836,4 @@ def test_choice_conversion_does_not_add_metrics_to_mixed_generative_task(
     assert pipeline.sampling_docs[sampling.LOGPROBS] == [choice]
     assert pipeline.sampling_docs[sampling.GENERATIVE] == [generative]
     assert generative.generation_size == lighteval_adapter.MAX_NEW_TOKENS
-    assert generative.stop_sequences == [lighteval_adapter.STOP_SEQUENCE]
+    assert generative.stop_sequences == ["\nUser:"]

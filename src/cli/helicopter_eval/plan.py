@@ -6,13 +6,13 @@ import json
 from itertools import groupby
 from pathlib import Path
 
-from .config import EvaluationConfig, WeightIdentity
+from .config import EvaluationConfig, PromptTemplate, WeightIdentity
 from .registry import RegistrySnapshot, RegistryTask
 
 
 WKV_MODES = ("fp16", "fp32io16")
 MAX_TASKS_PER_SHARD = 1
-EVAL_CONTRACT_VERSION = "lighteval-configured-selectors-v1"
+EVAL_CONTRACT_VERSION = "lighteval-configured-selectors-v2"
 _VLLM_CONTRACT_FILES = (
     "vllm/config/model.py",
     "vllm/engine/arg_utils.py",
@@ -45,6 +45,7 @@ class EvaluationUnit:
     weight: WeightIdentity
     wkv_mode: str
     shards: tuple[EvaluationShard, ...]
+    prompt_template: PromptTemplate = "bot"
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,7 @@ class EvaluationPlan:
     config_digest: str
     implementation_digest: str
     eval_contract_digest: str
+    prompt_template: PromptTemplate
     registry: RegistrySnapshot
     units: tuple[EvaluationUnit, ...]
 
@@ -112,6 +114,7 @@ def build_plan(
 ) -> EvaluationPlan:
     config_public = {
         "schema_version": config.schema_version,
+        "prompt_template": config.prompt_template,
         "benchmarks": config.benchmarks,
         "weights": [
             {"configured_path": weight.configured_path, "sha256": weight.sha256}
@@ -141,6 +144,7 @@ def build_plan(
             "window": "checkpoint-context-minus-context-and-dummy-token",
         },
         "generation": {
+            "prompt_template": config.prompt_template,
             "temperature": 0.96,
             "top_p": 0.76,
             "top_k": 32,
@@ -149,7 +153,7 @@ def build_plan(
             "backend_frequency_penalty": 0.0,
             "penalty_decay": 0.988,
             "max_new_tokens": 8192,
-            "stop": ["\nUser:"],
+            "stop": "vllm-rwkv-prompt-template-owned",
             "ignore_eos": False,
         },
     }
@@ -158,7 +162,12 @@ def build_plan(
     ).hexdigest()
     shards = build_shards(registry)
     units = tuple(
-        EvaluationUnit(weight=weight, wkv_mode=mode, shards=shards)
+        EvaluationUnit(
+            weight=weight,
+            wkv_mode=mode,
+            shards=shards,
+            prompt_template=config.prompt_template,
+        )
         for weight in weights
         for mode in WKV_MODES
     )
@@ -166,6 +175,7 @@ def build_plan(
         config_digest=config_digest,
         implementation_digest=implementation_digest,
         eval_contract_digest=eval_contract_digest,
+        prompt_template=config.prompt_template,
         registry=registry,
         units=units,
     )
@@ -176,6 +186,7 @@ def public_plan(plan: EvaluationPlan) -> dict[str, object]:
         "config_digest": plan.config_digest,
         "implementation_digest": plan.implementation_digest,
         "eval_contract_digest": plan.eval_contract_digest,
+        "prompt_template": plan.prompt_template,
         "registry": {
             "lighteval_version": plan.registry.lighteval_version,
             "task_count": len(plan.registry.tasks),
@@ -213,6 +224,7 @@ def public_plan(plan: EvaluationPlan) -> dict[str, object]:
                 "display_name": unit.weight.display_name,
                 "sha256": unit.weight.sha256,
                 "wkv_mode": unit.wkv_mode,
+                "prompt_template": unit.prompt_template,
                 "shard_count": len(unit.shards),
                 "task_count": sum(len(shard.tasks) for shard in unit.shards),
             }

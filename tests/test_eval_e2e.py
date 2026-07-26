@@ -114,6 +114,7 @@ async def test_standard_artifact_to_database_query_contract(
             schema_version=1,
             weights=(weight_path.name,),
             benchmarks=(task.selector,),
+            prompt_template="assistant",
         ),
         (weight,),
         registry,

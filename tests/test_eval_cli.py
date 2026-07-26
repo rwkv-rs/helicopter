@@ -87,6 +87,7 @@ def test_config_accepts_schema_weights_and_benchmarks(tmp_path: Path) -> None:
     config = load_evaluation_config(path)
     assert config.weights == ("a.pth", "nested/b.pth")
     assert config.benchmarks == ("mmlu", "gsm8k")
+    assert config.prompt_template == "bot"
 
     for field in ("tasks", "exclude", "max_samples", "wkv_mode"):
         path.write_text(
@@ -96,6 +97,26 @@ def test_config_accepts_schema_weights_and_benchmarks(tmp_path: Path) -> None:
         )
         with pytest.raises(EvaluationConfigurationError, match="unknown"):
             load_evaluation_config(path)
+
+
+@pytest.mark.parametrize(
+    "prompt_template",
+    ["bot", "assistant", "function_calling"],
+)
+def test_config_accepts_vllm_rwkv_prompt_templates(
+    tmp_path: Path,
+    prompt_template: str,
+) -> None:
+    config = load_evaluation_config(
+        _config(
+            tmp_path,
+            f'prompt_template = "{prompt_template}"\n'
+            'schema_version = 1\nweights = ["a.pth"]\n'
+            'benchmarks = ["gsm8k"]\n',
+        )
+    )
+
+    assert config.prompt_template == prompt_template
 
 
 @pytest.mark.parametrize(
@@ -130,6 +151,11 @@ def test_config_accepts_schema_weights_and_benchmarks(tmp_path: Path) -> None:
             "schema_version = 1\nweights = ['a.pth']\n"
             "benchmarks = ['gsm8k', 'gsm8k']\n",
             "duplicate benchmarks",
+        ),
+        (
+            "schema_version = 1\nprompt_template = 'unknown'\n"
+            "weights = ['a.pth']\nbenchmarks = ['gsm8k']\n",
+            "prompt_template",
         ),
     ],
 )
