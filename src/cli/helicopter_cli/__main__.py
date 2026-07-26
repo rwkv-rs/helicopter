@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import os
+import stat
+from pathlib import Path
 
 from .commands import (
     EMB_DEVICES,
@@ -10,7 +13,7 @@ from .commands import (
     prepend_venv_path,
 )
 from .config import load_config
-from .env import DEFAULT_ENV_FILE, load_env
+from .env import DEFAULT_ENV_FILE, find_env_path, load_env
 from .paths import find_root
 from .runner import run_command
 
@@ -63,6 +66,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     takeoff.set_defaults(plan_builder=build_takeoff_plan)
 
+    evaluate = subparsers.add_parser(
+        "eval",
+        help="run configured LightEval benchmarks",
+    )
+    evaluate.add_argument("--config", required=True, help="LightEval TOML")
+    evaluate.add_argument(
+        "--env-file",
+        default=DEFAULT_ENV_FILE,
+        help="private dotenv file; defaults to .env.local",
+    )
+    evaluate.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="validate, resolve selectors, and print a redacted plan",
+    )
+
     return parser
 
 
@@ -70,6 +89,65 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     root = find_root()
+    if args.command == "eval":
+        env_path = find_env_path(root, args.env_file, use_fallbacks=False)
+        if env_path is not None:
+            try:
+                env_status = env_path.lstat()
+            except OSError as error:
+                parser.error(f"cannot inspect eval private environment file: {error}")
+            if (
+                not stat.S_ISREG(env_status.st_mode)
+                or stat.S_IMODE(env_status.st_mode) != 0o600
+                or env_status.st_uid != os.geteuid()
+            ):
+                parser.error(
+                    "eval private environment file must be owned by the current "
+                    "user, have mode 0600, and be a regular non-symlink file: "
+                    f"{env_path}"
+                )
+        try:
+            eval_env, _ = load_env(
+                root,
+                args.env_file,
+                use_fallbacks=False,
+                require_private=True,
+            )
+        except (OSError, UnicodeError) as error:
+            parser.error(f"cannot securely read eval private environment file: {error}")
+        config_path = Path(args.config).expanduser()
+        if not config_path.is_absolute():
+            config_path = Path.cwd() / config_path
+        configured_python = eval_env.get("HELICOPTER_EVAL_PYTHON")
+        eval_python = (
+            Path(configured_python).expanduser()
+            if configured_python
+            else root / ".venv-lighteval/bin/python"
+        )
+        if not eval_python.is_absolute():
+            eval_python = root / eval_python
+        if not os.access(eval_python, os.X_OK):
+            parser.error(
+                f"LightEval Python executable not found: {eval_python}; "
+                "prepare the lighteval component"
+            )
+        command = [
+            str(eval_python),
+            "-m",
+            "helicopter_lighteval",
+            "--config",
+            str(config_path),
+        ]
+        if args.dry_run:
+            command.append("--dry-run")
+        return run_command(
+            command,
+            cwd=root,
+            env=eval_env,
+            shown_env={},
+            dry_run=False,
+        )
+
     env, _ = load_env(root, args.env_file)
     prepend_venv_path(env, root)
 

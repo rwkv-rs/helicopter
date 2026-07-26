@@ -84,6 +84,25 @@ class DotenvTests(unittest.TestCase):
             self.assertEqual(loaded["WEIGHT_PATH"], "/from-env")
 
 
+class EvaluationCliTests(unittest.TestCase):
+    def test_eval_accepts_config_env_file_and_dry_run(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "eval",
+                "--config",
+                "configs/eval/maxrl_math.toml",
+                "--env-file",
+                ".env.remote",
+                "--dry-run",
+            ]
+        )
+
+        self.assertEqual(args.command, "eval")
+        self.assertEqual(args.config, "configs/eval/maxrl_math.toml")
+        self.assertEqual(args.env_file, ".env.remote")
+        self.assertTrue(args.dry_run)
+
+
 class InferPlanTests(unittest.TestCase):
     def test_example_config_builds_vllm_command(self) -> None:
         loaded, _ = config.load_config(ROOT, str(EXAMPLE_CONFIG))
@@ -267,6 +286,7 @@ class TakeoffPlanTests(unittest.TestCase):
         )
         self.assertEqual(plan.env["RWKV_LM_PATH"], str(root / "src/train/rwkv-lm"))
         self.assertEqual(plan.env["PYTHONPATH"], str(root / "src/infer/vllm-rwkv"))
+        self.assertEqual(plan.env["HELICOPTER_PRODUCT_ROOT"], str(root))
         self.assertFalse(any("data.train_batch_size=" in item for item in plan.command))
 
 

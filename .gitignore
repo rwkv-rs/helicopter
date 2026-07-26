@@ -14,6 +14,7 @@ __pycache__/
 htmlcov/
 
 .venv/
+.venv-lighteval/
 venv/
 env/
 .uv/

@@ -12,6 +12,16 @@ dependencies = []
 helicopter = "helicopter_cli.__main__:main"
 
 [dependency-groups]
+lighteval = [
+  { include-group = "vllm-rwkv" },
+  "httpx[socks]",
+  "langcodes[data]",
+  "lighteval[extended-tasks,math,multilingual]==0.13.0",
+  "more-itertools",
+  "pyarrow>=19.0.0",
+  "ray",
+]
+
 vllm-rwkv = [
   "aiohttp>=3.13.3",
   "blake3",
@@ -95,8 +105,8 @@ rwkv-lm = [
 
 dev = [
   "pre-commit",
+  "pyarrow>=19.0.0",
   "pytest",
-  "pytest-asyncio",
 ]
 
 test = [
@@ -112,7 +122,19 @@ verl-liger = [
 [tool.uv]
 package = true
 default-groups = []
+conflicts = [
+  [
+    { group = "lighteval" },
+    { group = "verl-rwkv" },
+  ],
+]
 
-[tool.setuptools.packages.find]
-where = ["src/cli"]
-include = ["helicopter_cli*"]
+[tool.setuptools]
+packages = ["helicopter_cli", "helicopter_lighteval"]
+
+[tool.setuptools.package-dir]
+helicopter_cli = "src/cli/helicopter_cli"
+helicopter_lighteval = "src/eval/lighteval"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

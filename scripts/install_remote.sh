@@ -56,7 +56,7 @@ REMOTE_SSH_HOST="${REMOTE_SSH_HOST:-$REMOTE_WORKSPACE_ID.devpod}"
 REMOTE_ROOT="${REMOTE_ROOT:-/workspace/Projects/MachineLearning/helicopter}"
 REMOTE_VENV="${REMOTE_VENV:-$REMOTE_ROOT/.venv}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
-INSTALL_COMPONENTS="${INSTALL_COMPONENTS:-rwkv-lm,vllm-rwkv,verl-rwkv,dev}"
+INSTALL_COMPONENTS="${INSTALL_COMPONENTS:-rwkv-lm,vllm-rwkv,verl-rwkv,lighteval,dev}"
 UPDATE_UV="${UPDATE_UV:-0}"
 UV_UPGRADE="${UV_UPGRADE:-0}"
 RUN_PIP_CHECK="${RUN_PIP_CHECK:-1}"
@@ -104,15 +104,24 @@ validate_install_components() {
   ((${#components[@]} > 0)) || die "INSTALL_COMPONENTS must select at least one dependency group"
   for component in "${components[@]}"; do
     case "$component" in
-      dev | vllm-rwkv | verl-rwkv | rwkv-lm | verl-liger) ;;
+      dev | vllm-rwkv | verl-rwkv | rwkv-lm | verl-liger | lighteval | scoreboard-server | scoreboard-client) ;;
       full)
         die "INSTALL_COMPONENTS=full is disabled; select explicit dependency groups"
         ;;
       *)
-        die "unknown INSTALL_COMPONENTS entry '$component'; use a comma-separated subset of dev,vllm-rwkv,verl-rwkv,rwkv-lm,verl-liger"
+        die "unknown INSTALL_COMPONENTS entry '$component'; use a comma-separated subset of dev,vllm-rwkv,verl-rwkv,rwkv-lm,verl-liger,lighteval,scoreboard-server,scoreboard-client"
         ;;
     esac
   done
+}
+
+validate_uv_upgrade() {
+  case "$UV_UPGRADE" in
+    0 | lock | 1) ;;
+    *)
+      die "UV_UPGRADE=$UV_UPGRADE is invalid; use 0 for locked sync, lock to refresh lockfiles without a broad upgrade, or 1 for a broad upgrade"
+      ;;
+  esac
 }
 
 case "${INSTALL_PROFILE:-}" in
@@ -128,6 +137,7 @@ esac
 [[ "$VLLM_BUILD_PROFILE" == "rwkv" ]] ||
   die "VLLM_BUILD_PROFILE=$VLLM_BUILD_PROFILE is disabled; only rwkv is supported"
 validate_install_components
+validate_uv_upgrade
 
 have() {
   command -v "$1" >/dev/null 2>&1
@@ -265,6 +275,7 @@ sync_remote_repo() {
     --exclude '.git/' \
     --exclude '.git' \
     --exclude '.venv/' \
+    --exclude '.venv-lighteval/' \
     --exclude '.env' \
     --exclude '.env.local' \
     --exclude '__pycache__/' \

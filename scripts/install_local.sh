@@ -4,11 +4,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
 VENV="${VENV:-$ROOT/.venv}"
+EVAL_VENV="${EVAL_VENV:-$ROOT/.venv-lighteval}"
 UV="${UV:-uv}"
-INSTALL_COMPONENTS="${INSTALL_COMPONENTS:-rwkv-lm,vllm-rwkv,verl-rwkv,dev}"
+INSTALL_COMPONENTS="${INSTALL_COMPONENTS:-rwkv-lm,vllm-rwkv,verl-rwkv,lighteval,dev}"
 INSTALL_SYSTEM_DEPS="${INSTALL_SYSTEM_DEPS:-0}"
-UPDATE_UV="${UPDATE_UV:-1}"
-UV_UPGRADE="${UV_UPGRADE:-1}"
+UPDATE_UV="${UPDATE_UV:-0}"
+UV_UPGRADE="${UV_UPGRADE:-0}"
 RUN_PIP_CHECK="${RUN_PIP_CHECK:-1}"
 UV_SYNC_INEXACT="${UV_SYNC_INEXACT:-1}"
 CLEAN_SUBMODULE_VENVS="${CLEAN_SUBMODULE_VENVS:-1}"
@@ -24,14 +25,21 @@ UV_INDEX_URL="${UV_INDEX_URL:-${PYPI_INDEX_URL:-}}"
 HF_ENDPOINT="${HF_ENDPOINT:-}"
 CARGO_REGISTRY_MIRROR="${CARGO_REGISTRY_MIRROR:-}"
 CARGO_REGISTRY_MIRROR_NAME="${CARGO_REGISTRY_MIRROR_NAME:-rsproxy-sparse}"
+BUN_VERSION="1.3.14"
+BUN_LINUX_X64_SHA256="951ee2aee855f08595aeec6225226a298d3fea83a3dcd6465c09cbccdf7e848f"
+BUN_LINUX_AARCH64_SHA256="a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b"
 
 export VLLM_BUILD_PROFILE
 
 VLLM="$ROOT/src/infer/vllm-rwkv"
 RWKV_LM="$ROOT/src/train/rwkv-lm"
 VERL="$ROOT/src/train/verl-rwkv"
+SCOREBOARD_SERVER="$ROOT/src/scoreboard-server"
+SCOREBOARD_CLIENT="$ROOT/src/scoreboard-client"
 STAMP_DIR="$VENV/.helicopter-stamps"
 VLLM_STAMP="$STAMP_DIR/vllm-native.sha256"
+EVAL_STAMP_DIR="$EVAL_VENV/.helicopter-stamps"
+EVAL_VLLM_STAMP="$EVAL_STAMP_DIR/vllm-native.sha256"
 
 export PATH="$VENV/bin:$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 
@@ -72,19 +80,52 @@ validate_install_components() {
   ((${#components[@]} > 0)) || die "INSTALL_COMPONENTS must select at least one dependency group"
   for component in "${components[@]}"; do
     case "$component" in
-      dev | vllm-rwkv | verl-rwkv | rwkv-lm | verl-liger) ;;
+      dev | vllm-rwkv | verl-rwkv | rwkv-lm | verl-liger | lighteval | scoreboard-server | scoreboard-client) ;;
       full)
         die "INSTALL_COMPONENTS=full is disabled; select explicit dependency groups"
         ;;
       *)
-        die "unknown INSTALL_COMPONENTS entry '$component'; use a comma-separated subset of dev,vllm-rwkv,verl-rwkv,rwkv-lm,verl-liger"
+        die "unknown INSTALL_COMPONENTS entry '$component'; use a comma-separated subset of dev,vllm-rwkv,verl-rwkv,rwkv-lm,verl-liger,lighteval,scoreboard-server,scoreboard-client"
         ;;
     esac
   done
 }
 
+validate_uv_upgrade() {
+  case "$UV_UPGRADE" in
+    0 | lock | 1) ;;
+    *)
+      die "UV_UPGRADE=$UV_UPGRADE is invalid; use 0 for locked sync, lock to refresh lockfiles without a broad upgrade, or 1 for a broad upgrade"
+      ;;
+  esac
+}
+
+append_uv_sync_policy() {
+  local -n sync_args_ref="$1"
+  case "$UV_UPGRADE" in
+    0) sync_args_ref+=(--locked) ;;
+    lock) ;;
+    1) sync_args_ref+=(--upgrade) ;;
+  esac
+}
+
 native_component_enabled() {
-  component_enabled vllm-rwkv || component_enabled verl-rwkv || component_enabled rwkv-lm
+  component_enabled vllm-rwkv || component_enabled verl-rwkv ||
+    component_enabled rwkv-lm || component_enabled lighteval
+}
+
+vllm_package_enabled() {
+  component_enabled vllm-rwkv
+}
+
+python_component_enabled() {
+  local component
+  local -a components=()
+  IFS=, read -r -a components <<<"$INSTALL_COMPONENTS"
+  for component in "${components[@]}"; do
+    [[ "$component" == "scoreboard-client" ]] || return 0
+  done
+  return 1
 }
 
 case "${INSTALL_PROFILE:-}" in
@@ -100,6 +141,7 @@ esac
 [[ "$VLLM_BUILD_PROFILE" == "rwkv" ]] ||
   die "VLLM_BUILD_PROFILE=$VLLM_BUILD_PROFILE is disabled; only rwkv is supported"
 validate_install_components
+validate_uv_upgrade
 
 warn() {
   echo "warning: $*" >&2
@@ -132,6 +174,8 @@ configure_build_dirs() {
       BUILD_TMPDIR="$ROOT/$BUILD_TMPDIR"
     fi
     mkdir -p "$BUILD_TMPDIR"
+    BUILD_TMPDIR="$(cd "$BUILD_TMPDIR" && pwd -P)"
+    [[ -w "$BUILD_TMPDIR" ]] || die "BUILD_TMPDIR is not writable: $BUILD_TMPDIR"
     export TMPDIR="$BUILD_TMPDIR"
   fi
 }
@@ -173,6 +217,57 @@ ensure_uv() {
   if [[ "$UPDATE_UV" == "1" ]]; then
     run "$UV" self update || warn "uv self update failed; continuing with installed uv"
   fi
+}
+
+ensure_bun() {
+  component_enabled scoreboard-client || return 0
+  if [[ -x "$VENV/bin/bun" ]] &&
+    [[ "$("$VENV/bin/bun" --version)" == "$BUN_VERSION" ]]; then
+    return 0
+  fi
+  have curl || die "curl is required to install Bun $BUN_VERSION"
+  have sha256sum || die "sha256sum is required to verify Bun $BUN_VERSION"
+  [[ -x "$VENV/bin/python" ]] ||
+    die "workspace Python is required before installing Bun"
+
+  local architecture archive_name expected_sha256 download_url
+  case "$(uname -m)" in
+    x86_64)
+      architecture="x64"
+      expected_sha256="$BUN_LINUX_X64_SHA256"
+      ;;
+    aarch64 | arm64)
+      architecture="aarch64"
+      expected_sha256="$BUN_LINUX_AARCH64_SHA256"
+      ;;
+    *)
+      die "Bun $BUN_VERSION is not pinned for architecture $(uname -m)"
+      ;;
+  esac
+  archive_name="bun-linux-$architecture.zip"
+  download_url="https://github.com/oven-sh/bun/releases/download/bun-v$BUN_VERSION/$archive_name"
+
+  local temporary_root archive extracted binary actual_sha256
+  temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/helicopter-bun.XXXXXX")"
+  archive="$temporary_root/$archive_name"
+  extracted="$temporary_root/extracted"
+  run curl --fail --location --retry 3 --output "$archive" "$download_url"
+  actual_sha256="$(sha256sum "$archive" | awk '{print $1}')"
+  if [[ "$actual_sha256" != "$expected_sha256" ]]; then
+    rm -rf -- "$temporary_root"
+    die "Bun $BUN_VERSION SHA-256 mismatch for $archive_name"
+  fi
+  mkdir -p "$extracted"
+  run "$VENV/bin/python" -m zipfile -e "$archive" "$extracted"
+  binary="$extracted/bun-linux-$architecture/bun"
+  [[ -f "$binary" && ! -L "$binary" ]] || {
+    rm -rf -- "$temporary_root"
+    die "Bun $BUN_VERSION archive does not contain the expected binary"
+  }
+  run install -m 0755 "$binary" "$VENV/bin/bun"
+  rm -rf -- "$temporary_root"
+  [[ "$("$VENV/bin/bun" --version)" == "$BUN_VERSION" ]] ||
+    die "installed Bun version does not match $BUN_VERSION"
 }
 
 install_system_deps() {
@@ -244,10 +339,14 @@ configure_cuda_arch_list() {
   native_component_enabled || return 0
   [[ "$VLLM_TARGET_DEVICE" == "cuda" ]] || return 0
   [[ -z "${TORCH_CUDA_ARCH_LIST:-}" ]] || return 0
-  [[ -x "$VENV/bin/python" ]] || return 0
+  local runtime_venv="$VENV"
+  if ! vllm_package_enabled && component_enabled lighteval; then
+    runtime_venv="$EVAL_VENV"
+  fi
+  [[ -x "$runtime_venv/bin/python" ]] || return 0
 
   local arch_list
-  arch_list="$("$VENV/bin/python" - <<'PY'
+  arch_list="$("$runtime_venv/bin/python" - <<'PY'
 import torch
 
 if not torch.cuda.is_available() or torch.cuda.device_count() == 0:
@@ -275,25 +374,89 @@ sync_uv_env() {
   [[ -n "$UV_INDEX_URL" ]] && sync_args+=(--index-url "$UV_INDEX_URL")
   [[ "$UV_SYNC_INEXACT" == "1" ]] && sync_args+=(--inexact)
   sync_args+=(--project "$ROOT" --python "$PYTHON_VERSION" --no-default-groups)
-  [[ "$UV_UPGRADE" == "1" ]] && sync_args+=(--upgrade)
+  append_uv_sync_policy sync_args
 
   local component
   local -a components=()
   IFS=, read -r -a components <<<"$INSTALL_COMPONENTS"
   for component in "${components[@]}"; do
-    sync_args+=(--group "$component")
+    case "$component" in
+      lighteval | scoreboard-server | scoreboard-client) ;;
+      *) sync_args+=(--group "$component") ;;
+    esac
   done
 
   run "$UV" "${sync_args[@]}"
 }
 
+sync_lighteval_env() {
+  component_enabled lighteval || return 0
+  if [[ ! -x "$EVAL_VENV/bin/python" ]]; then
+    run "$UV" venv --allow-existing --python "$PYTHON_VERSION" "$EVAL_VENV"
+  fi
+
+  local sync_args=(
+    sync
+    --project "$ROOT"
+    --active
+    --inexact
+    --no-default-groups
+    --group lighteval
+  )
+  append_uv_sync_policy sync_args
+  [[ -n "$UV_INDEX_URL" ]] && sync_args+=(--index-url "$UV_INDEX_URL")
+  run env VIRTUAL_ENV="$EVAL_VENV" "$UV" "${sync_args[@]}"
+}
+
+sync_scoreboard_server() {
+  component_enabled scoreboard-server || return 0
+  [[ -f "$SCOREBOARD_SERVER/uv.lock" ]] ||
+    die "Scoreboard server lock is missing: $SCOREBOARD_SERVER/uv.lock"
+
+  local sync_args=(
+    sync
+    --project "$SCOREBOARD_SERVER"
+    --active
+    --inexact
+    --no-default-groups
+    --group dev
+  )
+  append_uv_sync_policy sync_args
+  [[ -n "$UV_INDEX_URL" ]] && sync_args+=(--index-url "$UV_INDEX_URL")
+  run env VIRTUAL_ENV="$VENV" "$UV" "${sync_args[@]}"
+}
+
+sync_scoreboard_client() {
+  component_enabled scoreboard-client || return 0
+  [[ -f "$SCOREBOARD_CLIENT/package.json" ]] ||
+    die "Scoreboard client package.json is missing"
+  [[ -f "$SCOREBOARD_CLIENT/bun.lock" ]] ||
+    die "Scoreboard client lock is missing"
+
+  local install_args=(install --cwd "$SCOREBOARD_CLIENT")
+  [[ "$UV_UPGRADE" == "0" ]] && install_args+=(--frozen-lockfile)
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    print_cmd "$VENV/bin/bun" "${install_args[@]}"
+    print_cmd env \
+      PLAYWRIGHT_BROWSERS_PATH="$VENV/playwright-browsers" \
+      "$VENV/bin/bun" run --cwd "$SCOREBOARD_CLIENT" playwright install chromium
+    return 0
+  fi
+  ensure_bun
+  run "$VENV/bin/bun" "${install_args[@]}"
+  run env \
+    PLAYWRIGHT_BROWSERS_PATH="$VENV/playwright-browsers" \
+    "$VENV/bin/bun" run --cwd "$SCOREBOARD_CLIENT" playwright install chromium
+}
+
 vllm_native_fingerprint() {
+  local target_venv="${1:-$VENV}"
   {
     printf 'VLLM_TARGET_DEVICE=%s\n' "$VLLM_TARGET_DEVICE"
     printf 'VLLM_VERSION_OVERRIDE=%s\n' "$VLLM_VERSION_OVERRIDE"
     printf 'CMAKE_BUILD_TYPE=%s\n' "$CMAKE_BUILD_TYPE"
     printf 'TORCH_CUDA_ARCH_LIST=%s\n' "${TORCH_CUDA_ARCH_LIST:-}"
-    "$VENV/bin/python" - <<'PY'
+    "$target_venv/bin/python" - <<'PY'
 import platform
 import sys
 
@@ -312,10 +475,11 @@ PY
 }
 
 vllm_native_ready() {
+  local target_venv="${1:-$VENV}"
   local -a modules=(vllm._C_stable_libtorch vllm.rwkv7_ops)
   [[ "$VLLM_BUILD_PROFILE" == "rwkv" ]] &&
     modules=(vllm._rapid_sampling vllm.rwkv7_ops)
-  "$VENV/bin/python" - "${modules[@]}" <<'PY' >/dev/null
+  "$target_venv/bin/python" - "${modules[@]}" <<'PY' >/dev/null
 import importlib
 import sys
 
@@ -333,17 +497,29 @@ PY
 }
 
 install_vllm_package() {
+  local target_venv="${1:-$VENV}"
+  local target_stamp="${2:-$VLLM_STAMP}"
   local pip=( "$UV" pip install )
   [[ -n "$UV_INDEX_URL" ]] && pip+=(--index-url "$UV_INDEX_URL")
-  pip+=(--project "$ROOT" --python "$VENV/bin/python" )
+  pip+=(--project "$ROOT" --python "$target_venv/bin/python" )
 
-  mkdir -p "$STAMP_DIR"
+  if [[ "${DRY_RUN:-0}" == "1" && ! -x "$target_venv/bin/python" ]]; then
+    print_cmd env \
+      VLLM_TARGET_DEVICE="$VLLM_TARGET_DEVICE" \
+      VLLM_VERSION_OVERRIDE="$VLLM_VERSION_OVERRIDE" \
+      VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED:-0}" \
+      CMAKE_BUILD_TYPE="$CMAKE_BUILD_TYPE" \
+      "${pip[@]}" --no-deps --no-build-isolation -e "$VLLM" --torch-backend=auto
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$target_stamp")"
   local fingerprint
-  fingerprint="$(vllm_native_fingerprint)"
+  fingerprint="$(vllm_native_fingerprint "$target_venv")"
 
-  if [[ "$VLLM_REBUILD" != "1" && -f "$VLLM_STAMP" ]] &&
-     [[ "$(cat "$VLLM_STAMP")" == "$fingerprint" ]] &&
-     vllm_native_ready; then
+  if [[ "$VLLM_REBUILD" != "1" && -f "$target_stamp" ]] &&
+     [[ "$(cat "$target_stamp")" == "$fingerprint" ]] &&
+     vllm_native_ready "$target_venv"; then
     echo "vLLM native extensions are already built for this source and environment; reusing existing install"
     return 0
   fi
@@ -355,9 +531,9 @@ install_vllm_package() {
     CMAKE_BUILD_TYPE="$CMAKE_BUILD_TYPE" \
     "${pip[@]}" --no-deps --no-build-isolation -e "$VLLM" --torch-backend=auto
 
-  vllm_native_ready
-  fingerprint="$(vllm_native_fingerprint)"
-  printf '%s\n' "$fingerprint" >"$VLLM_STAMP"
+  vllm_native_ready "$target_venv"
+  fingerprint="$(vllm_native_fingerprint "$target_venv")"
+  printf '%s\n' "$fingerprint" >"$target_stamp"
 }
 
 install_rwkv_lm_package() {
@@ -398,7 +574,7 @@ check_python_packages() {
 
   filtered_output="$(printf '%s\n' "$check_output" |
     grep -v -F 'The package `nvidia-cusparselt-cu13` was built for a different platform' |
-    grep -v -E '^(Checked [0-9]+ packages in .+|Found 1 incompatibility)$' || true)"
+    grep -v -E '^(Using Python .+|Checked [0-9]+ packages in .+|Found 1 incompatibility)$' || true)"
   if [[ -z "$filtered_output" ]] &&
      [[ "$check_output" == *'The package `nvidia-cusparselt-cu13` was built for a different platform'* ]]; then
     printf '%s\n' "$check_output" >&2
@@ -410,21 +586,55 @@ check_python_packages() {
   return 1
 }
 
+check_lighteval_packages() {
+  component_enabled lighteval || return 0
+  [[ "$RUN_PIP_CHECK" == "1" ]] || return 0
+
+  print_cmd "$UV" pip check --project "$ROOT" --python "$EVAL_VENV/bin/python"
+  [[ "${DRY_RUN:-0}" == "1" ]] && return 0
+
+  local check_output filtered_output
+  if check_output="$("$UV" pip check --project "$ROOT" --python "$EVAL_VENV/bin/python" 2>&1)"; then
+    printf '%s\n' "$check_output"
+    return 0
+  fi
+  filtered_output="$(printf '%s\n' "$check_output" |
+    grep -v -F 'The package `nvidia-cusparselt-cu13` was built for a different platform' |
+    grep -v -E '^(Using Python .+|Checked [0-9]+ packages in .+|Found 1 incompatibility)$' || true)"
+  if [[ -z "$filtered_output" ]] &&
+     [[ "$check_output" == *'The package `nvidia-cusparselt-cu13` was built for a different platform'* ]]; then
+    printf '%s\n' "$check_output" >&2
+    warn "ignoring uv platform-tag check for nvidia-cusparselt-cu13 in the LightEval environment"
+    return 0
+  fi
+  printf '%s\n' "$check_output" >&2
+  return 1
+}
+
 configure_network
 configure_build_dirs
 clean_submodule_venvs
-ensure_uv
+python_component_enabled && ensure_uv
 check_compiler_env
-sync_uv_env
+python_component_enabled && sync_uv_env
+sync_lighteval_env
+sync_scoreboard_server
+sync_scoreboard_client
 check_native_env
 check_cuda_env
 configure_cuda_arch_list
-component_enabled vllm-rwkv && clean_vllm_cmake_cache
-component_enabled vllm-rwkv && install_vllm_package
+(vllm_package_enabled || component_enabled lighteval) && clean_vllm_cmake_cache
+vllm_package_enabled && install_vllm_package "$VENV" "$VLLM_STAMP"
+component_enabled lighteval &&
+  install_vllm_package "$EVAL_VENV" "$EVAL_VLLM_STAMP"
 component_enabled rwkv-lm && install_rwkv_lm_package
 component_enabled verl-rwkv && install_verl_package
-check_python_packages
+python_component_enabled && check_python_packages
+check_lighteval_packages
 
 clean_submodule_venvs
 
 echo "Environment ready: $VENV"
+if component_enabled lighteval; then
+  echo "LightEval environment ready: $EVAL_VENV"
+fi

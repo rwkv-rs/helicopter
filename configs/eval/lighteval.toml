@@ -1,0 +1,67 @@
+# LightEval 评估配置只描述要评估的权重和 benchmark selectors。
+# superset selector 会由 LightEval 展开；当前 release 找不到的 selector 会报告 skipped。
+schema_version = 1
+
+# 对整个 campaign 使用一种 vLLM-RWKV 官方 prompt template。
+prompt_template = "bot"
+
+# 路径相对私有环境中的 WEIGHT_PATH；按这里的顺序执行。
+weights = [
+  "rwkv7/pth/rwkv7-g1g-7.2b-20260523-ctx8192.pth",
+  "rwkv7/pth/rwkv7-g1h-7.2b-20260710-ctx10240.pth",
+]
+
+benchmarks = [
+  # Knowledge
+  "mmlu",
+  "mmlu_pro",
+  "mmlu_redux_2",
+  "mmlu_sr_question_answer",
+  "gpqa:diamond",
+  "gpqa:main",
+  "arc:challenge",
+  "arc:easy",
+  "hellaswag",
+  "bigbench_hard",
+  "agieval",
+  "truthfulqa:mc",
+  "winogrande",
+  "openbookqa",
+  "commonsenseqa",
+  "ceval_zho_mcf",
+  "kmmlu",
+  "med_qa",
+  "med_mcqa",
+
+  # Math / Reasoning
+  "gsm8k",
+  "math_500",
+  "aime24",
+  "aime25",
+  "amc23",
+  "olympiad_bench",
+  "minerva_math",
+  "svamp",
+  "beyond_aime",
+  "brumo25",
+  "hmmt_feb_2025",
+  "math_odyssey",
+  "comp_math_24_25",
+  "gaokao_2023_english",
+  "answer_judge",
+  "simpleqa_verified",
+
+  # Coding
+  "humaneval",
+  "humaneval_cn",
+  "humaneval_fix",
+  "humaneval_plus",
+  "mbpp",
+  "mbpp_plus",
+  "lcb:codegeneration",
+
+  # Instruction Following
+  "ifeval",
+  "ifbench_test",
+  "ifbench_multiturn",
+]

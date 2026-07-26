@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-TRAINING_COMPONENTS = "rwkv-lm,vllm-rwkv,verl-rwkv,dev"
+TRAINING_COMPONENTS = "rwkv-lm,vllm-rwkv,verl-rwkv,lighteval,dev"
 
 
 class InstallPolicyTests(unittest.TestCase):

@@ -5,6 +5,7 @@ Domain behavior stays with the component that implements it:
 
 - `helicopter infer` launches `vllm-rwkv`.
 - `helicopter takeoff` delegates a complete MaxRL config to `verl-rwkv`.
+- `helicopter eval` runs the repository's LightEval adapter.
 - `scripts/install_local.sh` and `scripts/install_remote.sh` prepare the
   selected product environment.
 
@@ -15,9 +16,11 @@ rollouts, verify optimizer rounds, or implement a second evaluator.
 
 ```text
 configs/example.toml        # serving-only example
+configs/eval/               # LightEval campaign and MaxRL validation configs
 scripts/install_local.sh    # prepare this checkout
 scripts/install_remote.sh   # sync and prepare the configured remote checkout
 src/cli/helicopter_cli/     # thin product launcher
+src/eval/lighteval/         # LightEval adapter and result publication
 src/infer/vllm-rwkv/        # RWKV vLLM implementation
 src/train/rwkv-lm/          # RWKV training engine
 src/train/verl-rwkv/        # Verl RWKV and MaxRL implementation
@@ -31,7 +34,8 @@ datasets, credentials, and machine-local paths out of Git.
 Prepare the current checkout:
 
 ```bash
-INSTALL_COMPONENTS=rwkv-lm,vllm-rwkv,verl-rwkv,dev scripts/install_local.sh
+INSTALL_COMPONENTS=rwkv-lm,vllm-rwkv,verl-rwkv,lighteval,dev \
+  scripts/install_local.sh
 ```
 
 Prepare the configured remote checkout:
@@ -100,10 +104,31 @@ derives prompt/response capacity from the templated examples, enforces EOS
 stopping and fixed one-response microbatch slots, and owns MaxRL group
 filtering, sampling, optimization, and validation semantics.
 
-Full benchmark evaluation will use the evaluation component's public
-`helicopter eval --config <path>` contract after that separate LightEval change
-lands. MaxRL does not import evaluator-private functions or implement a second
-evaluator.
+The same Verl config owns `val_before_train` and periodic validation triggers.
+At each trigger it exports the current RWKV weight and invokes the public
+`helicopter eval --config configs/eval/maxrl_math.toml` command. That config
+runs AIME 2024, AIME 2025, AMC 2023, and MATH-500 through LightEval in
+`fp32io16`, writes metrics back to Verl, and sets `publish = false`, so training
+validation does not access the Scoreboard API or database. Verl neither imports
+LightEval nor implements a second evaluator. The installer keeps LightEval in
+`.venv-lighteval`; incompatible evaluator dependencies never enter the Verl
+training `.venv`.
+
+## Evaluation
+
+The general evaluation campaign remains available through:
+
+```bash
+helicopter eval --config configs/eval/lighteval.toml --dry-run
+helicopter eval --config configs/eval/lighteval.toml
+```
+
+The campaign config publishes confirmed LightEval results to Scoreboard.
+Training validation instead uses
+[`configs/eval/maxrl_math.toml`](configs/eval/maxrl_math.toml), whose explicit
+local result mode bypasses Scoreboard entirely. See
+[`docs/evaluation/lighteval.md`](docs/evaluation/lighteval.md) for the campaign
+contract and private environment requirements.
 
 ## Lightweight checks
 

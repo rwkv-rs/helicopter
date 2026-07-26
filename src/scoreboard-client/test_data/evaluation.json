@@ -1,0 +1,64 @@
+{
+  "registry_task": {
+    "identity": "gsm8k|0",
+    "module_family": "gsm8k",
+    "module": "lighteval.tasks.tasks.gsm8k",
+    "dataset": "openai/gsm8k",
+    "subset": "main",
+    "evaluation_splits": ["test"],
+    "languages": ["english"],
+    "upstream_tags": ["math"]
+  },
+  "standard_rows": [
+    {
+      "doc": {
+        "id": "shared-0",
+        "task_name": "gsm8k|0",
+        "query": "What is 1 + 1?",
+        "choices": ["2", "3"],
+        "gold_index": 0,
+        "specific": {
+          "helicopter_document_index": 0
+        }
+      },
+      "metric": {
+        "exact_match": 1.0
+      },
+      "model_response": {
+        "input": "What is 1 + 1?",
+        "input_tokens": [10, 11],
+        "text": [
+          ">first</think>Answer: A",
+          "<think>second</think>Answer: A\nUser:"
+        ],
+        "text_post_processed": ["2", "2"],
+        "reasonings": [null, "second"],
+        "output_tokens": [[1, 2], [3, 4]]
+      }
+    },
+    {
+      "doc": {
+        "id": "shared-1",
+        "task_name": "gsm8k|0",
+        "query": "Score this text without a generation request.",
+        "choices": ["Score this text without a generation request."],
+        "gold_index": 0,
+        "specific": {
+          "helicopter_document_index": 1
+        }
+      },
+      "metric": {
+        "exact_match": 1.0
+      },
+      "model_response": {
+        "input": "Score this text without a generation request.",
+        "input_tokens": [20, 21],
+        "text": [],
+        "text_post_processed": [],
+        "output_tokens": [[20], [21]],
+        "logprobs": [-0.1, -0.2],
+        "argmax_logits_eq_gold": [true, false]
+      }
+    }
+  ]
+}

@@ -295,10 +295,12 @@ def build_takeoff_plan(
         else str(vllm_rwkv_path)
     )
     plan_env["RWKV_LM_PATH"] = str(rwkv_lm_path)
+    plan_env["HELICOPTER_PRODUCT_ROOT"] = str(root)
     shown_env = {
         "PYTHON": python,
         "PYTHONPATH": plan_env["PYTHONPATH"],
         "RWKV_LM_PATH": str(rwkv_lm_path),
+        "HELICOPTER_PRODUCT_ROOT": str(root),
     }
     return CommandPlan(
         command=command,
