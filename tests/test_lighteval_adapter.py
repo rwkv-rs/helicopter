@@ -322,7 +322,9 @@ def test_vllm_model_receives_the_same_recurrent_total_length_override(
     assert captured["hf_overrides"] == {"model_max_length": 16384}
 
 
-def test_generation_contract_maps_logical_penalty_once() -> None:
+def test_generation_contract_uses_current_vllm_frequency_penalty_api() -> None:
+    from vllm import SamplingParams
+
     types = lighteval_adapter._runtime_types()
     Generation, ModelConfig, _, _, choice_answer = (
         lighteval_adapter._build_runtime_classes(types)
@@ -339,11 +341,15 @@ def test_generation_contract_maps_logical_penalty_once() -> None:
     )
     backend = parameters.to_vllm_dict()
     assert "stop" not in backend
-    assert backend["repetition_penalty"] == 0.1
-    assert backend["frequency_penalty"] == 0.0
+    assert backend["repetition_penalty"] == 1.0
+    assert backend["frequency_penalty"] == 0.1
     assert backend["penalty_decay"] == 0.988
     assert backend["stop_token_ids"] == [0]
     assert backend["ignore_eos"] is False
+    sampling = SamplingParams(**backend)
+    assert sampling.repetition_penalty == 1.0
+    assert sampling.frequency_penalty == 0.1
+    assert sampling.penalty_decay == 0.988
     config = ModelConfig(
         model_name="model",
         wkv_mode="fp16",

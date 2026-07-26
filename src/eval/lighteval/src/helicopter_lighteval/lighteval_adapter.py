@@ -218,8 +218,8 @@ def _build_runtime_classes(types: dict[str, Any]):
             # and are rejected by vLLM when the request is deserialized.
             backend.pop("stop", None)
             backend.update(
-                repetition_penalty=self.frequency_penalty,
-                frequency_penalty=0.0,
+                repetition_penalty=1.0,
+                frequency_penalty=self.frequency_penalty,
                 penalty_decay=self.penalty_decay,
                 stop_token_ids=[0],
                 ignore_eos=False,
