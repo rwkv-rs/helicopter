@@ -15,7 +15,7 @@ from .config import (
 )
 from .plan import build_plan, public_plan
 from .preflight import run_preflight
-from .registry import load_default_registry
+from .registry import load_configured_registry
 from .http_client import ScoreboardError
 
 
@@ -43,7 +43,7 @@ def run(*, config_path: Path, env: Mapping[str, str], dry_run: bool) -> int:
             environment = load_evaluation_environment(env)
             weights = resolve_weights(config, environment)
             readiness = run_preflight(environment)
-            registry = load_default_registry()
+            registry = load_configured_registry(config.benchmarks)
             plan = build_plan(config, weights, registry)
         except (EvaluationConfigurationError, ScoreboardError, OSError) as error:
             raise SystemExit(str(error)) from error

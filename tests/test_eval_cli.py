@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -18,13 +19,14 @@ from helicopter_eval.config import (
     resolve_weights,
     verify_weight_identity,
 )
-from helicopter_eval.domains import assign_domain
 from helicopter_eval.plan import WKV_MODES, build_plan, build_shards
 from helicopter_eval.registry import (
     RegistrySnapshot,
     RegistryTask,
+    _inventory,
+    _resolve_selectors,
     _snapshot_registry,
-    load_default_registry,
+    load_configured_registry,
 )
 from helicopter_eval.runner import run
 
@@ -49,6 +51,7 @@ def _config(tmp_path: Path, body: str) -> Path:
 
 def _task(name: str, module: str = "module") -> RegistryTask:
     return RegistryTask(
+        selector=name,
         identity=f"{name}|0",
         name=name,
         version="0",
@@ -59,32 +62,36 @@ def _task(name: str, module: str = "module") -> RegistryTask:
         evaluation_splits=("test",),
         languages=("english",),
         upstream_tags=("knowledge",),
-        primary_domain="knowledge",
     )
 
 
 def _registry(tasks: tuple[RegistryTask, ...]) -> RegistrySnapshot:
+    selectors = tuple(dict.fromkeys(task.selector for task in tasks))
     return RegistrySnapshot(
         lighteval_version="0.13.0",
+        configured_selectors=selectors,
+        resolved_selectors=selectors,
+        skipped_selectors=(),
         tasks=tasks,
         module_count=len({task.module_family for task in tasks}),
         digest="a" * 64,
-        domain_rules_version="test",
-        domain_rules_digest="b" * 64,
-        unknown_domain_modules=(),
     )
 
 
-def test_config_accepts_only_schema_and_unique_weights(tmp_path: Path) -> None:
+def test_config_accepts_schema_weights_and_benchmarks(tmp_path: Path) -> None:
     path = _config(
         tmp_path,
-        'schema_version = 1\nweights = ["a.pth", "nested/b.pth"]\n',
+        'schema_version = 1\nweights = ["a.pth", "nested/b.pth"]\n'
+        'benchmarks = ["mmlu", "gsm8k"]\n',
     )
-    assert load_evaluation_config(path).weights == ("a.pth", "nested/b.pth")
+    config = load_evaluation_config(path)
+    assert config.weights == ("a.pth", "nested/b.pth")
+    assert config.benchmarks == ("mmlu", "gsm8k")
 
-    for field in ("benchmarks", "tasks", "exclude", "max_samples", "wkv_mode"):
+    for field in ("tasks", "exclude", "max_samples", "wkv_mode"):
         path.write_text(
-            f'schema_version = 1\nweights = ["a.pth"]\n{field} = []\n',
+            'schema_version = 1\nweights = ["a.pth"]\n'
+            f'benchmarks = ["gsm8k"]\n{field} = []\n',
             encoding="utf-8",
         )
         with pytest.raises(EvaluationConfigurationError, match="unknown"):
@@ -94,15 +101,35 @@ def test_config_accepts_only_schema_and_unique_weights(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "body, message",
     [
-        ("schema_version = 2\nweights = ['a.pth']\n", "schema_version"),
-        ("schema_version = 1\nweights = []\n", "non-empty"),
         (
-            "schema_version = 1\nweights = [' a.pth']\n",
+            "schema_version = 1\nweights = ['a.pth']\n",
+            "missing eval config fields: benchmarks",
+        ),
+        (
+            "schema_version = 2\nweights = ['a.pth']\nbenchmarks = ['gsm8k']\n",
+            "schema_version",
+        ),
+        (
+            "schema_version = 1\nweights = []\nbenchmarks = ['gsm8k']\n",
+            "non-empty",
+        ),
+        (
+            "schema_version = 1\nweights = [' a.pth']\nbenchmarks = ['gsm8k']\n",
             "trimmed",
         ),
         (
-            "schema_version = 1\nweights = ['a.pth', 'a.pth']\n",
+            "schema_version = 1\nweights = ['a.pth', 'a.pth']\n"
+            "benchmarks = ['gsm8k']\n",
             "duplicate",
+        ),
+        (
+            "schema_version = 1\nweights = ['a.pth']\nbenchmarks = []\n",
+            "benchmarks",
+        ),
+        (
+            "schema_version = 1\nweights = ['a.pth']\n"
+            "benchmarks = ['gsm8k', 'gsm8k']\n",
+            "duplicate benchmarks",
         ),
     ],
 )
@@ -122,7 +149,8 @@ def test_weight_resolution_is_bounded_and_content_addressed(tmp_path: Path) -> N
     config = load_evaluation_config(
         _config(
             tmp_path,
-            'schema_version = 1\nweights = ["a.pth", "nested/b.pth"]\n',
+            'schema_version = 1\nweights = ["a.pth", "nested/b.pth"]\n'
+            'benchmarks = ["fixture"]\n',
         )
     )
     resolved = resolve_weights(config, load_evaluation_environment(env))
@@ -132,7 +160,11 @@ def test_weight_resolution_is_bounded_and_content_addressed(tmp_path: Path) -> N
     outside = tmp_path / "outside.pth"
     outside.write_bytes(b"outside")
     escaped = load_evaluation_config(
-        _config(tmp_path, 'schema_version = 1\nweights = ["../outside.pth"]\n')
+        _config(
+            tmp_path,
+            'schema_version = 1\nweights = ["../outside.pth"]\n'
+            'benchmarks = ["fixture"]\n',
+        )
     )
     with pytest.raises(EvaluationConfigurationError, match="normalized"):
         resolve_weights(escaped, load_evaluation_environment(env))
@@ -141,7 +173,8 @@ def test_weight_resolution_is_bounded_and_content_addressed(tmp_path: Path) -> N
         invalid = load_evaluation_config(
             _config(
                 tmp_path,
-                f'schema_version = 1\nweights = ["{unnormalized}"]\n',
+                f'schema_version = 1\nweights = ["{unnormalized}"]\n'
+                'benchmarks = ["fixture"]\n',
             )
         )
         with pytest.raises(EvaluationConfigurationError, match="normalized"):
@@ -150,7 +183,10 @@ def test_weight_resolution_is_bounded_and_content_addressed(tmp_path: Path) -> N
     link = root / "linked.pth"
     link.symlink_to(root / "a.pth")
     linked = load_evaluation_config(
-        _config(tmp_path, 'schema_version = 1\nweights = ["linked.pth"]\n')
+        _config(
+            tmp_path,
+            'schema_version = 1\nweights = ["linked.pth"]\nbenchmarks = ["fixture"]\n',
+        )
     )
     with pytest.raises(EvaluationConfigurationError, match="symlinks"):
         resolve_weights(linked, load_evaluation_environment(env))
@@ -390,7 +426,7 @@ def test_eval_cli_resolves_config_relative_to_invocation_directory(
     invocation.mkdir()
     config = invocation / "lighteval.toml"
     config.write_text(
-        'schema_version = 1\nweights = ["model.pth"]\n',
+        'schema_version = 1\nweights = ["model.pth"]\nbenchmarks = ["fixture"]\n',
         encoding="utf-8",
     )
     captured: dict[str, object] = {}
@@ -431,7 +467,8 @@ def test_plan_is_weight_ordered_paired_and_deterministic(tmp_path: Path) -> None
     config = load_evaluation_config(
         _config(
             tmp_path,
-            'schema_version = 1\nweights = ["a.pth", "b.pth"]\n',
+            'schema_version = 1\nweights = ["a.pth", "b.pth"]\n'
+            'benchmarks = ["fixture"]\n',
         )
     )
     weights = resolve_weights(config, load_evaluation_environment(env))
@@ -449,13 +486,104 @@ def test_plan_is_weight_ordered_paired_and_deterministic(tmp_path: Path) -> None
     assert build_plan(config, weights, registry) == plan
 
 
-def test_domain_rules_use_tags_override_and_other() -> None:
-    assert assign_domain("ordinary", ["math"]).primary_domain == "math"
-    assert (
-        assign_domain("wikitext", ["language-modeling"]).primary_domain == "knowledge"
+def test_selectors_expand_exact_and_superset_and_skip_unknown() -> None:
+    inventory = _inventory(
+        [
+            {
+                "module": "lighteval.tasks.tasks.fixture",
+                "docstring": {"tags": ["knowledge"]},
+                "tasks": [
+                    {"name": "single"},
+                    {"name": "suite:first"},
+                    {"name": "suite:second"},
+                ],
+            }
+        ]
     )
-    assert assign_domain("aa_omniscience", []).primary_domain == "knowledge"
-    assert assign_domain("new_upstream", ["unmapped"]).primary_domain == "other"
+    by_task, resolved, skipped = _resolve_selectors(
+        ("single", "suite", "missing"),
+        inventory,
+    )
+    assert by_task == {
+        "single": "single",
+        "suite:first": "suite",
+        "suite:second": "suite",
+    }
+    assert resolved == ("single", "suite")
+    assert skipped == ("missing",)
+
+
+def test_registry_inventory_deduplicates_same_module_but_rejects_ambiguity() -> None:
+    repeated = {
+        "module": "lighteval.tasks.multilingual.tasks.xnli",
+        "tasks": [{"name": "xnli_eng_mcf"}],
+    }
+    assert list(_inventory([repeated, repeated])) == ["xnli_eng_mcf"]
+    with pytest.raises(EvaluationConfigurationError, match="more than once"):
+        _inventory(
+            [
+                repeated,
+                {
+                    "module": "lighteval.tasks.tasks.other",
+                    "tasks": [{"name": "xnli_eng_mcf"}],
+                },
+            ]
+        )
+    with pytest.raises(EvaluationConfigurationError, match="more than once"):
+        _inventory(
+            [
+                repeated,
+                {
+                    "module": repeated["module"],
+                    "docstring": {"tags": ["different"]},
+                    "tasks": [{"name": "xnli_eng_mcf"}],
+                },
+            ]
+        )
+
+
+def test_overlapping_selectors_are_rejected() -> None:
+    inventory = _inventory(
+        [
+            {
+                "module": "lighteval.tasks.tasks.fixture",
+                "tasks": [
+                    {"name": "suite:first"},
+                    {"name": "suite:second"},
+                ],
+            }
+        ]
+    )
+    with pytest.raises(EvaluationConfigurationError, match="overlap"):
+        _resolve_selectors(("suite", "suite:first"), inventory)
+    with pytest.raises(EvaluationConfigurationError, match="none"):
+        _resolve_selectors(("missing",), inventory)
+
+
+def test_multilingual_task_is_included_only_when_selected() -> None:
+    inventory = _inventory(
+        [
+            {
+                "module": ("lighteval.tasks.multilingual.tasks.ceval_zho_mcf.main"),
+                "docstring": {
+                    "languages": ["chinese"],
+                    "tags": ["knowledge", "multilingual"],
+                },
+                "tasks": [
+                    {"name": "ceval_zho_mcf:accountant"},
+                    {"name": "ceval_zho_mcf:advanced_mathematics"},
+                ],
+            }
+        ]
+    )
+    by_task, resolved, skipped = _resolve_selectors(
+        ("ceval_zho_mcf:accountant", "not-selected"),
+        inventory,
+    )
+    assert by_task == {"ceval_zho_mcf:accountant": "ceval_zho_mcf:accountant"}
+    assert resolved == ("ceval_zho_mcf:accountant",)
+    assert skipped == ("not-selected",)
+    assert inventory["ceval_zho_mcf:accountant"].module_family == "ceval_zho_mcf"
 
 
 def test_dry_run_redacts_token_and_does_not_create_staging(
@@ -467,10 +595,26 @@ def test_dry_run_redacts_token_and_does_not_create_staging(
     (root / "a.pth").write_bytes(b"a")
     staging = Path(env["HELICOPTER_EVAL_STAGING_ROOT"])
     staging.rmdir()
-    config = _config(tmp_path, 'schema_version = 1\nweights = ["a.pth"]\n')
+    config = _config(
+        tmp_path,
+        'schema_version = 1\nweights = ["a.pth"]\n'
+        'benchmarks = ["fixture", "missing"]\n',
+    )
+    registry = _registry(
+        (
+            replace(_task("one"), selector="fixture"),
+            replace(_task("two"), selector="fixture"),
+        )
+    )
+    registry = replace(
+        registry,
+        configured_selectors=("fixture", "missing"),
+        resolved_selectors=("fixture",),
+        skipped_selectors=("missing",),
+    )
     monkeypatch.setattr(
-        "helicopter_eval.runner.load_default_registry",
-        lambda: _registry((_task("one"), _task("two"))),
+        "helicopter_eval.runner.load_configured_registry",
+        lambda selectors: registry,
     )
     monkeypatch.setattr(
         "helicopter_eval.runner.run_preflight",
@@ -490,6 +634,12 @@ def test_dry_run_redacts_token_and_does_not_create_staging(
     payload = json.loads(output)
     assert payload["plan"]["execution_unit_count"] == 2
     assert payload["plan"]["expected_task_count"] == 4
+    assert payload["plan"]["registry"]["configured_selectors"] == [
+        "fixture",
+        "missing",
+    ]
+    assert payload["plan"]["registry"]["resolved_selectors"] == ["fixture"]
+    assert payload["plan"]["registry"]["skipped_selectors"] == ["missing"]
     assert [task["identity"] for task in payload["plan"]["registry"]["tasks"]] == [
         "one|0",
         "two|0",
@@ -517,24 +667,18 @@ def test_eval_process_environment_reaches_native_dependencies_and_restores(
     assert "HELICOPTER_TASK_CREDENTIAL" not in os.environ
 
 
-def test_default_registry_snapshot_is_complete_and_non_multilingual() -> None:
-    snapshot = load_default_registry()
+def test_configured_registry_expands_available_and_reports_skipped() -> None:
+    snapshot = load_configured_registry(("mmlu_pro", "not_in_this_release"))
     assert snapshot.lighteval_version == "0.13.0"
-    assert len(snapshot.tasks) == 646
-    assert snapshot.module_count == 96
-    assert len({task.identity for task in snapshot.tasks}) == 646
-    assert all(".multilingual." not in task.module for task in snapshot.tasks)
+    assert snapshot.configured_selectors == ("mmlu_pro", "not_in_this_release")
+    assert snapshot.resolved_selectors == ("mmlu_pro",)
+    assert snapshot.skipped_selectors == ("not_in_this_release",)
+    assert snapshot.tasks
+    assert {task.selector for task in snapshot.tasks} == {"mmlu_pro"}
     assert all(task.evaluation_splits for task in snapshot.tasks)
-    assert any(task.module_family == "aa_omniscience" for task in snapshot.tasks)
-    assert (
-        next(
-            task for task in snapshot.tasks if task.module_family == "aa_omniscience"
-        ).primary_domain
-        == "knowledge"
-    )
 
 
-def test_registry_snapshot_automatically_includes_new_default_tasks() -> None:
+def test_registry_snapshot_changes_when_selected_tasks_change() -> None:
     def config(name: str):
         return SimpleNamespace(
             name=name,

@@ -131,7 +131,7 @@ class ScoreboardClient:
         )
         if (
             response.get("status") != "ready"
-            or response.get("schema_version") != "lighteval-campaign-v1"
+            or response.get("schema_version") != "lighteval-campaign-v2"
             or response.get("lighteval_version") != "0.13.0"
             or not isinstance(response.get("publisher_principal"), str)
             or not response["publisher_principal"]

@@ -12,7 +12,7 @@ from typing import Any
 import uuid
 
 
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2
 _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -129,9 +129,11 @@ class CampaignManifest:
     campaign_id: str
     config_digest: str
     registry_digest: str
-    domain_rules_digest: str
     eval_contract_digest: str
     weight_sha256: list[str]
+    configured_selectors: list[str]
+    resolved_selectors: list[str]
+    skipped_selectors: list[str]
     registry_task_identities: list[str]
     shard_paths: dict[str, str] = field(default_factory=dict)
     attempted_shard_paths: dict[str, str] = field(default_factory=dict)
@@ -154,7 +156,6 @@ class CampaignManifest:
             "resume_key",
             "config_digest",
             "registry_digest",
-            "domain_rules_digest",
             "eval_contract_digest",
         ):
             value = getattr(manifest, name)
@@ -182,6 +183,31 @@ class CampaignManifest:
         ):
             raise ManifestError(
                 "campaign manifest has invalid registry_task_identities"
+            )
+        for name in (
+            "configured_selectors",
+            "resolved_selectors",
+            "skipped_selectors",
+        ):
+            values = getattr(manifest, name)
+            if (
+                not isinstance(values, list)
+                or any(
+                    not isinstance(value, str) or not value or value != value.strip()
+                    for value in values
+                )
+                or len(values) != len(set(values))
+            ):
+                raise ManifestError(f"campaign manifest has invalid {name}")
+        if not manifest.configured_selectors or not manifest.resolved_selectors:
+            raise ManifestError("campaign manifest has no configured benchmarks")
+        resolved = set(manifest.resolved_selectors)
+        skipped = set(manifest.skipped_selectors)
+        if not resolved.isdisjoint(skipped) or resolved | skipped != set(
+            manifest.configured_selectors
+        ):
+            raise ManifestError(
+                "campaign manifest selector status does not match configuration"
             )
         try:
             campaign_id = str(uuid.UUID(manifest.campaign_id))

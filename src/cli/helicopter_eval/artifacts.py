@@ -328,6 +328,7 @@ def _expected_task(
         "weight_sha256": unit.weight.sha256,
         "weight_display_name": unit.weight.display_name,
         "wkv_mode": unit.wkv_mode,
+        "selector": task.selector,
         "task_name": task.identity,
         "task_version": task.version,
         "module_family": task.module_family,
@@ -337,7 +338,6 @@ def _expected_task(
         "evaluation_splits": list(task.evaluation_splits),
         "languages": list(task.languages),
         "upstream_tags": list(task.upstream_tags),
-        "primary_domain": task.primary_domain,
     }
 
 
@@ -514,7 +514,7 @@ def publications_from_shard(
             for index, row in enumerate(task_rows)
         ]
         payload: dict[str, object] = {
-            "schema_version": "lighteval-task-v1",
+            "schema_version": "lighteval-task-v2",
             "campaign_id": campaign_id,
             "task": task,
             "artifact": artifact,

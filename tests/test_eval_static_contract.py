@@ -4,19 +4,20 @@ from pathlib import Path
 ROOT = Path(__file__).parents[1]
 
 
-def test_eval_has_one_product_entrypoint_and_no_public_task_selection() -> None:
+def test_eval_has_one_product_entrypoint_and_simple_selector_config() -> None:
     source = ROOT / "src/cli/helicopter_eval"
     assert source.is_dir()
     assert not (ROOT / "src/eval/lighteval/evaluate.py").exists()
     assert not list(ROOT.glob("src/**/lighteval/**/evaluate.py"))
 
     config = (source / "config.py").read_text(encoding="utf-8")
-    assert 'frozenset({"schema_version", "weights"})' in config
+    assert 'frozenset({"schema_version", "weights", "benchmarks"})' in config
     example = (ROOT / "configs/eval/lighteval.toml").read_text(encoding="utf-8")
     assert "schema_version = 1" in example
     assert "weights = [" in example
+    assert "benchmarks = [" in example
     assert example.count('"rwkv7/pth/') == 2
-    for key in ("benchmarks =", "tasks =", "exclude =", "max_samples ="):
+    for key in ("tasks =", "exclude =", "max_samples ="):
         assert key not in example
 
 
@@ -45,8 +46,9 @@ def test_eval_uses_http_publication_and_removed_classification_is_not_product_da
         if file.suffix in {".py", ".ts", ".tsx", ".css"}
     )
     for field in (
-        "offi" + "cial",
         "non_" + "official",
+        "is_" + "official",
+        "official_" + "status",
         "trus" + "ted",
         "trust_" + "level",
         "visi" + "bility",
@@ -56,3 +58,13 @@ def test_eval_uses_http_publication_and_removed_classification_is_not_product_da
         "result_" + "level",
     ):
         assert field not in product_source
+    for removed in (
+        "primary_" + "domain",
+        "domain_" + "rules",
+        "tag_" + "domains",
+        "benchmark_" + "name_map",
+        "benchmark_" + "catalog",
+    ):
+        assert removed not in product_source
+    assert not (ROOT / "src/cli/helicopter_eval/domains.py").exists()
+    assert not (ROOT / "src/cli/helicopter_eval/catalog.py").exists()

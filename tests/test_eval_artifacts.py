@@ -14,6 +14,7 @@ from helicopter_eval.registry import RegistryTask
 
 def _task() -> RegistryTask:
     return RegistryTask(
+        selector="gsm8k",
         identity="gsm8k|0",
         name="gsm8k",
         version="0",
@@ -24,7 +25,6 @@ def _task() -> RegistryTask:
         evaluation_splits=("test",),
         languages=("english",),
         upstream_tags=("math",),
-        primary_domain="math",
     )
 
 
@@ -183,6 +183,7 @@ def test_standard_parser_accepts_only_registry_proven_superset_expansion(
         _task(),
         identity="bbq|0",
         name="bbq",
+        selector="bbq",
         module_family="bbq",
         module="lighteval.tasks.tasks.bbq",
         dataset="lighteval/bbq_helm",

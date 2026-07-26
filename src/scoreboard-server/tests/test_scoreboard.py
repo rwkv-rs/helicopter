@@ -80,6 +80,7 @@ def _expected(
         "weight_sha256": weight,
         "weight_display_name": f"{weight[:8]}.pth",
         "wkv_mode": mode,
+        "selector": task_name.split("|", 1)[0].split(":", 1)[0],
         "task_name": task_name,
         "task_version": "0",
         "module_family": task_name.split(":", 1)[0],
@@ -89,20 +90,20 @@ def _expected(
         "evaluation_splits": ["test"],
         "languages": ["english"],
         "upstream_tags": ["math"],
-        "primary_domain": "math",
     }
 
 
 def _campaign() -> dict:
     return {
-        "schema_version": "lighteval-campaign-v1",
+        "schema_version": "lighteval-campaign-v2",
         "resume_key": "1" * 64,
         "config_digest": "2" * 64,
         "registry_digest": "3" * 64,
-        "domain_rules_version": "2026-07-25",
-        "domain_rules_digest": "4" * 64,
         "eval_contract_digest": "5" * 64,
         "lighteval_version": "0.13.0",
+        "configured_selectors": ["gsm8k", "aime24"],
+        "resolved_selectors": ["gsm8k", "aime24"],
+        "skipped_selectors": [],
         "expected_tasks": [
             _expected(task_name=task, weight=weight, mode=mode)
             for weight in ("a" * 64, "b" * 64)
@@ -114,7 +115,7 @@ def _campaign() -> dict:
 
 def _publication(campaign_id: str, task: dict) -> dict:
     return {
-        "schema_version": "lighteval-task-v1",
+        "schema_version": "lighteval-task-v2",
         "campaign_id": campaign_id,
         "task": task,
         "artifact": {
@@ -262,7 +263,7 @@ async def test_publication_rejects_non_standard_json_constants_before_validation
                 },
                 content=gzip.compress(
                     (
-                        '{"schema_version":"lighteval-campaign-v1","unexpected":NaN}'
+                        '{"schema_version":"lighteval-campaign-v2","unexpected":NaN}'
                     ).encode()
                 ),
             )
@@ -310,6 +311,17 @@ def test_campaign_contract_requires_same_tasks_and_both_modes_per_weight() -> No
     ]
     with pytest.raises(ValidationError, match="same task set"):
         CampaignCreate.model_validate(missing_task)
+
+    invalid_selector_status = _campaign()
+    invalid_selector_status["skipped_selectors"] = ["gsm8k"]
+    with pytest.raises(ValidationError, match="disjoint"):
+        CampaignCreate.model_validate(invalid_selector_status)
+
+    missing_resolved_tasks = _campaign()
+    missing_resolved_tasks["configured_selectors"].append("empty")
+    missing_resolved_tasks["resolved_selectors"].append("empty")
+    with pytest.raises(ValidationError, match="resolved selector"):
+        CampaignCreate.model_validate(missing_resolved_tasks)
 
 
 def test_campaign_contract_requires_stable_task_and_weight_metadata() -> None:
@@ -576,7 +588,7 @@ async def test_campaign_publication_finalize_and_complete_queries(
             assert preflight.json() == {
                 "status": "ready",
                 "publisher_principal": "lighteval-production",
-                "schema_version": "lighteval-campaign-v1",
+                "schema_version": "lighteval-campaign-v2",
                 "lighteval_version": "0.13.0",
             }
             unauthorized = await client.post(
@@ -710,6 +722,16 @@ async def test_campaign_publication_finalize_and_complete_queries(
             assert (
                 summary["provenance"]["publisher_principal"] == "lighteval-production"
             )
+            assert summary["provenance"]["configured_selectors"] == [
+                "gsm8k",
+                "aime24",
+            ]
+            assert summary["provenance"]["resolved_selectors"] == [
+                "gsm8k",
+                "aime24",
+            ]
+            assert summary["provenance"]["skipped_selectors"] == []
+            assert summary["task"]["selector"] in {"gsm8k", "aime24"}
             assert summary["task"]["weight_sha256"] in {"a" * 64, "b" * 64}
             assert summary["model"]["wkv_mode"] in {"fp16", "fp32io16"}
             assert summary["aggregates"]["exact_match_stderr"] == 0.01

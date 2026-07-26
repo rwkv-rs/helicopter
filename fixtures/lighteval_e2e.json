@@ -1,5 +1,6 @@
 {
   "registry_task": {
+    "selector": "gsm8k",
     "identity": "gsm8k|0",
     "name": "gsm8k",
     "version": "0",
@@ -15,8 +16,7 @@
     ],
     "upstream_tags": [
       "math"
-    ],
-    "primary_domain": "math"
+    ]
   },
   "model_execution": {
     "weight_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

@@ -72,7 +72,7 @@ class EvaluationPublicationService:
         return PublicationPreflight(
             status="ready",
             publisher_principal=self.principal_for_authorization(authorization),
-            schema_version="lighteval-campaign-v1",
+            schema_version="lighteval-campaign-v2",
             lighteval_version="0.13.0",
         )
 

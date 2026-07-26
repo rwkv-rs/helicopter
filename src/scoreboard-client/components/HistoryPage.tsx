@@ -35,7 +35,7 @@ export function HistoryPage() {
                 <th>WKV</th>
                 <th>task</th>
                 <th>module</th>
-                <th>domain</th>
+                <th>official tags</th>
                 <th>native metric</th>
               </tr>
             </thead>
@@ -55,7 +55,11 @@ export function HistoryPage() {
                     </button>
                   </td>
                   <td>{row.task.module_family}</td>
-                  <td>{row.task.primary_domain}</td>
+                  <td>
+                    {row.task.upstream_tags.length
+                      ? row.task.upstream_tags.join(", ")
+                      : "—"}
+                  </td>
                   <td>
                     <div className="native-metrics">
                       {metricEntries(

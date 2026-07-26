@@ -94,12 +94,12 @@ async def test_standard_artifact_to_database_query_contract(
     task = RegistryTask(**fixture["registry_task"])
     registry = RegistrySnapshot(
         lighteval_version="0.13.0",
+        configured_selectors=(task.selector,),
+        resolved_selectors=(task.selector,),
+        skipped_selectors=(),
         tasks=(task,),
         module_count=1,
         digest="b" * 64,
-        domain_rules_version="shared-fixture",
-        domain_rules_digest="c" * 64,
-        unknown_domain_modules=(),
     )
     weight_path = tmp_path / fixture["model_execution"]["weight_display_name"]
     weight_path.write_bytes(b"shared fixture does not load a model")
@@ -110,7 +110,11 @@ async def test_standard_artifact_to_database_query_contract(
         sha256=fixture["model_execution"]["weight_sha256"],
     )
     plan = build_plan(
-        EvaluationConfig(schema_version=1, weights=(weight_path.name,)),
+        EvaluationConfig(
+            schema_version=1,
+            weights=(weight_path.name,),
+            benchmarks=(task.selector,),
+        ),
         (weight,),
         registry,
     )

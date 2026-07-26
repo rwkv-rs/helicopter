@@ -44,7 +44,7 @@ def test_preflight_proves_release_editable_source_and_backend(
         def preflight(self):
             return {
                 "status": "ready",
-                "schema_version": "lighteval-campaign-v1",
+                "schema_version": "lighteval-campaign-v2",
                 "lighteval_version": "0.13.0",
                 "publisher_principal": "eval-worker",
             }

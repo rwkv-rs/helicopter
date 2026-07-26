@@ -54,9 +54,9 @@ class ScoreboardRepository:
             existing = await connection.fetchrow(
                 """
                 SELECT id, status, config_digest, registry_digest,
-                       domain_rules_version, domain_rules_digest,
-                       eval_contract_digest, lighteval_version, expected_tasks,
-                       publisher_principal
+                       eval_contract_digest, lighteval_version,
+                       configured_selectors, resolved_selectors,
+                       skipped_selectors, expected_tasks, publisher_principal
                 FROM evaluation_campaign
                 WHERE resume_key = $1 AND status = 'incomplete'
                 """,
@@ -73,10 +73,11 @@ class ScoreboardRepository:
                 values = {
                     "config_digest": campaign.config_digest,
                     "registry_digest": campaign.registry_digest,
-                    "domain_rules_version": campaign.domain_rules_version,
-                    "domain_rules_digest": campaign.domain_rules_digest,
                     "eval_contract_digest": campaign.eval_contract_digest,
                     "lighteval_version": campaign.lighteval_version,
+                    "configured_selectors": campaign.configured_selectors,
+                    "resolved_selectors": campaign.resolved_selectors,
+                    "skipped_selectors": campaign.skipped_selectors,
                     "expected_tasks": expected,
                 }
                 mismatched = [
@@ -109,21 +110,22 @@ class ScoreboardRepository:
                 """
                 INSERT INTO evaluation_campaign (
                     id, resume_key, status, config_digest, registry_digest,
-                    domain_rules_version, domain_rules_digest,
-                    eval_contract_digest, lighteval_version, expected_tasks,
-                    publisher_principal
+                    eval_contract_digest, lighteval_version,
+                    configured_selectors, resolved_selectors, skipped_selectors,
+                    expected_tasks, publisher_principal
                 ) VALUES (
-                    $1, $2, 'incomplete', $3, $4, $5, $6, $7, $8, $9, $10
+                    $1, $2, 'incomplete', $3, $4, $5, $6, $7, $8, $9, $10, $11
                 )
                 """,
                 campaign_id,
                 campaign.resume_key,
                 campaign.config_digest,
                 campaign.registry_digest,
-                campaign.domain_rules_version,
-                campaign.domain_rules_digest,
                 campaign.eval_contract_digest,
                 campaign.lighteval_version,
+                campaign.configured_selectors,
+                campaign.resolved_selectors,
+                campaign.skipped_selectors,
                 expected,
                 publisher_principal,
             )
@@ -368,9 +370,10 @@ class ScoreboardRepository:
             """
             SELECT t.id, t.campaign_id, t.task_identity, t.created_at,
                    c.completed_at, c.publisher_principal, c.config_digest,
-                   c.registry_digest, c.domain_rules_version,
-                   c.domain_rules_digest, c.eval_contract_digest,
-                   c.lighteval_version, t.task, t.artifact, t.task_config,
+                   c.registry_digest, c.eval_contract_digest,
+                   c.lighteval_version, c.configured_selectors,
+                   c.resolved_selectors, c.skipped_selectors,
+                   t.task, t.artifact, t.task_config,
                    t.model, t.sampling_config, t.primary_metric,
                    t.aggregates, t.diagnostics
             FROM evaluation_task AS t
@@ -403,10 +406,11 @@ class ScoreboardRepository:
                     provenance=CampaignProvenance(
                         config_digest=row["config_digest"],
                         registry_digest=row["registry_digest"],
-                        domain_rules_version=row["domain_rules_version"],
-                        domain_rules_digest=row["domain_rules_digest"],
                         eval_contract_digest=row["eval_contract_digest"],
                         lighteval_version=row["lighteval_version"],
+                        configured_selectors=row["configured_selectors"],
+                        resolved_selectors=row["resolved_selectors"],
+                        skipped_selectors=row["skipped_selectors"],
                         publisher_principal=row["publisher_principal"],
                     ),
                 )

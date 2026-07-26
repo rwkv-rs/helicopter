@@ -10,6 +10,7 @@ export interface TaskIdentity {
   weight_sha256: string;
   weight_display_name: string;
   wkv_mode: WkvMode;
+  selector: string;
   task_name: string;
   task_version: string;
   module_family: string;
@@ -19,7 +20,6 @@ export interface TaskIdentity {
   evaluation_splits: string[];
   languages: string[];
   upstream_tags: string[];
-  primary_domain: string;
 }
 
 export interface ModelExecution {
@@ -64,10 +64,11 @@ export interface EvaluationSummary {
   provenance: {
     config_digest: string;
     registry_digest: string;
-    domain_rules_version: string;
-    domain_rules_digest: string;
     eval_contract_digest: string;
     lighteval_version: string;
+    configured_selectors: string[];
+    resolved_selectors: string[];
+    skipped_selectors: string[];
     publisher_principal: string;
   };
 }

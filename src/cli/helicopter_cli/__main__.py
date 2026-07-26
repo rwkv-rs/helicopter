@@ -68,17 +68,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     evaluate = subparsers.add_parser(
         "eval",
-        help="run the complete built-in LightEval registry and publish it",
+        help="run configured LightEval benchmarks and publish them",
         description=(
-            "Evaluate every task in the locked LightEval release's complete "
-            "default built-in registry for each configured weight in fp16 and "
-            "fp32io16, then publish and finalize one Scoreboard campaign."
+            "Expand the configured LightEval task/superset selectors for each "
+            "weight, evaluate them in fp16 and fp32io16, then publish and "
+            "finalize one Scoreboard campaign."
         ),
         epilog=(
-            "Config keys: schema_version = 1 and a non-empty weights array. "
-            "Weight paths are relative to WEIGHT_PATH. Benchmark selection, "
-            "sample limits, generation, WKV, shard, concurrency, and capacity "
-            "settings are intentionally not configurable. Exit 0 means the "
+            "Config keys: schema_version = 1, a non-empty weights array, and "
+            "a non-empty benchmarks string array. Weight paths are relative "
+            "to WEIGHT_PATH. Selectors absent from the locked LightEval release "
+            "are reported as skipped. Sample limits, generation, WKV, shard, "
+            "concurrency, and capacity settings are not configurable. Exit 0 means the "
             "campaign was finalized and standard local evaluation content was "
             "cleaned; every incomplete or unsafe outcome exits non-zero."
         ),
@@ -86,7 +87,7 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument(
         "--config",
         required=True,
-        help="minimal TOML containing schema_version and weights",
+        help="TOML containing schema_version, weights, and benchmarks",
     )
     evaluate.add_argument(
         "--env-file",

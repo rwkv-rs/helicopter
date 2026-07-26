@@ -200,8 +200,14 @@ export function EvaluationDetails() {
       <div className="metadata-grid">
         <span>evaluation: {selected.evaluation_id}</span>
         <span>campaign: {selected.campaign_id}</span>
+        <span>selector: {selected.task.selector}</span>
         <span>module: {selected.task.module_family}</span>
-        <span>domain: {selected.task.primary_domain}</span>
+        <span>
+          official tags:{" "}
+          {selected.task.upstream_tags.length
+            ? selected.task.upstream_tags.join(", ")
+            : "—"}
+        </span>
         <span>samples: {selected.diagnostics.samples}</span>
         <span>completions: {selected.diagnostics.completions}</span>
         <span>truncation: {selected.diagnostics.truncation_rate}</span>

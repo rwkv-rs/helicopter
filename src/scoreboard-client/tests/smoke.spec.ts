@@ -10,6 +10,7 @@ function evaluation(
   weight: "small.pth" | "large.pth",
   mode: WkvMode,
   task = sharedFixture.registry_task.identity,
+  tags: string[] = sharedFixture.registry_task.upstream_tags,
 ) {
   const sha = weight === "small.pth" ? "a".repeat(64) : "b".repeat(64);
   const score = weight === "small.pth" ? 0.25 : 0.5;
@@ -24,6 +25,7 @@ function evaluation(
       weight_sha256: sha,
       weight_display_name: weight,
       wkv_mode: mode,
+      selector: task.split("|", 1)[0].split(":", 1)[0],
       task_name: task,
       task_version: "0",
       module_family: sharedFixture.registry_task.module_family,
@@ -32,8 +34,7 @@ function evaluation(
       subset: sharedFixture.registry_task.subset,
       evaluation_splits: sharedFixture.registry_task.evaluation_splits,
       languages: sharedFixture.registry_task.languages,
-      upstream_tags: sharedFixture.registry_task.upstream_tags,
-      primary_domain: sharedFixture.registry_task.primary_domain,
+      upstream_tags: tags,
     },
     artifact: {
       lighteval_version: "0.13.0",
@@ -74,10 +75,11 @@ function evaluation(
     provenance: {
       config_digest: "1".repeat(64),
       registry_digest: "2".repeat(64),
-      domain_rules_version: "2026-07-25",
-      domain_rules_digest: "3".repeat(64),
       eval_contract_digest: "4".repeat(64),
       lighteval_version: "0.13.0",
+      configured_selectors: ["gsm8k", "unavailable"],
+      resolved_selectors: ["gsm8k"],
+      skipped_selectors: ["unavailable"],
       publisher_principal: "eval-worker",
     },
   };
@@ -108,6 +110,8 @@ async function serveApi(page: Page): Promise<void> {
     evaluation("small.pth", "fp16"),
     evaluation("small.pth", "fp32io16"),
     evaluation("large.pth", "fp16"),
+    evaluation("small.pth", "fp16", "multi|0", ["math", "reasoning"]),
+    evaluation("small.pth", "fp16", "untagged|0", []),
     // large/fp32io16 is deliberately absent.
   ];
   await page.route("**/api/evaluations?limit=5000&offset=0", (route) =>
@@ -152,13 +156,18 @@ test("shows two weights, both WKV modes, native metrics and missing pairs", asyn
   await expect(page.getByRole("button", { name: /0.25 exact_match/ }).first()).toBeVisible();
   await expect(page.getByRole("button", { name: /0.01 stderr/ }).first()).toBeVisible();
   await expect(page.getByLabel(/gsm8k\|0 fp32io16 结果缺失/)).toBeVisible();
-  await expect(page.getByText(/等级|official|trusted/i)).toHaveCount(0);
+  await expect(page.getByText(/结果等级|trusted|non-official/i)).toHaveCount(0);
 });
 
-test("filters domains and pages faithful multi-completion details", async ({ page }) => {
+test("filters official tags and pages faithful multi-completion details", async ({ page }) => {
   await serveApi(page);
   await page.goto("/?page=dashboard");
-  await page.getByLabel("domain").selectOption("math");
+  await expect(page.getByText("untagged|0", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "reasoning", exact: true }).click();
+  await expect(page.getByText("multi|0", { exact: true })).toBeVisible();
+  await expect(page.getByText("gsm8k|0", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("untagged|0", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "math", exact: true }).click();
   await page.getByRole("button", { name: /0.25 exact_match/ }).first().click();
 
   const details = page.getByRole("region", { name: "评估详情" });

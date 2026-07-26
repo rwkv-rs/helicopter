@@ -12,7 +12,7 @@ from .registry import RegistrySnapshot, RegistryTask
 
 WKV_MODES = ("fp16", "fp32io16")
 MAX_TASKS_PER_SHARD = 1
-EVAL_CONTRACT_VERSION = "lighteval-full-registry-v1"
+EVAL_CONTRACT_VERSION = "lighteval-configured-selectors-v1"
 _VLLM_CONTRACT_FILES = (
     "vllm/config/model.py",
     "vllm/engine/arg_utils.py",
@@ -112,6 +112,7 @@ def build_plan(
 ) -> EvaluationPlan:
     config_public = {
         "schema_version": config.schema_version,
+        "benchmarks": config.benchmarks,
         "weights": [
             {"configured_path": weight.configured_path, "sha256": weight.sha256}
             for weight in weights
@@ -180,12 +181,12 @@ def public_plan(plan: EvaluationPlan) -> dict[str, object]:
             "task_count": len(plan.registry.tasks),
             "module_count": plan.registry.module_count,
             "digest": plan.registry.digest,
-            "domain_rules_version": plan.registry.domain_rules_version,
-            "domain_rules_digest": plan.registry.domain_rules_digest,
-            "unknown_domain_count": len(plan.registry.unknown_domain_modules),
-            "unknown_domain_modules": plan.registry.unknown_domain_modules,
+            "configured_selectors": plan.registry.configured_selectors,
+            "resolved_selectors": plan.registry.resolved_selectors,
+            "skipped_selectors": plan.registry.skipped_selectors,
             "tasks": [
                 {
+                    "selector": task.selector,
                     "identity": task.identity,
                     "module_family": task.module_family,
                     "module": task.module,
@@ -194,7 +195,6 @@ def public_plan(plan: EvaluationPlan) -> dict[str, object]:
                     "evaluation_splits": task.evaluation_splits,
                     "languages": task.languages,
                     "upstream_tags": task.upstream_tags,
-                    "primary_domain": task.primary_domain,
                 }
                 for task in plan.registry.tasks
             ],

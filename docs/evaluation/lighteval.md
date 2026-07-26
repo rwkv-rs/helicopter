@@ -1,4 +1,4 @@
-# 完整 LightEval 评估
+# LightEval 评估
 
 产品入口只有一个：
 
@@ -6,14 +6,15 @@
 helicopter eval --config ./configs/eval/lighteval.toml
 ```
 
-该命令对配置中的每个权重依次运行 `fp16` 和 `fp32io16`，每种 mode 都评估当前
-锁定 LightEval release 的完整默认内置 registry。task 清单在运行时通过 LightEval
-公开 registry API 枚举，因此 release 增加默认 task 后会自动纳入。额外
-multilingual registry、外部 custom/community 注册项不属于这个默认集合。
+该命令对配置中的每个权重依次运行 `fp16` 和 `fp32io16`，每种 mode 都评估
+`benchmarks` 中全部可解析的 LightEval selectors。superset selector 由 LightEval
+展开成实际 task，因此不用在配置中抄写展开后的数百项。当前 LightEval release
+找不到的 selector 会在计划中明确列为 `skipped_selectors`，不进入预期 task；
+已经解析出的 task 若因 dataset、metric 或运行前提失败，campaign 仍保持
+incomplete 并非零退出。
 
-用户不需要也不能在配置中抄写或筛选数百个 benchmark。产品不接受 task、
-benchmark、exclude、`max_samples`、生成参数、WKV mode、shard、并发或 capacity
-字段。每个 task 使用完整 evaluation split，`max_samples=None`。
+产品不接受 exclude、`max_samples`、生成参数、WKV mode、shard、并发或 capacity
+字段。每个解析出的 task 使用完整 evaluation split，`max_samples=None`。
 
 ## 最小配置
 
@@ -23,8 +24,22 @@ weights = [
   "rwkv7/model-a.pth",
   "rwkv7/model-b.pth",
 ]
+
+benchmarks = [
+  "mmlu",
+  "gpqa:diamond",
+  "gsm8k",
+  "ifeval",
+]
 ```
 
+`benchmarks` 是一个普通字符串数组。每个值直接是 LightEval task identity 或
+superset selector；没有显示名映射、family 对象、状态字段或第二份配置。
+仓库当前启用范围只以
+[`configs/eval/lighteval.toml`](../../configs/eval/lighteval.toml) 为准，覆盖本轮
+Knowledge、Math / Reasoning、Coding 和 Instruction Following 清单。当前延期的
+GPQA-Extended 与三项 SWE-bench 不写入数组；它们不是隐式 exclude，也不会由另一份
+目录或映射表维护。
 `--config` 的相对路径按命令调用目录解析，因此
 `helicopter eval --config ./path/to/lighteval.toml` 可直接使用普通 shell 路径语义。
 权重路径相对 `WEIGHT_PATH` 解析。产品拒绝绝对路径、越界、symlink、重复路径和
@@ -97,7 +112,7 @@ INSTALL_COMPONENTS=lighteval,scoreboard-server,scoreboard-client,dev \
 Scoreboard smoke test 所需的 Chromium 写入
 `.venv/playwright-browsers`；不会依赖用户级 Bun 或 Playwright browser cache。
 
-Scoreboard 只接受空的或 contract version 1 的 PostgreSQL 数据库；发现旧
+Scoreboard 只接受空的或 contract version 2 的 PostgreSQL 数据库；发现旧
 `evaluation_result` 或未版本化 evaluation schema 时会拒绝启动，不执行隐式迁移。
 server 运行环境至少需要：
 
@@ -127,7 +142,7 @@ SCOREBOARD_API_BASE_URL=http://127.0.0.1:7860 bun run build
 SCOREBOARD_API_BASE_URL=http://127.0.0.1:7860 bun run start -- -p 3000
 ```
 
-## 先查看完整计划
+## 先查看计划
 
 ```bash
 helicopter eval \
@@ -135,8 +150,8 @@ helicopter eval \
   --dry-run
 ```
 
-`--dry-run` 会计算权重 SHA、枚举完整 registry、应用 domain 规则并输出
-weight/mode、task/module、deterministic shard 和 unknown-domain coverage。
+`--dry-run` 会计算权重 SHA、展开 selectors，并输出 configured/resolved/skipped
+selectors、weight/mode、task/module、官方 tags 和 deterministic shard。
 它会进行只读 Scoreboard preflight，但不会加载 dataset/模型、创建 campaign 或写入
 评估内容；token 始终显示为 `[REDACTED]`。
 
@@ -148,7 +163,7 @@ shard，使 dataset/prerequisite 失败只影响对应 task。分片只控制 da
 host-memory 生命周期。同一个
 weight/mode 只加载一次模型，vLLM-RWKV 根据模型规模、GPU 显存与 WKV mode 解析
 4×4×2 active-capacity matrix；评估层不提供 capacity 参数。
-完整 registry discovery 可能在主进程先初始化 CUDA，因此 adapter 在每个 model
+registry discovery 可能在主进程先初始化 CUDA，因此 adapter 在每个 model
 unit 内固定 `VLLM_WORKER_MULTIPROC_METHOD=spawn`，避免从已经初始化 CUDA 的
 父进程 fork worker；退出 unit 后恢复原环境。
 `fp16` 记录 FP16 WKV state/FP16 accumulation，`fp32io16` 记录 FP32 WKV
@@ -160,7 +175,7 @@ checkpoint 文件名的 `ctx<N>` 是 prompt context 上限，不是 prompt 与 c
 `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`，绕过只适用于位置编码模型的通用长度保护；
 退出该 unit 后恢复原环境。该规则固定在产品中，不能通过 TOML 覆盖。
 
-默认 registry 也包含 Wikitext 等原生 `PERPLEXITY` task。这类 task 不是对话生成：
+配置也可以选择 Wikitext 等原生 `PERPLEXITY` task。这类 task 不是对话生成：
 adapter 直接对 task 给出的原始 document query 做滚动 log-likelihood，不添加
 User/Assistant template 或生成参数。窗口受 checkpoint `ctx<N>` 约束，每个 token
 恰好计分一次；相应标准 detail 保存逐 token logprobs 和 output token evidence，
@@ -172,7 +187,7 @@ parquet。缺少某个 task 自身需要的 dataset、可选依赖、服务、�
 继续执行，但预期 task 不会从 campaign 中消失，命令最终非零且 campaign 保持
 incomplete。
 
-本地 manifest 只记录 digest、有序 weight SHA、完整 registry task identity
+本地 manifest 只记录 digest、有序 weight SHA、selector 状态、registry task identity
 快照、backend identity 和精确 staging child，不复制 Doc、metric、completion 或
 token。相同命令会恢复匹配的 incomplete campaign：
 后端已确认相同 identity/digest 的 task 不会重复计算；digest 冲突立即失败并保留
@@ -181,7 +196,7 @@ token。相同命令会恢复匹配的 incomplete campaign：
 续跑完成精确清理后直接成功返回，不会误建新 campaign。只有已经没有 manifest 的
 后续新调用才会创建新的完整评估 campaign。
 
-无法解析或与当前 config、权重、registry、domain rules 或 eval contract 不匹配的
+无法解析或与当前 config、权重、selector/registry 或 eval contract 不匹配的
 普通 manifest 会被移动到 `campaigns/quarantine/`；隔离只移动 manifest，不读取、
 复用、覆盖或删除它原先指向的 run 内容。若后端随后恢复到同一个 campaign id，而
 本地存在没有匹配 manifest 登记的非空 run 目录，命令会保留该目录并立即失败，要求
@@ -224,8 +239,8 @@ results/details、失败 attempt、模型 runtime 与 manifest。
 
 普通查询只返回 complete campaign：
 
-- `GET /api/evaluations?offset=0&limit=5000`：weight、WKV mode、module、
-  primary domain、全部 native aggregates、诊断和 campaign provenance；响应中的
+- `GET /api/evaluations?offset=0&limit=5000`：weight、WKV mode、selector、
+  module、官方 tags、全部 native aggregates、诊断和 campaign provenance；响应中的
   `next_offset` 与 `generated_at` 分别用于下一页的 `offset` 与
   `completed_before`，前端会在同一 complete-campaign 快照内自动拉完全部页。
 - `GET /api/evaluations/{evaluation_id}/samples?offset=0&limit=25`：按稳定
@@ -233,8 +248,9 @@ results/details、失败 attempt、模型 runtime 与 manifest。
   `outcome=correct|incorrect|unanswered|undetermined`。
 
 dashboard 只取最新 complete campaign，按 weight × WKV mode 展开其中每个
-benchmark task，并支持 module/domain 筛选；history 页面保留全部 complete
+benchmark task，并从官方 LightEval tags 动态生成 `[All] + tag Tabs`；一个 task
+可出现在多个 tag Tabs，无 tag task 只出现在 `All`。history 页面保留全部 complete
 campaign。两者原样展示 native metrics、缺失 mode，并可按稳定 evaluation identity
 打开 Doc/reference、sample metric、多 completion、reasoning/answer、input/output
-tokens、logprobs/argmax、truncation 与 turn-boundary。domain 只用于组织和筛选；
-数值始终来自各 task 的 native metric，不跨 benchmark 合成总分。
+tokens、logprobs/argmax、truncation 与 turn-boundary。tags 只用于浏览；
+数值始终来自各 task 的 native metric，不跨 benchmark 或 tag 合成总分。

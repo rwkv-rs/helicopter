@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS evaluation_schema_metadata (
     contract_version integer NOT NULL
 );
 INSERT INTO evaluation_schema_metadata (singleton, contract_version)
-VALUES (true, 1)
+VALUES (true, 2)
 ON CONFLICT (singleton) DO NOTHING;
 DO $$
 BEGIN
@@ -26,7 +26,7 @@ BEGIN
         SELECT contract_version
         FROM evaluation_schema_metadata
         WHERE singleton = true
-    ) <> 1 THEN
+    ) <> 2 THEN
         RAISE EXCEPTION
             'unsupported evaluation schema version; create a fresh Scoreboard database';
     END IF;
@@ -39,10 +39,11 @@ CREATE TABLE IF NOT EXISTS evaluation_campaign (
     status text NOT NULL CHECK (status IN ('incomplete', 'complete')),
     config_digest text NOT NULL CHECK (config_digest ~ '^[0-9a-f]{64}$'),
     registry_digest text NOT NULL CHECK (registry_digest ~ '^[0-9a-f]{64}$'),
-    domain_rules_version text NOT NULL,
-    domain_rules_digest text NOT NULL CHECK (domain_rules_digest ~ '^[0-9a-f]{64}$'),
     eval_contract_digest text NOT NULL CHECK (eval_contract_digest ~ '^[0-9a-f]{64}$'),
     lighteval_version text NOT NULL,
+    configured_selectors jsonb NOT NULL,
+    resolved_selectors jsonb NOT NULL,
+    skipped_selectors jsonb NOT NULL,
     expected_tasks jsonb NOT NULL,
     publisher_principal text NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),

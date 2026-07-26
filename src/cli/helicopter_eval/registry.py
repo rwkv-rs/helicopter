@@ -4,19 +4,14 @@ from dataclasses import dataclass
 import hashlib
 import importlib.metadata
 import json
-from typing import Any
+from typing import Any, Iterable
 
-from .domains import (
-    DOMAIN_RULES_VERSION,
-    DomainAssignment,
-    assign_domain,
-    rules_digest,
-)
 from .config import EvaluationConfigurationError
 
 
 @dataclass(frozen=True)
 class RegistryTask:
+    selector: str
     identity: str
     name: str
     version: str
@@ -27,10 +22,10 @@ class RegistryTask:
     evaluation_splits: tuple[str, ...]
     languages: tuple[str, ...]
     upstream_tags: tuple[str, ...]
-    primary_domain: str
 
     def snapshot(self) -> dict[str, Any]:
         return {
+            "selector": self.selector,
             "identity": self.identity,
             "name": self.name,
             "version": self.version,
@@ -41,19 +36,38 @@ class RegistryTask:
             "evaluation_splits": self.evaluation_splits,
             "languages": self.languages,
             "upstream_tags": self.upstream_tags,
-            "primary_domain": self.primary_domain,
         }
 
 
 @dataclass(frozen=True)
 class RegistrySnapshot:
     lighteval_version: str
+    configured_selectors: tuple[str, ...]
+    resolved_selectors: tuple[str, ...]
+    skipped_selectors: tuple[str, ...]
     tasks: tuple[RegistryTask, ...]
     module_count: int
     digest: str
-    domain_rules_version: str
-    domain_rules_digest: str
-    unknown_domain_modules: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _InventoryTask:
+    name: str
+    module_family: str
+    module: str
+    metadata: dict[str, object]
+
+
+def _module_family(module: str) -> str:
+    family = module.removesuffix(".main")
+    for prefix in (
+        "lighteval.tasks.tasks.",
+        "lighteval.tasks.multilingual.tasks.",
+        "lighteval.tasks.multilingual.",
+    ):
+        if family.startswith(prefix):
+            return family.removeprefix(prefix)
+    return family
 
 
 def _strings(value: object) -> tuple[str, ...]:
@@ -89,68 +103,38 @@ def _evaluation_splits(value: object, task_name: str) -> tuple[str, ...]:
     return normalized
 
 
-def _snapshot_registry(registry: Any, lighteval_version: str) -> RegistrySnapshot:
-    loaded = registry.load_tasks()
-    config_rows = [task.config for task in loaded.values()]
-    config_names: list[str] = []
-    for config in config_rows:
-        raw_name = config.name
-        if (
-            not isinstance(raw_name, str)
-            or not raw_name.strip()
-            or raw_name != raw_name.strip()
-        ):
+def _inventory(rows: Iterable[object]) -> dict[str, _InventoryTask]:
+    inventory: dict[str, _InventoryTask] = {}
+    for row in rows:
+        if not isinstance(row, dict):
             raise EvaluationConfigurationError(
-                "default built-in registry contains an invalid task config name"
+                "LightEval registry module inventory is invalid"
             )
-        config_names.append(raw_name)
-    if len(config_names) != len(set(config_names)):
-        raise EvaluationConfigurationError(
-            "default built-in registry contains duplicate task configs"
-        )
-    configs = {
-        name: config for name, config in zip(config_names, config_rows, strict=True)
-    }
-    if not configs:
-        raise EvaluationConfigurationError("default built-in registry is empty")
-    module_metadata: dict[str, tuple[str, dict[str, object]]] = {}
-    task_modules: dict[str, str] = {}
-    for row in registry.get_tasks_dump():
-        if not isinstance(row, dict) or "module" not in row:
-            raise EvaluationConfigurationError(
-                "default built-in registry module inventory is invalid"
-            )
-        module = row["module"]
+        module = row.get("module")
         if (
             not isinstance(module, str)
             or not module.strip()
             or module != module.strip()
         ):
             raise EvaluationConfigurationError(
-                "default built-in registry contains an invalid module name"
+                "LightEval registry contains an invalid module name"
             )
-        family = module.removeprefix("lighteval.tasks.tasks.").removesuffix(".main")
-        if not family:
+        module_family = _module_family(module)
+        if not module_family:
             raise EvaluationConfigurationError(
-                "default built-in registry contains an empty module family"
+                "LightEval registry contains an empty module name"
             )
-        metadata = row.get("docstring")
-        parsed = metadata if isinstance(metadata, dict) else {}
-        known_module = module_metadata.get(family)
-        if known_module is not None and known_module[0] != module:
-            raise EvaluationConfigurationError(
-                f"default registry module family is ambiguous: {family}"
-            )
-        module_metadata[family] = (module, parsed)
+        raw_metadata = row.get("docstring")
+        metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
         raw_tasks = row.get("tasks")
         if not isinstance(raw_tasks, list):
             raise EvaluationConfigurationError(
-                f"default registry module lacks a task list: {module}"
+                f"LightEval registry module lacks a task list: {module}"
             )
         for task in raw_tasks:
             if not isinstance(task, dict):
                 raise EvaluationConfigurationError(
-                    f"default registry module has invalid task metadata: {module}"
+                    f"LightEval registry module has invalid task metadata: {module}"
                 )
             task_name = task.get("name")
             if (
@@ -159,36 +143,123 @@ def _snapshot_registry(registry: Any, lighteval_version: str) -> RegistrySnapsho
                 or task_name != task_name.strip()
             ):
                 raise EvaluationConfigurationError(
-                    f"default registry module has invalid task metadata: {module}"
+                    f"LightEval registry module has invalid task metadata: {module}"
                 )
-            if task_name in task_modules:
+            if task_name in inventory:
+                known = inventory[task_name]
+                if (
+                    known.module == module
+                    and _strings(known.metadata.get("languages"))
+                    == _strings(metadata.get("languages"))
+                    and _strings(known.metadata.get("tags"))
+                    == _strings(metadata.get("tags"))
+                ):
+                    continue
                 raise EvaluationConfigurationError(
-                    f"default registry task appears more than once: {task_name}"
+                    f"LightEval registry task appears more than once: {task_name}"
                 )
-            task_modules[task_name] = family
+            inventory[task_name] = _InventoryTask(
+                name=task_name,
+                module_family=module_family,
+                module=module,
+                metadata=metadata,
+            )
+    if not inventory:
+        raise EvaluationConfigurationError("LightEval registry is empty")
+    return inventory
 
-    if set(configs) != set(task_modules):
-        missing = sorted(set(configs) - set(task_modules))
-        extra = sorted(set(task_modules) - set(configs))
+
+def _resolve_selectors(
+    selectors: tuple[str, ...],
+    inventory: dict[str, _InventoryTask],
+) -> tuple[dict[str, str], tuple[str, ...], tuple[str, ...]]:
+    task_names = tuple(sorted(inventory))
+    selector_by_task: dict[str, str] = {}
+    resolved: list[str] = []
+    skipped: list[str] = []
+    for selector in selectors:
+        if selector in inventory:
+            matches = (selector,)
+        else:
+            matches = tuple(
+                name
+                for name in task_names
+                if ":" in name and name.split(":", 1)[0] == selector
+            )
+            if len(matches) < 2:
+                matches = ()
+        if not matches:
+            skipped.append(selector)
+            continue
+        overlap = sorted(set(matches) & set(selector_by_task))
+        if overlap:
+            previous = selector_by_task[overlap[0]]
+            raise EvaluationConfigurationError(
+                "benchmark selectors overlap on task "
+                f"{overlap[0]}: {previous}, {selector}"
+            )
+        resolved.append(selector)
+        selector_by_task.update({name: selector for name in matches})
+    if not selector_by_task:
         raise EvaluationConfigurationError(
-            "default built-in registry module inventory mismatch; "
+            "none of the configured benchmark selectors exist in LightEval"
+        )
+    return selector_by_task, tuple(resolved), tuple(skipped)
+
+
+def _snapshot_registry(
+    registry: Any,
+    lighteval_version: str,
+    *,
+    configured_selectors: tuple[str, ...] | None = None,
+    selector_by_task: dict[str, str] | None = None,
+    inventory_rows: Iterable[object] | None = None,
+    skipped_selectors: tuple[str, ...] = (),
+) -> RegistrySnapshot:
+    loaded = registry.load_tasks()
+    config_rows = [task.config for task in loaded.values()]
+    configs: dict[str, object] = {}
+    for config in config_rows:
+        raw_name = config.name
+        if (
+            not isinstance(raw_name, str)
+            or not raw_name.strip()
+            or raw_name != raw_name.strip()
+        ):
+            raise EvaluationConfigurationError(
+                "LightEval registry contains an invalid task config name"
+            )
+        if raw_name in configs:
+            raise EvaluationConfigurationError(
+                "LightEval registry contains duplicate task configs"
+            )
+        configs[raw_name] = config
+    if not configs:
+        raise EvaluationConfigurationError("selected LightEval registry is empty")
+
+    inventory = _inventory(
+        registry.get_tasks_dump() if inventory_rows is None else inventory_rows
+    )
+    if selector_by_task is None:
+        selector_by_task = {name: name for name in configs}
+    if set(configs) != set(selector_by_task):
+        missing = sorted(set(selector_by_task) - set(configs))
+        extra = sorted(set(configs) - set(selector_by_task))
+        raise EvaluationConfigurationError(
+            "selected LightEval registry does not match selector expansion; "
             f"missing={missing}, extra={extra}"
+        )
+    missing_metadata = sorted(set(configs) - set(inventory))
+    if missing_metadata:
+        raise EvaluationConfigurationError(
+            "selected LightEval tasks are absent from module metadata: "
+            + ", ".join(missing_metadata)
         )
 
     tasks: list[RegistryTask] = []
-    unknown: set[str] = set()
     for name in sorted(configs):
         config = configs[name]
-        family = task_modules[name]
-        module, metadata = module_metadata[family]
-        tags = _strings(metadata.get("tags"))
-        assignment: DomainAssignment = assign_domain(family, tags)
-        if assignment.primary_domain == "other":
-            unknown.add(family)
-        evaluation_splits = _evaluation_splits(
-            config.evaluation_splits,
-            name,
-        )
+        metadata = inventory[name]
         identity = config.full_name
         if (
             not isinstance(identity, str)
@@ -228,25 +299,39 @@ def _snapshot_registry(registry: Any, lighteval_version: str) -> RegistrySnapsho
             )
         tasks.append(
             RegistryTask(
+                selector=selector_by_task[name],
                 identity=identity,
                 name=name,
                 version=version,
-                module_family=family,
-                module=module,
+                module_family=metadata.module_family,
+                module=metadata.module,
                 dataset=dataset,
                 subset=subset,
-                evaluation_splits=evaluation_splits,
-                languages=_strings(metadata.get("languages")),
-                upstream_tags=assignment.upstream_tags,
-                primary_domain=assignment.primary_domain,
+                evaluation_splits=_evaluation_splits(
+                    config.evaluation_splits,
+                    name,
+                ),
+                languages=_strings(metadata.metadata.get("languages")),
+                upstream_tags=_strings(metadata.metadata.get("tags")),
             )
         )
     if len({task.identity for task in tasks}) != len(tasks):
         raise EvaluationConfigurationError(
-            "default built-in registry contains duplicate task identities"
+            "selected LightEval registry contains duplicate task identities"
         )
+    configured = (
+        configured_selectors
+        if configured_selectors is not None
+        else tuple(dict.fromkeys(selector_by_task.values()))
+    )
+    resolved = tuple(
+        selector for selector in configured if selector not in skipped_selectors
+    )
     payload = {
         "lighteval_version": lighteval_version,
+        "configured_selectors": configured,
+        "resolved_selectors": resolved,
+        "skipped_selectors": skipped_selectors,
         "tasks": [task.snapshot() for task in tasks],
     }
     digest = hashlib.sha256(
@@ -254,27 +339,48 @@ def _snapshot_registry(registry: Any, lighteval_version: str) -> RegistrySnapsho
     ).hexdigest()
     return RegistrySnapshot(
         lighteval_version=lighteval_version,
+        configured_selectors=configured,
+        resolved_selectors=resolved,
+        skipped_selectors=skipped_selectors,
         tasks=tuple(tasks),
         module_count=len({task.module_family for task in tasks}),
         digest=digest,
-        domain_rules_version=DOMAIN_RULES_VERSION,
-        domain_rules_digest=rules_digest(),
-        unknown_domain_modules=tuple(sorted(unknown)),
     )
 
 
-def load_default_registry() -> RegistrySnapshot:
+def load_configured_registry(selectors: tuple[str, ...]) -> RegistrySnapshot:
     try:
         from lighteval.tasks.registry import Registry
 
+        lighteval_version = importlib.metadata.version("lighteval")
+        inventory_registry = Registry(
+            tasks=None,
+            load_multilingual=True,
+            custom_tasks=None,
+        )
+        inventory_rows = inventory_registry.get_tasks_dump()
+        inventory = _inventory(inventory_rows)
+        selector_by_task, _resolved, skipped = _resolve_selectors(
+            selectors,
+            inventory,
+        )
+        selected_registry = Registry(
+            tasks=",".join(selector_by_task),
+            load_multilingual=True,
+            custom_tasks=None,
+        )
         return _snapshot_registry(
-            Registry(tasks=None, load_multilingual=False, custom_tasks=None),
-            importlib.metadata.version("lighteval"),
+            selected_registry,
+            lighteval_version,
+            configured_selectors=selectors,
+            selector_by_task=selector_by_task,
+            inventory_rows=inventory_rows,
+            skipped_selectors=skipped,
         )
     except EvaluationConfigurationError:
         raise
     except Exception as error:
         raise EvaluationConfigurationError(
-            "cannot load the complete default LightEval registry: "
+            "cannot load configured LightEval benchmarks: "
             f"{type(error).__module__}.{type(error).__qualname__}"
         ) from error

@@ -10,7 +10,7 @@ from typing import Mapping
 from urllib.parse import urlsplit
 
 
-CONFIG_KEYS = frozenset({"schema_version", "weights"})
+CONFIG_KEYS = frozenset({"schema_version", "weights", "benchmarks"})
 SCHEMA_VERSION = 1
 
 
@@ -22,6 +22,7 @@ class EvaluationConfigurationError(ValueError):
 class EvaluationConfig:
     schema_version: int
     weights: tuple[str, ...]
+    benchmarks: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -62,25 +63,34 @@ def load_evaluation_config(path: Path) -> EvaluationConfig:
     version = raw["schema_version"]
     if isinstance(version, bool) or version != SCHEMA_VERSION:
         raise EvaluationConfigurationError(f"schema_version must be {SCHEMA_VERSION}")
-    weights = raw["weights"]
+    weights = _string_array(raw["weights"], name="weights")
+    benchmarks = _string_array(raw["benchmarks"], name="benchmarks")
+    return EvaluationConfig(
+        schema_version=SCHEMA_VERSION,
+        weights=weights,
+        benchmarks=benchmarks,
+    )
+
+
+def _string_array(value: object, *, name: str) -> tuple[str, ...]:
     if (
-        not isinstance(weights, list)
-        or not weights
+        not isinstance(value, list)
+        or not value
         or any(
-            not isinstance(value, str) or not value or value != value.strip()
-            for value in weights
+            not isinstance(item, str) or not item or item != item.strip()
+            for item in value
         )
     ):
         raise EvaluationConfigurationError(
-            "weights must be a non-empty array of non-empty trimmed relative paths"
+            f"{name} must be a non-empty array of non-empty trimmed strings"
         )
-    normalized = tuple(weights)
-    duplicates = sorted({value for value in normalized if normalized.count(value) > 1})
+    normalized = tuple(value)
+    duplicates = sorted({item for item in normalized if normalized.count(item) > 1})
     if duplicates:
         raise EvaluationConfigurationError(
-            "duplicate weights are not allowed: " + ", ".join(duplicates)
+            f"duplicate {name} are not allowed: " + ", ".join(duplicates)
         )
-    return EvaluationConfig(schema_version=SCHEMA_VERSION, weights=normalized)
+    return normalized
 
 
 def load_evaluation_environment(env: Mapping[str, str]) -> EvaluationEnvironment:

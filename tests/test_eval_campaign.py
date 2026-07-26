@@ -35,6 +35,7 @@ def _plan(tmp_path: Path):
         sha256=hashlib.sha256(b"weight").hexdigest(),
     )
     task = RegistryTask(
+        selector="gsm8k",
         identity="gsm8k|0",
         name="gsm8k",
         version="0",
@@ -45,19 +46,22 @@ def _plan(tmp_path: Path):
         evaluation_splits=("test",),
         languages=("english",),
         upstream_tags=("math",),
-        primary_domain="math",
     )
     registry = RegistrySnapshot(
         lighteval_version="0.13.0",
+        configured_selectors=("gsm8k",),
+        resolved_selectors=("gsm8k",),
+        skipped_selectors=(),
         tasks=(task,),
         module_count=1,
         digest="a" * 64,
-        domain_rules_version="test",
-        domain_rules_digest="b" * 64,
-        unknown_domain_modules=(),
     )
     return build_plan(
-        EvaluationConfig(schema_version=1, weights=("weight.pth",)),
+        EvaluationConfig(
+            schema_version=1,
+            weights=("weight.pth",),
+            benchmarks=("gsm8k",),
+        ),
         (weight,),
         registry,
     )
@@ -263,12 +267,14 @@ def test_resume_removes_only_registered_model_runtime(
 
 def test_manifest_schema_rejects_unsafe_paths_and_digest_state_overlap() -> None:
     raw = {
-        "version": 1,
+        "version": 2,
         "resume_key": "1" * 64,
         "campaign_id": "11111111-1111-1111-1111-111111111111",
         "config_digest": "2" * 64,
         "registry_digest": "3" * 64,
-        "domain_rules_digest": "4" * 64,
+        "configured_selectors": ["gsm8k"],
+        "resolved_selectors": ["gsm8k"],
+        "skipped_selectors": [],
         "eval_contract_digest": "5" * 64,
         "weight_sha256": ["6" * 64],
         "registry_task_identities": ["task|0"],

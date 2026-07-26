@@ -66,12 +66,12 @@ async def _seed(app, temporary_root: Path) -> None:
     task = RegistryTask(**fixture["registry_task"])
     registry = RegistrySnapshot(
         lighteval_version="0.13.0",
+        configured_selectors=(task.selector,),
+        resolved_selectors=(task.selector,),
+        skipped_selectors=(),
         tasks=(task,),
         module_count=1,
         digest="b" * 64,
-        domain_rules_version="shared-fixture",
-        domain_rules_digest="c" * 64,
-        unknown_domain_modules=(),
     )
     identities: list[WeightIdentity] = []
     for name, content in (
@@ -92,6 +92,7 @@ async def _seed(app, temporary_root: Path) -> None:
         EvaluationConfig(
             schema_version=1,
             weights=tuple(identity.configured_path for identity in identities),
+            benchmarks=(task.selector,),
         ),
         tuple(identities),
         registry,

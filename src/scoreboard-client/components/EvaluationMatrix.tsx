@@ -33,7 +33,7 @@ function keyOf(evaluation: EvaluationSummary): string {
 
 export function EvaluationMatrix() {
   const { data, select } = useEvaluations();
-  const [domain, setDomain] = useState("all");
+  const [tag, setTag] = useState("all");
   const [module, setModule] = useState("all");
 
   const allEvaluations = data?.evaluations ?? [];
@@ -58,8 +58,11 @@ export function EvaluationMatrix() {
       allEvaluations.filter((row) => row.campaign_id === latestCampaignId),
     [allEvaluations, latestCampaignId],
   );
-  const domains = useMemo(
-    () => [...new Set(evaluations.map((row) => row.task.primary_domain))].sort(),
+  const tags = useMemo(
+    () =>
+      [
+        ...new Set(evaluations.flatMap((row) => row.task.upstream_tags)),
+      ].sort(),
     [evaluations],
   );
   const modules = useMemo(
@@ -75,7 +78,7 @@ export function EvaluationMatrix() {
   }, [evaluations]);
   const filtered = evaluations.filter(
     (row) =>
-      (domain === "all" || row.task.primary_domain === domain) &&
+      (tag === "all" || row.task.upstream_tags.includes(tag)) &&
       (module === "all" || row.task.module_family === module),
   );
   const byKey = new Map<string, EvaluationSummary>();
@@ -90,7 +93,7 @@ export function EvaluationMatrix() {
         {
           name: row.task.task_name,
           module: row.task.module_family,
-          domain: row.task.primary_domain,
+          tags: row.task.upstream_tags,
         },
       ]),
     ).values(),
@@ -100,19 +103,10 @@ export function EvaluationMatrix() {
     <section className="card">
       <header className="section-head">
         <div>
-          <h2>完整 LightEval registry</h2>
+          <h2>配置的 LightEval benchmarks</h2>
           <p>显示每个 task 的原生 metric；空单元格表示该 weight/mode 结果缺失。</p>
         </div>
         <div className="filters">
-          <label>
-            domain
-            <select value={domain} onChange={(event) => setDomain(event.target.value)}>
-              <option value="all">全部</option>
-              {domains.map((value) => (
-                <option key={value}>{value}</option>
-              ))}
-            </select>
-          </label>
           <label>
             module
             <select value={module} onChange={(event) => setModule(event.target.value)}>
@@ -124,13 +118,26 @@ export function EvaluationMatrix() {
           </label>
         </div>
       </header>
+      <nav aria-label="官方 LightEval tags" className="tag-tabs">
+        {["all", ...tags].map((value) => (
+          <button
+            aria-pressed={tag === value}
+            className={tag === value ? "tag-tab active" : "tag-tab"}
+            key={value}
+            onClick={() => setTag(value)}
+            type="button"
+          >
+            {value === "all" ? "All" : value}
+          </button>
+        ))}
+      </nav>
       <div className="table-scroll">
         <table className="matrix">
           <thead>
             <tr>
               <th rowSpan={2}>task</th>
               <th rowSpan={2}>module</th>
-              <th rowSpan={2}>domain</th>
+              <th rowSpan={2}>official tags</th>
               {weights.map(([sha, name]) => (
                 <th colSpan={MODES.length} key={sha} title={sha}>
                   {name}
@@ -148,7 +155,7 @@ export function EvaluationMatrix() {
               <tr key={task.name}>
                 <td className="task-name">{task.name}</td>
                 <td>{task.module}</td>
-                <td>{task.domain}</td>
+                <td>{task.tags.length ? task.tags.join(", ") : "—"}</td>
                 {weights.flatMap(([sha]) =>
                   MODES.map((mode) => {
                     const row = byKey.get([sha, mode, task.name].join("\u0000"));

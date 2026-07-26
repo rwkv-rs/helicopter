@@ -9,7 +9,7 @@ The current focus is RWKV7:
 - `infer`: start a vLLM server for an RWKV checkpoint.
 - `takeoff`: start verl training for an RWKV checkpoint. The supported takeoff
   path is GRPO.
-- `eval`: run the complete default LightEval registry for multiple weights in
+- `eval`: run configured LightEval benchmarks for multiple weights in
   both WKV modes, publish it to Scoreboard, and clean standard local results.
 - `scripts/install_remote.sh`: prepare the BBT DevPod GPU workspace, sync this
   repository, and run the local installer remotely.
@@ -201,9 +201,10 @@ helicopter takeoff g1g-1.5b grpo \
   --override trainer.save_freq=10
 ```
 
-### Run the complete LightEval registry
+### Run configured LightEval benchmarks
 
-The public config contains only a schema version and one or more weight paths:
+The public TOML contains a schema version, weight paths, and a simple
+`benchmarks` string array of direct LightEval task/superset selectors:
 
 ```bash
 helicopter eval \
@@ -213,12 +214,11 @@ helicopter eval \
 helicopter eval --config ./configs/eval/lighteval.toml
 ```
 
-`eval` always discovers the complete default built-in registry dynamically and
-runs every full evaluation split for both `fp16` and `fp32io16`; benchmarks are
-not listed in the config. Native perplexity tasks use raw rolling
-log-likelihood rather than the chat-generation path. Scoreboard publication is
-mandatory, and a successful campaign cleans the standard local results/details
-after database confirmation.
+`eval` expands every available selector and runs every full evaluation split
+for both `fp16` and `fp32io16`. Selectors absent from the locked LightEval
+release are reported as skipped; failures after task resolution keep the
+campaign incomplete. Scoreboard publication is mandatory, and a successful
+campaign cleans the standard local results/details after database confirmation.
 Copy `.env.example` to the private eval environment file and run
 `chmod 600 .env.local` before using it. The file must be owned by the current
 user and must not be a symlink.

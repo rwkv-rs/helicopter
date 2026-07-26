@@ -50,6 +50,7 @@ def _expected_tasks(plan: EvaluationPlan) -> list[dict[str, object]]:
                     "weight_sha256": unit.weight.sha256,
                     "weight_display_name": unit.weight.display_name,
                     "wkv_mode": unit.wkv_mode,
+                    "selector": task.selector,
                     "task_name": task.identity,
                     "task_version": task.version,
                     "module_family": task.module_family,
@@ -59,7 +60,6 @@ def _expected_tasks(plan: EvaluationPlan) -> list[dict[str, object]]:
                     "evaluation_splits": list(task.evaluation_splits),
                     "languages": list(task.languages),
                     "upstream_tags": list(task.upstream_tags),
-                    "primary_domain": task.primary_domain,
                 }
             )
     return expected
@@ -71,7 +71,6 @@ def _resume_key(plan: EvaluationPlan) -> str:
             "config": plan.config_digest,
             "weights": list(dict.fromkeys(unit.weight.sha256 for unit in plan.units)),
             "registry": plan.registry.digest,
-            "domain": plan.registry.domain_rules_digest,
             "eval_contract": plan.eval_contract_digest,
         },
         sort_keys=True,
@@ -82,14 +81,15 @@ def _resume_key(plan: EvaluationPlan) -> str:
 
 def _campaign_payload(plan: EvaluationPlan, resume_key: str) -> dict[str, object]:
     return {
-        "schema_version": "lighteval-campaign-v1",
+        "schema_version": "lighteval-campaign-v2",
         "resume_key": resume_key,
         "config_digest": plan.config_digest,
         "registry_digest": plan.registry.digest,
-        "domain_rules_version": plan.registry.domain_rules_version,
-        "domain_rules_digest": plan.registry.domain_rules_digest,
         "eval_contract_digest": plan.eval_contract_digest,
         "lighteval_version": plan.registry.lighteval_version,
+        "configured_selectors": list(plan.registry.configured_selectors),
+        "resolved_selectors": list(plan.registry.resolved_selectors),
+        "skipped_selectors": list(plan.registry.skipped_selectors),
         "expected_tasks": _expected_tasks(plan),
     }
 
@@ -103,9 +103,11 @@ def _new_manifest(
         campaign_id=campaign_id,
         config_digest=plan.config_digest,
         registry_digest=plan.registry.digest,
-        domain_rules_digest=plan.registry.domain_rules_digest,
         eval_contract_digest=plan.eval_contract_digest,
         weight_sha256=list(dict.fromkeys(unit.weight.sha256 for unit in plan.units)),
+        configured_selectors=list(plan.registry.configured_selectors),
+        resolved_selectors=list(plan.registry.resolved_selectors),
+        skipped_selectors=list(plan.registry.skipped_selectors),
         registry_task_identities=[task.identity for task in plan.registry.tasks],
     )
 
@@ -119,7 +121,6 @@ def _check_manifest_contract(
         "resume_key": resume_key,
         "config_digest": plan.config_digest,
         "registry_digest": plan.registry.digest,
-        "domain_rules_digest": plan.registry.domain_rules_digest,
         "eval_contract_digest": plan.eval_contract_digest,
     }
     mismatched = [
@@ -136,6 +137,12 @@ def _validate_manifest_plan(
     manifest: CampaignManifest,
     plan: EvaluationPlan,
 ) -> None:
+    if manifest.configured_selectors != list(plan.registry.configured_selectors):
+        raise ManifestError("campaign manifest configured selectors do not match plan")
+    if manifest.resolved_selectors != list(plan.registry.resolved_selectors):
+        raise ManifestError("campaign manifest resolved selectors do not match plan")
+    if manifest.skipped_selectors != list(plan.registry.skipped_selectors):
+        raise ManifestError("campaign manifest skipped selectors do not match plan")
     expected_weights = list(dict.fromkeys(unit.weight.sha256 for unit in plan.units))
     if manifest.weight_sha256 != expected_weights:
         raise ManifestError("campaign manifest weight snapshot does not match plan")
@@ -415,15 +422,17 @@ def _control_metadata(
     campaign_id: str,
 ) -> dict[str, object]:
     return {
-        "schema_version": "lighteval-control-v1",
+        "schema_version": "lighteval-control-v2",
         "campaign_id": campaign_id,
         "status": "complete",
         "completed_at": datetime.now(timezone.utc).isoformat(),
         "config_digest": plan.config_digest,
         "implementation_digest": plan.implementation_digest,
         "registry_digest": plan.registry.digest,
-        "domain_rules_digest": plan.registry.domain_rules_digest,
         "eval_contract_digest": plan.eval_contract_digest,
+        "configured_selectors": list(plan.registry.configured_selectors),
+        "resolved_selectors": list(plan.registry.resolved_selectors),
+        "skipped_selectors": list(plan.registry.skipped_selectors),
         "weight_sha256": list(dict.fromkeys(unit.weight.sha256 for unit in plan.units)),
         "wkv_modes": ["fp16", "fp32io16"],
         "expected_task_count": plan.expected_task_count,
@@ -610,6 +619,11 @@ def run_campaign(
     environment: EvaluationEnvironment,
 ) -> int:
     ensure_private_staging_root(environment.staging_root)
+    if plan.registry.skipped_selectors:
+        print(
+            "skipped benchmark selectors unavailable in this LightEval release: "
+            + ", ".join(plan.registry.skipped_selectors)
+        )
     client = ScoreboardClient(environment)
     resume_key = _resume_key(plan)
     store = ManifestStore(environment.staging_root, resume_key)

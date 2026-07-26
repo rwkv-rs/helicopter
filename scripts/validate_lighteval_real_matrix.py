@@ -2,7 +2,7 @@
 
 This is an internal acceptance harness, not a product evaluation entrypoint.
 The product contract remains ``helicopter eval --config ...`` over the complete
-default registry.
+configured benchmark selector set.
 """
 
 from __future__ import annotations
@@ -29,12 +29,11 @@ from helicopter_eval.lighteval_adapter import (
     evaluation_max_model_length,
 )
 from helicopter_eval.plan import WKV_MODES, EvaluationUnit, build_plan
-from helicopter_eval.registry import load_default_registry
+from helicopter_eval.registry import load_configured_registry
 from helicopter_eval.runner import _process_environment
 
 
 SUCCESS_TASKS = frozenset({"aime24|0", "aime25|0"})
-PREREQUISITE_FAILURE_TASK = "aa_omniscience|0"
 VALIDATION_CAMPAIGN_ID = "00000000-0000-0000-0000-000000000000"
 
 
@@ -54,15 +53,14 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _selected_shards(unit: EvaluationUnit):
-    identities = SUCCESS_TASKS | {PREREQUISITE_FAILURE_TASK}
     shards = tuple(
         shard
         for shard in unit.shards
-        if len(shard.tasks) == 1 and shard.tasks[0].identity in identities
+        if len(shard.tasks) == 1 and shard.tasks[0].identity in SUCCESS_TASKS
     )
     selected = {shard.tasks[0].identity for shard in shards}
-    if selected != identities:
-        missing = sorted(identities - selected)
+    if selected != SUCCESS_TASKS:
+        missing = sorted(SUCCESS_TASKS - selected)
         raise RuntimeError(f"validation registry tasks are missing: {missing}")
     return shards
 
@@ -165,7 +163,7 @@ def _run_unit_matrix(
             raise RuntimeError(
                 f"real validation success set mismatch: {sorted(successful_tasks)}"
             )
-        if failed_tasks != {PREREQUISITE_FAILURE_TASK}:
+        if failed_tasks:
             raise RuntimeError(
                 f"real validation failure set mismatch: {sorted(failed_tasks)}"
             )
@@ -200,15 +198,7 @@ def _run_unit_matrix(
                 "model_execution": execution,
                 "model_load_count": 1,
                 "successful_shards": sorted(successful_tasks),
-                "task_prerequisite_failures": [
-                    {
-                        "task_identity": failure.shard.tasks[0].identity,
-                        "error_type": failure.error_type,
-                        "error_phase": failure.error_phase,
-                        "error_site": failure.error_site,
-                    }
-                    for failure in failures
-                ],
+                "task_prerequisite_failures": [],
                 "publications": publications,
                 "runtime_cleanup": "verified",
             }
@@ -300,7 +290,7 @@ def main() -> None:
         config = load_evaluation_config(args.config)
         environment = load_evaluation_environment(private_env)
         weights = resolve_weights(config, environment)
-        registry = load_default_registry()
+        registry = load_configured_registry(config.benchmarks)
         plan = build_plan(config, weights, registry)
         with tempfile.TemporaryDirectory(
             prefix="lighteval-real-matrix-",

@@ -24,6 +24,7 @@ class ExpectedTask(Contract):
     weight_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     weight_display_name: str = Field(min_length=1, max_length=500)
     wkv_mode: WkvMode
+    selector: str = Field(min_length=1, max_length=500)
     task_name: str = Field(min_length=1, max_length=500)
     task_version: str = Field(min_length=1, max_length=100)
     module_family: str = Field(min_length=1, max_length=300)
@@ -33,19 +34,18 @@ class ExpectedTask(Contract):
     evaluation_splits: list[str] = Field(min_length=1)
     languages: list[str]
     upstream_tags: list[str]
-    primary_domain: str = Field(min_length=1, max_length=100)
 
     @model_validator(mode="after")
     def identity_matches_dimensions(self) -> "ExpectedTask":
         for name in (
             "identity",
             "weight_display_name",
+            "selector",
             "task_name",
             "task_version",
             "module_family",
             "module",
             "dataset",
-            "primary_domain",
         ):
             value = getattr(self, name)
             if not value.strip() or value != value.strip():
@@ -69,18 +69,40 @@ class ExpectedTask(Contract):
 
 
 class CampaignCreate(Contract):
-    schema_version: Literal["lighteval-campaign-v1"]
+    schema_version: Literal["lighteval-campaign-v2"]
     resume_key: str = Field(pattern=r"^[0-9a-f]{64}$")
     config_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     registry_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
-    domain_rules_version: str = Field(min_length=1, max_length=100)
-    domain_rules_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     eval_contract_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     lighteval_version: Literal["0.13.0"]
+    configured_selectors: list[str] = Field(min_length=1)
+    resolved_selectors: list[str] = Field(min_length=1)
+    skipped_selectors: list[str]
     expected_tasks: list[ExpectedTask] = Field(min_length=1)
 
     @model_validator(mode="after")
     def unique_expected_tasks(self) -> "CampaignCreate":
+        for name in (
+            "configured_selectors",
+            "resolved_selectors",
+            "skipped_selectors",
+        ):
+            values = getattr(self, name)
+            if any(
+                not value.strip() or value != value.strip() for value in values
+            ) or len(values) != len(set(values)):
+                raise ValueError(f"{name} must contain unique trimmed strings")
+        if not set(self.resolved_selectors).isdisjoint(self.skipped_selectors):
+            raise ValueError("resolved and skipped selectors must be disjoint")
+        if set(self.resolved_selectors) | set(self.skipped_selectors) != set(
+            self.configured_selectors
+        ):
+            raise ValueError("selector status must partition configured selectors")
+        task_selectors = {task.selector for task in self.expected_tasks}
+        if not task_selectors.issubset(self.resolved_selectors):
+            raise ValueError("expected tasks must use resolved selectors")
+        if set(self.resolved_selectors) != task_selectors:
+            raise ValueError("every resolved selector must produce an expected task")
         identities = [task.identity for task in self.expected_tasks]
         if len(identities) != len(set(identities)):
             raise ValueError("expected task identities must be unique")
@@ -114,7 +136,7 @@ class CampaignCreate(Contract):
                         tuple(row.evaluation_splits),
                         tuple(row.languages),
                         tuple(row.upstream_tags),
-                        row.primary_domain,
+                        row.selector,
                     )
                     known = metadata_by_task.setdefault(task_name, metadata)
                     if known != metadata:
@@ -135,7 +157,7 @@ class CampaignReceipt(Contract):
 class PublicationPreflight(Contract):
     status: Literal["ready"]
     publisher_principal: str
-    schema_version: Literal["lighteval-campaign-v1"]
+    schema_version: Literal["lighteval-campaign-v2"]
     lighteval_version: Literal["0.13.0"]
 
 
@@ -214,7 +236,7 @@ class StandardDetail(Contract):
 
 
 class TaskPublication(Contract):
-    schema_version: Literal["lighteval-task-v1"]
+    schema_version: Literal["lighteval-task-v2"]
     campaign_id: str
     task: ExpectedTask
     artifact: ArtifactMetadata
@@ -333,10 +355,11 @@ class FinalizeReceipt(Contract):
 class CampaignProvenance(Contract):
     config_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     registry_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
-    domain_rules_version: str
-    domain_rules_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     eval_contract_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     lighteval_version: Literal["0.13.0"]
+    configured_selectors: list[str]
+    resolved_selectors: list[str]
+    skipped_selectors: list[str]
     publisher_principal: str
 
 
