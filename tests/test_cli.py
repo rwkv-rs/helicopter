@@ -108,8 +108,12 @@ def build_takeoff_plan(
         venv_python = ROOT / ".venv/bin/python"
     original_exists = Path.exists
     with mock.patch.object(Path, "exists", autospec=True) as exists:
-        exists.side_effect = lambda path: True if path == venv_python else original_exists(path)
-        return commands.build_takeoff_plan(args, root=ROOT, env=loaded_env, config=loaded_config)
+        exists.side_effect = lambda path: (
+            True if path == venv_python else original_exists(path)
+        )
+        return commands.build_takeoff_plan(
+            args, root=ROOT, env=loaded_env, config=loaded_config
+        )
 
 
 class DotenvTests(unittest.TestCase):
@@ -183,7 +187,9 @@ class ConfigResolutionTests(unittest.TestCase):
         loaded_config = load_example_config()
         loaded_env = {"WEIGHT_PATH": "/weights/RWKV"}
 
-        model_path, model = config.resolve_model_path(loaded_config, "g1g-1.5b", root=ROOT, env=loaded_env)
+        model_path, model = config.resolve_model_path(
+            loaded_config, "g1g-1.5b", root=ROOT, env=loaded_env
+        )
 
         self.assertEqual(model["served_model_name"], "g1g-1.5b")
         self.assertEqual(
@@ -222,11 +228,38 @@ class ConfigResolutionTests(unittest.TestCase):
         self.assertEqual(takeoff["ctx_len"], 10240)
         self.assertNotIn("max_prompt_length", takeoff)
         self.assertNotIn("max_response_length", takeoff)
-        self.assertTrue(takeoff["derive_sequence_lengths"])
+        self.assertNotIn("derive_sequence_lengths", takeoff)
         self.assertFalse(takeoff["rwkv_use_dynamic_bsz"])
         self.assertNotIn("rollout_ignore_eos", takeoff)
         self.assertEqual(takeoff["ppo_epochs"], 1)
         self.assertEqual(takeoff["actor_use_kl_loss"], False)
+        self.assertEqual(takeoff["total_epochs"], 10)
+        self.assertNotIn("total_training_steps", takeoff)
+
+    def test_maxrl_grouped_config_rejects_legacy_optimizer_steps(self) -> None:
+        raw = tomllib.loads(DAPO_CONFIG.read_text(encoding="utf-8"))
+        raw["experiment"]["optimizer_steps"] = 200
+
+        with self.assertRaisesRegex(SystemExit, "optimizer_steps was removed"):
+            config.compile_config(raw)
+
+    def test_maxrl_grouped_config_allows_manual_stop(self) -> None:
+        raw = tomllib.loads(DAPO_CONFIG.read_text(encoding="utf-8"))
+        raw["experiment"]["candidate_dataset_passes"] = 0
+
+        compiled = config.compile_config(raw)
+
+        self.assertEqual(compiled["takeoff"]["grpo"]["total_epochs"], 0)
+        self.assertNotIn("total_training_steps", compiled["takeoff"]["grpo"])
+
+    def test_maxrl_grouped_config_rejects_negative_candidate_passes(self) -> None:
+        raw = tomllib.loads(DAPO_CONFIG.read_text(encoding="utf-8"))
+        raw["experiment"]["candidate_dataset_passes"] = -1
+
+        with self.assertRaisesRegex(
+            SystemExit, "candidate_dataset_passes must be >= 0"
+        ):
+            config.compile_config(raw)
 
     def test_grouped_config_rejects_legacy_section_mixing(self) -> None:
         raw = tomllib.loads(EXAMPLE_CONFIG.read_text(encoding="utf-8"))
@@ -242,7 +275,9 @@ class ConfigResolutionTests(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "exactly one context suffix"):
             config.compile_config(raw)
 
-    def test_grouped_config_rejects_removed_length_batching_and_eos_fields(self) -> None:
+    def test_grouped_config_rejects_removed_length_batching_and_eos_fields(
+        self,
+    ) -> None:
         raw = tomllib.loads(EXAMPLE_CONFIG.read_text(encoding="utf-8"))
         raw["model"]["context_tokens"] = 8192
         raw["data"]["train"]["max_prompt_tokens"] = 1024
@@ -291,7 +326,9 @@ class CommandPlanTests(unittest.TestCase):
             {"VLLM_RWKV7_WKV_MODE"},
         )
 
-    def test_takeoff_plan_uses_verl_module_entrypoint_and_default_overrides(self) -> None:
+    def test_takeoff_plan_uses_verl_module_entrypoint_and_default_overrides(
+        self,
+    ) -> None:
         loaded_config = load_example_config()
         venv_python = ROOT / ".venv/bin/python"
 
@@ -349,7 +386,8 @@ class CommandPlanTests(unittest.TestCase):
                 "data.max_response_length": "null",
                 "data.seed": "42",
                 "reward.custom_reward_function.path": str(
-                    ROOT / "src/train/verl-rwkv/examples/rwkv_trainer/math_verify_reward.py"
+                    ROOT
+                    / "src/train/verl-rwkv/examples/rwkv_trainer/math_verify_reward.py"
                 ),
                 "actor_rollout_ref.actor.use_dynamic_bsz": "False",
                 "actor_rollout_ref.actor.ppo_mini_batch_size": "56",
@@ -386,9 +424,7 @@ class CommandPlanTests(unittest.TestCase):
             '"1"',
         )
         self.assertEqual(
-            overrides[
-                "+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_LOGGING_LEVEL"
-            ],
+            overrides["+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_LOGGING_LEVEL"],
             '"INFO"',
         )
         self.assertNotIn("rollout.nnodes", overrides)
@@ -478,7 +514,11 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(overrides["actor_rollout_ref.rollout.top_p"], "0.95")
         self.assertEqual(overrides["actor_rollout_ref.rollout.ignore_eos"], "False")
         self.assertEqual(overrides["+data.model_context_length"], "10240")
-        self.assertEqual(overrides["+data.derive_sequence_lengths"], "True")
+        self.assertNotIn("+data.derive_sequence_lengths", overrides)
+        self.assertEqual(overrides["actor_rollout_ref.rollout.prompt_length"], "10240")
+        self.assertEqual(
+            overrides["actor_rollout_ref.rollout.response_length"], "10240"
+        )
         self.assertEqual(overrides["trainer.logger"], '["console","file","wandb"]')
         self.assertEqual(overrides["trainer.test_freq"], "50")
         self.assertEqual(overrides["trainer.val_before_train"], "True")
@@ -544,14 +584,18 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(plan.env["VLLM_RWKV7_WKV_MODE"], "fp16")
         self.assertNotIn("VLLM_RWKV7_ALLOW_FP16_ACCUMULATION", plan.env)
 
-    def test_takeoff_high_precision_wkv_disables_fp16_accumulation_by_default(self) -> None:
+    def test_takeoff_high_precision_wkv_disables_fp16_accumulation_by_default(
+        self,
+    ) -> None:
         plan = build_takeoff_plan(load_example_config())
 
         self.assertEqual(plan.env["VLLM_RWKV7_WKV_MODE"], "fp32io16")
         self.assertNotIn("VLLM_RWKV7_ALLOW_FP16_ACCUMULATION", plan.env)
 
     def test_infer_rejects_accumulation_that_conflicts_with_wkv_profile(self) -> None:
-        with self.assertRaisesRegex(SystemExit, "derives GEMM accumulation from WKV mode"):
+        with self.assertRaisesRegex(
+            SystemExit, "derives GEMM accumulation from WKV mode"
+        ):
             commands.build_infer_plan(
                 infer_args(wkv_mode="fp16", allow_fp16_accumulation=False),
                 root=ROOT,
@@ -577,7 +621,11 @@ class CommandPlanTests(unittest.TestCase):
     def test_takeoff_config_adv_estimator_becomes_hydra_overrides(self) -> None:
         loaded_config = load_example_config()
         takeoff = loaded_config["takeoff"]
-        takeoff["grpo"] = {**takeoff["grpo"], "adv_estimator": "maxrl", "reward_manager": "dapo"}
+        takeoff["grpo"] = {
+            **takeoff["grpo"],
+            "adv_estimator": "maxrl",
+            "reward_manager": "dapo",
+        }
 
         overrides = hydra_map(build_takeoff_plan(loaded_config))
 
@@ -701,11 +749,16 @@ class CommandPlanTests(unittest.TestCase):
     def test_takeoff_config_can_enable_validation_dump_dir(self) -> None:
         loaded_config = load_example_config()
         takeoff = loaded_config["takeoff"]
-        takeoff["grpo"] = {**takeoff["grpo"], "validation_data_dir": "logs/validation/run"}
+        takeoff["grpo"] = {
+            **takeoff["grpo"],
+            "validation_data_dir": "logs/validation/run",
+        }
 
         overrides = hydra_map(build_takeoff_plan(loaded_config))
 
-        self.assertEqual(overrides["trainer.validation_data_dir"], "logs/validation/run")
+        self.assertEqual(
+            overrides["trainer.validation_data_dir"], "logs/validation/run"
+        )
 
     def test_takeoff_rejects_training_rollout_top_p_drift(self) -> None:
         loaded_config = load_example_config()
@@ -747,7 +800,9 @@ class CommandPlanTests(unittest.TestCase):
         ):
             build_takeoff_plan(loaded_config)
 
-    def test_takeoff_uses_automatic_lengths_and_fixed_response_slots(self) -> None:
+    def test_takeoff_uses_per_request_context_budget_and_fixed_response_slots(
+        self,
+    ) -> None:
         loaded_config = load_example_config()
 
         overrides = hydra_map(build_takeoff_plan(loaded_config))
@@ -755,6 +810,8 @@ class CommandPlanTests(unittest.TestCase):
         self.assertEqual(overrides["+data.model_context_length"], "8192")
         self.assertEqual(overrides["data.max_prompt_length"], "null")
         self.assertEqual(overrides["data.max_response_length"], "null")
+        self.assertEqual(overrides["actor_rollout_ref.rollout.prompt_length"], "8192")
+        self.assertEqual(overrides["actor_rollout_ref.rollout.response_length"], "8192")
         self.assertEqual(
             overrides["actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu"], "1"
         )
@@ -805,7 +862,9 @@ class CommandPlanTests(unittest.TestCase):
                         args=takeoff_args(override=[override]),
                     )
 
-    def test_takeoff_rejects_environment_drift_from_state_passing_contract(self) -> None:
+    def test_takeoff_rejects_environment_drift_from_state_passing_contract(
+        self,
+    ) -> None:
         loaded_config = load_example_config()
         invalid_environments = (
             {"RWKV_INFCTX": "0"},
@@ -853,15 +912,21 @@ class CommandPlanTests(unittest.TestCase):
 
         overrides = hydra_map(plan)
         self.assertEqual(overrides["data.train_batch_size"], "112")
-        self.assertEqual(overrides["actor_rollout_ref.actor.ppo_mini_batch_size"], "112")
+        self.assertEqual(
+            overrides["actor_rollout_ref.actor.ppo_mini_batch_size"], "112"
+        )
 
     def test_takeoff_fixes_eight_independent_single_gpu_rollout_replicas(self) -> None:
         overrides = hydra_map(build_takeoff_plan(load_example_config()))
 
         self.assertEqual(overrides["trainer.n_gpus_per_node"], "8")
-        self.assertEqual(overrides["actor_rollout_ref.rollout.tensor_model_parallel_size"], "1")
+        self.assertEqual(
+            overrides["actor_rollout_ref.rollout.tensor_model_parallel_size"], "1"
+        )
         self.assertEqual(overrides["actor_rollout_ref.rollout.data_parallel_size"], "1")
-        self.assertEqual(overrides["actor_rollout_ref.rollout.pipeline_model_parallel_size"], "1")
+        self.assertEqual(
+            overrides["actor_rollout_ref.rollout.pipeline_model_parallel_size"], "1"
+        )
 
     def test_takeoff_enables_nsys_for_all_colocated_roles_from_config(self) -> None:
         config = load_example_config()
@@ -872,7 +937,9 @@ class CommandPlanTests(unittest.TestCase):
 
         self.assertEqual(overrides["global_profiler.tool"], "nsys")
         self.assertEqual(overrides["global_profiler.steps"], "[2]")
-        self.assertEqual(overrides["actor_rollout_ref.actor.profiler.all_ranks"], "True")
+        self.assertEqual(
+            overrides["actor_rollout_ref.actor.profiler.all_ranks"], "True"
+        )
         self.assertEqual(overrides["actor_rollout_ref.rollout.profiler.enable"], "True")
 
     def test_takeoff_rejects_tensor_parallel_even_in_topology_phase(self) -> None:
@@ -881,7 +948,9 @@ class CommandPlanTests(unittest.TestCase):
             "actor_rollout_ref.rollout.pipeline_model_parallel_size=1",
         ]
         with self.assertRaisesRegex(SystemExit, "strict on-policy takeoff"):
-            build_takeoff_plan(load_example_config(), args=takeoff_args(override=topology_override))
+            build_takeoff_plan(
+                load_example_config(), args=takeoff_args(override=topology_override)
+            )
 
         with self.assertRaisesRegex(SystemExit, "tensor_model_parallel_size=1"):
             build_takeoff_plan(
@@ -908,7 +977,9 @@ class CommandPlanTests(unittest.TestCase):
             "val_prompt_key": "prompt",
         }
 
-        plan = build_takeoff_plan(loaded_config, args=takeoff_args(dataset="dapo_math_17k"))
+        plan = build_takeoff_plan(
+            loaded_config, args=takeoff_args(dataset="dapo_math_17k")
+        )
         overrides = hydra_map(plan)
 
         self.assertEqual(
@@ -934,14 +1005,20 @@ class CommandPlanTests(unittest.TestCase):
             },
         )
 
-    def test_takeoff_defaults_enable_native_reference_without_changing_loss(self) -> None:
+    def test_takeoff_defaults_enable_native_reference_without_changing_loss(
+        self,
+    ) -> None:
         loaded_config = load_example_config()
         overrides = hydra_map(build_takeoff_plan(loaded_config))
 
         self.assertEqual(
             {
-                "actor_rollout_ref.actor.use_kl_loss": overrides["actor_rollout_ref.actor.use_kl_loss"],
-                "actor_rollout_ref.actor.kl_loss_coef": overrides["actor_rollout_ref.actor.kl_loss_coef"],
+                "actor_rollout_ref.actor.use_kl_loss": overrides[
+                    "actor_rollout_ref.actor.use_kl_loss"
+                ],
+                "actor_rollout_ref.actor.kl_loss_coef": overrides[
+                    "actor_rollout_ref.actor.kl_loss_coef"
+                ],
             },
             {
                 "actor_rollout_ref.actor.use_kl_loss": "False",
@@ -962,7 +1039,9 @@ class CommandPlanTests(unittest.TestCase):
                 "max_model_len": 8192,
             }
             loaded_config["datasets"]["dapo_math_17k"] = {
-                "train_files": ["${DATASETS_PATH}/DAPO/dapo-math-17k-processed.parquet"],
+                "train_files": [
+                    "${DATASETS_PATH}/DAPO/dapo-math-17k-processed.parquet"
+                ],
                 "val_files": ["${DATASETS_PATH}/AIME24/test.parquet"],
                 "train_prompt_key": "source_prompt",
                 "val_prompt_key": "prompt",
@@ -1039,31 +1118,48 @@ class CommandPlanTests(unittest.TestCase):
             f"dataset root not found: {missing_dataset_root / 'partial'}",
         )
 
-    def test_takeoff_user_overrides_are_appended_after_generated_overrides(self) -> None:
+    def test_takeoff_user_overrides_are_appended_after_generated_overrides(
+        self,
+    ) -> None:
         loaded_config = load_example_config()
         plan = build_takeoff_plan(
             loaded_config,
-            args=takeoff_args(override=["trainer.total_epochs=1", "trainer.save_freq=10"]),
+            args=takeoff_args(
+                override=["trainer.total_epochs=1", "trainer.save_freq=10"]
+            ),
         )
 
         self.assertEqual(hydra_values(plan, "trainer.total_epochs"), ["1", "1"])
         self.assertEqual(hydra_values(plan, "trainer.save_freq"), ["20", "10"])
-        self.assertEqual(plan.command[-2:], ["trainer.total_epochs=1", "trainer.save_freq=10"])
+        self.assertEqual(
+            plan.command[-2:], ["trainer.total_epochs=1", "trainer.save_freq=10"]
+        )
 
     def test_takeoff_rejects_missing_default_venv_python(self) -> None:
         config = load_example_config()
         env = {
             key: value
             for key, value in os.environ.items()
-            if key not in {"HELICOPTER_PYTHON", "PYTHON", "HELICOPTER_VENV", "VENV", "REMOTE_VENV"}
+            if key
+            not in {
+                "HELICOPTER_PYTHON",
+                "PYTHON",
+                "HELICOPTER_VENV",
+                "VENV",
+                "REMOTE_VENV",
+            }
         }
         venv_python = ROOT / ".venv/bin/python"
         original_exists = Path.exists
 
         with mock.patch.object(Path, "exists", autospec=True) as exists:
-            exists.side_effect = lambda path: False if path == venv_python else original_exists(path)
+            exists.side_effect = lambda path: (
+                False if path == venv_python else original_exists(path)
+            )
             with self.assertRaises(SystemExit) as raised:
-                commands.python_executable(config, root=ROOT, env=env, require_configured=True)
+                commands.python_executable(
+                    config, root=ROOT, env=env, require_configured=True
+                )
 
         self.assertEqual(
             str(raised.exception),

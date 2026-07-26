@@ -29,7 +29,15 @@ GROUPED_CONFIG_SECTIONS = {
     "checkpoint",
     "logging",
 }
-LEGACY_CONFIG_SECTIONS = {"models", "datasets", "infer", "runtime", "gpu", "takeoff", "paths"}
+LEGACY_CONFIG_SECTIONS = {
+    "models",
+    "datasets",
+    "infer",
+    "runtime",
+    "gpu",
+    "takeoff",
+    "paths",
+}
 SELECTED_DATASET_KEY = "__selected__"
 CONTEXT_SUFFIX_RE = re.compile(r"(?:^|[-_.])ctx(?P<tokens>[1-9]\d*)(?=[-_.]|$)")
 
@@ -37,7 +45,9 @@ CONTEXT_SUFFIX_RE = re.compile(r"(?:^|[-_.])ctx(?P<tokens>[1-9]\d*)(?=[-_.]|$)")
 def default_config_path(root: Path) -> Path:
     local_dir = root / DEFAULT_LOCAL_CONFIG_DIR
     if local_dir.exists():
-        local_configs = sorted(path for path in local_dir.glob("*.toml") if path.is_file())
+        local_configs = sorted(
+            path for path in local_dir.glob("*.toml") if path.is_file()
+        )
         if local_configs:
             return local_configs[-1]
     return root / DEFAULT_EXAMPLE_CONFIG
@@ -88,14 +98,18 @@ def context_tokens_from_checkpoint(checkpoint: Any) -> int:
     """Derive model context length from the checkpoint filename's ``ctxN`` suffix."""
 
     filename = str(checkpoint).replace("\\", "/").rsplit("/", 1)[-1]
-    matches = [int(match.group("tokens")) for match in CONTEXT_SUFFIX_RE.finditer(filename)]
+    matches = [
+        int(match.group("tokens")) for match in CONTEXT_SUFFIX_RE.finditer(filename)
+    ]
     if len(matches) != 1:
         raise SystemExit(
             "model.checkpoint filename must contain exactly one context suffix such as "
             f"'ctx10240'; got {filename!r}"
         )
     if matches[0] < 2:
-        raise SystemExit("model checkpoint context must leave room for prompt and response tokens")
+        raise SystemExit(
+            "model checkpoint context must leave room for prompt and response tokens"
+        )
     return matches[0]
 
 
@@ -181,7 +195,9 @@ def compile_config(config: dict[str, Any]) -> dict[str, Any]:
         raise SystemExit("data.validation.prompt_field must not be empty")
     suites = _required_value(data_validation, "suites", section_name="data.validation")
     if not isinstance(suites, list) or not suites:
-        raise SystemExit("data.validation.suites must contain at least one [[data.validation.suites]]")
+        raise SystemExit(
+            "data.validation.suites must contain at least one [[data.validation.suites]]"
+        )
     val_files: list[Any] = []
     for index, suite in enumerate(suites):
         if not isinstance(suite, dict) or not suite.get("file"):
@@ -197,6 +213,23 @@ def compile_config(config: dict[str, Any]) -> dict[str, Any]:
     }
 
     algorithm_name = str(_required_value(algorithm, "name", section_name="algorithm"))
+    if algorithm_name == "maxrl":
+        if "optimizer_steps" in experiment:
+            raise SystemExit(
+                "MaxRL experiment.optimizer_steps was removed; use "
+                "experiment.candidate_dataset_passes (0 means manual stop)"
+            )
+        candidate_dataset_passes = int(
+            _required_value(
+                experiment,
+                "candidate_dataset_passes",
+                section_name="experiment",
+            )
+        )
+        if candidate_dataset_passes < 0:
+            raise SystemExit("experiment.candidate_dataset_passes must be >= 0")
+    else:
+        candidate_dataset_passes = 1
     prompts_per_step = _required_value(
         algorithm, "prompts_per_step", section_name="algorithm"
     )
@@ -224,9 +257,7 @@ def compile_config(config: dict[str, Any]) -> dict[str, Any]:
         _required_value(execution, "gpus_per_node", section_name="execution")
     )
     rollout_replicas = int(
-        _required_value(
-            execution_rollout, "replicas", section_name="execution.rollout"
-        )
+        _required_value(execution_rollout, "replicas", section_name="execution.rollout")
     )
     rollout_tp = int(
         _required_value(
@@ -242,22 +273,19 @@ def compile_config(config: dict[str, Any]) -> dict[str, Any]:
         )
 
     takeoff: dict[str, Any] = {
-        "project_name": _required_value(experiment, "project", section_name="experiment"),
-        "experiment_name": _required_value(experiment, "name", section_name="experiment"),
-        "seed": _required_value(experiment, "seed", section_name="experiment"),
-        "total_training_steps": _required_value(
-            experiment, "optimizer_steps", section_name="experiment"
+        "project_name": _required_value(
+            experiment, "project", section_name="experiment"
         ),
+        "experiment_name": _required_value(
+            experiment, "name", section_name="experiment"
+        ),
+        "seed": _required_value(experiment, "seed", section_name="experiment"),
         "train_batch_size": prompts_per_step,
         # Strict on-policy performs exactly one optimizer update per rollout group.
         "ppo_mini_batch_size": prompts_per_step,
         "ppo_epochs": 1,
         # One generated response occupies one fixed microbatch slot.
         "ppo_micro_batch_size": 1,
-        # Dataset construction resolves:
-        #   max_prompt = max templated prompt length across train + validation
-        #   max_response = model context - max_prompt
-        "derive_sequence_lengths": True,
         "rollout_n": _required_value(
             algorithm, "responses_per_prompt", section_name="algorithm"
         ),
@@ -361,11 +389,15 @@ def compile_config(config: dict[str, Any]) -> dict[str, Any]:
         "save_freq": _required_value(
             checkpoint, "every_optimizer_steps", section_name="checkpoint"
         ),
-        "trainer_loggers": _required_value(
-            logging, "backends", section_name="logging"
-        ),
-        "total_epochs": 1,
+        "trainer_loggers": _required_value(logging, "backends", section_name="logging"),
+        "total_epochs": candidate_dataset_passes,
     }
+    if algorithm_name != "maxrl":
+        takeoff["total_training_steps"] = _required_value(
+            experiment,
+            "optimizer_steps",
+            section_name="experiment",
+        )
     if algorithm_name != "grpo":
         takeoff["adv_estimator"] = algorithm_name
     _put_if_present(takeoff, "clip_ratio_c", algorithm.get("dual_clip"))
@@ -451,7 +483,9 @@ def resolve_model_path(
         env_value(env, "WEIGHT_PATH", "HELICOPTER_WEIGHT_PATH"),
     )
     if not base_value:
-        raise SystemExit("WEIGHT_PATH is not set and config paths.weight_path is missing")
+        raise SystemExit(
+            "WEIGHT_PATH is not set and config paths.weight_path is missing"
+        )
 
     base = resolve_path(str(base_value), root=root, env=env)
     base_dir = base.parent if base.suffix == ".pth" else base

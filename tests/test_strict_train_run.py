@@ -22,10 +22,19 @@ def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def test_takeoff_config_accepts_already_compiled_config():
+    compiled = {"takeoff": {"grpo": {"train_batch_size": 32}}}
+
+    assert strict_train_run.takeoff_config(compiled) is compiled["takeoff"]["grpo"]
+
+
 def test_effective_training_steps_follow_the_last_hydra_override():
     config = {"takeoff": {"grpo": {"total_training_steps": 200}}}
 
-    assert strict_train_run.resolve_expected_rounds(config, ["helicopter", "takeoff"]) == 200
+    assert (
+        strict_train_run.resolve_expected_rounds(config, ["helicopter", "takeoff"])
+        == 200
+    )
     assert (
         strict_train_run.resolve_expected_rounds(
             config,
@@ -43,6 +52,148 @@ def test_effective_training_steps_follow_the_last_hydra_override():
             strict_train_run.resolve_expected_rounds(
                 config, [f"trainer.total_training_steps={invalid}"]
             )
+
+
+def test_pass_based_training_only_has_expected_rounds_when_explicitly_bounded():
+    config = {"takeoff": {"grpo": {"total_epochs": 10}}}
+
+    assert (
+        strict_train_run.resolve_expected_rounds(config, ["helicopter", "takeoff"])
+        is None
+    )
+    assert (
+        strict_train_run.resolve_expected_rounds(
+            config, ["helicopter", "takeoff", "trainer.total_training_steps=2"]
+        )
+        == 2
+    )
+
+
+def test_observed_rounds_are_inferred_from_complete_correctness_records(tmp_path):
+    metrics = tmp_path / "metrics.jsonl"
+    metrics.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "step": step,
+                    "data": {"training/rollout_probs_diff_valid": 1},
+                }
+            )
+            for step in (1, 2)
+        )
+        + "\n"
+    )
+
+    assert strict_train_run.infer_observed_rounds(metrics) == 2
+
+
+def test_graceful_long_run_signal_keeps_sampler_alive(monkeypatch):
+    class Process:
+        pid = 42
+
+        def __init__(self):
+            self.signals = []
+
+        def poll(self):
+            return None
+
+        def send_signal(self, signum):
+            self.signals.append(signum)
+
+    child = Process()
+    sampler = Process()
+    killed_groups = []
+    monkeypatch.setattr(
+        strict_train_run.os,
+        "killpg",
+        lambda pid, signum: killed_groups.append((pid, signum)),
+    )
+
+    strict_train_run.relay_termination_signal(
+        signal.SIGTERM,
+        child=child,
+        sampler=sampler,
+        graceful=True,
+    )
+
+    assert child.signals == [signal.SIGTERM]
+    assert sampler.signals == []
+    assert killed_groups == []
+
+
+def test_effective_sampling_metrics_validate_denominators_and_progress(tmp_path):
+    path = tmp_path / "metrics.jsonl"
+    records = []
+    for step, candidate, cumulative in ((1, 40, 40), (2, 48, 88)):
+        prefix = "training/effective_sampling/"
+        records.append(
+            {
+                "step": step,
+                "data": {
+                    f"{prefix}candidate_groups": candidate,
+                    f"{prefix}accepted_groups": 32,
+                    f"{prefix}all_correct_groups": 4,
+                    f"{prefix}all_wrong_groups": candidate - 36,
+                    f"{prefix}surplus_groups": 0,
+                    f"{prefix}refill_waves": 1,
+                    f"{prefix}generated_trajectories": candidate * 16,
+                    f"{prefix}effective_batch_trajectories": 512,
+                    f"{prefix}acceptance_rate": 32 / candidate,
+                    f"{prefix}rollout_amplification": candidate / 32,
+                    f"{prefix}candidate_dataset_pass": 0,
+                    f"{prefix}candidate_cursor": cumulative,
+                    f"{prefix}optimizer_step": step,
+                    f"{prefix}cumulative_candidate_groups": cumulative,
+                    f"{prefix}cumulative_accepted_groups": step * 32,
+                },
+            }
+        )
+    path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+
+    summary = strict_train_run.verify_effective_sampling_metrics(
+        path,
+        expected_rounds=2,
+        target_groups=32,
+        responses_per_prompt=16,
+    )
+
+    assert summary["optimizer_step"] == 2
+    assert summary["cumulative_candidate_groups"] == 88
+    assert summary["cumulative_accepted_groups"] == 64
+
+
+def test_forced_signal_stops_child_group_and_sampler(monkeypatch):
+    class Process:
+        pid = 42
+
+        def __init__(self):
+            self.signals = []
+
+        def poll(self):
+            return None
+
+        def send_signal(self, signum):
+            self.signals.append(signum)
+
+    child = Process()
+    sampler = Process()
+    killed_groups = []
+    monkeypatch.setattr(
+        strict_train_run.os,
+        "killpg",
+        lambda pid, signum: killed_groups.append((pid, signum)),
+    )
+
+    strict_train_run.relay_termination_signal(
+        signal.SIGINT,
+        child=child,
+        sampler=sampler,
+        graceful=False,
+    )
+
+    assert child.signals == []
+    assert sampler.signals == [signal.SIGTERM]
+    assert killed_groups == [(42, signal.SIGTERM)]
 
 
 def test_source_metadata_uses_remote_revision_manifest_without_git(tmp_path):
@@ -87,7 +238,9 @@ def test_vllm_capacity_is_extracted_per_replica(tmp_path):
     }
 
 
-def test_vllm_capacity_requires_structured_observation_for_each_recurrent_replica(tmp_path):
+def test_vllm_capacity_requires_structured_observation_for_each_recurrent_replica(
+    tmp_path,
+):
     command_log = tmp_path / "command.log"
     command_log.write_text(
         "Keeping chunked prefill enabled for no-KVCache causal recurrent model.\n",
@@ -118,16 +271,22 @@ def test_vllm_capacity_requires_structured_observation_for_each_recurrent_replic
         "capacity_mode": "recurrent-state-no-kv-cache",
         "kv_cache_applicable": False,
         "per_replica": [
-            {"replica_rank": replica_rank, **capacity}
-            for replica_rank in range(8)
+            {"replica_rank": replica_rank, **capacity} for replica_rank in range(8)
         ],
         "structured_errors": [],
         "gpu_kv_cache_tokens": [],
         "maximum_concurrency": [],
     }
 
-    topology_path.write_text(json.dumps({"deployments": [{"replica_rank": 0, "capacity": capacity}]}))
-    assert strict_train_run.extract_vllm_capacity(command_log, topology_path)["replica_observation_count"] == 0
+    topology_path.write_text(
+        json.dumps({"deployments": [{"replica_rank": 0, "capacity": capacity}]})
+    )
+    assert (
+        strict_train_run.extract_vllm_capacity(command_log, topology_path)[
+            "replica_observation_count"
+        ]
+        == 0
+    )
 
 
 def test_formal_rollout_capacity_must_match_resolved_rwkv_config():
@@ -174,7 +333,9 @@ def test_tee_keeps_persisting_after_live_stdout_breaks(monkeypatch):
     output_errors = []
     monkeypatch.setattr(strict_train_run.sys, "stdout", BrokenStdout())
 
-    strict_train_run.tee_child_output(io.BytesIO(b"complete child output"), command_log, output_errors)
+    strict_train_run.tee_child_output(
+        io.BytesIO(b"complete child output"), command_log, output_errors
+    )
 
     assert command_log.getvalue() == b"complete child output"
     assert output_errors == []
@@ -193,7 +354,10 @@ def test_child_failure_is_not_mislabeled_as_a_post_run_contract_failure(tmp_path
         == "child_failure"
     )
     command_log.write_text("CUDA out of memory\n")
-    assert strict_train_run.classify_failure(1, "metrics are missing", command_log) == "cuda_oom"
+    assert (
+        strict_train_run.classify_failure(1, "metrics are missing", command_log)
+        == "cuda_oom"
+    )
 
 
 def test_verify_dataset_manifest_checks_every_file(tmp_path):
@@ -203,7 +367,14 @@ def test_verify_dataset_manifest_checks_every_file(tmp_path):
     second.write_bytes(b"second")
     manifest = tmp_path / "dataset.json"
     manifest.write_text(
-        json.dumps({"files": [{"path": str(first), "sha256": _sha(first)}, {"path": str(second), "sha256": _sha(second)}]})
+        json.dumps(
+            {
+                "files": [
+                    {"path": str(first), "sha256": _sha(first)},
+                    {"path": str(second), "sha256": _sha(second)},
+                ]
+            }
+        )
     )
 
     verified = strict_train_run.verify_dataset_manifest(manifest)
@@ -227,9 +398,10 @@ def test_run_phase_fails_closed_and_run_dir_is_absolute_within_workspace(tmp_pat
     with pytest.raises(RuntimeError, match="basline"):
         strict_train_run.validate_run_phase("basline")
 
-    assert strict_train_run.resolve_run_dir(tmp_path, ".helicopter-dev/runs/1") == (
-        tmp_path / ".helicopter-dev/runs/1"
-    ).resolve()
+    assert (
+        strict_train_run.resolve_run_dir(tmp_path, ".helicopter-dev/runs/1")
+        == (tmp_path / ".helicopter-dev/runs/1").resolve()
+    )
     with pytest.raises(RuntimeError, match="within the workspace root"):
         strict_train_run.resolve_run_dir(tmp_path, "../outside")
 
@@ -273,7 +445,13 @@ def test_stop_process_escalates_from_term_to_kill():
 
 def test_topology_contract_and_observation_must_match(tmp_path):
     expected = strict_train_run.verify_topology_contract(
-        {"trainer_gpus": 8, "rollout_replicas": 8, "rollout_tp": 1, "rollout_pp": 1, "rollout_internal_dp": 1}
+        {
+            "trainer_gpus": 8,
+            "rollout_replicas": 8,
+            "rollout_tp": 1,
+            "rollout_pp": 1,
+            "rollout_internal_dp": 1,
+        }
     )
     observed_path = tmp_path / "rollout_topology.json"
     observed_path.write_text(
@@ -284,7 +462,9 @@ def test_topology_contract_and_observation_must_match(tmp_path):
                 "tensor_parallel_size": 1,
                 "data_parallel_size": 1,
                 "pipeline_parallel_size": 1,
-                "endpoints": [f"http://127.0.0.1:{30000 + index}" for index in range(8)],
+                "endpoints": [
+                    f"http://127.0.0.1:{30000 + index}" for index in range(8)
+                ],
                 "deployments": [
                     {
                         "node_id": "node-0",
@@ -300,7 +480,10 @@ def test_topology_contract_and_observation_must_match(tmp_path):
             }
         )
     )
-    assert strict_train_run.verify_observed_topology(observed_path, expected)["replicas"] == 8
+    assert (
+        strict_train_run.verify_observed_topology(observed_path, expected)["replicas"]
+        == 8
+    )
 
     observed = json.loads(observed_path.read_text())
     observed["endpoints"][-1] = observed["endpoints"][0]
@@ -318,7 +501,13 @@ def test_topology_contract_and_observation_must_match(tmp_path):
 
     with pytest.raises(RuntimeError, match="8 independent TP1"):
         strict_train_run.verify_topology_contract(
-            {"trainer_gpus": 8, "rollout_replicas": 4, "rollout_tp": 2, "rollout_pp": 1, "rollout_internal_dp": 1}
+            {
+                "trainer_gpus": 8,
+                "rollout_replicas": 4,
+                "rollout_tp": 2,
+                "rollout_pp": 1,
+                "rollout_internal_dp": 1,
+            }
         )
 
 
@@ -390,7 +579,9 @@ def test_declared_contract_must_match_resolved_training_config():
         )
 
 
-def test_correctness_metrics_require_on_policy_same_version_correction_and_update(tmp_path):
+def test_correctness_metrics_require_on_policy_same_version_correction_and_update(
+    tmp_path,
+):
     metrics = tmp_path / "metrics.jsonl"
     aligned = {
         "training/rollout_probs_diff_valid": 1,
@@ -414,14 +605,24 @@ def test_correctness_metrics_require_on_policy_same_version_correction_and_updat
         "actor/grad_norm": 1.5,
         "actor/optimizer_steps": 1,
     }
-    metrics.write_text("".join(json.dumps({"step": step, "data": aligned}) + "\n" for step in (1, 2)))
-    assert strict_train_run.verify_correctness_metrics(metrics, expected_rounds=2)["rounds"] == 2
+    metrics.write_text(
+        "".join(json.dumps({"step": step, "data": aligned}) + "\n" for step in (1, 2))
+    )
+    assert (
+        strict_train_run.verify_correctness_metrics(metrics, expected_rounds=2)[
+            "rounds"
+        ]
+        == 2
+    )
 
     cross_runtime_mismatch = {**aligned, "training/rollout_probs_diff_max": 0.5}
     metrics.write_text(json.dumps({"step": 1, "data": cross_runtime_mismatch}) + "\n")
-    assert strict_train_run.verify_correctness_metrics(metrics, expected_rounds=1)[
-        "cross_runtime_diagnostics"
-    ][0]["max_probability_diff"] == 0.5
+    assert (
+        strict_train_run.verify_correctness_metrics(metrics, expected_rounds=1)[
+            "cross_runtime_diagnostics"
+        ][0]["max_probability_diff"]
+        == 0.5
+    )
 
     unhealthy_correction = {**aligned, "rollout_corr/rollout_is_eff_sample_size": 0.2}
     metrics.write_text(json.dumps({"step": 1, "data": unhealthy_correction}) + "\n")
@@ -496,7 +697,9 @@ def test_performance_metrics_exclude_warmup_and_recompute_throughput(tmp_path):
 
 def test_performance_metrics_reject_insufficient_timed_steps(tmp_path):
     with pytest.raises(RuntimeError, match="2 warmup and 5 timed"):
-        strict_train_run.verify_performance_metrics(tmp_path / "missing.jsonl", expected_rounds=6)
+        strict_train_run.verify_performance_metrics(
+            tmp_path / "missing.jsonl", expected_rounds=6
+        )
 
 
 def test_validation_curve_tracks_equal_sample_and_wall_clock_axis(tmp_path):
@@ -578,7 +781,9 @@ def test_validation_curve_rejects_invalid_testing_time(tmp_path, testing_seconds
         strict_train_run.verify_validation_curve(path, expected_rounds=0)
 
 
-@pytest.mark.parametrize(("batch_size", "rounds", "test_freq"), [(56, 14, 2), (112, 7, 1)])
+@pytest.mark.parametrize(
+    ("batch_size", "rounds", "test_freq"), [(56, 14, 2), (112, 7, 1)]
+)
 def test_global_batch_quality_schedule_is_equal_sampled(batch_size, rounds, test_freq):
     config = {
         "takeoff": {
@@ -631,7 +836,7 @@ def test_dapo_maxrl_config_matches_paper_and_remote_contract():
         "name": "maxrl-dapo-math-17k",
         "project": "helicopter-math",
         "seed": 42,
-        "optimizer_steps": 200,
+        "candidate_dataset_passes": 10,
     }
     assert config["algorithm"] == {
         "name": "maxrl",
@@ -666,6 +871,8 @@ def test_dapo_maxrl_config_matches_paper_and_remote_contract():
     assert "gpu_memory_utilization" not in config["execution"]["rollout"]
 
     takeoff = strict_train_run.takeoff_config(config)
+    assert takeoff["total_epochs"] == 10
+    assert "total_training_steps" not in takeoff
 
     batch_fields = (
         "train_batch_size",
@@ -697,9 +904,7 @@ def test_gsm8k_grpo_config_keeps_distinct_algorithm_identity():
     assert config["experiment"]["name"] == "gsm8k-grpo"
     assert config["algorithm"]["name"] == "grpo"
     assert config["reward"]["manager"] == "naive"
-    assert config["data"]["train"]["files"] == [
-        "${DATASETS_PATH}/gsm8k/train.parquet"
-    ]
+    assert config["data"]["train"]["files"] == ["${DATASETS_PATH}/gsm8k/train.parquet"]
     assert "takeoff" not in config
     assert "datasets" not in config
 
@@ -727,12 +932,24 @@ def test_global_batch_quality_schedule_rejects_sparse_validation():
     ("mutation", "message"),
     [
         (lambda records: records[3].__setitem__("step", records[2]["step"]), "unique"),
-        (lambda records: records[3]["data"].__setitem__("timing/train_seconds", float("nan")), "finite"),
-        (lambda records: records[3]["data"].__setitem__("training/actual_total_tokens", 999), "total=prompt"),
+        (
+            lambda records: records[3]["data"].__setitem__(
+                "timing/train_seconds", float("nan")
+            ),
+            "finite",
+        ),
+        (
+            lambda records: records[3]["data"].__setitem__(
+                "training/actual_total_tokens", 999
+            ),
+            "total=prompt",
+        ),
         (lambda records: records[3]["data"].pop("actor/entropy"), "missing"),
     ],
 )
-def test_performance_metrics_fail_closed_on_malformed_evidence(tmp_path, mutation, message):
+def test_performance_metrics_fail_closed_on_malformed_evidence(
+    tmp_path, mutation, message
+):
     records = [
         {
             "step": step,
@@ -850,7 +1067,9 @@ def test_nsys_phase_requires_nonempty_trace_and_stage_manifest(tmp_path):
     assert strict_train_run.verify_nsys_trace(tmp_path)["formal_performance"] is False
 
 
-def test_nvml_sampler_writes_one_complete_sequence_and_shuts_down(tmp_path, monkeypatch):
+def test_nvml_sampler_writes_one_complete_sequence_and_shuts_down(
+    tmp_path, monkeypatch
+):
     state = {"shutdown": False}
 
     class OneRoundEvent:
@@ -873,7 +1092,9 @@ def test_nvml_sampler_writes_one_complete_sequence_and_shuts_down(tmp_path, monk
         nvmlDeviceGetHandleByIndex=lambda index: index,
         nvmlDeviceGetUtilizationRates=lambda handle: SimpleNamespace(gpu=10 + handle),
         nvmlDeviceGetPowerUsage=lambda handle: 100000 + handle,
-        nvmlDeviceGetMemoryInfo=lambda handle: SimpleNamespace(used=(1024 * 1024) * (1000 + handle)),
+        nvmlDeviceGetMemoryInfo=lambda handle: SimpleNamespace(
+            used=(1024 * 1024) * (1000 + handle)
+        ),
     )
     monkeypatch.setitem(sys.modules, "pynvml", fake_pynvml)
     monkeypatch.setattr(strict_train_run.threading, "Event", OneRoundEvent)
@@ -891,7 +1112,9 @@ def test_nvml_sampler_writes_one_complete_sequence_and_shuts_down(tmp_path, monk
 
 
 def test_telemetry_affinity_reserves_one_allowed_cpu(monkeypatch):
-    monkeypatch.setattr(strict_train_run.os, "sched_getaffinity", lambda _pid: {9, 3, 7})
+    monkeypatch.setattr(
+        strict_train_run.os, "sched_getaffinity", lambda _pid: {9, 3, 7}
+    )
 
     sampler_cpu, child_cpus = strict_train_run.telemetry_cpu_affinity_plan()
 
@@ -916,22 +1139,58 @@ def test_sampler_heartbeat_uses_monotonic_gap(tmp_path):
     }
 
 
-def test_policy_identity_log_requires_monotonic_publication_and_matching_training(tmp_path):
+def test_policy_identity_log_requires_monotonic_publication_and_matching_training(
+    tmp_path,
+):
     identity_log = tmp_path / "policy_identity.jsonl"
     common = {
         "sampling_config_digest": "sampling",
         "runtime_identity": "runtime",
     }
     records = [
-        {"event": "publish_initial", "global_steps": 0, "policy_version": 0, "weight_digest": "digest-0", **common},
-        {"event": "train_begin", "global_steps": 1, "policy_version": 0, "weight_digest": "digest-0", "effective_sampling_digest": "effective", **common},
-        {"event": "publish", "global_steps": 1, "policy_version": 1, "weight_digest": "digest-1", **common},
-        {"event": "train_begin", "global_steps": 2, "policy_version": 1, "weight_digest": "digest-1", "effective_sampling_digest": "effective", **common},
-        {"event": "publish", "global_steps": 2, "policy_version": 2, "weight_digest": "digest-2", **common},
+        {
+            "event": "publish_initial",
+            "global_steps": 0,
+            "policy_version": 0,
+            "weight_digest": "digest-0",
+            **common,
+        },
+        {
+            "event": "train_begin",
+            "global_steps": 1,
+            "policy_version": 0,
+            "weight_digest": "digest-0",
+            "effective_sampling_digest": "effective",
+            **common,
+        },
+        {
+            "event": "publish",
+            "global_steps": 1,
+            "policy_version": 1,
+            "weight_digest": "digest-1",
+            **common,
+        },
+        {
+            "event": "train_begin",
+            "global_steps": 2,
+            "policy_version": 1,
+            "weight_digest": "digest-1",
+            "effective_sampling_digest": "effective",
+            **common,
+        },
+        {
+            "event": "publish",
+            "global_steps": 2,
+            "policy_version": 2,
+            "weight_digest": "digest-2",
+            **common,
+        },
     ]
     identity_log.write_text("".join(json.dumps(record) + "\n" for record in records))
 
-    summary = strict_train_run.verify_policy_identity_log(identity_log, expected_rounds=2)
+    summary = strict_train_run.verify_policy_identity_log(
+        identity_log, expected_rounds=2
+    )
     assert summary["train_versions"] == [0, 1]
     assert summary["last_published_version"] == 2
 
@@ -964,6 +1223,8 @@ def test_policy_identity_log_rejects_incomplete_or_repeated_rounds(tmp_path, rec
         "sampling_config_digest": "sampling",
         "runtime_identity": "runtime",
     }
-    identity_log.write_text("".join(json.dumps({**common, **record}) + "\n" for record in records))
+    identity_log.write_text(
+        "".join(json.dumps({**common, **record}) + "\n" for record in records)
+    )
     with pytest.raises(RuntimeError):
         strict_train_run.verify_policy_identity_log(identity_log, expected_rounds=1)

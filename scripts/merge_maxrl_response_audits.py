@@ -16,6 +16,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--current-full-prompt", type=Path, required=True)
     parser.add_argument("--historical-full-prompt-replay", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--simple-output", type=Path)
     return parser.parse_args()
 
 
@@ -140,6 +141,21 @@ def main() -> None:
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+    if args.simple_output is not None:
+        simple_payload = {
+            "prompt": current_body["input"]["rendered_prompt"],
+            "previous_version_outputs": [
+                response["output_text"]
+                for response in historical_body["responses"]
+            ],
+            "current_version_outputs": [
+                response["output_text"] for response in current_body["responses"]
+            ],
+        }
+        args.simple_output.parent.mkdir(parents=True, exist_ok=True)
+        args.simple_output.write_text(
+            json.dumps(simple_payload, ensure_ascii=False, indent=2) + "\n"
+        )
     print(
         json.dumps(
             {

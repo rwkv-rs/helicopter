@@ -2,7 +2,7 @@
 name = "maxrl-dapo-math-17k"
 project = "helicopter-math"
 seed = 42
-optimizer_steps = 200
+candidate_dataset_passes = 10
 
 [model]
 name = "g1h-7.2b"

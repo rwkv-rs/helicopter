@@ -23,7 +23,7 @@ from vllm import LLM, SamplingParams
 from vllm.sampling_params import RepetitionDetectionParams
 
 from verl.utils.ngram_repetition import (
-    NGramRepetitionDetector,
+    ConsecutiveRepetitionDetector,
     vllm_repetition_detection_config,
 )
 
@@ -269,7 +269,8 @@ def main() -> None:
 
     responses = []
     for sample_index, sample in enumerate(request_output.outputs):
-        detector_truncation_length = NGramRepetitionDetector().observe(sample.token_ids)
+        detector = ConsecutiveRepetitionDetector()
+        detector_truncation_length = detector.observe(sample.token_ids)
         engine_repetition_truncated = (
             sample.finish_reason == "repetition"
             or sample.stop_reason == "repetition_detected"
@@ -294,6 +295,14 @@ def main() -> None:
                 "last_token_id": sample.token_ids[-1] if sample.token_ids else None,
                 "engine_repetition_truncated": engine_repetition_truncated,
                 "detector_repetition_truncation_length": detector_truncation_length,
+                "detector_repetition_matched_rule": (
+                    {
+                        "pattern_size": detector.matched_rule[0],
+                        "min_count": detector.matched_rule[1],
+                    }
+                    if detector.matched_rule is not None
+                    else None
+                ),
                 "scoring": score,
             }
         )
@@ -363,18 +372,18 @@ def main() -> None:
             "request_max_tokens": max_tokens,
         },
         "sampling": {
-            "n": args.responses,
-            "temperature": 1.0,
-            "top_k": -1,
-            "top_p": 0.95,
-            "presence_penalty": 0.0,
-            "frequency_penalty": 0.0,
-            "repetition_penalty": 1.0,
-            "penalty_decay": 1.0,
-            "ignore_eos": False,
+            "n": sampling_params.n,
+            "temperature": sampling_params.temperature,
+            "top_k": sampling_params.top_k,
+            "top_p": sampling_params.top_p,
+            "presence_penalty": sampling_params.presence_penalty,
+            "frequency_penalty": sampling_params.frequency_penalty,
+            "repetition_penalty": sampling_params.repetition_penalty,
+            "penalty_decay": sampling_params.penalty_decay,
+            "ignore_eos": sampling_params.ignore_eos,
             "global_engine_seed": args.dataset_seed,
-            "per_request_seed": None,
-            "max_tokens": max_tokens,
+            "per_request_seed": sampling_params.seed,
+            "max_tokens": sampling_params.max_tokens,
             "repetition_detection": asdict(
                 RepetitionDetectionParams(**repetition_config)
             ),
