@@ -2547,68 +2547,140 @@ def _formal_gqa_code_binding(
                 f"{error}"
             ) from error
 
-    status_lines = tuple(
-        line
-        for line in git_text(
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=all",
-            "--",
-            scope.as_posix(),
-        ).splitlines()
-        if line
+    managed_manifest_path = (
+        product_root / ".helicopter-dev/source-revisions.json"
     )
-    if require_clean and status_lines:
-        raise ContractError(
-            "formal GQA validation requires a clean any2rwkv code scope: "
-            + "; ".join(status_lines[:8])
-        )
-    try:
-        tracked_output = subprocess.run(
-            [
-                "git",
-                "-C",
-                str(product_root),
-                "ls-files",
-                "-z",
+    managed_manifest_sha256 = None
+    managed_scope_binding = None
+    if managed_manifest_path.is_file():
+        try:
+            managed_payload = json.loads(
+                managed_manifest_path.read_text(encoding="utf-8")
+            )
+            commit = str(managed_payload["product_commit"])
+            managed_scope_binding = managed_payload["scopes"][
+                scope.as_posix()
+            ]
+        except (OSError, KeyError, json.JSONDecodeError) as error:
+            raise ContractError(
+                "formal GQA managed revision manifest is invalid: "
+                f"{error}"
+            ) from error
+        if len(commit) != 40 or any(
+            value not in "0123456789abcdef" for value in commit
+        ):
+            raise ContractError(
+                "formal GQA managed product revision is invalid"
+            )
+        if (
+            not isinstance(managed_scope_binding, dict)
+            or managed_scope_binding.get("clean") is not True
+        ):
+            raise ContractError(
+                "formal GQA managed code scope is not commit-clean"
+            )
+        status_lines: tuple[str, ...] = ()
+        revision_source = "helicopter-dev-managed-sync"
+        managed_manifest_sha256 = file_sha256(managed_manifest_path)
+        clean: bool | None = None
+    else:
+        status_lines = tuple(
+            line
+            for line in git_text(
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
                 "--",
                 scope.as_posix(),
-            ],
-            check=True,
-            capture_output=True,
-        ).stdout
-    except (OSError, subprocess.CalledProcessError) as error:
-        raise ContractError(
-            "formal GQA validation cannot enumerate its tracked code: "
-            f"{error}"
-        ) from error
-    tracked_paths = tuple(
-        Path(value.decode())
-        for value in tracked_output.split(b"\0")
-        if value
+            ).splitlines()
+            if line
+        )
+        commit = git_text("rev-parse", "HEAD").strip()
+        revision_source = "git-checkout"
+        clean = None
+
+    scope_root = product_root / scope
+    runtime_paths = tuple(
+        sorted(
+            path
+            for path in scope_root.rglob("*")
+            if path.is_file()
+            and "__pycache__" not in path.parts
+            and path.suffix not in {".pyc", ".pyo"}
+        )
     )
-    if not tracked_paths:
-        raise ContractError("formal GQA validation code scope is not tracked")
+    if not runtime_paths:
+        raise ContractError("formal GQA validation code scope is empty")
+    symlink_paths = tuple(
+        path.relative_to(product_root).as_posix()
+        for path in runtime_paths
+        if path.is_symlink()
+    )
+    if symlink_paths:
+        raise ContractError(
+            "formal GQA validation code scope contains symlinked runtime "
+            "files: "
+            + "; ".join(symlink_paths[:8])
+        )
     tree_entries = []
-    for relative_path in tracked_paths:
-        absolute_path = product_root / relative_path
+    for absolute_path in runtime_paths:
+        relative_path = absolute_path.relative_to(product_root)
         tree_entries.append(
             {
                 "path": relative_path.as_posix(),
-                "sha256": (
-                    file_sha256(absolute_path)
-                    if absolute_path.is_file()
-                    else None
-                ),
+                "sha256": file_sha256(absolute_path),
             }
         )
+    if managed_scope_binding is None:
+        tracked_runtime_paths = {
+            path
+            for path in git_text(
+                "ls-tree",
+                "-r",
+                "--name-only",
+                "HEAD",
+                "--",
+                scope.as_posix(),
+            ).splitlines()
+            if path
+            and "__pycache__" not in Path(path).parts
+            and Path(path).suffix not in {".pyc", ".pyo"}
+        }
+        actual_runtime_paths = {
+            entry["path"] for entry in tree_entries
+        }
+        missing_paths = sorted(tracked_runtime_paths - actual_runtime_paths)
+        extra_paths = sorted(actual_runtime_paths - tracked_runtime_paths)
+        status_lines += tuple(f"D! {path}" for path in missing_paths)
+        status_lines += tuple(f"?! {path}" for path in extra_paths)
+        if require_clean and status_lines:
+            raise ContractError(
+                "formal GQA validation requires a clean any2rwkv code scope: "
+                + "; ".join(status_lines[:8])
+            )
+        clean = not status_lines
+    code_tree_sha256 = _sha256_json(tree_entries)
+    if managed_scope_binding is not None and (
+        managed_scope_binding.get("runtime_file_count")
+        != len(tree_entries)
+        or managed_scope_binding.get("code_tree_sha256")
+        != code_tree_sha256
+    ):
+        raise ContractError(
+            "formal GQA managed code scope differs from the synchronized "
+            "commit-clean tree"
+        )
     return {
-        "commit": git_text("rev-parse", "HEAD").strip(),
+        "commit": commit,
+        "revision_source": revision_source,
+        "managed_revision_manifest_sha256": (
+            managed_manifest_sha256
+        ),
         "scope": scope.as_posix(),
-        "clean": not status_lines,
+        "clean": clean,
         "status_porcelain_sha256": _sha256_json(list(status_lines)),
-        "tracked_file_count": len(tree_entries),
-        "code_tree_sha256": _sha256_json(tree_entries),
+        "runtime_file_count": len(tree_entries),
+        "code_tree_sha256": code_tree_sha256,
     }
 
 

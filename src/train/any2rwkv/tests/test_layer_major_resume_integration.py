@@ -706,6 +706,10 @@ def test_formal_gqa_code_binding_rejects_dirty_code_scope(
     package.mkdir(parents=True)
     module = package / "solver.py"
     module.write_text("VALUE = 1\n", encoding="utf-8")
+    (package / ".gitignore").write_text(
+        "*.generated.py\n",
+        encoding="utf-8",
+    )
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     subprocess.run(
         ["git", "-C", str(repo), "config", "user.name", "test"],
@@ -723,7 +727,7 @@ def test_formal_gqa_code_binding_rejects_dirty_code_scope(
         check=True,
     )
     subprocess.run(
-        ["git", "-C", str(repo), "add", module.relative_to(repo)],
+        ["git", "-C", str(repo), "add", package.relative_to(repo)],
         check=True,
     )
     subprocess.run(
@@ -733,7 +737,7 @@ def test_formal_gqa_code_binding_rejects_dirty_code_scope(
 
     clean = _formal_gqa_code_binding(repo, require_clean=True)
     assert clean["clean"] is True
-    assert clean["tracked_file_count"] == 1
+    assert clean["runtime_file_count"] == 2
     module.write_text("VALUE = 2\n", encoding="utf-8")
     with pytest.raises(
         ContractError,
@@ -743,6 +747,77 @@ def test_formal_gqa_code_binding_rejects_dirty_code_scope(
     dirty = _formal_gqa_code_binding(repo, require_clean=False)
     assert dirty["clean"] is False
     assert dirty["code_tree_sha256"] != clean["code_tree_sha256"]
+
+    subprocess.run(
+        ["git", "-C", str(repo), "restore", module.relative_to(repo)],
+        check=True,
+    )
+    ignored = package / "ignored.generated.py"
+    ignored.write_text("VALUE = 3\n", encoding="utf-8")
+    with pytest.raises(
+        ContractError,
+        match="requires a clean any2rwkv code scope",
+    ):
+        _formal_gqa_code_binding(repo, require_clean=True)
+    ignored.unlink()
+
+    linked = package / "linked.py"
+    linked.symlink_to(module.name)
+    with pytest.raises(
+        ContractError,
+        match="contains symlinked runtime files",
+    ):
+        _formal_gqa_code_binding(repo, require_clean=True)
+
+
+def test_formal_gqa_code_binding_uses_managed_sync_revision(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "deployed"
+    package = repo / "src/train/any2rwkv/any2rwkv"
+    package.mkdir(parents=True)
+    (package / "solver.py").write_text("VALUE = 2\n", encoding="utf-8")
+    revision_dir = repo / ".helicopter-dev"
+    revision_dir.mkdir()
+    revision = "a" * 40
+    scope = "src/train/any2rwkv/any2rwkv"
+    expected_tree_sha256 = _sha256_json(
+        [
+            {
+                "path": f"{scope}/solver.py",
+                "sha256": file_sha256(package / "solver.py"),
+            }
+        ]
+    )
+    write_json(
+        revision_dir / "source-revisions.json",
+        {
+            "product_commit": revision,
+            "submodules": {},
+            "scopes": {
+                scope: {
+                    "clean": True,
+                    "runtime_file_count": 1,
+                    "code_tree_sha256": expected_tree_sha256,
+                }
+            },
+        },
+    )
+
+    binding = _formal_gqa_code_binding(repo, require_clean=True)
+
+    assert binding["commit"] == revision
+    assert binding["revision_source"] == "helicopter-dev-managed-sync"
+    assert binding["clean"] is None
+    assert len(binding["managed_revision_manifest_sha256"]) == 64
+    assert binding["runtime_file_count"] == 1
+
+    (package / "solver.py").write_text("VALUE = 3\n", encoding="utf-8")
+    with pytest.raises(
+        ContractError,
+        match="differs from the synchronized commit-clean tree",
+    ):
+        _formal_gqa_code_binding(repo, require_clean=True)
 
 
 def _provenance_cache_reader(
