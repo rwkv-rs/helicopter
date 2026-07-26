@@ -29,7 +29,6 @@ benchmarks = [
   "openbookqa",
   "commonsenseqa",
   "ceval_zho_mcf",
-  "cmmlu_zho_mcf",
   "kmmlu",
   "med_qa",
   "med_mcqa",
