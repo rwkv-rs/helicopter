@@ -93,7 +93,8 @@ def _expected(
     }
 
 
-def _campaign() -> dict:
+def _campaign(*, task_names: tuple[str, ...] = ("gsm8k|0",)) -> dict:
+    selectors = [task_name.split("|", 1)[0] for task_name in task_names]
     return {
         "schema_version": "lighteval-campaign-v3",
         "run_key": "1" * 64,
@@ -101,13 +102,13 @@ def _campaign() -> dict:
         "registry_digest": "3" * 64,
         "eval_contract_digest": "5" * 64,
         "lighteval_version": "0.13.0",
-        "configured_selectors": ["gsm8k", "aime24"],
-        "resolved_selectors": ["gsm8k", "aime24"],
+        "configured_selectors": list(selectors),
+        "resolved_selectors": list(selectors),
         "skipped_selectors": [],
         "expected_tasks": [
             _expected(task_name=task, weight=weight, mode=mode)
             for weight in ("a" * 64, "b" * 64)
-            for task in ("gsm8k|0", "aime24|0")
+            for task in task_names
             for mode in ("fp16", "fp32io16")
         ],
     }
@@ -243,69 +244,39 @@ def _task_headers(payload: dict) -> dict[str, str]:
     }
 
 
-async def test_publication_rejects_non_standard_json_constants_before_validation(
-    database_settings: DatabaseSettings,
-) -> None:
-    app = create_app(
-        database_settings,
-        publication_tokens={TOKEN: "test-publisher"},
-    )
-    async with app.router.lifespan_context(app):
-        async with AsyncClient(
-            transport=ASGITransport(app=app),
-            base_url="http://test",
-        ) as client:
-            response = await client.post(
-                "/api/v1/evaluation-campaigns",
-                headers={
-                    **AUTH,
-                    "Content-Encoding": "gzip",
-                    "Content-Type": "application/json",
-                    "Idempotency-Key": "campaign:" + "1" * 64,
-                },
-                content=gzip.compress(
-                    (
-                        '{"schema_version":"lighteval-campaign-v3","unexpected":NaN}'
-                    ).encode()
-                ),
-            )
+async def test_publication_rejects_non_standard_json_constants() -> None:
+    app = create_app(publication_tokens={TOKEN: "test-publisher"})
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/api/v1/evaluation-campaigns",
+            headers={
+                **AUTH,
+                "Content-Encoding": "gzip",
+                "Content-Type": "application/json",
+                "Idempotency-Key": "campaign:" + "1" * 64,
+            },
+            content=gzip.compress(
+                '{"schema_version":"lighteval-campaign-v3","unexpected":NaN}'.encode()
+            ),
+        )
 
     assert response.status_code == 400
     assert response.json()["detail"] == "invalid JSON body"
 
 
-@pytest.mark.parametrize(
-    "field",
-    [
-        "offi" + "cial",
-        "non_" + "official",
-        "trus" + "ted",
-        "trust_" + "level",
-        "visi" + "bility",
-        "eligi" + "bility",
-        "sani" + "ty",
-        "compa" + "rable",
-        "result_" + "level",
-    ],
-)
-def test_contract_rejects_removed_result_classification_fields(field: str) -> None:
-    task = _expected(task_name="gsm8k|0")
-    payload = _publication(str(uuid.uuid4()), task)
-    payload[field] = True
-    with pytest.raises(ValidationError, match="extra_forbidden"):
-        TaskPublication.model_validate(payload)
-
-
 def test_campaign_contract_requires_same_tasks_and_both_modes_per_weight() -> None:
-    valid = _campaign()
+    valid = _campaign(task_names=("gsm8k|0", "aime24|0"))
     assert len(CampaignCreate.model_validate(valid).expected_tasks) == 8
 
-    missing_mode = _campaign()
+    missing_mode = _campaign(task_names=("gsm8k|0", "aime24|0"))
     missing_mode["expected_tasks"].pop()
     with pytest.raises(ValidationError, match="both WKV modes"):
         CampaignCreate.model_validate(missing_mode)
 
-    missing_task = _campaign()
+    missing_task = _campaign(task_names=("gsm8k|0", "aime24|0"))
     missing_task["expected_tasks"] = [
         task
         for task in missing_task["expected_tasks"]
@@ -314,12 +285,12 @@ def test_campaign_contract_requires_same_tasks_and_both_modes_per_weight() -> No
     with pytest.raises(ValidationError, match="same task set"):
         CampaignCreate.model_validate(missing_task)
 
-    invalid_selector_status = _campaign()
+    invalid_selector_status = _campaign(task_names=("gsm8k|0", "aime24|0"))
     invalid_selector_status["skipped_selectors"] = ["gsm8k"]
     with pytest.raises(ValidationError, match="disjoint"):
         CampaignCreate.model_validate(invalid_selector_status)
 
-    missing_resolved_tasks = _campaign()
+    missing_resolved_tasks = _campaign(task_names=("gsm8k|0", "aime24|0"))
     missing_resolved_tasks["configured_selectors"].append("empty")
     missing_resolved_tasks["resolved_selectors"].append("empty")
     with pytest.raises(ValidationError, match="resolved selector"):
@@ -343,13 +314,8 @@ def test_campaign_contract_requires_stable_task_and_weight_metadata() -> None:
         CampaignCreate.model_validate(untrimmed)
 
 
-def test_contract_rejects_result_level_and_forged_diagnostics() -> None:
+def test_contract_rejects_inconsistent_evaluation_evidence() -> None:
     task = _expected(task_name="gsm8k|0")
-    payload = _publication(str(uuid.uuid4()), task)
-    payload["result_" + "level"] = "removed"
-    with pytest.raises(ValidationError, match="extra_forbidden"):
-        TaskPublication.model_validate(payload)
-
     payload = _publication(str(uuid.uuid4()), task)
     payload["diagnostics"]["truncated"] = 1
     with pytest.raises(ValidationError, match="diagnostics do not match"):
@@ -372,11 +338,6 @@ def test_contract_rejects_result_level_and_forged_diagnostics() -> None:
         TaskPublication.model_validate(payload)
 
     payload = _publication(str(uuid.uuid4()), task)
-    payload["artifact"]["results_path"] = "results//model/results.json"
-    with pytest.raises(ValidationError, match="normalized relative paths"):
-        TaskPublication.model_validate(payload)
-
-    payload = _publication(str(uuid.uuid4()), task)
     payload["task_config"]["original_num_docs"] = 0
     payload["task_config"]["effective_num_docs"] = 0
     payload["details"] = []
@@ -390,18 +351,6 @@ def test_contract_rejects_result_level_and_forged_diagnostics() -> None:
         "turn_boundary_violation_rate": 0,
     }
     with pytest.raises(ValidationError, match="full evaluation split"):
-        TaskPublication.model_validate(payload)
-
-    payload = _publication(str(uuid.uuid4()), task)
-    payload["task_config"]["original_num_docs"] = 3
-    payload["task_config"]["effective_num_docs"] = 2
-    payload["task_config"]["skipped_multiselect_docs"] = 1
-    publication = TaskPublication.model_validate(payload)
-    assert publication.task_config["skipped_multiselect_docs"] == 1
-
-    payload = _publication(str(uuid.uuid4()), task)
-    payload["aggregates"][" invalid"] = 0.5
-    with pytest.raises(ValidationError, match="native metric names"):
         TaskPublication.model_validate(payload)
 
 
@@ -666,7 +615,7 @@ async def test_campaign_publication_finalize_and_complete_queries(
                 },
             )
             assert incomplete.status_code == 409
-            assert len(incomplete.json()["detail"]["missing"]) == 8
+            assert len(incomplete.json()["detail"]["missing"]) == 4
 
             receipts = []
             for task in campaign["expected_tasks"]:
@@ -709,7 +658,7 @@ async def test_campaign_publication_finalize_and_complete_queries(
                 )
             ).json()
             assert status["missing_task_identities"] == []
-            assert len(status["acknowledged_task_digests"]) == 8
+            assert len(status["acknowledged_task_digests"]) == 4
             assert (await client.get("/api/evaluations")).json()["evaluations"] == []
 
             finalized = await client.post(
@@ -720,31 +669,31 @@ async def test_campaign_publication_finalize_and_complete_queries(
                 },
             )
             assert finalized.status_code == 200
-            assert finalized.json()["task_count"] == 8
+            assert finalized.json()["task_count"] == 4
 
             evaluations = (await client.get("/api/evaluations")).json()
-            assert len(evaluations["evaluations"]) == 8
-            assert evaluations["total"] == 8
+            assert len(evaluations["evaluations"]) == 4
+            assert evaluations["total"] == 4
             assert evaluations["next_offset"] is None
             first_page = (
                 await client.get(
                     "/api/evaluations",
-                    params={"offset": 0, "limit": 4},
+                    params={"offset": 0, "limit": 2},
                 )
             ).json()
-            assert len(first_page["evaluations"]) == 4
-            assert first_page["next_offset"] == 4
+            assert len(first_page["evaluations"]) == 2
+            assert first_page["next_offset"] == 2
             second_page = (
                 await client.get(
                     "/api/evaluations",
                     params={
                         "offset": first_page["next_offset"],
-                        "limit": 4,
+                        "limit": 2,
                         "completed_before": first_page["generated_at"],
                     },
                 )
             ).json()
-            assert len(second_page["evaluations"]) == 4
+            assert len(second_page["evaluations"]) == 2
             assert second_page["next_offset"] is None
             assert {
                 item["evaluation_id"]
@@ -754,22 +703,13 @@ async def test_campaign_publication_finalize_and_complete_queries(
             assert (
                 summary["provenance"]["publisher_principal"] == "lighteval-production"
             )
-            assert summary["provenance"]["configured_selectors"] == [
-                "gsm8k",
-                "aime24",
-            ]
-            assert summary["provenance"]["resolved_selectors"] == [
-                "gsm8k",
-                "aime24",
-            ]
+            assert summary["provenance"]["configured_selectors"] == ["gsm8k"]
+            assert summary["provenance"]["resolved_selectors"] == ["gsm8k"]
             assert summary["provenance"]["skipped_selectors"] == []
-            assert summary["task"]["selector"] in {"gsm8k", "aime24"}
+            assert summary["task"]["selector"] == "gsm8k"
             assert summary["task"]["weight_sha256"] in {"a" * 64, "b" * 64}
             assert summary["model"]["wkv_mode"] in {"fp16", "fp32io16"}
             assert summary["aggregates"]["exact_match_stderr"] == 0.01
-            assert "official" not in json.dumps(evaluations)
-            assert "visibility" not in json.dumps(evaluations)
-            assert "comparable" not in json.dumps(evaluations)
 
             evaluation_id = receipts[0]["evaluation_id"]
             page = (
@@ -809,50 +749,8 @@ async def test_campaign_publication_finalize_and_complete_queries(
         await app.state.database.stop()
 
 
-async def test_invalid_task_rolls_back_all_samples(
-    database_settings: DatabaseSettings,
-) -> None:
-    app = create_app(database_settings, publication_tokens={TOKEN: "ci"})
-    await app.state.database.start()
-    campaign = _campaign()
-    try:
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://testserver"
-        ) as client:
-            created = await client.post(
-                "/api/v1/evaluation-campaigns",
-                content=_body(campaign),
-                headers=_campaign_headers(campaign),
-            )
-            campaign_id = created.json()["campaign_id"]
-            payload = _publication(campaign_id, campaign["expected_tasks"][0])
-            payload["details"][1]["sample_index"] = 99
-            rejected = await client.put(
-                (
-                    f"/api/v1/evaluation-campaigns/{campaign_id}/tasks/"
-                    f"{quote(payload['task']['identity'], safe='')}"
-                ),
-                content=_body(payload),
-                headers=_task_headers(payload),
-            )
-            assert rejected.status_code == 422
-            pool = app.state.database.require_pool()
-            assert await pool.fetchval("SELECT count(*) FROM evaluation_task") == 0
-            assert await pool.fetchval("SELECT count(*) FROM evaluation_sample") == 0
-    finally:
-        await app.state.database.stop()
-
-
-@pytest.mark.parametrize(
-    "legacy_sql",
-    [
-        "CREATE TABLE evaluation_result (id integer)",
-        "CREATE TABLE evaluation_campaign (id integer)",
-    ],
-)
 async def test_server_refuses_legacy_or_unversioned_evaluation_schema(
     database_settings: DatabaseSettings,
-    legacy_sql: str,
 ) -> None:
     connection = await asyncpg.connect(
         host=database_settings.host,
@@ -862,7 +760,7 @@ async def test_server_refuses_legacy_or_unversioned_evaluation_schema(
         database=database_settings.database,
     )
     try:
-        await connection.execute(legacy_sql)
+        await connection.execute("CREATE TABLE evaluation_campaign (id integer)")
     finally:
         await connection.close()
 

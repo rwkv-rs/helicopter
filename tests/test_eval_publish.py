@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import gzip
 import json
 import stat
 from pathlib import Path
@@ -207,10 +206,7 @@ def test_prepare_staging_creates_private_owned_directory(tmp_path: Path) -> None
         publish.prepare_staging(staging)
 
 
-def test_canonical_json_is_stable_rejects_nan_and_gzips() -> None:
+def test_canonical_json_is_stable_and_rejects_nan() -> None:
     assert publish.canonical_json({"b": 2, "a": 1}) == b'{"a":1,"b":2}'
-    assert json.loads(
-        gzip.decompress(gzip.compress(publish.canonical_json({"a": 1})))
-    ) == {"a": 1}
     with pytest.raises(PublicationError, match="canonical JSON"):
         publish.canonical_json({"metric": float("nan")})

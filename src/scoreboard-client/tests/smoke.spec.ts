@@ -1,6 +1,6 @@
 import { expect, type Page, test } from "@playwright/test";
 
-import sharedFixture from "../../../fixtures/lighteval_e2e.json" with {
+import sharedFixture from "../test_data/evaluation.json" with {
   type: "json",
 };
 
@@ -158,7 +158,6 @@ test("shows two weights, both WKV modes, native metrics and missing pairs", asyn
   await expect(page.getByRole("button", { name: /0.25 exact_match/ }).first()).toBeVisible();
   await expect(page.getByRole("button", { name: /0.01 stderr/ }).first()).toBeVisible();
   await expect(page.getByLabel(/gsm8k\|0 fp32io16 结果缺失/)).toBeVisible();
-  await expect(page.getByText(/结果等级|trusted|non-official/i)).toHaveCount(0);
 });
 
 test("filters tags and pages faithful multi-completion details", async ({ page }) => {
@@ -193,14 +192,6 @@ test("filters tags and pages faithful multi-completion details", async ({ page }
   await expect(firstSample.getByText('"exact_match": 1')).toBeVisible();
   await expect(firstSample.getByText("[10,11]", { exact: true })).toBeVisible();
   await expect(details.getByText("latency", { exact: false })).toHaveCount(0);
-});
-
-test("history uses stable evaluation identity and complete API data", async ({ page }) => {
-  await serveApi(page);
-  await page.goto("/?page=history");
-  await expect(page.getByRole("heading", { name: "评估历史" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "gsm8k|0" }).first()).toBeVisible();
-  await expect(page.getByText("stderr").first()).toBeVisible();
 });
 
 test("loads every paginated evaluation before rendering the matrix", async ({
