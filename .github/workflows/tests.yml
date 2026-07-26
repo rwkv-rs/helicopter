@@ -43,10 +43,10 @@ jobs:
 
       - name: Run lightweight tests
         env:
-          PYTHONPATH: src/cli:src/eval/lighteval/src:src/scoreboard-server
+          PYTHONPATH: src/cli:src/scoreboard-server
         run: |
           source .venv/bin/activate
           python -m unittest discover -s tests
           python -m pytest -q \
-            tests/test_eval_preflight.py \
-            tests/test_lighteval_adapter.py::test_pipeline_parameters_enable_multilingual_inventory
+            tests/test_eval_config.py \
+            tests/test_eval_evaluate.py::test_pipeline_parameters_enable_multilingual_inventory

@@ -8,21 +8,21 @@ from types import SimpleNamespace
 
 import pytest
 
-from helicopter_lighteval import campaign
+from helicopter_lighteval import evaluate
 from helicopter_lighteval.config import (
     EvaluationConfig,
     EvaluationEnvironment,
     WeightIdentity,
 )
-from helicopter_lighteval.manifest import (
+from helicopter_lighteval.publish import (
     ManifestError,
     ManifestStore,
     campaign_directory,
     remove_acknowledged_shard,
     remove_campaign_child_directory,
 )
-from helicopter_lighteval.plan import build_plan
-from helicopter_lighteval.registry import RegistrySnapshot, RegistryTask
+from helicopter_lighteval.config import build_plan
+from helicopter_lighteval.config import RegistrySnapshot, RegistryTask
 
 
 def _plan(tmp_path: Path, *, prompt_template: str = "bot"):
@@ -91,7 +91,7 @@ def test_resume_key_includes_resolved_weight_digest(tmp_path: Path) -> None:
     changed_weight_plan = replace(plan, units=replacement_units)
 
     assert changed_weight_plan.config_digest == plan.config_digest
-    assert campaign._resume_key(changed_weight_plan) != campaign._resume_key(plan)
+    assert evaluate._resume_key(changed_weight_plan) != evaluate._resume_key(plan)
 
 
 def test_prompt_template_changes_campaign_identity(tmp_path: Path) -> None:
@@ -100,7 +100,7 @@ def test_prompt_template_changes_campaign_identity(tmp_path: Path) -> None:
 
     assert bot.config_digest != assistant.config_digest
     assert bot.eval_contract_digest != assistant.eval_contract_digest
-    assert campaign._resume_key(bot) != campaign._resume_key(assistant)
+    assert evaluate._resume_key(bot) != evaluate._resume_key(assistant)
 
 
 def test_cleanup_only_removes_exact_campaign_child(tmp_path: Path) -> None:
@@ -157,8 +157,8 @@ def test_resume_removes_only_registered_interrupted_attempt(
 ) -> None:
     plan = _plan(tmp_path)
     environment = _environment(tmp_path)
-    resume_key = campaign._resume_key(plan)
-    manifest = campaign._new_manifest(
+    resume_key = evaluate._resume_key(plan)
+    manifest = evaluate._new_manifest(
         plan,
         resume_key,
         "11111111-1111-1111-1111-111111111111",
@@ -178,7 +178,7 @@ def test_resume_removes_only_registered_interrupted_attempt(
     (sibling / "preserve").write_text("unknown", encoding="utf-8")
     manifest.attempted_shard_paths[key] = str(attempt.relative_to(directory))
 
-    campaign._cleanup_interrupted_attempts(
+    evaluate._cleanup_interrupted_attempts(
         manifest=manifest,
         environment=environment,
     )
@@ -193,8 +193,8 @@ def test_failed_shard_persists_only_exception_type(
 ) -> None:
     plan = _plan(tmp_path)
     environment = _environment(tmp_path)
-    resume_key = campaign._resume_key(plan)
-    manifest = campaign._new_manifest(
+    resume_key = evaluate._resume_key(plan)
+    manifest = evaluate._new_manifest(
         plan,
         resume_key,
         "11111111-1111-1111-1111-111111111111",
@@ -209,7 +209,7 @@ def test_failed_shard_persists_only_exception_type(
     attempt = directory / "weight" / unit.wkv_mode / "failed"
     attempt.mkdir(parents=True)
     model_execution = {"wkv_mode": unit.wkv_mode}
-    campaign._record_shard_attempt(
+    evaluate._record_shard_attempt(
         store=store,
         manifest=manifest,
         campaign_dir=directory,
@@ -219,7 +219,7 @@ def test_failed_shard_persists_only_exception_type(
         model_execution=model_execution,
     )
 
-    campaign._record_shard_failure(
+    evaluate._record_shard_failure(
         store=store,
         manifest=manifest,
         campaign_dir=directory,
@@ -245,8 +245,8 @@ def test_resume_removes_only_registered_model_runtime(
 ) -> None:
     plan = _plan(tmp_path)
     environment = _environment(tmp_path)
-    resume_key = campaign._resume_key(plan)
-    manifest = campaign._new_manifest(
+    resume_key = evaluate._resume_key(plan)
+    manifest = evaluate._new_manifest(
         plan,
         resume_key,
         "11111111-1111-1111-1111-111111111111",
@@ -265,7 +265,7 @@ def test_resume_removes_only_registered_model_runtime(
     (sibling / "preserve").write_text("unknown", encoding="utf-8")
     manifest.runtime_paths[unit_key] = str(runtime.relative_to(directory))
 
-    campaign._cleanup_interrupted_runtimes(
+    evaluate._cleanup_interrupted_runtimes(
         manifest=manifest,
         environment=environment,
     )
@@ -298,13 +298,13 @@ def test_manifest_schema_rejects_unsafe_paths_and_digest_state_overlap() -> None
         "acknowledged_task_digests": {},
     }
     with pytest.raises(ManifestError, match="unsafe path"):
-        campaign.CampaignManifest.from_json(raw)
+        evaluate.CampaignManifest.from_json(raw)
 
     raw["shard_paths"] = {}
     raw["pending_task_digests"] = {"task": "a" * 64}
     raw["acknowledged_task_digests"] = {"task": "a" * 64}
     with pytest.raises(ManifestError, match="states overlap"):
-        campaign.CampaignManifest.from_json(raw)
+        evaluate.CampaignManifest.from_json(raw)
 
 
 def test_manifest_store_wraps_atomic_persistence_failures(
@@ -312,9 +312,9 @@ def test_manifest_store_wraps_atomic_persistence_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     plan = _plan(tmp_path)
-    resume_key = campaign._resume_key(plan)
+    resume_key = evaluate._resume_key(plan)
     store = ManifestStore(tmp_path / "staging", resume_key)
-    manifest = campaign._new_manifest(
+    manifest = evaluate._new_manifest(
         plan,
         resume_key,
         "11111111-1111-1111-1111-111111111111",
@@ -324,7 +324,7 @@ def test_manifest_store_wraps_atomic_persistence_failures(
         raise OSError("disk unavailable")
 
     monkeypatch.setattr(
-        "helicopter_lighteval.manifest._write_json_atomic",
+        "helicopter_lighteval.publish._write_json_atomic",
         fail_write,
     )
 
@@ -336,9 +336,9 @@ def test_manifest_store_rejects_non_standard_json_constants(
     tmp_path: Path,
 ) -> None:
     plan = _plan(tmp_path)
-    resume_key = campaign._resume_key(plan)
+    resume_key = evaluate._resume_key(plan)
     store = ManifestStore(tmp_path / "staging", resume_key)
-    manifest = campaign._new_manifest(
+    manifest = evaluate._new_manifest(
         plan,
         resume_key,
         "11111111-1111-1111-1111-111111111111",
@@ -358,8 +358,8 @@ def test_manifest_plan_rejects_runtime_path_for_a_different_unit(
     tmp_path: Path,
 ) -> None:
     plan = _plan(tmp_path)
-    resume_key = campaign._resume_key(plan)
-    manifest = campaign._new_manifest(
+    resume_key = evaluate._resume_key(plan)
+    manifest = evaluate._new_manifest(
         plan,
         resume_key,
         "11111111-1111-1111-1111-111111111111",
@@ -372,15 +372,15 @@ def test_manifest_plan_rejects_runtime_path_for_a_different_unit(
         ManifestError,
         match="runtime path does not match its unit",
     ):
-        campaign._validate_manifest_plan(manifest, plan)
+        evaluate._validate_manifest_plan(manifest, plan)
 
 
 def test_manifest_plan_rejects_shard_state_without_model_execution(
     tmp_path: Path,
 ) -> None:
     plan = _plan(tmp_path)
-    resume_key = campaign._resume_key(plan)
-    manifest = campaign._new_manifest(
+    resume_key = evaluate._resume_key(plan)
+    manifest = evaluate._new_manifest(
         plan,
         resume_key,
         "11111111-1111-1111-1111-111111111111",
@@ -394,15 +394,15 @@ def test_manifest_plan_rejects_shard_state_without_model_execution(
         ManifestError,
         match="lacks model execution metadata",
     ):
-        campaign._validate_manifest_plan(manifest, plan)
+        evaluate._validate_manifest_plan(manifest, plan)
 
 
 def test_manifest_plan_requires_exact_weight_and_registry_snapshots(
     tmp_path: Path,
 ) -> None:
     plan = _plan(tmp_path)
-    resume_key = campaign._resume_key(plan)
-    manifest = campaign._new_manifest(
+    resume_key = evaluate._resume_key(plan)
+    manifest = evaluate._new_manifest(
         plan,
         resume_key,
         "11111111-1111-1111-1111-111111111111",
@@ -410,7 +410,7 @@ def test_manifest_plan_requires_exact_weight_and_registry_snapshots(
     manifest.registry_task_identities = ["different|0"]
 
     with pytest.raises(ManifestError, match="registry snapshot"):
-        campaign._validate_manifest_plan(manifest, plan)
+        evaluate._validate_manifest_plan(manifest, plan)
 
 
 def test_backend_commit_before_local_ack_recovers_without_recompute(
@@ -440,7 +440,7 @@ def test_backend_commit_before_local_ack_recovers_without_recompute(
 
         def campaign_status(self, _campaign_id):
             expected = [
-                campaign._task_identity(unit, task.identity)
+                evaluate._task_identity(unit, task.identity)
                 for unit in plan.units
                 for task in plan.registry.tasks
             ]
@@ -515,7 +515,7 @@ def test_backend_commit_before_local_ack_recovers_without_recompute(
         return outputs, []
 
     def fake_publications(*, campaign_id, unit, shard, **_kwargs):
-        identity = campaign._task_identity(unit, shard.tasks[0].identity)
+        identity = evaluate._task_identity(unit, shard.tasks[0].identity)
         payload = {
             "campaign_id": campaign_id,
             "identity": identity,
@@ -526,20 +526,20 @@ def test_backend_commit_before_local_ack_recovers_without_recompute(
         ).hexdigest()
         return [(identity, payload, digest)]
 
-    monkeypatch.setattr(campaign, "ScoreboardClient", FakeClient)
-    monkeypatch.setattr(campaign, "publications_from_shard", fake_publications)
+    monkeypatch.setattr(evaluate, "ScoreboardClient", FakeClient)
+    monkeypatch.setattr(evaluate, "publications_from_shard", fake_publications)
     monkeypatch.setattr(
-        "helicopter_lighteval.lighteval_adapter.evaluate_unit",
+        "helicopter_lighteval.evaluate.evaluate_unit",
         fake_evaluate_unit,
     )
 
-    assert campaign.run_campaign(plan=plan, environment=environment) == 1
+    assert evaluate.run_campaign(plan=plan, environment=environment) == 1
     assert evaluated == ["fp16", "fp32io16"]
     assert list(environment.staging_root.glob("campaigns/*.json"))
     assert not list(environment.staging_root.glob("runs/**/standard-result"))
 
     evaluated.clear()
-    assert campaign.run_campaign(plan=plan, environment=environment) == 0
+    assert evaluate.run_campaign(plan=plan, environment=environment) == 0
     assert evaluated == []
     assert environment.staging_root.is_dir()
     control_files = list((environment.staging_root / "control").glob("*.json"))
@@ -582,7 +582,7 @@ def test_publication_failure_reuses_persisted_artifact_without_recompute(
 
         def campaign_status(self, _campaign_id):
             expected = [
-                campaign._task_identity(unit, task.identity)
+                evaluate._task_identity(unit, task.identity)
                 for unit in plan.units
                 for task in plan.registry.tasks
             ]
@@ -656,7 +656,7 @@ def test_publication_failure_reuses_persisted_artifact_without_recompute(
         return outputs, []
 
     def fake_publications(*, campaign_id, unit, shard, **_kwargs):
-        identity = campaign._task_identity(unit, shard.tasks[0].identity)
+        identity = evaluate._task_identity(unit, shard.tasks[0].identity)
         payload = {
             "campaign_id": campaign_id,
             "identity": identity,
@@ -667,20 +667,20 @@ def test_publication_failure_reuses_persisted_artifact_without_recompute(
         ).hexdigest()
         return [(identity, payload, digest)]
 
-    monkeypatch.setattr(campaign, "ScoreboardClient", FakeClient)
-    monkeypatch.setattr(campaign, "publications_from_shard", fake_publications)
+    monkeypatch.setattr(evaluate, "ScoreboardClient", FakeClient)
+    monkeypatch.setattr(evaluate, "publications_from_shard", fake_publications)
     monkeypatch.setattr(
-        "helicopter_lighteval.lighteval_adapter.evaluate_unit",
+        "helicopter_lighteval.evaluate.evaluate_unit",
         fake_evaluate_unit,
     )
 
-    assert campaign.run_campaign(plan=plan, environment=environment) == 1
+    assert evaluate.run_campaign(plan=plan, environment=environment) == 1
     assert evaluated == ["fp16", "fp32io16"]
     assert len(list(environment.staging_root.glob("runs/**/standard-result"))) == 2
 
     allow_publication = True
     evaluated.clear()
-    assert campaign.run_campaign(plan=plan, environment=environment) == 0
+    assert evaluate.run_campaign(plan=plan, environment=environment) == 0
     assert evaluated == []
     assert not (environment.staging_root / "runs").exists()
     assert not (environment.staging_root / "campaigns").exists()
@@ -693,16 +693,16 @@ def test_completed_backend_recovery_cleans_locally_without_starting_new_campaign
     plan = _plan(tmp_path)
     environment = _environment(tmp_path)
     old_campaign_id = "11111111-1111-1111-1111-111111111111"
-    resume_key = campaign._resume_key(plan)
+    resume_key = evaluate._resume_key(plan)
     store = ManifestStore(environment.staging_root, resume_key)
-    manifest = campaign._new_manifest(plan, resume_key, old_campaign_id)
+    manifest = evaluate._new_manifest(plan, resume_key, old_campaign_id)
     backend_digests: dict[str, str] = {}
 
     for unit in plan.units:
         shard = unit.shards[0]
         unit_key = f"{unit.weight.sha256}:{unit.wkv_mode}"
         key = f"{unit.weight.sha256}:{unit.wkv_mode}:{shard.shard_id}"
-        identity = campaign._task_identity(unit, shard.tasks[0].identity)
+        identity = evaluate._task_identity(unit, shard.tasks[0].identity)
         backend_digests[identity] = hashlib.sha256(identity.encode()).hexdigest()
         manifest.acknowledged_task_digests[identity] = backend_digests[identity]
         manifest.model_executions[unit_key] = {"wkv_mode": unit.wkv_mode}
@@ -755,9 +755,9 @@ def test_completed_backend_recovery_cleans_locally_without_starting_new_campaign
         def create_campaign(self, _payload, _resume_key):
             raise AssertionError("completed recovery must not start a new campaign")
 
-    monkeypatch.setattr(campaign, "ScoreboardClient", FakeClient)
+    monkeypatch.setattr(evaluate, "ScoreboardClient", FakeClient)
 
-    assert campaign.run_campaign(plan=plan, environment=environment) == 0
+    assert evaluate.run_campaign(plan=plan, environment=environment) == 0
     assert not (environment.staging_root / "runs").exists()
     assert not (environment.staging_root / "campaigns").exists()
     assert (environment.staging_root / "control" / f"{old_campaign_id}.json").is_file()
@@ -769,9 +769,9 @@ def test_mismatched_local_manifest_is_quarantined_without_touching_its_run(
 ) -> None:
     plan = _plan(tmp_path)
     environment = _environment(tmp_path)
-    resume_key = campaign._resume_key(plan)
+    resume_key = evaluate._resume_key(plan)
     store = ManifestStore(environment.staging_root, resume_key)
-    manifest = campaign._new_manifest(
+    manifest = evaluate._new_manifest(
         plan,
         resume_key,
         "11111111-1111-1111-1111-111111111111",
@@ -801,10 +801,10 @@ def test_mismatched_local_manifest_is_quarantined_without_touching_its_run(
             )
             raise CurrentCampaignRequested
 
-    monkeypatch.setattr(campaign, "ScoreboardClient", FakeClient)
+    monkeypatch.setattr(evaluate, "ScoreboardClient", FakeClient)
 
     with pytest.raises(CurrentCampaignRequested):
-        campaign.run_campaign(plan=plan, environment=environment)
+        evaluate.run_campaign(plan=plan, environment=environment)
     assert (old_run / "preserve.txt").read_text(encoding="utf-8") == "unknown content"
 
 
@@ -814,10 +814,10 @@ def test_quarantined_manifest_never_reuses_unregistered_run_content(
 ) -> None:
     plan = _plan(tmp_path)
     environment = _environment(tmp_path)
-    resume_key = campaign._resume_key(plan)
+    resume_key = evaluate._resume_key(plan)
     campaign_id = "11111111-1111-1111-1111-111111111111"
     store = ManifestStore(environment.staging_root, resume_key)
-    manifest = campaign._new_manifest(plan, resume_key, campaign_id)
+    manifest = evaluate._new_manifest(plan, resume_key, campaign_id)
     manifest.registry_task_identities = ["corrupt|0"]
     store.save(manifest)
     old_run = campaign_directory(environment.staging_root, campaign_id) / "unknown"
@@ -839,12 +839,12 @@ def test_quarantined_manifest_never_reuses_unregistered_run_content(
                 "acknowledged_task_digests": {},
             }
 
-    monkeypatch.setattr(campaign, "ScoreboardClient", FakeClient)
+    monkeypatch.setattr(evaluate, "ScoreboardClient", FakeClient)
 
     with pytest.raises(
         ManifestError,
         match="without a matching manifest",
     ):
-        campaign.run_campaign(plan=plan, environment=environment)
+        evaluate.run_campaign(plan=plan, environment=environment)
 
     assert evidence.read_text(encoding="utf-8") == "unknown content"

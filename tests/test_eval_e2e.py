@@ -15,10 +15,10 @@ import pyarrow.parquet as parquet
 import pytest
 import pytest_asyncio
 
-from helicopter_lighteval import artifacts, campaign
+from helicopter_lighteval import evaluate, publish
 from helicopter_lighteval.config import EvaluationConfig, WeightIdentity
-from helicopter_lighteval.plan import build_plan
-from helicopter_lighteval.registry import RegistrySnapshot, RegistryTask
+from helicopter_lighteval.config import build_plan
+from helicopter_lighteval.config import RegistrySnapshot, RegistryTask
 from scoreboard_server.application import create_app
 from scoreboard_server.db.settings import DatabaseSettings
 
@@ -71,7 +71,7 @@ async def e2e_database() -> DatabaseSettings:
 
 
 def _gzip(value: object) -> bytes:
-    return gzip.compress(artifacts.canonical_json(value))
+    return gzip.compress(publish.canonical_json(value))
 
 
 def _publication_headers(digest: str) -> dict[str, str]:
@@ -119,8 +119,8 @@ async def test_standard_artifact_to_database_query_contract(
         (weight,),
         registry,
     )
-    resume_key = campaign._resume_key(plan)
-    create_payload = campaign._campaign_payload(plan, resume_key)
+    resume_key = evaluate._resume_key(plan)
+    create_payload = evaluate._campaign_payload(plan, resume_key)
     app = create_app(e2e_database, publication_tokens={TOKEN: "shared-fixture"})
     await app.state.database.start()
     try:
@@ -170,7 +170,7 @@ async def test_standard_artifact_to_database_query_contract(
                         else "fp32-accumulation"
                     ),
                 }
-                publications = artifacts.publications_from_shard(
+                publications = publish.publications_from_shard(
                     shard_dir=shard_dir,
                     campaign_id=campaign_id,
                     unit=unit,

@@ -1,15 +1,22 @@
 import copy
+from io import BytesIO
 from dataclasses import replace
 import hashlib
 import math
 from pathlib import Path
+from urllib.error import HTTPError
 
 import pytest
 
-from helicopter_lighteval import artifacts
-from helicopter_lighteval.config import WeightIdentity
-from helicopter_lighteval.plan import EvaluationShard, EvaluationUnit
-from helicopter_lighteval.registry import RegistryTask
+from helicopter_lighteval import publish
+from helicopter_lighteval.publish import (
+    ScoreboardClient,
+    ScoreboardConflict,
+    ScoreboardError,
+)
+from helicopter_lighteval.config import EvaluationEnvironment, WeightIdentity
+from helicopter_lighteval.config import EvaluationShard, EvaluationUnit
+from helicopter_lighteval.config import RegistryTask
 
 
 def _task() -> RegistryTask:
@@ -128,11 +135,11 @@ def test_standard_parser_preserves_native_metrics_and_multi_completion(
 ) -> None:
     unit, shard = _unit(tmp_path)
     monkeypatch.setattr(
-        artifacts,
+        publish,
         "_standard_artifacts",
         lambda _path: _standard(tmp_path),
     )
-    publications = artifacts.publications_from_shard(
+    publications = publish.publications_from_shard(
         shard_dir=tmp_path,
         campaign_id="11111111-1111-1111-1111-111111111111",
         unit=unit,
@@ -161,9 +168,9 @@ def test_standard_parser_accepts_multiple_native_rows_for_one_document(
     second_sampling_category = copy.deepcopy(standard[1][0])
     second_sampling_category["metric"] = {"extractive_match": 0.0}
     standard[1].append(second_sampling_category)
-    monkeypatch.setattr(artifacts, "_standard_artifacts", lambda _path: standard)
+    monkeypatch.setattr(publish, "_standard_artifacts", lambda _path: standard)
 
-    publications = artifacts.publications_from_shard(
+    publications = publish.publications_from_shard(
         shard_dir=tmp_path,
         campaign_id="11111111-1111-1111-1111-111111111111",
         unit=unit,
@@ -187,9 +194,9 @@ def test_standard_parser_accounts_for_skipped_multiselect_documents(
     task_config["original_num_docs"] = 2
     task_config["effective_num_docs"] = 1
     task_config["skipped_multiselect_docs"] = 1
-    monkeypatch.setattr(artifacts, "_standard_artifacts", lambda _path: standard)
+    monkeypatch.setattr(publish, "_standard_artifacts", lambda _path: standard)
 
-    publications = artifacts.publications_from_shard(
+    publications = publish.publications_from_shard(
         shard_dir=tmp_path,
         campaign_id="11111111-1111-1111-1111-111111111111",
         unit=unit,
@@ -250,9 +257,9 @@ def test_standard_parser_accepts_only_registry_proven_superset_expansion(
     child_row["doc"]["task_name"] = "bbq:Age|0"
     rows.append(child_row)
     standard = results, rows, result_path, detail_paths
-    monkeypatch.setattr(artifacts, "_standard_artifacts", lambda _path: standard)
+    monkeypatch.setattr(publish, "_standard_artifacts", lambda _path: standard)
 
-    publications = artifacts.publications_from_shard(
+    publications = publish.publications_from_shard(
         shard_dir=tmp_path,
         campaign_id="11111111-1111-1111-1111-111111111111",
         unit=unit,
@@ -268,10 +275,10 @@ def test_standard_parser_accepts_only_registry_proven_superset_expansion(
     }
 
     with pytest.raises(
-        artifacts.ArtifactError,
+        publish.ArtifactError,
         match="task set does not match deterministic shard",
     ):
-        artifacts.publications_from_shard(
+        publish.publications_from_shard(
             shard_dir=tmp_path,
             campaign_id="11111111-1111-1111-1111-111111111111",
             unit=unit,
@@ -291,9 +298,9 @@ def test_standard_parser_never_selects_stderr_as_primary_metric(
         "stderr": 0.01,
         "extractive_match": 1.0,
     }
-    monkeypatch.setattr(artifacts, "_standard_artifacts", lambda _path: standard)
+    monkeypatch.setattr(publish, "_standard_artifacts", lambda _path: standard)
 
-    publication = artifacts.publications_from_shard(
+    publication = publish.publications_from_shard(
         shard_dir=tmp_path,
         campaign_id="11111111-1111-1111-1111-111111111111",
         unit=unit,
@@ -312,10 +319,10 @@ def test_standard_parser_rejects_non_numeric_native_aggregate(
     unit, shard = _unit(tmp_path)
     standard = _standard(tmp_path)
     standard[0]["results"]["gsm8k|0"]["unexpected"] = "not-a-number"
-    monkeypatch.setattr(artifacts, "_standard_artifacts", lambda _path: standard)
+    monkeypatch.setattr(publish, "_standard_artifacts", lambda _path: standard)
 
-    with pytest.raises(artifacts.ArtifactError, match="aggregate is invalid"):
-        artifacts.publications_from_shard(
+    with pytest.raises(publish.ArtifactError, match="aggregate is invalid"):
+        publish.publications_from_shard(
             shard_dir=tmp_path,
             campaign_id="11111111-1111-1111-1111-111111111111",
             unit=unit,
@@ -333,10 +340,10 @@ def test_standard_parser_rejects_symlink_result_file(tmp_path: Path) -> None:
     (result_dir / "results_stamp.json").symlink_to(outside)
 
     with pytest.raises(
-        artifacts.ArtifactError,
+        publish.ArtifactError,
         match="safe shard child|regular non-symlink",
     ):
-        artifacts._standard_artifacts(tmp_path / "shard")
+        publish._standard_artifacts(tmp_path / "shard")
 
 
 def test_standard_parser_accepts_logprob_rows_with_output_token_evidence(
@@ -354,9 +361,9 @@ def test_standard_parser_accepts_logprob_rows_with_output_token_evidence(
         "logprobs": [-0.1, -0.2],
         "argmax_logits_eq_gold": [True, False],
     }
-    monkeypatch.setattr(artifacts, "_standard_artifacts", lambda _path: standard)
+    monkeypatch.setattr(publish, "_standard_artifacts", lambda _path: standard)
 
-    publication = artifacts.publications_from_shard(
+    publication = publish.publications_from_shard(
         shard_dir=tmp_path,
         campaign_id="11111111-1111-1111-1111-111111111111",
         unit=unit,
@@ -380,13 +387,13 @@ def test_standard_parser_rejects_misaligned_postprocessed_completions(
     unit, shard = _unit(tmp_path)
     standard = _standard(tmp_path)
     standard[1][0]["model_response"]["text_post_processed"] = ["2"]
-    monkeypatch.setattr(artifacts, "_standard_artifacts", lambda _path: standard)
+    monkeypatch.setattr(publish, "_standard_artifacts", lambda _path: standard)
 
     with pytest.raises(
-        artifacts.ArtifactError,
+        publish.ArtifactError,
         match="text_post_processed must align",
     ):
-        artifacts.publications_from_shard(
+        publish.publications_from_shard(
             shard_dir=tmp_path,
             campaign_id="11111111-1111-1111-1111-111111111111",
             unit=unit,
@@ -409,13 +416,13 @@ def test_standard_parser_rejects_misaligned_logprob_token_evidence(
         "output_tokens": [[3]],
         "logprobs": [-0.1, -0.2],
     }
-    monkeypatch.setattr(artifacts, "_standard_artifacts", lambda _path: standard)
+    monkeypatch.setattr(publish, "_standard_artifacts", lambda _path: standard)
 
     with pytest.raises(
-        artifacts.ArtifactError,
+        publish.ArtifactError,
         match="log-likelihood evidence and output-token counts differ",
     ):
-        artifacts.publications_from_shard(
+        publish.publications_from_shard(
             shard_dir=tmp_path,
             campaign_id="11111111-1111-1111-1111-111111111111",
             unit=unit,
@@ -431,12 +438,12 @@ def test_standard_parser_rejects_misaligned_logprob_token_evidence(
         "text": [],
         "logprobs": [-0.1, -0.2],
     }
-    monkeypatch.setattr(artifacts, "_standard_artifacts", lambda _path: standard)
+    monkeypatch.setattr(publish, "_standard_artifacts", lambda _path: standard)
     with pytest.raises(
-        artifacts.ArtifactError,
+        publish.ArtifactError,
         match="output_tokens must be a non-empty array",
     ):
-        artifacts.publications_from_shard(
+        publish.publications_from_shard(
             shard_dir=tmp_path,
             campaign_id="11111111-1111-1111-1111-111111111111",
             unit=unit,
@@ -453,12 +460,12 @@ def test_standard_parser_rejects_misaligned_logprob_token_evidence(
         "output_tokens": [[]],
         "logprobs": [-0.1],
     }
-    monkeypatch.setattr(artifacts, "_standard_artifacts", lambda _path: standard)
+    monkeypatch.setattr(publish, "_standard_artifacts", lambda _path: standard)
     with pytest.raises(
-        artifacts.ArtifactError,
+        publish.ArtifactError,
         match="output token groups must be non-empty",
     ):
-        artifacts.publications_from_shard(
+        publish.publications_from_shard(
             shard_dir=tmp_path,
             campaign_id="11111111-1111-1111-1111-111111111111",
             unit=unit,
@@ -475,9 +482,9 @@ def test_standard_parser_rejects_nonfinite_and_partial_data(
     unit, shard = _unit(tmp_path)
     result = _standard(tmp_path)
     result[0]["results"]["gsm8k|0"]["extractive_match"] = math.nan
-    monkeypatch.setattr(artifacts, "_standard_artifacts", lambda _path: result)
-    with pytest.raises(artifacts.ArtifactError, match="not finite"):
-        artifacts.publications_from_shard(
+    monkeypatch.setattr(publish, "_standard_artifacts", lambda _path: result)
+    with pytest.raises(publish.ArtifactError, match="not finite"):
+        publish.publications_from_shard(
             shard_dir=tmp_path,
             campaign_id="11111111-1111-1111-1111-111111111111",
             unit=unit,
@@ -488,9 +495,9 @@ def test_standard_parser_rejects_nonfinite_and_partial_data(
 
     result = _standard(tmp_path)
     result[0]["config_tasks"]["gsm8k|0"]["effective_num_docs"] = 0
-    monkeypatch.setattr(artifacts, "_standard_artifacts", lambda _path: result)
-    with pytest.raises(artifacts.ArtifactError, match="full evaluation split"):
-        artifacts.publications_from_shard(
+    monkeypatch.setattr(publish, "_standard_artifacts", lambda _path: result)
+    with pytest.raises(publish.ArtifactError, match="full evaluation split"):
+        publish.publications_from_shard(
             shard_dir=tmp_path,
             campaign_id="11111111-1111-1111-1111-111111111111",
             unit=unit,
@@ -511,10 +518,10 @@ def test_standard_parser_rejects_non_standard_results_json(
     detail_path.touch()
 
     with pytest.raises(
-        artifacts.ArtifactError,
+        publish.ArtifactError,
         match="standard results JSON is invalid",
     ):
-        artifacts._standard_artifacts(tmp_path)
+        publish._standard_artifacts(tmp_path)
 
 
 def test_standard_parser_validates_sampling_and_model_execution_locally(
@@ -526,13 +533,13 @@ def test_standard_parser_validates_sampling_and_model_execution_locally(
     standard[0]["config_general"]["model_config"]["generation_parameters"][
         "temperature"
     ] = 0.0
-    monkeypatch.setattr(artifacts, "_standard_artifacts", lambda _path: standard)
+    monkeypatch.setattr(publish, "_standard_artifacts", lambda _path: standard)
 
     with pytest.raises(
-        artifacts.ArtifactError,
+        publish.ArtifactError,
         match="sampling contract: temperature",
     ):
-        artifacts.publications_from_shard(
+        publish.publications_from_shard(
             shard_dir=tmp_path,
             campaign_id="11111111-1111-1111-1111-111111111111",
             unit=unit,
@@ -544,10 +551,10 @@ def test_standard_parser_validates_sampling_and_model_execution_locally(
     model_execution = _model(unit)
     model_execution["weight_sha256"] = "f" * 64
     with pytest.raises(
-        artifacts.ArtifactError,
+        publish.ArtifactError,
         match="planned unit: weight_sha256",
     ):
-        artifacts.publications_from_shard(
+        publish.publications_from_shard(
             shard_dir=tmp_path,
             campaign_id="11111111-1111-1111-1111-111111111111",
             unit=unit,
@@ -559,10 +566,10 @@ def test_standard_parser_validates_sampling_and_model_execution_locally(
     model_execution = _model(unit)
     model_execution["prompt_template"] = "bot"
     with pytest.raises(
-        artifacts.ArtifactError,
+        publish.ArtifactError,
         match="planned unit: prompt_template",
     ):
-        artifacts.publications_from_shard(
+        publish.publications_from_shard(
             shard_dir=tmp_path,
             campaign_id="11111111-1111-1111-1111-111111111111",
             unit=unit,
@@ -570,3 +577,61 @@ def test_standard_parser_validates_sampling_and_model_execution_locally(
             model_execution=model_execution,
             registry_tasks=shard.tasks,
         )
+
+
+def _client(tmp_path: Path) -> ScoreboardClient:
+    return ScoreboardClient(
+        EvaluationEnvironment(
+            weight_root=tmp_path,
+            scoreboard_url="https://scoreboard.example.test",
+            scoreboard_token="private-token",
+            staging_root=tmp_path / "staging",
+        )
+    )
+
+
+@pytest.mark.parametrize("invalid", [float("nan"), object()])
+def test_request_wraps_non_json_publication_payload(
+    tmp_path: Path,
+    invalid: object,
+) -> None:
+    with pytest.raises(ScoreboardError, match="Scoreboard request failed"):
+        _client(tmp_path)._request(
+            "POST",
+            "/api/v1/evaluation-campaigns",
+            payload={"invalid": invalid},
+        )
+
+
+@pytest.mark.parametrize(
+    ("status", "error_type"),
+    [
+        (400, ScoreboardError),
+        (409, ScoreboardConflict),
+        (500, ScoreboardError),
+    ],
+)
+def test_http_error_never_exposes_backend_body(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    error_type: type[ScoreboardError],
+) -> None:
+    client = _client(tmp_path)
+    transformed_secret = "private\\u002dtoken"
+
+    def fail(*_args, **_kwargs):
+        raise HTTPError(
+            client.base_url,
+            status,
+            "failed",
+            {},
+            BytesIO(f'{{"detail":"credential={transformed_secret}"}}'.encode()),
+        )
+
+    monkeypatch.setattr(client._opener, "open", fail)
+    with pytest.raises(error_type) as raised:
+        client._request("GET", "/api/v1/evaluation-publication-preflight")
+
+    assert "credential" not in str(raised.value)
+    assert transformed_secret not in str(raised.value)

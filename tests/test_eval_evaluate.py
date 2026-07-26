@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from helicopter_lighteval import lighteval_adapter
+from helicopter_lighteval import evaluate
 
 
 @pytest.mark.parametrize(
@@ -21,7 +21,7 @@ def test_official_prompt_templates_bind_rendering_and_stop(
     name: str,
     stop: str,
 ) -> None:
-    assert lighteval_adapter._official_prompt_template(style) == (name, stop)
+    assert evaluate._official_prompt_template(style) == (name, stop)
 
 
 @pytest.mark.parametrize(
@@ -32,8 +32,8 @@ def test_model_prompt_manager_passes_campaign_template(
     monkeypatch: pytest.MonkeyPatch,
     prompt_template: str,
 ) -> None:
-    types = lighteval_adapter._runtime_types()
-    _, _, Model, _, _ = lighteval_adapter._build_runtime_classes(types)
+    types = evaluate._runtime_types()
+    _, _, Model, _, _ = evaluate._build_runtime_classes(types)
     observed = {}
 
     class Tokenizer:
@@ -70,7 +70,7 @@ def test_runtime_environment_is_restored_after_failure(
     monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
 
     with pytest.raises(RuntimeError, match="stop"):
-        with lighteval_adapter._temporary_environment(
+        with evaluate._temporary_environment(
             {
                 "VLLM_RWKV7_WKV_MODE": "fp16",
                 "VLLM_USE_V2_MODEL_RUNNER": "1",
@@ -91,9 +91,7 @@ def test_evaluation_scopes_recurrent_total_length_override(
     unit = SimpleNamespace(weight=object(), wkv_mode="fp16", prompt_template="bot")
     monkeypatch.setenv("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "before")
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
-    monkeypatch.setattr(
-        lighteval_adapter, "verify_weight_identity", lambda _weight: None
-    )
+    monkeypatch.setattr(evaluate, "verify_weight_identity", lambda _weight: None)
 
     def fake_evaluate_unit(**_kwargs):
         observed["allow_long_max_model_len"] = os.environ[
@@ -102,9 +100,9 @@ def test_evaluation_scopes_recurrent_total_length_override(
         observed["worker_multiproc_method"] = os.environ["VLLM_WORKER_MULTIPROC_METHOD"]
         return [], []
 
-    monkeypatch.setattr(lighteval_adapter, "_evaluate_unit", fake_evaluate_unit)
+    monkeypatch.setattr(evaluate, "_evaluate_unit", fake_evaluate_unit)
 
-    lighteval_adapter.evaluate_unit(
+    evaluate.evaluate_unit(
         unit=unit,
         shards=(),
         campaign_dir=Path("/unused"),
@@ -123,7 +121,7 @@ def test_pipeline_parameters_enable_multilingual_inventory() -> None:
         def __init__(self, **values):
             super().__init__(**values)
 
-    parameters = lighteval_adapter._pipeline_parameters(
+    parameters = evaluate._pipeline_parameters(
         {
             "PipelineParameters": Parameters,
             "ParallelismManager": SimpleNamespace(VLLM="vllm"),
@@ -139,7 +137,7 @@ def test_pipeline_parameters_enable_multilingual_inventory() -> None:
 def test_task_failure_record_uses_only_exception_type() -> None:
     error = RuntimeError("credential=do-not-record")
 
-    failure_type = lighteval_adapter._exception_type(error)
+    failure_type = evaluate._exception_type(error)
 
     assert failure_type == "builtins.RuntimeError"
     assert "do-not-record" not in failure_type
@@ -152,7 +150,7 @@ def test_task_failure_site_uses_only_module_and_function() -> None:
     try:
         raise_secret()
     except RuntimeError as error:
-        failure_site = lighteval_adapter._exception_site(error)
+        failure_site = evaluate._exception_site(error)
 
     assert failure_site.endswith(
         "test_task_failure_site_uses_only_module_and_function.<locals>.raise_secret"
@@ -161,15 +159,15 @@ def test_task_failure_site_uses_only_module_and_function() -> None:
 
 
 def test_model_length_reserves_checkpoint_context_and_full_output_budget() -> None:
-    assert lighteval_adapter.evaluation_max_model_length(8192) == 16384
-    assert lighteval_adapter.evaluation_max_model_length(10240) == 18432
+    assert evaluate.evaluation_max_model_length(8192) == 16384
+    assert evaluate.evaluation_max_model_length(10240) == 18432
     for invalid in (0, -1, True, 1.5):
         with pytest.raises(ValueError, match="context length must be positive"):
-            lighteval_adapter.evaluation_max_model_length(invalid)
+            evaluate.evaluation_max_model_length(invalid)
 
 
 def test_perplexity_windows_score_every_token_once_with_bounded_context() -> None:
-    windows = lighteval_adapter._rolling_token_windows(
+    windows = evaluate._rolling_token_windows(
         list(range(1, 13)),
         prefix_token_id=0,
         checkpoint_context_length=7,
@@ -189,8 +187,8 @@ def test_perplexity_windows_score_every_token_once_with_bounded_context() -> Non
 
 
 def test_perplexity_uses_raw_query_and_preserves_token_logprobs() -> None:
-    types = lighteval_adapter._runtime_types()
-    _, _, Model, _, _ = lighteval_adapter._build_runtime_classes(types)
+    types = evaluate._runtime_types()
+    _, _, Model, _, _ = evaluate._build_runtime_classes(types)
     generated_inputs: list[list[int]] = []
     model = object.__new__(Model)
     model._checkpoint_context_length = 6
@@ -247,8 +245,8 @@ def test_perplexity_uses_raw_query_and_preserves_token_logprobs() -> None:
 
 
 def test_perplexity_fails_closed_when_vllm_omits_a_token_logprob() -> None:
-    types = lighteval_adapter._runtime_types()
-    _, _, Model, _, _ = lighteval_adapter._build_runtime_classes(types)
+    types = evaluate._runtime_types()
+    _, _, Model, _, _ = evaluate._build_runtime_classes(types)
     model = object.__new__(Model)
     model._checkpoint_context_length = 6
     model._tokenizer = lambda text, add_special_tokens: {"input_ids": [1, 2]}
@@ -267,8 +265,8 @@ def test_perplexity_fails_closed_when_vllm_omits_a_token_logprob() -> None:
 
 
 def test_perplexity_bounds_prompt_logprob_output_batches() -> None:
-    types = lighteval_adapter._runtime_types()
-    _, _, Model, _, _ = lighteval_adapter._build_runtime_classes(types)
+    types = evaluate._runtime_types()
+    _, _, Model, _, _ = evaluate._build_runtime_classes(types)
     model = object.__new__(Model)
     model._checkpoint_context_length = 6
     model._tokenizer = lambda text, add_special_tokens: {"input_ids": [1]}
@@ -291,13 +289,13 @@ def test_perplexity_bounds_prompt_logprob_output_batches() -> None:
     model._generate = generate
     documents = [
         SimpleNamespace(query=f"document-{index}")
-        for index in range(lighteval_adapter.PERPLEXITY_WINDOW_BATCH_SIZE + 1)
+        for index in range(evaluate.PERPLEXITY_WINDOW_BATCH_SIZE + 1)
     ]
 
     responses = model.loglikelihood_rolling(documents)
 
     assert batch_sizes == [
-        lighteval_adapter.PERPLEXITY_WINDOW_BATCH_SIZE,
+        evaluate.PERPLEXITY_WINDOW_BATCH_SIZE,
         1,
     ]
     assert len(responses) == len(documents)
@@ -306,8 +304,8 @@ def test_perplexity_bounds_prompt_logprob_output_batches() -> None:
 def test_vllm_model_receives_the_same_recurrent_total_length_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    types = lighteval_adapter._runtime_types()
-    _, _, Model, _, _ = lighteval_adapter._build_runtime_classes(types)
+    types = evaluate._runtime_types()
+    _, _, Model, _, _ = evaluate._build_runtime_classes(types)
     captured = {}
 
     class FakeLlm:
@@ -343,9 +341,9 @@ def test_vllm_model_receives_the_same_recurrent_total_length_override(
 def test_generation_contract_uses_current_vllm_frequency_penalty_api() -> None:
     from vllm import SamplingParams
 
-    types = lighteval_adapter._runtime_types()
-    Generation, ModelConfig, _, _, choice_answer = (
-        lighteval_adapter._build_runtime_classes(types)
+    types = evaluate._runtime_types()
+    Generation, ModelConfig, _, _, choice_answer = evaluate._build_runtime_classes(
+        types
     )
     parameters = Generation(
         temperature=0.96,
@@ -386,7 +384,7 @@ def test_generation_contract_uses_current_vllm_frequency_penalty_api() -> None:
     assert (
         choice_answer(
             "<think>x</think>Answer: B",
-            [1] * lighteval_adapter.MAX_NEW_TOKENS,
+            [1] * evaluate.MAX_NEW_TOKENS,
             choices,
         )
         == ""
@@ -396,8 +394,8 @@ def test_generation_contract_uses_current_vllm_frequency_penalty_api() -> None:
 def test_pipeline_uses_registry_only_cache_during_construction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    types = lighteval_adapter._runtime_types()
-    _, _, _, Pipeline, _ = lighteval_adapter._build_runtime_classes(types)
+    types = evaluate._runtime_types()
+    _, _, _, Pipeline, _ = evaluate._build_runtime_classes(types)
     observed = {}
 
     def fake_init(self, *args, **kwargs):
@@ -423,8 +421,8 @@ def test_pipeline_uses_registry_only_cache_during_construction(
 def test_campaign_owned_model_cleanup_only_runs_at_unit_end(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    types = lighteval_adapter._runtime_types()
-    _, _, Model, _, _ = lighteval_adapter._build_runtime_classes(types)
+    types = evaluate._runtime_types()
+    _, _, Model, _, _ = evaluate._build_runtime_classes(types)
     calls = []
     monkeypatch.setattr(
         types["VLLMModel"],
@@ -457,16 +455,16 @@ def test_failed_model_cleanup_never_unregisters_runtime(
     runtime_dir = campaign_dir / "runtime" / "weight" / "fp16"
     runtime_dir.mkdir(parents=True)
     monkeypatch.setattr(
-        lighteval_adapter,
+        evaluate,
         "_remove_runtime_directory",
         lambda *_args: removed.append("removed"),
     )
 
     with pytest.raises(
-        lighteval_adapter.UnsafeModelCleanupError,
+        evaluate.UnsafeModelCleanupError,
         match="model cleanup failed",
     ) as raised:
-        lighteval_adapter._finish_runtime(
+        evaluate._finish_runtime(
             backend=Backend(),
             campaign_dir=campaign_dir,
             runtime_dir=runtime_dir,
@@ -486,10 +484,10 @@ def test_failed_model_construction_is_an_unsafe_lifecycle_stop() -> None:
             raise RuntimeError("credential=must-not-be-reported")
 
     with pytest.raises(
-        lighteval_adapter.UnsafeModelCleanupError,
+        evaluate.UnsafeModelCleanupError,
         match="before lifecycle ownership could be proven safe",
     ) as raised:
-        lighteval_adapter._construct_backend(Model, object())
+        evaluate._construct_backend(Model, object())
 
     assert "must-not-be-reported" not in str(raised.value)
     assert "builtins.RuntimeError" in str(raised.value)
@@ -498,8 +496,8 @@ def test_failed_model_construction_is_an_unsafe_lifecycle_stop() -> None:
 def test_generation_keeps_doc_stop_while_reusing_chat_prompt_manager(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    types = lighteval_adapter._runtime_types()
-    _, _, Model, _, _ = lighteval_adapter._build_runtime_classes(types)
+    types = evaluate._runtime_types()
+    _, _, Model, _, _ = evaluate._build_runtime_classes(types)
     observed: list[bool] = []
     monkeypatch.setattr(
         types["VLLMModel"],
@@ -522,7 +520,7 @@ def test_generation_keeps_doc_stop_while_reusing_chat_prompt_manager(
 def test_mixed_choice_docs_preserve_native_metric_names_and_aggregator(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    types = lighteval_adapter._runtime_types()
+    types = evaluate._runtime_types()
     sampling = types["SamplingMethod"]
     generated_metrics: list[SimpleNamespace] = []
 
@@ -533,7 +531,7 @@ def test_mixed_choice_docs_preserve_native_metric_names_and_aggregator(
 
     types["ExactMatches"] = lambda: "strict-exact-match"
     types["SampleLevelMetric"] = sample_metric
-    _, _, _, Pipeline, _ = lighteval_adapter._build_runtime_classes(types)
+    _, _, _, Pipeline, _ = evaluate._build_runtime_classes(types)
     monkeypatch.setattr(
         types["Pipeline"],
         "_init_tasks_and_requests",
@@ -598,21 +596,21 @@ def test_mixed_choice_docs_preserve_native_metric_names_and_aggregator(
     assert config.metrics == (native_metric,)
     assert pipeline.sampling_docs[sampling.GENERATIVE] == [eligible]
     assert pipeline.sampling_docs[sampling.LOGPROBS] == [ineligible]
-    assert eligible.generation_size == lighteval_adapter.MAX_NEW_TOKENS
+    assert eligible.generation_size == evaluate.MAX_NEW_TOKENS
     assert eligible.stop_sequences == ["\nUser:"]
 
 
 def test_singleton_gold_index_list_is_a_uniquely_resolved_choice(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    types = lighteval_adapter._runtime_types()
+    types = evaluate._runtime_types()
     sampling = types["SamplingMethod"]
     generated_metrics: list[SimpleNamespace] = []
     types["ExactMatches"] = lambda: "strict-exact-match"
     types["SampleLevelMetric"] = lambda **values: (
         generated_metrics.append(SimpleNamespace(**values)) or generated_metrics[-1]
     )
-    _, _, _, Pipeline, _ = lighteval_adapter._build_runtime_classes(types)
+    _, _, _, Pipeline, _ = evaluate._build_runtime_classes(types)
     monkeypatch.setattr(
         types["Pipeline"],
         "_init_tasks_and_requests",
@@ -659,14 +657,14 @@ def test_singleton_gold_index_list_is_a_uniquely_resolved_choice(
 def test_multiselect_choice_documents_are_skipped_and_counted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    types = lighteval_adapter._runtime_types()
+    types = evaluate._runtime_types()
     sampling = types["SamplingMethod"]
     generated_metrics: list[SimpleNamespace] = []
     types["ExactMatches"] = lambda: "strict-exact-match"
     types["SampleLevelMetric"] = lambda **values: (
         generated_metrics.append(SimpleNamespace(**values)) or generated_metrics[-1]
     )
-    _, _, _, Pipeline, _ = lighteval_adapter._build_runtime_classes(types)
+    _, _, _, Pipeline, _ = evaluate._build_runtime_classes(types)
     monkeypatch.setattr(
         types["Pipeline"],
         "_init_tasks_and_requests",
@@ -730,11 +728,11 @@ def test_multiselect_choice_documents_are_skipped_and_counted(
 def test_choice_conversion_does_not_replace_native_generative_semantics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    types = lighteval_adapter._runtime_types()
+    types = evaluate._runtime_types()
     sampling = types["SamplingMethod"]
     types["ExactMatches"] = lambda: "strict-exact-match"
     types["SampleLevelMetric"] = lambda **values: SimpleNamespace(**values)
-    _, _, _, Pipeline, _ = lighteval_adapter._build_runtime_classes(types)
+    _, _, _, Pipeline, _ = evaluate._build_runtime_classes(types)
     monkeypatch.setattr(
         types["Pipeline"],
         "_init_tasks_and_requests",
@@ -792,14 +790,14 @@ def test_choice_conversion_does_not_replace_native_generative_semantics(
 def test_choice_conversion_does_not_add_metrics_to_mixed_generative_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    types = lighteval_adapter._runtime_types()
+    types = evaluate._runtime_types()
     sampling = types["SamplingMethod"]
     generated_metrics: list[SimpleNamespace] = []
     types["ExactMatches"] = lambda: "strict-exact-match"
     types["SampleLevelMetric"] = lambda **values: (
         generated_metrics.append(SimpleNamespace(**values)) or generated_metrics[-1]
     )
-    _, _, _, Pipeline, _ = lighteval_adapter._build_runtime_classes(types)
+    _, _, _, Pipeline, _ = evaluate._build_runtime_classes(types)
     monkeypatch.setattr(
         types["Pipeline"],
         "_init_tasks_and_requests",
@@ -859,5 +857,5 @@ def test_choice_conversion_does_not_add_metrics_to_mixed_generative_task(
     assert task.metrics == (logprob_metric, generative_metric)
     assert pipeline.sampling_docs[sampling.LOGPROBS] == [choice]
     assert pipeline.sampling_docs[sampling.GENERATIVE] == [generative]
-    assert generative.generation_size == lighteval_adapter.MAX_NEW_TOKENS
+    assert generative.generation_size == evaluate.MAX_NEW_TOKENS
     assert generative.stop_sequences == ["\nUser:"]

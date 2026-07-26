@@ -17,10 +17,10 @@ import pyarrow as pa
 import pyarrow.parquet as parquet
 import uvicorn
 
-from helicopter_lighteval import artifacts, campaign
+from helicopter_lighteval import evaluate, publish
 from helicopter_lighteval.config import EvaluationConfig, WeightIdentity
-from helicopter_lighteval.plan import build_plan
-from helicopter_lighteval.registry import RegistrySnapshot, RegistryTask
+from helicopter_lighteval.config import build_plan
+from helicopter_lighteval.config import RegistrySnapshot, RegistryTask
 from scoreboard_server.application import create_app
 from scoreboard_server.db.settings import DatabaseSettings
 
@@ -39,7 +39,7 @@ def _maintenance_kwargs() -> dict[str, str]:
 
 
 def _gzip(value: object) -> bytes:
-    return gzip.compress(artifacts.canonical_json(value))
+    return gzip.compress(publish.canonical_json(value))
 
 
 def _headers(idempotency_key: str) -> dict[str, str]:
@@ -98,7 +98,7 @@ async def _seed(app, temporary_root: Path) -> None:
         tuple(identities),
         registry,
     )
-    resume_key = campaign._resume_key(plan)
+    resume_key = evaluate._resume_key(plan)
     transport = ASGITransport(app=app)
     async with AsyncClient(
         transport=transport,
@@ -106,7 +106,7 @@ async def _seed(app, temporary_root: Path) -> None:
     ) as client:
         created = await client.post(
             "/api/v1/evaluation-campaigns",
-            content=_gzip(campaign._campaign_payload(plan, resume_key)),
+            content=_gzip(evaluate._campaign_payload(plan, resume_key)),
             headers=_headers(f"campaign:{resume_key}"),
         )
         campaign_id = _response_json(created, 201)["campaign_id"]
@@ -142,7 +142,7 @@ async def _seed(app, temporary_root: Path) -> None:
                     else "fp32-accumulation"
                 ),
             }
-            publications = artifacts.publications_from_shard(
+            publications = publish.publications_from_shard(
                 shard_dir=shard_dir,
                 campaign_id=campaign_id,
                 unit=unit,

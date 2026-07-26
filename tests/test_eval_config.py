@@ -9,18 +9,19 @@ from types import SimpleNamespace
 
 import pytest
 
-import helicopter_lighteval
+from helicopter_lighteval import evaluate, publish
 from helicopter_cli import __main__ as helicopter_main
-from helicopter_lighteval import runner as evaluation_runner
+from helicopter_lighteval import evaluate as evaluation_runner
 from helicopter_lighteval.config import (
     EvaluationConfigurationError,
+    EvaluationEnvironment,
     load_evaluation_config,
     load_evaluation_environment,
     resolve_weights,
     verify_weight_identity,
 )
-from helicopter_lighteval.plan import WKV_MODES, build_plan, build_shards
-from helicopter_lighteval.registry import (
+from helicopter_lighteval.config import WKV_MODES, build_plan, build_shards
+from helicopter_lighteval.config import (
     RegistrySnapshot,
     RegistryTask,
     _inventory,
@@ -28,7 +29,7 @@ from helicopter_lighteval.registry import (
     _snapshot_registry,
     load_configured_registry,
 )
-from helicopter_lighteval.runner import run
+from helicopter_lighteval.evaluate import run
 
 
 def _environment(tmp_path: Path, token: str = "do-not-print") -> dict[str, str]:
@@ -269,9 +270,7 @@ def test_environment_rejects_product_root_as_staging(
     tmp_path: Path,
 ) -> None:
     env = _environment(tmp_path)
-    env["HELICOPTER_EVAL_STAGING_ROOT"] = str(
-        Path(__file__).resolve().parents[1]
-    )
+    env["HELICOPTER_EVAL_STAGING_ROOT"] = str(Path(__file__).resolve().parents[1])
 
     with pytest.raises(
         EvaluationConfigurationError,
@@ -470,7 +469,7 @@ def test_eval_cli_resolves_config_relative_to_invocation_directory(
         lambda _root, _path, **_kwargs: ({"PRIVATE": "value"}, None),
     )
     monkeypatch.setattr(
-        helicopter_lighteval,
+        evaluate,
         "run",
         lambda **kwargs: captured.update(kwargs) or 0,
     )
@@ -639,11 +638,11 @@ def test_dry_run_redacts_token_and_does_not_create_staging(
         skipped_selectors=("missing",),
     )
     monkeypatch.setattr(
-        "helicopter_lighteval.runner.load_configured_registry",
+        "helicopter_lighteval.evaluate.load_configured_registry",
         lambda selectors: registry,
     )
     monkeypatch.setattr(
-        "helicopter_lighteval.runner.run_preflight",
+        "helicopter_lighteval.evaluate.run_preflight",
         lambda environment: {
             "scoreboard": {
                 "url": environment.scoreboard_url,
@@ -812,3 +811,125 @@ def test_registry_snapshot_rejects_unsafe_evaluation_splits(
 
     with pytest.raises(EvaluationConfigurationError, match=message):
         _snapshot_registry(FakeRegistry(), "0.13.0")
+
+
+REPOSITORY = Path(__file__).resolve().parents[1]
+
+
+def _preflight_environment(tmp_path: Path) -> EvaluationEnvironment:
+    weight_root = tmp_path / "weights"
+    weight_root.mkdir()
+    return EvaluationEnvironment(
+        weight_root=weight_root,
+        scoreboard_url="https://scoreboard.example.test",
+        scoreboard_token="private",
+        staging_root=tmp_path / "staging",
+    )
+
+
+def test_preflight_proves_release_editable_source_and_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert publish.repository_root() == REPOSITORY
+    assert (REPOSITORY / "src/infer/vllm-rwkv").is_dir()
+
+    def dependency(name: str):
+        if name == "lighteval":
+            return {"version": "0.13.0", "direct_url": {}}
+        return {
+            "version": "0.13.0.dev0",
+            "direct_url": {
+                "url": (REPOSITORY / "src/infer/vllm-rwkv").as_uri(),
+                "dir_info": {"editable": True},
+            },
+        }
+
+    class Client:
+        def __init__(self, _environment):
+            pass
+
+        def preflight(self):
+            return {
+                "status": "ready",
+                "schema_version": "lighteval-campaign-v2",
+                "lighteval_version": "0.13.0",
+                "publisher_principal": "eval-worker",
+            }
+
+    monkeypatch.setattr(publish, "_dependency_source", dependency)
+    monkeypatch.setattr(publish, "ScoreboardClient", Client)
+    result = publish.run_preflight(_preflight_environment(tmp_path))
+    assert result["dependencies"]["lighteval"]["version"] == "0.13.0"
+    assert result["scoreboard"]["status"] == "ready"
+    assert result["scoreboard"]["publisher_principal"] == "eval-worker"
+    assert not (tmp_path / "staging").exists()
+
+
+@pytest.mark.parametrize(
+    ("lighteval_version", "lighteval_direct_url", "editable", "message"),
+    [
+        ("0.12.0", {}, True, "lighteval must be exactly"),
+        (
+            "0.13.0",
+            {"url": "file:///tmp/lighteval"},
+            True,
+            "locked registry release",
+        ),
+        ("0.13.0", {}, False, "editable source mismatch"),
+    ],
+)
+def test_preflight_fails_closed_on_dependency_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lighteval_version: str,
+    lighteval_direct_url: dict,
+    editable: bool,
+    message: str,
+) -> None:
+    def dependency(name: str):
+        if name == "lighteval":
+            return {
+                "version": lighteval_version,
+                "direct_url": lighteval_direct_url,
+            }
+        return {
+            "version": "0.13.0.dev0",
+            "direct_url": {
+                "url": (REPOSITORY / "src/infer/vllm-rwkv").as_uri(),
+                "dir_info": {"editable": editable},
+            },
+        }
+
+    monkeypatch.setattr(publish, "_dependency_source", dependency)
+    with pytest.raises(EvaluationConfigurationError, match=message):
+        publish.run_preflight(_preflight_environment(tmp_path))
+
+
+def test_preflight_rejects_shared_writable_staging_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = _preflight_environment(tmp_path)
+    tmp_path.chmod(0o777)
+    monkeypatch.setattr(
+        publish,
+        "_dependency_source",
+        lambda name: (
+            {"version": "0.13.0", "direct_url": {}}
+            if name == "lighteval"
+            else {
+                "version": "0.13.0.dev0",
+                "direct_url": {
+                    "url": (REPOSITORY / "src/infer/vllm-rwkv").as_uri(),
+                    "dir_info": {"editable": True},
+                },
+            }
+        ),
+    )
+
+    with pytest.raises(
+        EvaluationConfigurationError,
+        match="not group/world writable",
+    ):
+        publish.run_preflight(environment)
