@@ -208,6 +208,14 @@ export function EvaluationDetails() {
             ? selected.task.upstream_tags.join(", ")
             : "—"}
         </span>
+        <span>
+          questions: {String(selected.task_config.effective_num_docs)} /{" "}
+          {String(selected.task_config.original_num_docs)}
+        </span>
+        <span>
+          skipped multi-select:{" "}
+          {String(selected.task_config.skipped_multiselect_docs)}
+        </span>
         <span>samples: {selected.diagnostics.samples}</span>
         <span>completions: {selected.diagnostics.completions}</span>
         <span>truncation: {selected.diagnostics.truncation_rate}</span>

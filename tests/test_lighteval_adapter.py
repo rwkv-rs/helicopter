@@ -283,6 +283,7 @@ def test_generation_contract_maps_logical_penalty_once() -> None:
         max_new_tokens=8192,
     )
     backend = parameters.to_vllm_dict()
+    assert "stop" not in backend
     assert backend["repetition_penalty"] == 0.1
     assert backend["frequency_penalty"] == 0.0
     assert backend["penalty_decay"] == 0.988
@@ -567,6 +568,76 @@ def test_singleton_gold_index_list_is_a_uniquely_resolved_choice(
     assert document.sampling_methods == [sampling.GENERATIVE]
     assert document.specific["rwkv_generative_choice"] is True
     assert generated_metrics[0].metric_name == "acc"
+
+
+def test_multiselect_choice_documents_are_skipped_and_counted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    types = lighteval_adapter._runtime_types()
+    sampling = types["SamplingMethod"]
+    generated_metrics: list[SimpleNamespace] = []
+    types["ExactMatches"] = lambda: "strict-exact-match"
+    types["SampleLevelMetric"] = lambda **values: (
+        generated_metrics.append(SimpleNamespace(**values)) or generated_metrics[-1]
+    )
+    _, _, _, Pipeline, _ = lighteval_adapter._build_runtime_classes(types)
+    monkeypatch.setattr(
+        types["Pipeline"],
+        "_init_tasks_and_requests",
+        lambda self, tasks: None,
+    )
+    single_choice = SimpleNamespace(
+        choices=["alpha", "beta", "gamma"],
+        gold_index=[1],
+        query="Choose one.",
+        sampling_methods=[sampling.LOGPROBS],
+        specific={},
+        generation_size=None,
+        stop_sequences=None,
+    )
+    multiselect = SimpleNamespace(
+        choices=["alpha", "beta", "gamma"],
+        gold_index=[0, 2],
+        query="Choose every correct answer.",
+        sampling_methods=[sampling.LOGPROBS],
+        specific={},
+        generation_size=None,
+        stop_sequences=None,
+    )
+    metric = SimpleNamespace(
+        metric_name="acc",
+        category=sampling.LOGPROBS,
+        corpus_level_fn=sum,
+        higher_is_better=True,
+    )
+    original_config = SimpleNamespace(metrics=(metric,))
+    task = SimpleNamespace(
+        full_name="multiselect|0",
+        metrics=(metric,),
+        config=original_config,
+        eval_docs=lambda: [single_choice, multiselect],
+        sampling_methods=[sampling.LOGPROBS],
+    )
+    pipeline = object.__new__(Pipeline)
+    pipeline.tasks_dict = {task.full_name: task}
+    pipeline.documents_dict = {task.full_name: [single_choice, multiselect]}
+    pipeline.sampling_docs = collections.defaultdict(list)
+    pipeline.evaluation_tracker = SimpleNamespace(
+        task_config_logger=SimpleNamespace(log=lambda tasks: None)
+    )
+
+    pipeline._init_tasks_and_requests(task.full_name)
+
+    assert pipeline.documents_dict[task.full_name] == [single_choice]
+    assert pipeline.sampling_docs[sampling.LOGPROBS] == []
+    assert pipeline.sampling_docs[sampling.GENERATIVE] == [single_choice]
+    assert task.config is not original_config
+    assert task.config.original_num_docs == 2
+    assert task.config.effective_num_docs == 1
+    assert task.config.skipped_multiselect_docs == 1
+    assert single_choice.specific["helicopter_document_index"] == 0
+    assert "helicopter_document_index" not in multiselect.specific
+    assert len(generated_metrics) == 1
 
 
 def test_choice_conversion_does_not_replace_native_generative_semantics(

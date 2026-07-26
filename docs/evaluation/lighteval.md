@@ -187,6 +187,13 @@ parquet。缺少某个 task 自身需要的 dataset、可选依赖、服务、�
 继续执行，但预期 task 不会从 campaign 中消失，命令最终非零且 campaign 保持
 incomplete。
 
+选择题只评估唯一正确选项的题目：`gold_index` 为单个整数或单元素列表时转换为
+生成式答案；包含多个正确选项的题目直接跳过，不发起 generation 或 logprob
+请求。标准 task config 同时记录 `original_num_docs`、
+`effective_num_docs` 和 `skipped_multiselect_docs`，且必须满足
+`original_num_docs = effective_num_docs + skipped_multiselect_docs`。后端会再次
+校验该等式和连续 document index，前端详情页展示实际评估题数与跳过数。
+
 本地 manifest 只记录 digest、有序 weight SHA、selector 状态、registry task identity
 快照、backend identity 和精确 staging child，不复制 Doc、metric、completion 或
 token。相同命令会恢复匹配的 incomplete campaign：

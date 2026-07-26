@@ -214,11 +214,13 @@ helicopter eval \
 helicopter eval --config ./configs/eval/lighteval.toml
 ```
 
-`eval` expands every available selector and runs every full evaluation split
-for both `fp16` and `fp32io16`. Selectors absent from the locked LightEval
-release are reported as skipped; failures after task resolution keep the
-campaign incomplete. Scoreboard publication is mandatory, and a successful
-campaign cleans the standard local results/details after database confirmation.
+`eval` expands every available selector and runs its evaluation split for both
+`fp16` and `fp32io16`. Multiple-answer choice documents are skipped and counted
+explicitly; all remaining documents must be evaluated. Selectors absent from
+the locked LightEval release are reported as skipped; failures after task
+resolution keep the campaign incomplete. Scoreboard publication is mandatory,
+and a successful campaign cleans the standard local results/details after
+database confirmation.
 Copy `.env.example` to the private eval environment file and run
 `chmod 600 .env.local` before using it. The file must be owned by the current
 user and must not be a symlink.

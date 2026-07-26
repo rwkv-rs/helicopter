@@ -434,6 +434,7 @@ def publications_from_shard(
             raise ArtifactError(f"invalid task config for {task_name}")
         original_docs = task_config.get("original_num_docs")
         effective_docs = task_config.get("effective_num_docs")
+        skipped_multiselect_docs = task_config.get("skipped_multiselect_docs")
         document_indices: list[int] = []
         for row in rows_by_task[task_name]:
             try:
@@ -452,13 +453,17 @@ def publications_from_shard(
             or not isinstance(original_docs, int)
             or isinstance(effective_docs, bool)
             or not isinstance(effective_docs, int)
+            or isinstance(skipped_multiselect_docs, bool)
+            or not isinstance(skipped_multiselect_docs, int)
             or original_docs <= 0
             or effective_docs <= 0
-            or original_docs != effective_docs
+            or skipped_multiselect_docs < 0
+            or original_docs != effective_docs + skipped_multiselect_docs
             or set(document_indices) != set(range(effective_docs))
         ):
             raise ArtifactError(
-                f"task detail count does not prove full evaluation split: {task_name}"
+                f"task detail count does not account for the full evaluation "
+                f"split: {task_name}"
             )
         document_indices_by_task[task_name] = document_indices
     sampling = _sampling_config(results)

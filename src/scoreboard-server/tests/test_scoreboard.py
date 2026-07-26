@@ -127,6 +127,7 @@ def _publication(campaign_id: str, task: dict) -> dict:
             "generation_size": 8192,
             "original_num_docs": 2,
             "effective_num_docs": 2,
+            "skipped_multiselect_docs": 0,
         },
         "model": {
             "weight_sha256": task["weight_sha256"],
@@ -389,6 +390,13 @@ def test_contract_rejects_result_level_and_forged_diagnostics() -> None:
     }
     with pytest.raises(ValidationError, match="full evaluation split"):
         TaskPublication.model_validate(payload)
+
+    payload = _publication(str(uuid.uuid4()), task)
+    payload["task_config"]["original_num_docs"] = 3
+    payload["task_config"]["effective_num_docs"] = 2
+    payload["task_config"]["skipped_multiselect_docs"] = 1
+    publication = TaskPublication.model_validate(payload)
+    assert publication.task_config["skipped_multiselect_docs"] == 1
 
     payload = _publication(str(uuid.uuid4()), task)
     payload["aggregates"][" invalid"] = 0.5

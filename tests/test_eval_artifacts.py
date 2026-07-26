@@ -78,6 +78,7 @@ def _standard(root: Path):
                 "generation_size": 8192,
                 "original_num_docs": 1,
                 "effective_num_docs": 1,
+                "skipped_multiselect_docs": 0,
             }
         },
     }
@@ -172,6 +173,30 @@ def test_standard_parser_accepts_multiple_native_rows_for_one_document(
     details = publications[0][1]["details"]
     assert [detail["sample_index"] for detail in details] == [0, 1]
     assert [detail["document_index"] for detail in details] == [0, 0]
+
+
+def test_standard_parser_accounts_for_skipped_multiselect_documents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unit, shard = _unit(tmp_path)
+    standard = _standard(tmp_path)
+    task_config = standard[0]["config_tasks"]["gsm8k|0"]
+    task_config["original_num_docs"] = 2
+    task_config["effective_num_docs"] = 1
+    task_config["skipped_multiselect_docs"] = 1
+    monkeypatch.setattr(artifacts, "_standard_artifacts", lambda _path: standard)
+
+    publications = artifacts.publications_from_shard(
+        shard_dir=tmp_path,
+        campaign_id="11111111-1111-1111-1111-111111111111",
+        unit=unit,
+        shard=shard,
+        model_execution=_model(unit),
+        registry_tasks=shard.tasks,
+    )
+
+    assert publications[0][1]["task_config"]["skipped_multiselect_docs"] == 1
 
 
 def test_standard_parser_accepts_only_registry_proven_superset_expansion(

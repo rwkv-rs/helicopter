@@ -44,6 +44,7 @@ function evaluation(
     task_config: {
       original_num_docs: 2,
       effective_num_docs: 2,
+      skipped_multiselect_docs: 0,
     },
     model: {
       weight_sha256: sha,
@@ -172,6 +173,8 @@ test("filters official tags and pages faithful multi-completion details", async 
 
   const details = page.getByRole("region", { name: "评估详情" });
   await expect(details.getByText("publisher audit: eval-worker")).toBeVisible();
+  await expect(details.getByText("questions: 2 / 2")).toBeVisible();
+  await expect(details.getByText("skipped multi-select: 0")).toBeVisible();
   await expect(details.getByText("completion 1")).toBeVisible();
   await expect(details.getByText("completion 2")).toBeVisible();
   await expect(details.getByText("first", { exact: true })).toBeVisible();

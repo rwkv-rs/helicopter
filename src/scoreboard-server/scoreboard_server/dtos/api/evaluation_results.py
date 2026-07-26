@@ -296,19 +296,23 @@ class TaskPublication(Contract):
             raise ValueError("artifact and model LightEval versions differ")
         original_docs = self.task_config.get("original_num_docs")
         effective_docs = self.task_config.get("effective_num_docs")
+        skipped_multiselect_docs = self.task_config.get("skipped_multiselect_docs")
         document_indices = {detail.document_index for detail in self.details}
         if (
             isinstance(original_docs, bool)
             or not isinstance(original_docs, int)
             or isinstance(effective_docs, bool)
             or not isinstance(effective_docs, int)
+            or isinstance(skipped_multiselect_docs, bool)
+            or not isinstance(skipped_multiselect_docs, int)
             or original_docs <= 0
             or effective_docs <= 0
-            or original_docs != effective_docs
+            or skipped_multiselect_docs < 0
+            or original_docs != effective_docs + skipped_multiselect_docs
             or document_indices != set(range(effective_docs))
         ):
             raise ValueError(
-                "task config and details do not prove a full evaluation split"
+                "task config and details do not account for the full evaluation split"
             )
         required_sampling: dict[str, JsonValue] = {
             "temperature": 0.96,

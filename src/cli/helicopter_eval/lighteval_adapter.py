@@ -189,6 +189,11 @@ def _build_runtime_classes(types: dict[str, Any]):
 
         def to_vllm_dict(self) -> dict:
             backend = super().to_vllm_dict()
+            # LightEval applies each generative document's stop sequences after
+            # constructing SamplingParams. Keeping the config-level stop here
+            # leaks it into logprob requests, which later disable detokenization
+            # and are rejected by vLLM when the request is deserialized.
+            backend.pop("stop", None)
             backend.update(
                 repetition_penalty=self.frequency_penalty,
                 frequency_penalty=0.0,
@@ -420,6 +425,25 @@ def _build_runtime_classes(types: dict[str, Any]):
             and SamplingMethod.GENERATIVE not in doc.sampling_methods
         )
 
+    def is_multiselect_choice_doc(doc) -> bool:
+        choices = doc.choices
+        gold_indices = doc.gold_index
+        return (
+            isinstance(choices, list)
+            and 2 <= len(choices) <= 26
+            and isinstance(gold_indices, (list, tuple))
+            and len(gold_indices) > 1
+            and all(
+                isinstance(index, int)
+                and not isinstance(index, bool)
+                and 0 <= index < len(choices)
+                for index in gold_indices
+            )
+            and len(set(gold_indices)) == len(gold_indices)
+            and SamplingMethod.LOGPROBS in doc.sampling_methods
+            and SamplingMethod.GENERATIVE not in doc.sampling_methods
+        )
+
     def convert_choice_doc(doc) -> None:
         labels = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ"[: len(doc.choices)])
         options = "\n".join(
@@ -517,16 +541,27 @@ def _build_runtime_classes(types: dict[str, Any]):
                 # adaptation local so the next weight/mode starts from the
                 # locked upstream task contract.
                 task.config = copy.copy(task.config)
-                docs = self.documents_dict[task.full_name]
+                original_docs = self.documents_dict[task.full_name]
+                skipped_multiselect_docs = sum(
+                    is_multiselect_choice_doc(doc) for doc in original_docs
+                )
+                docs = [
+                    doc for doc in original_docs if not is_multiselect_choice_doc(doc)
+                ]
+                self.documents_dict[task.full_name] = docs
                 task.config.original_num_docs = len(task.eval_docs())
                 task.config.effective_num_docs = len(docs)
+                task.config.skipped_multiselect_docs = skipped_multiselect_docs
                 if (
                     task.config.original_num_docs <= 0
                     or task.config.effective_num_docs <= 0
-                    or task.config.original_num_docs != task.config.effective_num_docs
+                    or task.config.original_num_docs
+                    != task.config.effective_num_docs
+                    + task.config.skipped_multiselect_docs
                 ):
                     raise RuntimeError(
-                        f"task {task.full_name} did not load its full evaluation split"
+                        f"task {task.full_name} did not account for its full "
+                        "evaluation split"
                     )
                 for document_index, doc in enumerate(docs):
                     specific = dict(doc.specific or {})
