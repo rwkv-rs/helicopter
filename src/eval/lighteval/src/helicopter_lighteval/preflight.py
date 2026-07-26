@@ -8,7 +8,11 @@ import stat
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
-from .config import EvaluationConfigurationError, EvaluationEnvironment
+from .config import (
+    EvaluationConfigurationError,
+    EvaluationEnvironment,
+    repository_root,
+)
 from .http_client import ScoreboardClient
 
 
@@ -69,9 +73,7 @@ def run_preflight(environment: EvaluationEnvironment) -> dict[str, object]:
     direct_url = vllm["direct_url"]
     dir_info = direct_url.get("dir_info") if isinstance(direct_url, dict) else None
     editable = isinstance(dir_info, dict) and dir_info.get("editable") is True
-    expected = (
-        Path(__file__).resolve().parents[3] / "src" / "infer" / "vllm-rwkv"
-    ).resolve()
+    expected = (repository_root() / "src" / "infer" / "vllm-rwkv").resolve()
     source_url = direct_url.get("url") if isinstance(direct_url, dict) else None
     if not isinstance(source_url, str) or not source_url.startswith("file://"):
         raise EvaluationConfigurationError(

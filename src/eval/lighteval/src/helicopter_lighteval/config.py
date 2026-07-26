@@ -49,6 +49,18 @@ class EvaluationEnvironment:
     staging_root: Path
 
 
+def repository_root() -> Path:
+    package_root = Path(__file__).resolve().parent
+    for candidate in package_root.parents:
+        if (candidate / "pyproject.toml").is_file() and (
+            candidate / "src" / "eval" / "lighteval" / "src" / "helicopter_lighteval"
+        ).is_dir():
+            return candidate
+    raise EvaluationConfigurationError(
+        "cannot locate the Helicopter repository from the LightEval package"
+    )
+
+
 def load_evaluation_config(path: Path) -> EvaluationConfig:
     try:
         with path.open("rb") as stream:
@@ -138,7 +150,7 @@ def load_evaluation_environment(env: Mapping[str, str]) -> EvaluationEnvironment
         )
     weight_root = raw_weight_root.resolve()
     staging_root = raw_staging_root.resolve()
-    product_root = Path(__file__).resolve().parents[5]
+    product_root = repository_root()
     if not weight_root.is_dir():
         raise EvaluationConfigurationError(
             f"WEIGHT_PATH is not a directory: {weight_root}"

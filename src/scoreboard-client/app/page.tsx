@@ -28,7 +28,9 @@ export default async function Home({ searchParams }: { searchParams: SearchParam
         <div>
           <h1>RWKV Skills</h1>
           <div className="subtitle">
-            {isHistory ? "评估历史 · 原生指标与来源" : "评测看板 · 完整 LightEval registry"}
+            {isHistory
+              ? "评估历史 · 原生指标与来源"
+              : "评测看板 · 配置的 LightEval 评估集"}
           </div>
         </div>
         <nav className="page-nav">

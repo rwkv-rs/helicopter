@@ -4,9 +4,13 @@ from dataclasses import dataclass
 import hashlib
 import json
 from itertools import groupby
-from pathlib import Path
 
-from .config import EvaluationConfig, PromptTemplate, WeightIdentity
+from .config import (
+    EvaluationConfig,
+    PromptTemplate,
+    WeightIdentity,
+    repository_root,
+)
 from .registry import RegistrySnapshot, RegistryTask
 
 
@@ -90,14 +94,9 @@ def build_shards(registry: RegistrySnapshot) -> tuple[EvaluationShard, ...]:
 
 
 def _implementation_digest() -> str:
-    repository = Path(__file__).resolve().parents[5]
+    repository = repository_root()
     evaluator_root = (
-        repository
-        / "src"
-        / "eval"
-        / "lighteval"
-        / "src"
-        / "helicopter_lighteval"
+        repository / "src" / "eval" / "lighteval" / "src" / "helicopter_lighteval"
     )
     sources = sorted(evaluator_root.glob("*.py"))
     sources.extend(

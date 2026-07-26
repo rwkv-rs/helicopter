@@ -9,6 +9,9 @@ from helicopter_lighteval.config import (
 from helicopter_lighteval import preflight
 
 
+REPOSITORY = Path(__file__).resolve().parents[1]
+
+
 def _environment(tmp_path: Path) -> EvaluationEnvironment:
     weight_root = tmp_path / "weights"
     weight_root.mkdir()
@@ -24,7 +27,8 @@ def test_preflight_proves_release_editable_source_and_backend(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    repository = Path(preflight.__file__).resolve().parents[3]
+    assert preflight.repository_root() == REPOSITORY
+    assert (REPOSITORY / "src/infer/vllm-rwkv").is_dir()
 
     def dependency(name: str):
         if name == "lighteval":
@@ -32,7 +36,7 @@ def test_preflight_proves_release_editable_source_and_backend(
         return {
             "version": "0.13.0.dev0",
             "direct_url": {
-                "url": (repository / "src/infer/vllm-rwkv").as_uri(),
+                "url": (REPOSITORY / "src/infer/vllm-rwkv").as_uri(),
                 "dir_info": {"editable": True},
             },
         }
@@ -79,8 +83,6 @@ def test_preflight_fails_closed_on_dependency_drift(
     editable: bool,
     message: str,
 ) -> None:
-    repository = Path(preflight.__file__).resolve().parents[3]
-
     def dependency(name: str):
         if name == "lighteval":
             return {
@@ -90,7 +92,7 @@ def test_preflight_fails_closed_on_dependency_drift(
         return {
             "version": "0.13.0.dev0",
             "direct_url": {
-                "url": (repository / "src/infer/vllm-rwkv").as_uri(),
+                "url": (REPOSITORY / "src/infer/vllm-rwkv").as_uri(),
                 "dir_info": {"editable": editable},
             },
         }
@@ -115,10 +117,7 @@ def test_preflight_rejects_shared_writable_staging_parent(
             else {
                 "version": "0.13.0.dev0",
                 "direct_url": {
-                    "url": (
-                        Path(preflight.__file__).resolve().parents[3]
-                        / "src/infer/vllm-rwkv"
-                    ).as_uri(),
+                    "url": (REPOSITORY / "src/infer/vllm-rwkv").as_uri(),
                     "dir_info": {"editable": True},
                 },
             }

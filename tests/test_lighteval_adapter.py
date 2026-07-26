@@ -118,6 +118,24 @@ def test_evaluation_scopes_recurrent_total_length_override(
     assert os.environ["VLLM_WORKER_MULTIPROC_METHOD"] == "fork"
 
 
+def test_pipeline_parameters_enable_multilingual_inventory() -> None:
+    class Parameters(SimpleNamespace):
+        def __init__(self, **values):
+            super().__init__(**values)
+
+    parameters = lighteval_adapter._pipeline_parameters(
+        {
+            "PipelineParameters": Parameters,
+            "ParallelismManager": SimpleNamespace(VLLM="vllm"),
+        }
+    )
+
+    assert parameters.launcher_type == "vllm"
+    assert parameters.max_samples is None
+    assert parameters.remove_reasoning_tags is False
+    assert parameters.load_tasks_multilingual is True
+
+
 def test_task_failure_record_uses_only_exception_type() -> None:
     error = RuntimeError("credential=do-not-record")
 

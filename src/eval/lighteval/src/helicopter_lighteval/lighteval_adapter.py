@@ -198,6 +198,15 @@ def _runtime_types():
     }
 
 
+def _pipeline_parameters(types: dict[str, Any]):
+    return types["PipelineParameters"](
+        launcher_type=types["ParallelismManager"].VLLM,
+        max_samples=None,
+        remove_reasoning_tags=False,
+        load_tasks_multilingual=True,
+    )
+
+
 def _build_runtime_classes(types: dict[str, Any]):
     GenerationParameters = types["GenerationParameters"]
     VLLMModelConfig = types["VLLMModelConfig"]
@@ -870,12 +879,7 @@ def _evaluate_unit(
                     output_dir=str(shard_dir),
                     save_details=True,
                 )
-                parameters = types["PipelineParameters"](
-                    launcher_type=types["ParallelismManager"].VLLM,
-                    max_samples=None,
-                    remove_reasoning_tags=False,
-                    load_tasks_multilingual=False,
-                )
+                parameters = _pipeline_parameters(types)
                 pipeline = Pipeline(
                     tasks=",".join(task.identity for task in shard.tasks),
                     pipeline_parameters=parameters,
