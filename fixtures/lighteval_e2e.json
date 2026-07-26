@@ -65,7 +65,8 @@
       "gsm8k|0": {
         "generation_size": 8192,
         "original_num_docs": 2,
-        "effective_num_docs": 2
+        "effective_num_docs": 2,
+        "skipped_multiselect_docs": 0
       }
     }
   },

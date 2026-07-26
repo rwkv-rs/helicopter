@@ -1059,6 +1059,7 @@ source = { editable = "." }
 [package.dev-dependencies]
 dev = [
     { name = "pre-commit" },
+    { name = "pyarrow" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]
@@ -1195,6 +1196,7 @@ vllm-rwkv = [
 [package.metadata.requires-dev]
 dev = [
     { name = "pre-commit" },
+    { name = "pyarrow", specifier = ">=19.0.0" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]

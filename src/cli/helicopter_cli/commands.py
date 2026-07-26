@@ -215,18 +215,6 @@ def build_grpo_hydra_overrides(
         "rollout_n_gpus_per_node",
         "ROLLOUT_NGPUS_PER_NODE",
     )
-    rollout_data_parallel_size = takeoff_value(
-        takeoff,
-        env,
-        "rollout_data_parallel_size",
-        "ROLLOUT_DP",
-    )
-    rollout_pipeline_parallel_size = takeoff_value(
-        takeoff,
-        env,
-        "rollout_pipeline_parallel_size",
-        "ROLLOUT_PP",
-    )
     trainer_n_gpus_per_node = takeoff_value(
         takeoff,
         env,
