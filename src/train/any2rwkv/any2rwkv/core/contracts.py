@@ -39,6 +39,7 @@ class PerformanceProfileCacheRequest:
     plan: object
     training_config: Path
     dataset_manifest: Path
+    row_selection: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)

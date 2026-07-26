@@ -613,7 +613,18 @@ class LayerInputCacheReader:
         if self.manifest.get("schema_version") != 1:
             raise ContractError("unsupported layer-input cache schema")
         if expected_binding is not None and self.manifest.get("binding") != dict(expected_binding):
-            raise ContractError("layer-input cache binding differs from the requested prefix")
+            actual_binding = self.manifest.get("binding")
+            actual = actual_binding if isinstance(actual_binding, dict) else {}
+            expected = dict(expected_binding)
+            differing_keys = sorted(
+                key
+                for key in set(actual) | set(expected)
+                if actual.get(key) != expected.get(key)
+            )
+            raise ContractError(
+                "layer-input cache binding differs from the request; keys="
+                + ",".join(differing_keys)
+            )
         self._row_locations: dict[int, tuple[Path, int]] = {}
         for shard in self.manifest.get("shards", []):
             path = self.cache_dir / str(shard.get("path", ""))

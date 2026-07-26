@@ -111,6 +111,7 @@ class Qwen35ToRWKV7Recipe:
             ),
             training_config=request.training_config,
             dataset_manifest=request.dataset_manifest,
+            row_selection=request.row_selection,
         )
 
     def run_gqa_zero_step_validation(

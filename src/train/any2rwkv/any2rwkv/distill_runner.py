@@ -1094,6 +1094,8 @@ def prepare_performance_profile_caches(
     training_config: Path,
     recipe_id: str,
     allow_proxy_layers: bool,
+    train_row_limit: int | None = None,
+    validation_row_limit: int | None = None,
 ) -> dict[str, object]:
     resolved = resolve_recipe(recipe_id)
     if not torch.cuda.is_available():
@@ -1111,6 +1113,31 @@ def prepare_performance_profile_caches(
         burn_in_tokens=plan.burn_in_tokens,
         supervised_tokens=plan.supervised_tokens,
     )
+    available_train_rows = len(token_rows)
+    available_validation_rows = len(validation_rows)
+    for label, limit in (
+        ("train", train_row_limit),
+        ("validation", validation_row_limit),
+    ):
+        if limit is not None and limit <= 0:
+            raise ContractError(
+                f"performance profile {label} row limit must be positive"
+            )
+    if train_row_limit is not None:
+        token_rows = token_rows[:train_row_limit]
+    if validation_row_limit is not None:
+        validation_rows = validation_rows[:validation_row_limit]
+    row_selection = {
+        "strategy": "prefix-v1",
+        "distill_train": {
+            "available_rows": available_train_rows,
+            "selected_rows": len(token_rows),
+        },
+        "validation": {
+            "available_rows": available_validation_rows,
+            "selected_rows": len(validation_rows),
+        },
+    }
     validate_distributed_row_capacity(plan, token_rows, validation_rows)
     torch.manual_seed(plan.seed)
     source_manifest = resolved.source.load_checkpoint(
@@ -1144,6 +1171,7 @@ def prepare_performance_profile_caches(
             plan=plan,
             training_config=training_config,
             dataset_manifest=dataset_manifest,
+            row_selection=row_selection,
         )
     )
 

@@ -72,7 +72,10 @@ def test_cache_rejects_incomplete_coverage_and_binding_or_hash_drift(tmp_path: P
         binding={"source": "x"},
         batches=(LayerInputBatch(torch.tensor([0]), hidden),),
     )
-    with pytest.raises(ContractError, match="binding differs"):
+    with pytest.raises(
+        ContractError,
+        match=r"binding differs from the request; keys=source",
+    ):
         LayerInputCacheReader(cache_dir, expected_binding={"source": "y"})
     manifest = json.loads((cache_dir / "manifest.json").read_text())
     shard = cache_dir / manifest["shards"][0]["path"]

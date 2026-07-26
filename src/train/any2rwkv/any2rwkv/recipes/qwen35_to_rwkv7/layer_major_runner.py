@@ -114,6 +114,7 @@ def prepare_performance_profile_caches(
     initial_trainable: list[set[str]],
     training_config: Path,
     dataset_manifest: Path,
+    row_selection: dict[str, object] | None = None,
     device: torch.device | None = None,
     dtype: torch.dtype | None = None,
 ) -> dict[str, object]:
@@ -154,6 +155,7 @@ def prepare_performance_profile_caches(
         initial_trainable=initial_trainable,
         training_config=training_config,
         dataset_manifest=dataset_manifest,
+        profile_row_selection=row_selection,
     )
     row_count = len(token_rows) + len(validation_rows)
     sequence_length = len(all_rows[0])
@@ -261,6 +263,7 @@ def prepare_performance_profile_caches(
         "world_size": distributed.world_size,
         "training_config_sha256": file_sha256(training_config),
         "dataset_manifest_sha256": file_sha256(dataset_manifest),
+        "row_selection": row_selection,
         "cases": [
             {
                 **case,
@@ -369,14 +372,6 @@ def run_gqa_zero_step_validation(
             getattr(plan, "evidence_tier", "fixture") != "fixture"
         ),
     )
-    base_binding = _run_binding(
-        source_manifest=source_manifest,
-        run_dir=run_dir,
-        zero_step_dir=zero_step_dir,
-        initial_trainable=initial_trainable,
-        training_config=training_config,
-        dataset_manifest=dataset_manifest,
-    )
     cache_root = run_dir / "performance-profile-cache"
     profile_manifest_path = run_dir / "performance-profile-caches.json"
     if not profile_manifest_path.is_file():
@@ -397,6 +392,76 @@ def run_gqa_zero_step_validation(
         raise ContractError(
             "performance-profile cache manifest differs from the GQA run"
         )
+    row_selection = profile_manifest.get("row_selection")
+    selected_train_rows = len(train_row_source_sample_ids)
+    selected_validation_rows = len(validation_row_source_sample_ids)
+    has_row_selection = isinstance(row_selection, dict)
+    if getattr(plan, "evidence_tier", "fixture") != "fixture":
+        train_selection = (
+            row_selection.get("distill_train")
+            if has_row_selection
+            else None
+        )
+        if (
+            row_selection.get("strategy") != "prefix-v1"
+            if has_row_selection
+            else True
+        ) or not isinstance(train_selection, dict):
+            raise ContractError(
+                "formal GQA profile caches require recorded prefix row selection"
+            )
+        if int(train_selection.get("selected_rows", 0)) < int(
+            plan.activation_fit_rows
+        ):
+            raise ContractError(
+                "formal GQA profile cache has fewer rows than activation fit"
+            )
+    if has_row_selection:
+        if row_selection.get("strategy") != "prefix-v1":
+            raise ContractError(
+                "GQA profile cache row selection strategy is unsupported"
+            )
+        selections = {
+            "distill_train": (
+                row_selection.get("distill_train"),
+                len(train_row_source_sample_ids),
+            ),
+            "validation": (
+                row_selection.get("validation"),
+                len(validation_row_source_sample_ids),
+            ),
+        }
+        selected_counts: dict[str, int] = {}
+        for split, (selection, provenance_count) in selections.items():
+            if not isinstance(selection, dict):
+                raise ContractError(
+                    f"GQA profile cache row selection is missing {split}"
+                )
+            available = int(selection.get("available_rows", 0))
+            selected = int(selection.get("selected_rows", 0))
+            if (
+                available != provenance_count
+                or selected <= 0
+                or selected > available
+            ):
+                raise ContractError(
+                    f"GQA profile cache row selection differs from {split} "
+                    "provenance"
+                )
+            selected_counts[split] = selected
+        selected_train_rows = selected_counts["distill_train"]
+        selected_validation_rows = selected_counts["validation"]
+    base_binding = _run_binding(
+        source_manifest=source_manifest,
+        run_dir=run_dir,
+        zero_step_dir=zero_step_dir,
+        initial_trainable=initial_trainable,
+        training_config=training_config,
+        dataset_manifest=dataset_manifest,
+        profile_row_selection=(
+            row_selection if has_row_selection else None
+        ),
+    )
 
     if device.type == "cuda":
         torch.cuda.synchronize(device)
@@ -450,14 +515,23 @@ def run_gqa_zero_step_validation(
         prefix_fingerprint,
         max_cached_bytes=maximum_cached_bytes,
     )
+    if (
+        train_reader.row_count != selected_train_rows
+        or full_validation_reader.row_count != selected_validation_rows
+    ):
+        raise ContractError(
+            "GQA profile cache row counts differ from recorded row selection"
+        )
     fit_reader, installation_reader, epoch_reader = (
         _split_gqa_validation_protocol(
             train_reader,
             full_validation_reader,
             world_size=distributed.world_size,
-            train_row_source_sample_ids=train_row_source_sample_ids,
+            train_row_source_sample_ids=(
+                train_row_source_sample_ids[:selected_train_rows]
+            ),
             validation_row_source_sample_ids=(
-                validation_row_source_sample_ids
+                validation_row_source_sample_ids[:selected_validation_rows]
             ),
         )
     )
@@ -2453,6 +2527,7 @@ def _run_binding(
     initial_trainable,
     training_config,
     dataset_manifest,
+    profile_row_selection=None,
 ):
     from ...distill_runner import _binding_sha256, _zero_step_checkpoint_binding
 
@@ -2466,7 +2541,7 @@ def _run_binding(
         if isinstance(metadata, dict)
         and isinstance(metadata.get("source_sample_ids_sha256"), str)
     }
-    return {
+    binding = {
         "recipe": "qwen35_to_rwkv7",
         "source_checkpoint_sha256": _sha256_json(source_manifest.file_hashes),
         "zero_step_checkpoint_sha256": _binding_sha256(
@@ -2480,6 +2555,11 @@ def _run_binding(
         "dataset_manifest_sha256": file_sha256(dataset_manifest),
         "split_sample_ids_sha256": split_sample_ids_sha256,
     }
+    if profile_row_selection is not None:
+        binding["profile_row_selection_sha256"] = _sha256_json(
+            profile_row_selection
+        )
+    return binding
 
 
 def _advance_prefix_fingerprint(prefix_fingerprint: str, mixer_path: Path) -> str:

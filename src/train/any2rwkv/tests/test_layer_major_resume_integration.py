@@ -423,11 +423,23 @@ def test_profile_cache_preparation_closes_pre_evidence_cycle(
         initial_trainable=trainable,
         training_config=training_config,
         dataset_manifest=dataset_manifest,
+        row_selection={
+            "strategy": "prefix-v1",
+            "distill_train": {
+                "available_rows": 4,
+                "selected_rows": 4,
+            },
+            "validation": {
+                "available_rows": 2,
+                "selected_rows": 2,
+            },
+        },
         device=torch.device("cpu"),
         dtype=torch.float32,
     )
 
     assert result["status"] == "prepared"
+    assert result["row_selection"]["strategy"] == "prefix-v1"
     assert [
         case["representative_layer"] for case in result["cases"]
     ] == [0, 1, 3]
@@ -537,6 +549,17 @@ def test_gqa_native_zero_step_runs_in_formal_layer_transaction(
         initial_trainable=trainable,
         training_config=training_config,
         dataset_manifest=dataset_manifest,
+        row_selection={
+            "strategy": "prefix-v1",
+            "distill_train": {
+                "available_rows": 12,
+                "selected_rows": len(rows),
+            },
+            "validation": {
+                "available_rows": 6,
+                "selected_rows": len(validation_rows),
+            },
+        },
         device=torch.device("cpu"),
         dtype=torch.float32,
     )
@@ -598,11 +621,11 @@ def test_gqa_native_zero_step_runs_in_formal_layer_transaction(
         dataset_manifest=dataset_manifest,
         layer_index=3,
         train_row_source_sample_ids=tuple(
-            (f"train-{row}",) for row in range(len(rows))
+            (f"train-{row}",) for row in range(12)
         ),
         validation_row_source_sample_ids=tuple(
             (f"validation-{row}",)
-            for row in range(len(validation_rows))
+            for row in range(6)
         ),
         device=torch.device("cpu"),
         dtype=torch.float32,
