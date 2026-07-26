@@ -14,7 +14,7 @@ helicopter = "helicopter_cli.__main__:main"
 [dependency-groups]
 lighteval = [
   { include-group = "vllm-rwkv" },
-  "lighteval[extended-tasks,math]==0.13.0",
+  "lighteval[extended-tasks,math,multilingual]==0.13.0",
   "more-itertools",
   "pyarrow>=19.0.0",
   "ray",

@@ -12,7 +12,7 @@ def test_lighteval_is_a_locked_root_group_without_a_child_package() -> None:
     group = manifest["dependency-groups"]["lighteval"]
 
     assert group[0] == {"include-group": "vllm-rwkv"}
-    assert "lighteval[extended-tasks,math]==0.13.0" in group
+    assert "lighteval[extended-tasks,math,multilingual]==0.13.0" in group
     assert not any(
         "git+" in str(item) or str(item).startswith("vllm") for item in group[1:]
     )
