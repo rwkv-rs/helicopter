@@ -352,15 +352,66 @@ exact oracle，也不能被表述成精确 counterfactual。真正的 exact-comp
 counterfactual 必须从同一冻结 trace 生成相应 oracle signal，并重新执行同一
 native kernel。
 
-真实权重实验还必须满足空间有界。当前 dense 原型会同时物化多 context 的
-query、state 与 solver matrix；对 Qwen3.5-2B 的真实几何，它的保守峰值估算已经
-超过单卡预算，因此正式 runner 必须 fail closed。可交付实现应按
-row/query-head/KV-group 流式累计 observable objective 的充分统计量，再分
-head/group 求解和归并；不能用 OOM、超时或缩小到失真 workload 代替真实单层
-证据。在这一路径完成并按上述协议重跑以前，不发布任何 GQA 真实权重 NMSE、BF16
-SHA 或误差归因数值。
+空间有界的实现按 row、query head 和 KV group 流式累计充分统计量。每个 rank
+只保存自己的 teacher trace；需要全局一致的 Gram、cross-covariance、metric
+sums 和 basis gradient 才进行 tensor all-reduce。非连续统计量先转为
+contiguous buffer 完成 collective，再写回原 view，因而既满足 NCCL contract，
+也保持原位累计语义。最长因果 trace 同时覆盖全部短前缀，所以正式求解只收集
+最长 trace，短 context 只作为 prefix diagnostic。
 
-## 7. 完整迁移顺序
+## 7. 真实单层验证
+
+实验读取 Qwen3.5-2B 的真实 checkpoint，在第 3 层验证
+`full_attention → RWKV7`：
+
+- source geometry：8 个 Query heads、2 个 KV heads、head dimension 256；
+- target geometry：16 个 native heads、head dimension 128；
+- train cache：从 2943 条 `distill_train` 中确定性选择前 64 条，transaction
+  使用前 32 条，其中 16 条 calibration、16 条 adaptive development；
+- validation cache：32 条独立文本，其中 15 条只用于 installation gate、15 条
+  只用于后续 epoch selection，另留 2 条作为互斥边界；
+- context：burn-in 128、supervised suffix 512、选择最长 640-token trace；
+- runtime：8 张 NVIDIA RTX PRO 6000 Blackwell，BF16 module，
+  `WKV_MODE=fp32io16`。
+
+逐级误差如下：
+
+| 边界 | NMSE | cosine | 含义 |
+| --- | ---: | ---: | --- |
+| 精确 prefix hazard oracle | $1.08\times10^{-13}$ | 1.000000 | 式 $(1)$ 的数值回放达到浮点误差 |
+| 有界 hazard surrogate | 0.123891 | 0.950232 | sigmoid hazard 近似本身的误差 |
+| observable state compression 对 affine oracle | 0.023265 | 0.988307 | 两个独立 `128×128` states 引入的增量压缩误差 |
+| observable state compression 对 exact attention | 0.325510 | 0.821303 | hazard、affine closure 与 state compression 的累计误差 |
+| native free-running transition 对 compressed output | 0.006048 | 0.997675 | recurrence 编译自身的增量误差 |
+| native free-running transition 对 exact attention | 0.327557 | 0.820410 | 到 native recurrence 的累计误差 |
+| 完整 native parameter projection，development | 0.505662 | 0.703271 | 再计入实际 projection、norm、gate 与 output |
+
+最终安装判定只看冻结 validation 上真实 BF16 module：
+
+| 指标 | frozen baseline | zero-step candidate | 相对下降 |
+| --- | ---: | ---: | ---: |
+| mixer normalized MSE | 4.973255 | 0.498262 | 89.98% |
+| block normalized MSE | 1.018474 | 0.105706 | 89.62% |
+| total normalized MSE | 2.995865 | 0.301984 | 89.92% |
+| loss | 6.018663 | 0.609692 | 89.87% |
+| cosine | 0.730662 | 0.942757 | — |
+
+候选通过了“mixer normalized MSE 严格下降且 block normalized MSE
+不退化”的原子安装规则。不可变 generation 的 module-state SHA-256 为
+`c5ee61224e0bdec6a9d650578eda350d54d82b8e2ddf77470bcfcacfd94a01b8`，
+execution report SHA-256 为
+`8fecef19b1a0ee0ef245c13463b214a1f77c3bedd78c044faefe05d053447ece`，
+代码提交为 `ddcc7d059b722b96a796b27bdb308e73bde85dbc`。
+
+这组结果说明两个 `128×128` states 不是对 \(256\times256\) 算子的无损分块：
+相对 affine oracle 的纯压缩增量 NMSE 为 0.023265；0.325510 则是从 bounded
+hazard、affine closure 到 state compression 的累计误差，不能全部归因于状态容量。
+解析初始化在这一层、这一组冻结 installation samples 上把完整 mixer 误差降低约
+一个数量级，因此是显著优于 frozen mapped baseline 的候选。它能否稳定缩短逐层
+蒸馏、能否跨层保持优势，或者是否可能免蒸馏，仍须由多层、完整 baseline matrix
+与逐层训练曲线验证。
+
+## 8. 完整迁移顺序
 
 最终流程可以压缩为八步：
 
