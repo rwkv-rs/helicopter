@@ -1,82 +1,19 @@
-# A config is one complete, reproducible experiment. Machine-local paths still
-# come from .env.local or .env.remote; configs are not split or inherited.
+# Helicopter only owns serving launch settings. Training configs live with
+# their implementation in src/train/verl-rwkv.
 
-[experiment]
-name = "gsm8k-grpo-example"
-project = "verl_rwkv_grpo"
-seed = 42
-optimizer_steps = 200
+[models."g1g-1.5b"]
+path = "${WEIGHT_PATH}/rwkv7-g1g-1.5b-20260526-ctx8192.pth"
+served_model_name = "g1g-1.5b"
+max_model_len = 8192
 
-[model]
-name = "g1g-1.5b"
-checkpoint = "${WEIGHT_PATH}/rwkv7-g1g-1.5b-20260526-ctx8192.pth"
-prompt_mode = "open_think"
-prompt_template = "\nBot✿"
+[models."g1g-7.2b"]
+path = "${WEIGHT_PATH}/rwkv7-g1g-7.2b-20260603-ctx8192.pth"
+served_model_name = "g1g-7.2b"
+max_model_len = 8192
 
-[data.train]
-files = ["${DATASETS_PATH}/gsm8k/train.parquet"]
-
-[data.validation]
-
-[[data.validation.suites]]
-name = "gsm8k"
-file = "${DATASETS_PATH}/gsm8k/test.parquet"
-
-[algorithm]
-name = "grpo"
-prompts_per_step = 56
-responses_per_prompt = 8
-ppo_clip = 0.2
-dual_clip = 3.0
-entropy_coefficient = 0.0
-kl_coefficient = 0.0
-
-[reward]
-manager = "naive"
-scorer = "math_verify"
-
-[optimizer]
-learning_rate = 1e-5
-warmup_steps = 0
-weight_decay = 0.01
-gradient_norm_limit = 0.3
-
-[generation.train]
-temperature = 1.0
-top_k = -1
-top_p = 0.95
-
-[generation.validation]
-strategy = "sample"
-responses_per_prompt = 4
-temperature = 0.96
-top_k = 32
-top_p = 0.76
-presence_penalty = 1.0
-frequency_penalty = 0.1
-penalty_decay = 0.988
-
-[execution]
-nodes = 1
-gpus_per_node = 8
+[infer]
 wkv_mode = "fp32io16"
-context_mode = "state_passing"
-state_chunk_tokens = 2048
 
-[execution.rollout]
-replicas = 8
-tensor_parallel_size_per_replica = 1
-pipeline_parallel_size_per_replica = 1
-max_concurrent_sequences_per_replica = 64
-generation_token_budget_per_replica = 8192
-weight_update_bucket_mib = 64
-
-[evaluation]
-before_training = true
-every_optimizer_steps = 50
-
-[checkpoint]
-every_optimizer_steps = 20
-
-[logging]
-backends = ["console", "file"]
+[runtime]
+host = "0.0.0.0"
+port = 8000

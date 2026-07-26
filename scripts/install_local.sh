@@ -128,6 +128,9 @@ EOF
 
 configure_build_dirs() {
   if [[ -n "$BUILD_TMPDIR" ]]; then
+    if [[ "$BUILD_TMPDIR" != /* ]]; then
+      BUILD_TMPDIR="$ROOT/$BUILD_TMPDIR"
+    fi
     mkdir -p "$BUILD_TMPDIR"
     export TMPDIR="$BUILD_TMPDIR"
   fi

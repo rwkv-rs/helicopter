@@ -17,6 +17,7 @@ htmlcov/
 venv/
 env/
 .uv/
+.tmp/
 
 .agents/skills/
 

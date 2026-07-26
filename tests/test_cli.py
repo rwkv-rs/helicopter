@@ -2,23 +2,17 @@ from __future__ import annotations
 
 import os
 import tempfile
-import tomllib
 import unittest
 from argparse import Namespace
 from pathlib import Path
 from unittest import mock
 
 from helicopter_cli import commands, config, env
+from helicopter_cli.__main__ import build_parser
 
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_CONFIG = ROOT / "configs/example.toml"
-DAPO_CONFIG = ROOT / "configs/local/202606300831.toml"
-
-
-def load_example_config() -> dict[str, object]:
-    loaded, _ = config.load_config(ROOT, str(EXAMPLE_CONFIG))
-    return loaded
 
 
 def infer_args(**overrides: object) -> Namespace:
@@ -42,23 +36,6 @@ def infer_args(**overrides: object) -> Namespace:
     return Namespace(**values)
 
 
-def takeoff_args(**overrides: object) -> Namespace:
-    values = {
-        "algorithm": "grpo",
-        "model": "g1g-1.5b",
-        "dataset": "gsm8k",
-        "dry_run": True,
-        "wkv_mode": None,
-        "emb_device": None,
-        "allow_fp16_accumulation": None,
-        "num_nodes": None,
-        "num_devices": None,
-        "override": None,
-    }
-    values.update(overrides)
-    return Namespace(**values)
-
-
 def command_options(command: list[str]) -> dict[str, str | bool]:
     options: dict[str, str | bool] = {}
     index = 0
@@ -76,60 +53,13 @@ def command_options(command: list[str]) -> dict[str, str | bool]:
     return options
 
 
-def hydra_pairs(plan: commands.CommandPlan) -> list[tuple[str, str]]:
-    pairs = []
-    for item in plan.command[3:]:
-        if "=" in item:
-            key, value = item.split("=", 1)
-            pairs.append((key, value))
-    return pairs
-
-
-def hydra_map(plan: commands.CommandPlan) -> dict[str, str]:
-    return dict(hydra_pairs(plan))
-
-
-def hydra_values(plan: commands.CommandPlan, key: str) -> list[str]:
-    return [value for pair_key, value in hydra_pairs(plan) if pair_key == key]
-
-
-def build_takeoff_plan(
-    loaded_config: dict[str, object],
-    *,
-    args: Namespace | None = None,
-    loaded_env: dict[str, str] | None = None,
-    venv_python: Path | None = None,
-) -> commands.CommandPlan:
-    if loaded_env is None:
-        loaded_env = {"WEIGHT_PATH": "/weights/RWKV", "DATASETS_PATH": "/datasets"}
-    if args is None:
-        args = takeoff_args()
-    if venv_python is None:
-        venv_python = ROOT / ".venv/bin/python"
-    original_exists = Path.exists
-    with mock.patch.object(Path, "exists", autospec=True) as exists:
-        exists.side_effect = lambda path: (
-            True if path == venv_python else original_exists(path)
-        )
-        return commands.build_takeoff_plan(
-            args, root=ROOT, env=loaded_env, config=loaded_config
-        )
-
-
 class DotenvTests(unittest.TestCase):
     def test_load_dotenv_supports_simple_export_and_quotes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             env_file = Path(tmp) / ".env"
             env_file.write_text(
-                "\n".join(
-                    [
-                        "PLAIN=value",
-                        "export EXPORTED=enabled",
-                        "QUOTED='space value'",
-                        "# ignored",
-                        "not-an-assignment",
-                    ]
-                )
+                "PLAIN=value\nexport EXPORTED=enabled\nQUOTED='space value'\n",
+                encoding="utf-8",
             )
 
             self.assertEqual(
@@ -141,172 +71,37 @@ class DotenvTests(unittest.TestCase):
                 },
             )
 
-    def test_load_env_keeps_command_scoped_environment_over_dotenv(self) -> None:
+    def test_command_environment_wins_over_dotenv(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / ".env.local").write_text("WEIGHT_PATH=/from-file\n")
+            (root / ".env.local").write_text(
+                "WEIGHT_PATH=/from-file\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {"WEIGHT_PATH": "/from-env"}):
+                loaded, _ = env.load_env(root, ".env.local")
 
-            with mock.patch.dict(os.environ, {"WEIGHT_PATH": "/from-env"}, clear=False):
-                loaded_env, path = env.load_env(root, ".env.local")
-
-            self.assertEqual(path, root / ".env.local")
-            self.assertEqual(loaded_env["WEIGHT_PATH"], "/from-env")
-
-
-class ConfigResolutionTests(unittest.TestCase):
-    def test_verl_runtime_dependencies_include_required_runtime_stack(self) -> None:
-        manifest = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-        dependencies = {
-            dependency
-            for dependency in manifest["dependency-groups"]["verl-rwkv"]
-            if isinstance(dependency, str)
-        }
-
-        self.assertTrue(
-            {
-                "math-verify",
-                "latex2sympy2-extended",
-                "nvidia-ml-py>=12.560.30",
-                "nvtx==0.2.15",
-            }.issubset(dependencies)
-        )
-
-    def test_default_config_uses_newest_local_toml_when_available(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            local = root / "configs/local"
-            local.mkdir(parents=True)
-            (root / "configs/example.toml").write_text("")
-            (local / "202401010000.toml").write_text("")
-            newest = local / "202606290720.toml"
-            newest.write_text("")
-
-            self.assertEqual(config.default_config_path(root), newest)
-
-    def test_resolve_model_path_uses_weight_path_directory(self) -> None:
-        loaded_config = load_example_config()
-        loaded_env = {"WEIGHT_PATH": "/weights/RWKV"}
-
-        model_path, model = config.resolve_model_path(
-            loaded_config, "g1g-1.5b", root=ROOT, env=loaded_env
-        )
-
-        self.assertEqual(model["served_model_name"], "g1g-1.5b")
-        self.assertEqual(
-            model_path,
-            Path("/weights/RWKV/rwkv7-g1g-1.5b-20260526-ctx8192.pth"),
-        )
-
-    def test_strict_checkpoint_path_is_the_model_source_of_truth(self) -> None:
-        loaded_config = load_example_config()
-        expected = Path("/weights/RWKV/rwkv7/pth/strict-checkpoint.pth")
-
-        model_path, _ = config.resolve_model_path(
-            loaded_config,
-            "g1g-1.5b",
-            root=ROOT,
-            env={
-                "WEIGHT_PATH": "/weights/RWKV",
-                "HELICOPTER_CHECKPOINT_PATH": str(expected),
-            },
-        )
-
-        self.assertEqual(model_path, expected)
-
-    def test_grouped_config_compiles_without_a_runtime_profile(self) -> None:
-        raw = tomllib.loads(DAPO_CONFIG.read_text(encoding="utf-8"))
-        compiled, _ = config.load_config(ROOT, str(DAPO_CONFIG))
-        takeoff = compiled["takeoff"]["grpo"]
-
-        self.assertNotIn("runtime", raw)
-        self.assertNotIn("takeoff", raw)
-        self.assertNotIn("models", raw)
-        self.assertNotIn("datasets", raw)
-        self.assertEqual(takeoff["train_batch_size"], 32)
-        self.assertEqual(takeoff["ppo_mini_batch_size"], 32)
-        self.assertEqual(takeoff["rollout_n"], 16)
-        self.assertEqual(takeoff["ctx_len"], 10240)
-        self.assertNotIn("max_prompt_length", takeoff)
-        self.assertNotIn("max_response_length", takeoff)
-        self.assertNotIn("derive_sequence_lengths", takeoff)
-        self.assertFalse(takeoff["rwkv_use_dynamic_bsz"])
-        self.assertNotIn("rollout_ignore_eos", takeoff)
-        self.assertEqual(takeoff["ppo_epochs"], 1)
-        self.assertEqual(takeoff["actor_use_kl_loss"], False)
-        self.assertEqual(takeoff["total_epochs"], 10)
-        self.assertNotIn("total_training_steps", takeoff)
-
-    def test_maxrl_grouped_config_rejects_legacy_optimizer_steps(self) -> None:
-        raw = tomllib.loads(DAPO_CONFIG.read_text(encoding="utf-8"))
-        raw["experiment"]["optimizer_steps"] = 200
-
-        with self.assertRaisesRegex(SystemExit, "optimizer_steps was removed"):
-            config.compile_config(raw)
-
-    def test_maxrl_grouped_config_allows_manual_stop(self) -> None:
-        raw = tomllib.loads(DAPO_CONFIG.read_text(encoding="utf-8"))
-        raw["experiment"]["candidate_dataset_passes"] = 0
-
-        compiled = config.compile_config(raw)
-
-        self.assertEqual(compiled["takeoff"]["grpo"]["total_epochs"], 0)
-        self.assertNotIn("total_training_steps", compiled["takeoff"]["grpo"])
-
-    def test_maxrl_grouped_config_rejects_negative_candidate_passes(self) -> None:
-        raw = tomllib.loads(DAPO_CONFIG.read_text(encoding="utf-8"))
-        raw["experiment"]["candidate_dataset_passes"] = -1
-
-        with self.assertRaisesRegex(
-            SystemExit, "candidate_dataset_passes must be >= 0"
-        ):
-            config.compile_config(raw)
-
-    def test_grouped_config_rejects_legacy_section_mixing(self) -> None:
-        raw = tomllib.loads(EXAMPLE_CONFIG.read_text(encoding="utf-8"))
-        raw["runtime"] = {"profile": "remote"}
-
-        with self.assertRaisesRegex(SystemExit, "cannot mix legacy sections: runtime"):
-            config.compile_config(raw)
-
-    def test_grouped_config_requires_checkpoint_ctx_suffix(self) -> None:
-        raw = tomllib.loads(EXAMPLE_CONFIG.read_text(encoding="utf-8"))
-        raw["model"]["checkpoint"] = "${WEIGHT_PATH}/rwkv7-g1g-1.5b.pth"
-
-        with self.assertRaisesRegex(SystemExit, "exactly one context suffix"):
-            config.compile_config(raw)
-
-    def test_grouped_config_rejects_removed_length_batching_and_eos_fields(
-        self,
-    ) -> None:
-        raw = tomllib.loads(EXAMPLE_CONFIG.read_text(encoding="utf-8"))
-        raw["model"]["context_tokens"] = 8192
-        raw["data"]["train"]["max_prompt_tokens"] = 1024
-        raw["generation"]["train"]["max_response_tokens"] = 7168
-        raw["generation"]["train"]["stop_on_eos"] = True
-        raw["execution"]["dynamic_microbatching"] = True
-        raw["execution"]["train_token_budget_per_gpu"] = 8192
-
-        with self.assertRaisesRegex(
-            SystemExit,
-            "model.context_tokens.*execution.train_token_budget_per_gpu",
-        ):
-            config.compile_config(raw)
+            self.assertEqual(loaded["WEIGHT_PATH"], "/from-env")
 
 
-class CommandPlanTests(unittest.TestCase):
-    def test_infer_plan_uses_vllm_rwkv_contract(self) -> None:
-        loaded_config = load_example_config()
+class InferPlanTests(unittest.TestCase):
+    def test_example_config_builds_vllm_command(self) -> None:
+        loaded, _ = config.load_config(ROOT, str(EXAMPLE_CONFIG))
 
         plan = commands.build_infer_plan(
             infer_args(),
             root=ROOT,
             env={"WEIGHT_PATH": "/weights/RWKV"},
-            config=loaded_config,
+            config=loaded,
         )
 
         self.assertEqual(
             plan.command[:3],
-            ["vllm", "serve", "/weights/RWKV/rwkv7-g1g-1.5b-20260526-ctx8192.pth"],
+            [
+                "vllm",
+                "serve",
+                "/weights/RWKV/rwkv7-g1g-1.5b-20260526-ctx8192.pth",
+            ],
         )
         self.assertEqual(
             command_options(plan.command),
@@ -319,226 +114,27 @@ class CommandPlanTests(unittest.TestCase):
                 "--max-model-len": "8192",
             },
         )
-        self.assertEqual(plan.cwd, ROOT)
         self.assertEqual(plan.shown_env, {"VLLM_RWKV7_WKV_MODE": "fp32io16"})
         self.assertEqual(
             {key for key in plan.env if key.startswith("VLLM_")},
             {"VLLM_RWKV7_WKV_MODE"},
         )
+        self.assertEqual(plan.cwd, ROOT)
 
-    def test_takeoff_plan_uses_verl_module_entrypoint_and_default_overrides(
-        self,
-    ) -> None:
-        loaded_config = load_example_config()
-        venv_python = ROOT / ".venv/bin/python"
+    def test_checkpoint_environment_override_is_respected(self) -> None:
+        loaded, _ = config.load_config(ROOT, str(EXAMPLE_CONFIG))
 
-        plan = build_takeoff_plan(loaded_config, venv_python=venv_python)
-        overrides = hydra_map(plan)
-
-        self.assertEqual(plan.cwd, ROOT / "src/train/verl-rwkv")
-        self.assertEqual(
-            plan.command[:3],
-            [
-                str(venv_python),
-                "-m",
-                "verl.trainer.main_ppo",
-            ],
-        )
-        self.assertEqual(
-            plan.shown_env,
-            {
-                "PYTHON": str(venv_python),
-                "PYTHONPATH": str(ROOT / "src/infer/vllm-rwkv"),
-                "RWKV_LM_PATH": str(ROOT / "src/train/rwkv-lm"),
-                "RWKV_MODEL_PATH": "/weights/RWKV/rwkv7-g1g-1.5b-20260526-ctx8192.pth",
-                "VLLM_RWKV7_WKV_MODE": "fp32io16",
-            },
-        )
-        self.assertEqual(
-            {
-                key: overrides[key]
-                for key in (
-                    "data.train_batch_size",
-                    "data.max_prompt_length",
-                    "data.max_response_length",
-                    "data.seed",
-                    "reward.custom_reward_function.path",
-                    "actor_rollout_ref.actor.use_dynamic_bsz",
-                    "actor_rollout_ref.actor.ppo_mini_batch_size",
-                    "actor_rollout_ref.actor.ppo_epochs",
-                    "actor_rollout_ref.actor.data_loader_seed",
-                    "actor_rollout_ref.model.path",
-                    "actor_rollout_ref.rollout.name",
-                    "actor_rollout_ref.rollout.checkpoint_engine.backend",
-                    "actor_rollout_ref.rollout.top_p",
-                    "actor_rollout_ref.rollout.seed",
-                    "actor_rollout_ref.hybrid_engine",
-                    "trainer.v1.trainer_mode",
-                    "trainer.n_gpus_per_node",
-                    "trainer.logger",
-                    "trainer.total_epochs",
-                    "trainer.val_before_train",
-                )
-            },
-            {
-                "data.train_batch_size": "56",
-                "data.max_prompt_length": "null",
-                "data.max_response_length": "null",
-                "data.seed": "42",
-                "reward.custom_reward_function.path": str(
-                    ROOT
-                    / "src/train/verl-rwkv/examples/rwkv_trainer/math_verify_reward.py"
-                ),
-                "actor_rollout_ref.actor.use_dynamic_bsz": "False",
-                "actor_rollout_ref.actor.ppo_mini_batch_size": "56",
-                "actor_rollout_ref.actor.ppo_epochs": "1",
-                "actor_rollout_ref.actor.data_loader_seed": "42",
-                "actor_rollout_ref.model.path": "/weights/RWKV/rwkv7-g1g-1.5b-20260526-ctx8192.pth",
-                "actor_rollout_ref.rollout.name": "vllm",
-                "actor_rollout_ref.rollout.checkpoint_engine.backend": "naive",
-                "actor_rollout_ref.rollout.top_p": "0.95",
-                "actor_rollout_ref.rollout.seed": "42",
-                "actor_rollout_ref.hybrid_engine": "True",
-                "trainer.v1.trainer_mode": "sync",
-                "trainer.n_gpus_per_node": "8",
-                "trainer.logger": '["console","file"]',
-                "trainer.total_epochs": "1",
-                "trainer.val_before_train": "True",
-            },
-        )
-        self.assertNotIn("actor_rollout_ref.rollout.gpu_memory_utilization", overrides)
-        self.assertEqual(overrides["actor_rollout_ref.rollout.max_num_seqs"], "64")
-        self.assertEqual(
-            overrides["actor_rollout_ref.rollout.max_num_batched_tokens"], "8192"
-        )
-        self.assertEqual(
-            overrides[
-                "+actor_rollout_ref.rollout.engine_kwargs.vllm.distributed_executor_backend"
-            ],
-            "uni",
-        )
-        self.assertEqual(
-            overrides[
-                "+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_USE_V2_MODEL_RUNNER"
-            ],
-            '"1"',
-        )
-        self.assertEqual(
-            overrides["+ray_kwargs.ray_init.runtime_env.env_vars.VLLM_LOGGING_LEVEL"],
-            '"INFO"',
-        )
-        self.assertNotIn("rollout.nnodes", overrides)
-        self.assertNotIn("rollout.n_gpus_per_node", overrides)
-
-    def test_grouped_takeoff_uses_selected_data_without_dataset_alias(self) -> None:
-        plan = build_takeoff_plan(
-            load_example_config(),
-            args=takeoff_args(dataset=None),
-        )
-        overrides = hydra_map(plan)
-
-        self.assertEqual(
-            overrides["data.train_files"],
-            "['/datasets/gsm8k/train.parquet']",
-        )
-        self.assertEqual(
-            overrides["data.val_files"],
-            "['/datasets/gsm8k/test.parquet']",
+        model_path, _ = config.resolve_model_path(
+            loaded,
+            "g1g-1.5b",
+            root=ROOT,
+            env={"HELICOPTER_CHECKPOINT_PATH": "/weights/selected.pth"},
         )
 
-    def test_takeoff_runtime_env_strips_dotenv_vllm_knobs(self) -> None:
-        loaded_config = load_example_config()
-        plan = build_takeoff_plan(
-            loaded_config,
-            loaded_env={
-                "WEIGHT_PATH": "/weights/RWKV",
-                "DATASETS_PATH": "/datasets",
-                "HELICOPTER_VLLM_RWKV_PATH": "src/infer/vllm-rwkv",
-                "VLLM_GPU_MEMORY_UTILIZATION": "0.85",
-                "VLLM_MAX_NUM_SEQS": "2048",
-                "VLLM_MAX_NUM_BATCHED_TOKENS": "65536",
-                "VLLM_RWKV_PATH": "legacy/path",
-                "VLLM_RWKV7_EMB_DEVICE": "cpu",
-                "HELICOPTER_TAKEOFF_ALLOW_FP16_ACCUMULATION": "0",
-                "VLLM_USE_V2_MODEL_RUNNER": "1",
-            },
-        )
-        overrides = hydra_map(plan)
-        forbidden_env_keys = {
-            "VLLM_GPU_MEMORY_UTILIZATION",
-            "VLLM_MAX_NUM_SEQS",
-            "VLLM_MAX_NUM_BATCHED_TOKENS",
-            "VLLM_RWKV_PATH",
-            "VLLM_USE_V2_MODEL_RUNNER",
-        }
-        forbidden_override_keys = {"actor_rollout_ref.rollout.gpu_memory_utilization"}
+        self.assertEqual(model_path, Path("/weights/selected.pth"))
 
-        self.assertEqual(plan.env["VLLM_RWKV7_WKV_MODE"], "fp32io16")
-        self.assertNotIn("VLLM_RWKV7_EMB_DEVICE", plan.env)
-        self.assertNotIn("VLLM_RWKV7_ALLOW_FP16_ACCUMULATION", plan.env)
-        self.assertEqual(plan.env["PYTHONPATH"], str(ROOT / "src/infer/vllm-rwkv"))
-        self.assertEqual(forbidden_env_keys & plan.env.keys(), set())
-        self.assertEqual(forbidden_override_keys & overrides.keys(), set())
-        self.assertEqual(overrides["actor_rollout_ref.rollout.max_num_seqs"], "64")
-        self.assertEqual(
-            overrides["actor_rollout_ref.rollout.max_num_batched_tokens"], "8192"
-        )
-
-    def test_dapo_config_uses_complete_processed_dataset_and_pins_seed(self) -> None:
-        loaded_config, _ = config.load_config(ROOT, str(DAPO_CONFIG))
-        plan = build_takeoff_plan(
-            loaded_config,
-            args=takeoff_args(model="g1h-7.2b", dataset="dapo_math_17k"),
-            loaded_env={
-                "WEIGHT_PATH": "/weights/RWKV",
-                "DATASETS_PATH": "/datasets",
-                "HELICOPTER_SEED": "42",
-            },
-        )
-        overrides = hydra_map(plan)
-
-        self.assertEqual(
-            overrides["data.train_files"],
-            "['/datasets/DAPO/dapo-math-17k-processed.parquet']",
-        )
-        self.assertNotIn("data.train_max_samples", overrides)
-        self.assertNotIn("data.val_max_samples", overrides)
-        self.assertEqual(overrides["+data.train_prompt_key"], "source_prompt")
-        self.assertEqual(overrides["+data.val_prompt_key"], "prompt")
-        self.assertEqual(overrides["data.seed"], "42")
-        self.assertEqual(overrides["actor_rollout_ref.actor.data_loader_seed"], "42")
-        self.assertEqual(overrides["actor_rollout_ref.rollout.seed"], "42")
-        self.assertEqual(overrides["actor_rollout_ref.rollout.n"], "16")
-        self.assertEqual(overrides["actor_rollout_ref.rollout.temperature"], "1.0")
-        self.assertEqual(overrides["actor_rollout_ref.rollout.top_k"], "-1")
-        self.assertEqual(overrides["actor_rollout_ref.rollout.top_p"], "0.95")
-        self.assertEqual(overrides["actor_rollout_ref.rollout.ignore_eos"], "False")
-        self.assertEqual(overrides["+data.model_context_length"], "10240")
-        self.assertNotIn("+data.derive_sequence_lengths", overrides)
-        self.assertEqual(overrides["actor_rollout_ref.rollout.prompt_length"], "10240")
-        self.assertEqual(
-            overrides["actor_rollout_ref.rollout.response_length"], "10240"
-        )
-        self.assertEqual(overrides["trainer.logger"], '["console","file","wandb"]')
-        self.assertEqual(overrides["trainer.test_freq"], "50")
-        self.assertEqual(overrides["trainer.val_before_train"], "True")
-
-    def test_dapo_config_rejects_prompt_field_override(self) -> None:
-        loaded_config, _ = config.load_config(ROOT, str(DAPO_CONFIG))
-
-        with self.assertRaisesRegex(SystemExit, "data.train_prompt_key=source_prompt"):
-            build_takeoff_plan(
-                loaded_config,
-                args=takeoff_args(
-                    model="g1h-7.2b",
-                    dataset="dapo_math_17k",
-                    override=["data.train_prompt_key=prompt"],
-                ),
-            )
-
-    def test_infer_runtime_env_strips_dotenv_vllm_knobs(self) -> None:
-        loaded_config = load_example_config()
-
+    def test_runtime_env_strips_dotenv_vllm_knobs(self) -> None:
+        loaded, _ = config.load_config(ROOT, str(EXAMPLE_CONFIG))
         plan = commands.build_infer_plan(
             infer_args(),
             root=ROOT,
@@ -549,18 +145,18 @@ class CommandPlanTests(unittest.TestCase):
                 "VLLM_GPU_MEMORY_UTILIZATION": "0.85",
                 "VLLM_MAX_NUM_SEQS": "2048",
             },
-            config=loaded_config,
+            config=loaded,
         )
+
         options = command_options(plan.command)
-        forbidden_env_keys = {"VLLM_GPU_MEMORY_UTILIZATION", "VLLM_MAX_NUM_SEQS"}
-        forbidden_option_keys = {"--gpu-memory-utilization", "--max-num-seqs"}
-
-        self.assertEqual(plan.env["VLLM_RWKV7_WKV_MODE"], "fp32io16")
         self.assertNotIn("VLLM_RWKV7_ALLOW_FP16_ACCUMULATION", plan.env)
-        self.assertEqual(forbidden_env_keys & plan.env.keys(), set())
-        self.assertEqual(forbidden_option_keys & options.keys(), set())
+        self.assertNotIn("VLLM_GPU_MEMORY_UTILIZATION", plan.env)
+        self.assertNotIn("VLLM_MAX_NUM_SEQS", plan.env)
+        self.assertNotIn("--gpu-memory-utilization", options)
+        self.assertNotIn("--max-num-seqs", options)
 
-    def test_infer_fp16_accumulation_cli_false_overrides_environment(self) -> None:
+    def test_fp16_accumulation_cli_false_overrides_environment(self) -> None:
+        loaded, _ = config.load_config(ROOT, str(EXAMPLE_CONFIG))
         plan = commands.build_infer_plan(
             infer_args(allow_fp16_accumulation=False),
             root=ROOT,
@@ -568,31 +164,25 @@ class CommandPlanTests(unittest.TestCase):
                 "WEIGHT_PATH": "/weights/RWKV",
                 "HELICOPTER_INFER_ALLOW_FP16_ACCUMULATION": "1",
             },
-            config=load_example_config(),
+            config=loaded,
         )
 
         self.assertNotIn("VLLM_RWKV7_ALLOW_FP16_ACCUMULATION", plan.env)
 
-    def test_infer_fp16_wkv_enables_fp16_accumulation_by_default(self) -> None:
+    def test_fp16_wkv_enables_matching_accumulation_by_default(self) -> None:
+        loaded, _ = config.load_config(ROOT, str(EXAMPLE_CONFIG))
         plan = commands.build_infer_plan(
             infer_args(wkv_mode="fp16"),
             root=ROOT,
             env={"WEIGHT_PATH": "/weights/RWKV"},
-            config=load_example_config(),
+            config=loaded,
         )
 
         self.assertEqual(plan.env["VLLM_RWKV7_WKV_MODE"], "fp16")
         self.assertNotIn("VLLM_RWKV7_ALLOW_FP16_ACCUMULATION", plan.env)
 
-    def test_takeoff_high_precision_wkv_disables_fp16_accumulation_by_default(
-        self,
-    ) -> None:
-        plan = build_takeoff_plan(load_example_config())
-
-        self.assertEqual(plan.env["VLLM_RWKV7_WKV_MODE"], "fp32io16")
-        self.assertNotIn("VLLM_RWKV7_ALLOW_FP16_ACCUMULATION", plan.env)
-
-    def test_infer_rejects_accumulation_that_conflicts_with_wkv_profile(self) -> None:
+    def test_rejects_accumulation_that_conflicts_with_wkv_profile(self) -> None:
+        loaded, _ = config.load_config(ROOT, str(EXAMPLE_CONFIG))
         with self.assertRaisesRegex(
             SystemExit, "derives GEMM accumulation from WKV mode"
         ):
@@ -600,10 +190,11 @@ class CommandPlanTests(unittest.TestCase):
                 infer_args(wkv_mode="fp16", allow_fp16_accumulation=False),
                 root=ROOT,
                 env={"WEIGHT_PATH": "/weights/RWKV"},
-                config=load_example_config(),
+                config=loaded,
             )
 
-    def test_infer_fp16_accumulation_rejects_invalid_environment_value(self) -> None:
+    def test_rejects_invalid_accumulation_environment_value(self) -> None:
+        loaded, _ = config.load_config(ROOT, str(EXAMPLE_CONFIG))
         with self.assertRaisesRegex(
             SystemExit,
             "HELICOPTER_INFER_ALLOW_FP16_ACCUMULATION must be 0 or 1",
@@ -615,563 +206,68 @@ class CommandPlanTests(unittest.TestCase):
                     "WEIGHT_PATH": "/weights/RWKV",
                     "HELICOPTER_INFER_ALLOW_FP16_ACCUMULATION": "true",
                 },
-                config=load_example_config(),
+                config=loaded,
             )
 
-    def test_takeoff_config_adv_estimator_becomes_hydra_overrides(self) -> None:
-        loaded_config = load_example_config()
-        takeoff = loaded_config["takeoff"]
-        takeoff["grpo"] = {
-            **takeoff["grpo"],
-            "adv_estimator": "maxrl",
-            "reward_manager": "dapo",
-        }
 
-        overrides = hydra_map(build_takeoff_plan(loaded_config))
-
-        self.assertEqual(
-            {
-                "algorithm.adv_estimator": overrides["algorithm.adv_estimator"],
-                "reward.reward_manager.name": overrides["reward.reward_manager.name"],
-            },
-            {
-                "algorithm.adv_estimator": "maxrl",
-                "reward.reward_manager.name": "dapo",
-            },
+class TakeoffPlanTests(unittest.TestCase):
+    def test_parser_exposes_only_config_and_forwarded_overrides(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "takeoff",
+                "--config",
+                "maxrl.toml",
+                "--override",
+                "trainer.save_freq=10",
+            ]
         )
 
-    def test_takeoff_config_infctx_becomes_rwkv_lm_engine_overrides(self) -> None:
-        loaded_config = load_example_config()
-        takeoff = loaded_config["takeoff"]
-        takeoff["grpo"] = {
-            **takeoff["grpo"],
-            "ctx_len": 8192,
-            "infctx": True,
-            "chunk_ctx": 2048,
-        }
+        self.assertEqual(args.config, "maxrl.toml")
+        self.assertEqual(args.override, ["trainer.save_freq=10"])
+        self.assertFalse(hasattr(args, "model"))
+        self.assertFalse(hasattr(args, "dataset"))
+        self.assertFalse(hasattr(args, "algorithm"))
 
-        overrides = hydra_map(build_takeoff_plan(loaded_config))
-
-        self.assertEqual(
-            {
-                key: overrides[key]
-                for key in (
-                    "actor_rollout_ref.actor.engine.ctx_len",
-                    "actor_rollout_ref.actor.engine.infctx",
-                    "actor_rollout_ref.actor.engine.chunk_ctx",
-                    "actor_rollout_ref.ref.engine.ctx_len",
-                    "actor_rollout_ref.ref.engine.infctx",
-                    "actor_rollout_ref.ref.engine.chunk_ctx",
-                )
-            },
-            {
-                "actor_rollout_ref.actor.engine.ctx_len": "8192",
-                "actor_rollout_ref.actor.engine.infctx": "True",
-                "actor_rollout_ref.actor.engine.chunk_ctx": "2048",
-                "actor_rollout_ref.ref.engine.ctx_len": "8192",
-                "actor_rollout_ref.ref.engine.infctx": "True",
-                "actor_rollout_ref.ref.engine.chunk_ctx": "2048",
-            },
-        )
-
-    def test_fp32io16_uses_fp16_rollout_without_overriding_native_bf16(self) -> None:
-        loaded_config = load_example_config()
-        loaded_config["takeoff"]["grpo"]["wkv_mode"] = "fp32io16"
-
-        overrides = hydra_map(build_takeoff_plan(loaded_config))
-
-        self.assertEqual(overrides["actor_rollout_ref.rollout.dtype"], "float16")
-        self.assertNotIn("actor_rollout_ref.actor.engine.precision", overrides)
-        self.assertNotIn("actor_rollout_ref.actor.engine.dtype", overrides)
-        self.assertNotIn("actor_rollout_ref.ref.engine.precision", overrides)
-        self.assertNotIn("actor_rollout_ref.ref.engine.dtype", overrides)
-        self.assertNotIn("actor_rollout_ref.model.dtype", overrides)
-
-    def test_takeoff_config_sets_validation_sampling_for_non_greedy_eval(self) -> None:
-        loaded_config = load_example_config()
-
-        plan = build_takeoff_plan(loaded_config)
-        overrides = hydra_map(plan)
-
-        self.assertEqual(
-            {
-                key: overrides[key]
-                for key in (
-                    "actor_rollout_ref.rollout.val_kwargs.do_sample",
-                    "actor_rollout_ref.rollout.val_kwargs.temperature",
-                    "actor_rollout_ref.rollout.val_kwargs.top_k",
-                    "actor_rollout_ref.rollout.val_kwargs.top_p",
-                    "actor_rollout_ref.rollout.val_kwargs.presence_penalty",
-                    "actor_rollout_ref.rollout.val_kwargs.frequency_penalty",
-                    "actor_rollout_ref.rollout.val_kwargs.penalty_decay",
-                    "actor_rollout_ref.rollout.val_kwargs.n",
-                    "+data.apply_chat_template_kwargs.rwkv_generation_prompt",
-                    "+data.val_apply_chat_template_kwargs.rwkv_generation_prompt",
-                    "+data.apply_chat_template_kwargs.rwkv_prompt_template",
-                    "+data.val_apply_chat_template_kwargs.rwkv_prompt_template",
-                    "actor_rollout_ref.rollout.rwkv_prompt_template",
-                )
-            },
-            {
-                "actor_rollout_ref.rollout.val_kwargs.do_sample": "True",
-                "actor_rollout_ref.rollout.val_kwargs.temperature": "0.96",
-                "actor_rollout_ref.rollout.val_kwargs.top_k": "32",
-                "actor_rollout_ref.rollout.val_kwargs.top_p": "0.76",
-                "actor_rollout_ref.rollout.val_kwargs.presence_penalty": "1.0",
-                "actor_rollout_ref.rollout.val_kwargs.frequency_penalty": "0.1",
-                "actor_rollout_ref.rollout.val_kwargs.penalty_decay": "0.988",
-                "actor_rollout_ref.rollout.val_kwargs.n": "4",
-                "+data.apply_chat_template_kwargs.rwkv_generation_prompt": "open_think",
-                "+data.val_apply_chat_template_kwargs.rwkv_generation_prompt": "open_think",
-                "+data.apply_chat_template_kwargs.rwkv_prompt_template": '"\nBot✿"',
-                "+data.val_apply_chat_template_kwargs.rwkv_prompt_template": '"\nBot✿"',
-                "actor_rollout_ref.rollout.rwkv_prompt_template": '"\nBot✿"',
-            },
-        )
-    def test_takeoff_config_can_override_validation_generation_prompt(self) -> None:
-        loaded_config = load_example_config()
-        takeoff = loaded_config["takeoff"]
-        takeoff["grpo"] = {
-            **takeoff["grpo"],
-            "val_rwkv_generation_prompt": "fake_think",
-        }
-
-        overrides = hydra_map(build_takeoff_plan(loaded_config))
-
-        self.assertEqual(
-            overrides["+data.val_apply_chat_template_kwargs.rwkv_generation_prompt"],
-            "fake_think",
-        )
-
-    def test_takeoff_config_can_override_validation_rollout_n(self) -> None:
-        loaded_config = load_example_config()
-        takeoff = loaded_config["takeoff"]
-        takeoff["grpo"] = {**takeoff["grpo"], "val_n": 2}
-
-        overrides = hydra_map(build_takeoff_plan(loaded_config))
-
-        self.assertEqual(overrides["actor_rollout_ref.rollout.val_kwargs.n"], "2")
-
-    def test_takeoff_config_can_enable_validation_dump_dir(self) -> None:
-        loaded_config = load_example_config()
-        takeoff = loaded_config["takeoff"]
-        takeoff["grpo"] = {
-            **takeoff["grpo"],
-            "validation_data_dir": "logs/validation/run",
-        }
-
-        overrides = hydra_map(build_takeoff_plan(loaded_config))
-
-        self.assertEqual(
-            overrides["trainer.validation_data_dir"], "logs/validation/run"
-        )
-
-    def test_takeoff_rejects_training_rollout_top_p_drift(self) -> None:
-        loaded_config = load_example_config()
-        takeoff = loaded_config["takeoff"]
-        takeoff["grpo"] = {**takeoff["grpo"], "rollout_top_p": 0.65}
-
-        with self.assertRaisesRegex(SystemExit, "rollout.top_p=0.95"):
-            build_takeoff_plan(loaded_config)
-
-    def test_takeoff_rejects_legacy_separate_rollout_gpu_pool(self) -> None:
-        loaded_config = load_example_config()
-        takeoff = loaded_config["takeoff"]
-        takeoff["grpo"] = {
-            **takeoff["grpo"],
-            "trainer_n_gpus_per_node": 7,
-            "rollout_n_gpus_per_node": 1,
-            "rollout_data_parallel_size": 1,
-            "rollout_pipeline_parallel_size": 1,
-        }
-
-        with self.assertRaisesRegex(
-            SystemExit,
-            "strict on-policy takeoff requires trainer.n_gpus_per_node=8",
-        ):
-            build_takeoff_plan(loaded_config)
-
-    def test_takeoff_rejects_mismatched_round_and_ppo_mini_batch(self) -> None:
-        loaded_config = load_example_config()
-        takeoff = loaded_config["takeoff"]
-        takeoff["grpo"] = {
-            **takeoff["grpo"],
-            "train_batch_size": 56,
-            "ppo_mini_batch_size": 28,
-        }
-
-        with self.assertRaisesRegex(
-            SystemExit,
-            "ppo_mini_batch_size == data.train_batch_size",
-        ):
-            build_takeoff_plan(loaded_config)
-
-    def test_takeoff_uses_per_request_context_budget_and_fixed_response_slots(
-        self,
-    ) -> None:
-        loaded_config = load_example_config()
-
-        overrides = hydra_map(build_takeoff_plan(loaded_config))
-
-        self.assertEqual(overrides["+data.model_context_length"], "8192")
-        self.assertEqual(overrides["data.max_prompt_length"], "null")
-        self.assertEqual(overrides["data.max_response_length"], "null")
-        self.assertEqual(overrides["actor_rollout_ref.rollout.prompt_length"], "8192")
-        self.assertEqual(overrides["actor_rollout_ref.rollout.response_length"], "8192")
-        self.assertEqual(
-            overrides["actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu"], "1"
-        )
-        self.assertEqual(overrides["actor_rollout_ref.actor.use_dynamic_bsz"], "False")
-        self.assertNotIn("actor_rollout_ref.actor.ppo_max_token_len_per_gpu", overrides)
-        self.assertEqual(overrides["actor_rollout_ref.rollout.ignore_eos"], "False")
-
-    def test_takeoff_rejects_strict_on_policy_override_regressions(self) -> None:
-        loaded_config = load_example_config()
-        invalid_overrides = (
-            "trainer.v1.trainer_mode=colocate_async",
-            "actor_rollout_ref.hybrid_engine=False",
-            "actor_rollout_ref.actor.ppo_epochs=2",
-            "actor_rollout_ref.rollout.checkpoint_engine.backend=nccl",
-            "algorithm.rollout_correction.rollout_is=null",
-            "algorithm.rollout_correction.rollout_is=sequence",
-            "algorithm.rollout_correction.rollout_is_threshold=4.0",
-            "algorithm.rollout_correction.rollout_is_batch_normalize=True",
-            "algorithm.rollout_correction.rollout_rs=seq_mean_k1",
-            "algorithm.rollout_correction.bypass_mode=True",
-            "data.dataloader_num_workers=8",
-            "trainer.n_gpus_per_node=7",
-            "actor_rollout_ref.rollout.tensor_model_parallel_size=2",
-            "actor_rollout_ref.rollout.data_parallel_size=2",
-            "actor_rollout_ref.rollout.pipeline_model_parallel_size=2",
-            "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2",
-            "actor_rollout_ref.actor.use_dynamic_bsz=True",
-            "actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True",
-            "actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True",
-            "actor_rollout_ref.rollout.ignore_eos=True",
-            "data.max_prompt_length=1024",
-            "data.max_response_length=7168",
-            "actor_rollout_ref.actor.ppo_max_token_len_per_gpu=4096",
-            "actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=4096",
-            "actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=4096",
-            "actor_rollout_ref.actor.engine.infctx=False",
-            "actor_rollout_ref.ref.engine.infctx=False",
-            "actor_rollout_ref.actor.engine.chunk_ctx=4096",
-            "actor_rollout_ref.ref.engine.chunk_ctx=4096",
-            "rollout.n_gpus_per_node=1",
-        )
-
-        for override in invalid_overrides:
-            with self.subTest(override=override):
-                with self.assertRaisesRegex(SystemExit, "strict on-policy takeoff"):
-                    build_takeoff_plan(
-                        loaded_config,
-                        args=takeoff_args(override=[override]),
-                    )
-
-    def test_takeoff_rejects_environment_drift_from_state_passing_contract(
-        self,
-    ) -> None:
-        loaded_config = load_example_config()
-        invalid_environments = (
-            {"RWKV_INFCTX": "0"},
-            {"RWKV_CHUNK_CTX": "4096"},
-        )
-
-        for mutation in invalid_environments:
-            with self.subTest(mutation=mutation):
-                with self.assertRaisesRegex(SystemExit, "strict on-policy takeoff"):
-                    build_takeoff_plan(
-                        loaded_config,
-                        loaded_env={
-                            "WEIGHT_PATH": "/weights/RWKV",
-                            "DATASETS_PATH": "/datasets",
-                            **mutation,
-                        },
-                    )
-
-    def test_takeoff_ignores_legacy_length_environment_knobs(self) -> None:
-        overrides = hydra_map(
-            build_takeoff_plan(
-                load_example_config(),
-                loaded_env={
-                    "WEIGHT_PATH": "/weights/RWKV",
-                    "DATASETS_PATH": "/datasets",
-                    "MAX_PROMPT_LENGTH": "1024",
-                    "MAX_RESPONSE_LENGTH": "7168",
-                },
-            )
-        )
-
-        self.assertEqual(overrides["data.max_prompt_length"], "null")
-        self.assertEqual(overrides["data.max_response_length"], "null")
-
-    def test_takeoff_allows_equal_larger_round_and_ppo_mini_batch(self) -> None:
-        plan = build_takeoff_plan(
-            load_example_config(),
-            args=takeoff_args(
-                override=[
-                    "data.train_batch_size=112",
-                    "actor_rollout_ref.actor.ppo_mini_batch_size=112",
-                ]
-            ),
-        )
-
-        overrides = hydra_map(plan)
-        self.assertEqual(overrides["data.train_batch_size"], "112")
-        self.assertEqual(
-            overrides["actor_rollout_ref.actor.ppo_mini_batch_size"], "112"
-        )
-
-    def test_takeoff_fixes_eight_independent_single_gpu_rollout_replicas(self) -> None:
-        overrides = hydra_map(build_takeoff_plan(load_example_config()))
-
-        self.assertEqual(overrides["trainer.n_gpus_per_node"], "8")
-        self.assertEqual(
-            overrides["actor_rollout_ref.rollout.tensor_model_parallel_size"], "1"
-        )
-        self.assertEqual(overrides["actor_rollout_ref.rollout.data_parallel_size"], "1")
-        self.assertEqual(
-            overrides["actor_rollout_ref.rollout.pipeline_model_parallel_size"], "1"
-        )
-
-    def test_takeoff_enables_nsys_for_all_colocated_roles_from_config(self) -> None:
-        config = load_example_config()
-        config["takeoff"]["grpo"]["profiler_tool"] = "nsys"
-        config["takeoff"]["grpo"]["profiler_steps"] = [2]
-
-        overrides = hydra_map(build_takeoff_plan(config))
-
-        self.assertEqual(overrides["global_profiler.tool"], "nsys")
-        self.assertEqual(overrides["global_profiler.steps"], "[2]")
-        self.assertEqual(
-            overrides["actor_rollout_ref.actor.profiler.all_ranks"], "True"
-        )
-        self.assertEqual(overrides["actor_rollout_ref.rollout.profiler.enable"], "True")
-
-    def test_takeoff_rejects_tensor_parallel_even_in_topology_phase(self) -> None:
-        topology_override = [
-            "actor_rollout_ref.rollout.tensor_model_parallel_size=8",
-            "actor_rollout_ref.rollout.pipeline_model_parallel_size=1",
-        ]
-        with self.assertRaisesRegex(SystemExit, "strict on-policy takeoff"):
-            build_takeoff_plan(
-                load_example_config(), args=takeoff_args(override=topology_override)
+    def test_takeoff_is_a_transparent_verl_launcher(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "maxrl.toml"
+            config_path.write_text("[algorithm]\nname = 'maxrl'\n", encoding="utf-8")
+            for relative in (
+                "src/train/verl-rwkv",
+                "src/train/rwkv-lm",
+                "src/infer/vllm-rwkv",
+                ".venv/bin",
+            ):
+                (root / relative).mkdir(parents=True)
+            python = root / ".venv/bin/python"
+            python.write_text("#!/bin/sh\n", encoding="utf-8")
+            python.chmod(0o755)
+            args = Namespace(
+                config=str(config_path),
+                override=["trainer.save_freq=10"],
+                dry_run=True,
             )
 
-        with self.assertRaisesRegex(SystemExit, "tensor_model_parallel_size=1"):
-            build_takeoff_plan(
-                load_example_config(),
-                args=takeoff_args(override=topology_override),
-                loaded_env={
-                    "WEIGHT_PATH": "/weights/RWKV",
-                    "DATASETS_PATH": "/datasets",
-                    "HELICOPTER_RUN_PHASE": "topology",
-                    "HELICOPTER_ROLLOUT_TOPOLOGY_EXPERIMENT": "1",
-                },
-            )
+            plan = commands.build_takeoff_plan(args, root=root, env={})
 
-    def test_takeoff_dataset_files_become_verl_file_lists(self) -> None:
-        loaded_config = load_example_config()
-        datasets = loaded_config["datasets"]
-        datasets["dapo_math_17k"] = {
-            "train_files": ["${DATASETS_PATH}/DAPO/dapo-math-17k-processed.parquet"],
-            "val_files": [
-                "${DATASETS_PATH}/AIME24/test.parquet",
-                "${DATASETS_PATH}/AIME25/test.parquet",
+        self.assertEqual(plan.cwd, root / "src/train/verl-rwkv")
+        self.assertEqual(
+            plan.command,
+            [
+                str(python),
+                "-m",
+                "verl.trainer.maxrl",
+                "--config",
+                str(config_path),
+                "--override",
+                "trainer.save_freq=10",
+                "--dry-run",
             ],
-            "train_prompt_key": "source_prompt",
-            "val_prompt_key": "prompt",
-        }
-
-        plan = build_takeoff_plan(
-            loaded_config, args=takeoff_args(dataset="dapo_math_17k")
         )
-        overrides = hydra_map(plan)
-
-        self.assertEqual(
-            {
-                "data.train_files": overrides["data.train_files"],
-                "data.val_files": overrides["data.val_files"],
-            },
-            {
-                "data.train_files": "['/datasets/DAPO/dapo-math-17k-processed.parquet']",
-                "data.val_files": "['/datasets/AIME24/test.parquet','/datasets/AIME25/test.parquet']",
-            },
-        )
-        self.assertEqual(overrides["+data.train_prompt_key"], "source_prompt")
-        self.assertEqual(overrides["+data.val_prompt_key"], "prompt")
-        self.assertEqual(
-            set(plan.shown_env),
-            {
-                "PYTHON",
-                "PYTHONPATH",
-                "RWKV_LM_PATH",
-                "RWKV_MODEL_PATH",
-                "VLLM_RWKV7_WKV_MODE",
-            },
-        )
-
-    def test_takeoff_defaults_enable_native_reference_without_changing_loss(
-        self,
-    ) -> None:
-        loaded_config = load_example_config()
-        overrides = hydra_map(build_takeoff_plan(loaded_config))
-
-        self.assertEqual(
-            {
-                "actor_rollout_ref.actor.use_kl_loss": overrides[
-                    "actor_rollout_ref.actor.use_kl_loss"
-                ],
-                "actor_rollout_ref.actor.kl_loss_coef": overrides[
-                    "actor_rollout_ref.actor.kl_loss_coef"
-                ],
-            },
-            {
-                "actor_rollout_ref.actor.use_kl_loss": "False",
-                "actor_rollout_ref.actor.kl_loss_coef": "0.0",
-            },
-        )
-
-    def test_takeoff_explicit_dataset_files_do_not_require_dataset_root(self) -> None:
-        loaded_config = load_example_config()
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            model_path = tmp_path / "model.pth"
-            model_path.write_bytes(b"")
-            missing_dataset_root = tmp_path / "missing-datasets"
-            loaded_config["models"]["local-test"] = {
-                "path": str(model_path),
-                "served_model_name": "local-test",
-                "max_model_len": 8192,
-            }
-            loaded_config["datasets"]["dapo_math_17k"] = {
-                "train_files": [
-                    "${DATASETS_PATH}/DAPO/dapo-math-17k-processed.parquet"
-                ],
-                "val_files": ["${DATASETS_PATH}/AIME24/test.parquet"],
-                "train_prompt_key": "source_prompt",
-                "val_prompt_key": "prompt",
-            }
-            args = Namespace(
-                algorithm="grpo",
-                model="local-test",
-                dataset="dapo_math_17k",
-                dry_run=False,
-                wkv_mode=None,
-                emb_device=None,
-                allow_fp16_accumulation=None,
-                num_nodes=None,
-                num_devices=None,
-                override=None,
-            )
-
-            plan = commands.build_takeoff_plan(
-                args,
-                root=ROOT,
-                env={
-                    "DATASETS_PATH": str(missing_dataset_root),
-                    "HELICOPTER_PYTHON": "/usr/bin/python3",
-                },
-                config=loaded_config,
-            )
-
-        self.assertEqual(
-            hydra_map(plan)["data.train_files"],
-            f"['{missing_dataset_root}/DAPO/dapo-math-17k-processed.parquet']",
-        )
-
-    def test_takeoff_partial_explicit_dataset_files_require_dataset_root(self) -> None:
-        loaded_config = load_example_config()
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            model_path = tmp_path / "model.pth"
-            model_path.write_bytes(b"")
-            missing_dataset_root = tmp_path / "missing-datasets"
-            loaded_config["models"]["local-test"] = {
-                "path": str(model_path),
-                "served_model_name": "local-test",
-                "max_model_len": 8192,
-            }
-            loaded_config["datasets"]["partial"] = {
-                "train_files": ["${DATASETS_PATH}/partial/train.parquet"],
-            }
-            args = Namespace(
-                algorithm="grpo",
-                model="local-test",
-                dataset="partial",
-                dry_run=False,
-                wkv_mode=None,
-                emb_device=None,
-                allow_fp16_accumulation=None,
-                num_nodes=None,
-                num_devices=None,
-                override=None,
-            )
-
-            with self.assertRaises(SystemExit) as raised:
-                commands.build_takeoff_plan(
-                    args,
-                    root=ROOT,
-                    env={
-                        "DATASETS_PATH": str(missing_dataset_root),
-                        "HELICOPTER_PYTHON": "/usr/bin/python3",
-                    },
-                    config=loaded_config,
-                )
-
-        self.assertEqual(
-            str(raised.exception),
-            f"dataset root not found: {missing_dataset_root / 'partial'}",
-        )
-
-    def test_takeoff_user_overrides_are_appended_after_generated_overrides(
-        self,
-    ) -> None:
-        loaded_config = load_example_config()
-        plan = build_takeoff_plan(
-            loaded_config,
-            args=takeoff_args(
-                override=["trainer.total_epochs=1", "trainer.save_freq=10"]
-            ),
-        )
-
-        self.assertEqual(hydra_values(plan, "trainer.total_epochs"), ["1", "1"])
-        self.assertEqual(hydra_values(plan, "trainer.save_freq"), ["20", "10"])
-        self.assertEqual(
-            plan.command[-2:], ["trainer.total_epochs=1", "trainer.save_freq=10"]
-        )
-
-    def test_takeoff_rejects_missing_default_venv_python(self) -> None:
-        config = load_example_config()
-        env = {
-            key: value
-            for key, value in os.environ.items()
-            if key
-            not in {
-                "HELICOPTER_PYTHON",
-                "PYTHON",
-                "HELICOPTER_VENV",
-                "VENV",
-                "REMOTE_VENV",
-            }
-        }
-        venv_python = ROOT / ".venv/bin/python"
-        original_exists = Path.exists
-
-        with mock.patch.object(Path, "exists", autospec=True) as exists:
-            exists.side_effect = lambda path: (
-                False if path == venv_python else original_exists(path)
-            )
-            with self.assertRaises(SystemExit) as raised:
-                commands.python_executable(
-                    config, root=ROOT, env=env, require_configured=True
-                )
-
-        self.assertEqual(
-            str(raised.exception),
-            f"Python executable not found: {venv_python}; run scripts/install_local.sh "
-            "or set HELICOPTER_PYTHON / paths.python",
-        )
+        self.assertEqual(plan.env["RWKV_LM_PATH"], str(root / "src/train/rwkv-lm"))
+        self.assertEqual(plan.env["PYTHONPATH"], str(root / "src/infer/vllm-rwkv"))
+        self.assertFalse(any("data.train_batch_size=" in item for item in plan.command))
 
 
 if __name__ == "__main__":

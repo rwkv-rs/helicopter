@@ -1,274 +1,114 @@
 # Helicopter
 
-Helicopter is an RWKV leaderboard-run framework. It keeps the pieces needed for
-RWKV vLLM serving, verl-based training, and benchmark-oriented experiment runs
-in one repository, with a small CLI for launching common workflows.
+Helicopter is the product-level launcher for RWKV serving and MaxRL training.
+Domain behavior stays with the component that implements it:
 
-The current focus is RWKV7:
+- `helicopter infer` launches `vllm-rwkv`.
+- `helicopter takeoff` delegates a complete MaxRL config to `verl-rwkv`.
+- `scripts/install_local.sh` and `scripts/install_remote.sh` prepare the
+  selected product environment.
 
-- `infer`: start a vLLM server for an RWKV checkpoint.
-- `takeoff`: start verl training for an RWKV checkpoint. The supported takeoff
-  path is GRPO.
-- `scripts/install_remote.sh`: prepare the configured SSH remote host, sync this
-  repository, and run the local installer remotely.
-- `scripts/run_remote.sh`: prepare the remote host, run a command there, and copy
-  configured result paths back.
-- `scripts/install_local.sh`: create/update the project `.venv`, install the
-  selected capability dependency groups, and install the corresponding local
-  editable `vllm`, `rwkv-lm`, and `verl` packages.
+Helicopter does not compile MaxRL configs, prepare training datasets, inspect
+rollouts, verify optimizer rounds, or implement a second evaluator.
 
 ## Repository layout
 
 ```text
-configs/
-  example.toml              # public example experiment config
-  local/*.toml              # machine-local experiment configs
-scripts/
-  install_local.sh          # prepare the current machine/workspace
-  install_remote.sh         # sync and prepare the remote SSH host
-  run_remote.sh             # prepare, run a remote command, and collect results
-src/cli/helicopter_cli/     # Python CLI package
-src/infer/vllm-rwkv/        # vLLM RWKV implementation
-src/train/rwkv-lm/          # RWKV training code
-src/train/verl-rwkv/        # verl RWKV integration
+configs/example.toml        # serving-only example
+scripts/install_local.sh    # prepare this checkout
+scripts/install_remote.sh   # sync and prepare the configured remote checkout
+src/cli/helicopter_cli/     # thin product launcher
+src/infer/vllm-rwkv/        # RWKV vLLM implementation
+src/train/rwkv-lm/          # RWKV training engine
+src/train/verl-rwkv/        # Verl RWKV and MaxRL implementation
 ```
 
-`AGENTS.md` is intentionally ignored in this repository because it may contain
-machine-specific remote connection details. Use `.env.example` and
-`AGENTS.example.md` as public templates.
+## Environment preparation
 
-## Environment files and configs
+Copy `.env.example` to a private `.env.local` or `.env.remote`. Keep weights,
+datasets, credentials, and machine-local paths out of Git.
 
-Copy `.env.example` to a private env file before running commands:
-
-```bash
-cp .env.example .env.local
-```
-
-For remote SSH use, keep the private remote values in `.env.remote`.
-
-The env files use simple dotenv syntax:
-
-```text
-KEY=value
-export KEY=value
-```
-
-Do not put shell expressions in env files that the Python CLI must read. Values
-already present in the command environment override values from `.env.local` or
-`.env.remote`, which makes command-scoped overrides predictable:
-
-```bash
-WEIGHT_PATH=/home/caizus/Weights/RWKV helicopter infer g1g-1.5b
-```
-
-Experiment settings live in TOML files. If `--config` is omitted, the CLI uses
-the newest `configs/local/*.toml`; otherwise it falls back to
-`configs/example.toml`. Each TOML is one complete experiment: the CLI does not
-load a second runtime profile, inherit another TOML, or merge a model/dataset
-catalog into it. Machine-local paths remain in `.env.local` or `.env.remote`.
-
-Important config sections:
-
-- `[experiment]`: run identity, seed, and optimizer-step count.
-- `[model]`: the selected checkpoint and prompt mode. The context limit is
-  parsed from the checkpoint filename's `ctxN` suffix.
-- `[data.train]` and `[[data.validation.suites]]`: concrete training and
-  validation inputs. `prompt_field` maps a source dataset's conversation
-  column when it is not named `prompt`.
-- `[algorithm]`, `[reward]`, and `[optimizer]`: learning semantics.
-- `[generation.train]` and `[generation.validation]`: sampling semantics.
-- `[execution]` and `[execution.rollout]`: hardware topology and capacity
-  limits; these remain in the same TOML rather than a separate runtime file.
-- `[evaluation]`, `[checkpoint]`, and `[logging]`: lifecycle and observability.
-
-The public names describe their units and scope. For example,
-`prompts_per_step` is the number of prompts in one optimizer round,
-`responses_per_prompt` is the MaxRL/GRPO group size, and
-`generation_token_budget_per_replica` is the rollout scheduler's aggregate
-serving budget.
-
-Prompt and response limits are not configuration knobs. Before GPU workers
-start, the dataset loader measures every selected train and validation prompt
-after applying its corresponding chat template. The maximum response length is
-then derived as `ctxN - maximum_templated_prompt_length`. A prompt that leaves
-no response capacity fails closed. Training always stops at EOS and uses one
-response per fixed microbatch slot; dynamic token microbatching is disabled.
-
-The tracked MaxRL DAPO experiment uses the deduplicated
-`open-r1/DAPO-Math-17k-Processed` `all/train` split. Its conversation column is
-`source_prompt`; all 17,398 unique rows are used directly, without repeating
-the source parquet or applying a random `max_records` subsample.
-
-Strict implementation details such as one PPO epoch, mini-batch equality,
-native reference enablement, token-level rollout correction, V1 sync mode, and
-colocated weight transport are derived and validated by the CLI rather than
-repeated as user-facing switches.
-
-## Prepare the environment
-
-Remote preparation is the expected path for RWKV vLLM/verl work:
-
-```bash
-scripts/install_remote.sh
-```
-
-The remote installer:
-
-- checks that the configured SSH host has the expected build tools and shared roots;
-- syncs this repository with `rsync`;
-- preserves the remote `.venv`;
-- runs `scripts/install_local.sh` inside the remote repo path.
-- builds `vllm-rwkv` with its reduced `VLLM_BUILD_PROFILE=rwkv` native target set.
-
-Use `scripts/run_remote.sh` when you want one command to prepare the host, run
-code on `rwkv-sha-pro6000x8`, and copy results back:
-
-```bash
-scripts/run_remote.sh -- helicopter takeoff --dataset gsm8k g1g-1.5b grpo
-```
-
-The run wrapper calls `scripts/install_remote.sh` first by default. Use
-`--no-install` to only sync before running, or `--no-prepare` when the remote
-tree is already current.
-
-For local or already-synced workspace preparation:
+Prepare the current checkout:
 
 ```bash
 INSTALL_COMPONENTS=rwkv-lm,vllm-rwkv,verl-rwkv,dev scripts/install_local.sh
 ```
 
-Useful install overrides:
+Prepare the configured remote checkout:
 
 ```bash
-INSTALL_COMPONENTS=rwkv-lm,dev scripts/install_local.sh
-INSTALL_COMPONENTS=vllm-rwkv,dev VLLM_REBUILD=1 scripts/install_local.sh
-INSTALL_COMPONENTS=verl-rwkv,rwkv-lm,dev VERL_REINSTALL=1 scripts/install_local.sh
-INSTALL_COMPONENTS=verl-rwkv,verl-liger,dev scripts/install_local.sh
+scripts/install_remote.sh
 ```
 
-`pyproject.toml` defines separately selectable `vllm-rwkv`, `verl-rwkv`, and
-`rwkv-lm` runtime groups. `dev` contains `pre-commit` and test tooling;
-`verl-liger` is an explicit optional accelerator. `full` is not a dependency
-group and is rejected before synchronization or native builds.
+The root `helicopter-dev` control repository owns remote execution, resource
+locking, environment recovery, and artifact collection. This product checkout
+does not provide a second remote runner.
 
-Both local and remote installation use the RWKV-only vLLM build profile. The
-profile compiles `rwkv7_ops` without the generic stable/MoE extensions or vLLM
-external CUDA projects; `VLLM_BUILD_PROFILE=full` is intentionally rejected by
-the root installer.
+## Serving
 
-Use `DRY_RUN=1` to print installer actions without executing them:
-
-```bash
-DRY_RUN=1 scripts/install_remote.sh
-```
-
-## CLI usage
-
-Run the CLI through the installed console script:
-
-```bash
-helicopter --help
-```
-
-During development, the package can also be run directly:
-
-```bash
-PYTHONPATH=src/cli python3 -m helicopter_cli --help
-```
-
-### Start RWKV vLLM serving
-
-Dry-run first to inspect the exact command and environment:
+Inspect the command:
 
 ```bash
 helicopter infer --config configs/example.toml --dry-run g1g-1.5b
 ```
 
-Start the server:
+Start serving:
 
 ```bash
 helicopter infer --config configs/example.toml g1g-1.5b
 ```
 
-Override serving parameters from the CLI when an experiment explicitly needs
-them:
+Serving-specific overrides remain on `infer`, for example:
 
 ```bash
-helicopter infer g1g-7.2b \
+helicopter infer --config configs/example.toml g1g-7.2b \
   --host 0.0.0.0 \
   --port 8000 \
   --tensor-parallel-size 1 \
-  --gpu-memory-utilization 0.85 \
-  --max-num-seqs 2048 \
-  --max-num-batched-tokens 65536
+  --gpu-memory-utilization 0.85
 ```
 
-RWKV vLLM uses upstream defaults by default. For RWKV7, set only WKV mode unless
-you are debugging a specific vLLM issue. GRPO `takeoff` keeps embedding
-preprocessing on GPU with `HELICOPTER_TAKEOFF_EMB_DEVICE=gpu`:
+## MaxRL training
 
-```bash
-VLLM_RWKV7_WKV_MODE=fp32io16 helicopter infer g1g-1.5b
+The MaxRL contract and canonical DAPO config are owned by `verl-rwkv`:
+
+```text
+src/train/verl-rwkv/verl/trainer/maxrl.py
+src/train/verl-rwkv/examples/rwkv_trainer/config/maxrl_dapo_math_17k.toml
 ```
 
-### Start GRPO takeoff training
-
-Dry-run a GSM8K GRPO run:
+Helicopter passes the file through without interpreting or merging it:
 
 ```bash
 helicopter takeoff \
-  --config configs/example.toml \
-  --dry-run \
-  g1g-1.5b grpo
+  --config src/train/verl-rwkv/examples/rwkv_trainer/config/maxrl_dapo_math_17k.toml \
+  --dry-run
 ```
 
-Start the run:
+Start training by removing `--dry-run`. Explicit Hydra overrides are forwarded
+to Verl and validated there:
 
 ```bash
 helicopter takeoff \
-  --config configs/example.toml \
-  g1g-1.5b grpo
-```
-
-Pass extra Hydra overrides to the underlying verl entrypoint:
-
-```bash
-helicopter takeoff g1g-1.5b grpo \
-  --override trainer.total_epochs=1 \
+  --config src/train/verl-rwkv/examples/rwkv_trainer/config/maxrl_dapo_math_17k.toml \
   --override trainer.save_freq=10
 ```
 
-`takeoff` requires the project Python executable to exist. By default it uses
-the configured `.venv/bin/python`; set `HELICOPTER_PYTHON` or `paths.python` only
-when an explicit override is intended:
+The canonical config is one complete experiment; it is not split into a
+runtime file. Verl derives the context length from the checkpoint filename,
+derives prompt/response capacity from the templated examples, enforces EOS
+stopping and fixed one-response microbatch slots, and owns MaxRL group
+filtering, sampling, optimization, and validation semantics.
 
-```bash
-HELICOPTER_PYTHON=/home/caizus/Projects/MachineLearning/helicopter/.venv/bin/python \
-helicopter takeoff --dataset gsm8k g1g-1.5b grpo
-```
-
-## Common command-scoped overrides
-
-```bash
-WEIGHT_PATH=/home/caizus/Weights/RWKV
-DATASETS_PATH=/home/caizus/Datasets
-HELICOPTER_NUM_NODES=1
-HELICOPTER_NUM_DEVICES=8
-HELICOPTER_TAKEOFF_WKV_MODE=fp32io16
-HELICOPTER_TAKEOFF_EMB_DEVICE=gpu
-```
-
-Keep checkpoint files, datasets, `.env.local`, `.env.remote`, and machine-local
-agent notes out of the public repository.
+Full benchmark evaluation will use the evaluation component's public
+`helicopter eval --config <path>` contract after that separate LightEval change
+lands. MaxRL does not import evaluator-private functions or implement a second
+evaluator.
 
 ## Lightweight checks
 
-The root CLI has standard-library tests and does not require the full RWKV
-dependency group:
-
 ```bash
-PYTHONPATH=src/cli python3 -m unittest tests.test_cli
+PYTHONPATH=src/cli python3 -m pytest -q tests/test_cli.py tests/test_install_policy.py
 PYTHONPATH=src/cli python3 -m compileall -q src/cli/helicopter_cli tests
-bash -n scripts/install_local.sh scripts/install_remote.sh scripts/run_remote.sh
+bash -n scripts/install_local.sh scripts/install_remote.sh
 ```

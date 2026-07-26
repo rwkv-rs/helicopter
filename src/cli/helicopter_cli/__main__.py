@@ -15,10 +15,13 @@ from .paths import find_root
 from .runner import run_command
 
 
-def add_common_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--config", help="TOML config path; defaults to the newest configs/local/*.toml")
-    parser.add_argument("--env-file", default=DEFAULT_ENV_FILE, help="dotenv file to load first")
-    parser.add_argument("--dry-run", action="store_true", help="print the command without executing it")
+def add_runtime_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--env-file", default=DEFAULT_ENV_FILE, help="dotenv file to load first"
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="print the command without executing it"
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -26,7 +29,11 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     infer = subparsers.add_parser("infer", help="start vLLM for an RWKV model")
-    add_common_options(infer)
+    add_runtime_options(infer)
+    infer.add_argument(
+        "--config",
+        help="serving TOML; defaults to configs/example.toml",
+    )
     infer.add_argument("model", help="model alias from configs")
     infer.add_argument("--wkv-mode", choices=WKV_MODES)
     infer.add_argument("--emb-device", choices=EMB_DEVICES)
@@ -46,24 +53,14 @@ def build_parser() -> argparse.ArgumentParser:
     infer.add_argument("--enable-auto-tool-choice", action="store_true", default=None)
     infer.set_defaults(plan_builder=build_infer_plan)
 
-    takeoff = subparsers.add_parser("takeoff", help="start verl training for an RWKV model")
-    add_common_options(takeoff)
-    takeoff.add_argument("model", help="model alias from configs")
-    takeoff.add_argument("algorithm", choices=("grpo",))
-    takeoff.add_argument(
-        "--dataset",
-        help="legacy dataset alias; grouped experiment configs select their own data files",
+    takeoff = subparsers.add_parser(
+        "takeoff", help="launch a Verl-owned MaxRL config"
     )
-    takeoff.add_argument("--num-nodes", type=int)
-    takeoff.add_argument("--num-devices", type=int)
-    takeoff.add_argument("--wkv-mode", choices=WKV_MODES)
-    takeoff.add_argument("--emb-device", choices=EMB_DEVICES)
+    add_runtime_options(takeoff)
+    takeoff.add_argument("--config", required=True, help="Verl-owned MaxRL TOML")
     takeoff.add_argument(
-        "--allow-fp16-accumulation",
-        action=argparse.BooleanOptionalAction,
-        default=None,
+        "--override", action="append", help="operational override validated by Verl"
     )
-    takeoff.add_argument("--override", action="append", help="extra Hydra override passed to verl")
     takeoff.set_defaults(plan_builder=build_takeoff_plan)
 
     return parser
@@ -74,16 +71,19 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     root = find_root()
     env, _ = load_env(root, args.env_file)
-    config, _ = load_config(root, args.config)
-    prepend_venv_path(env, root, config)
+    prepend_venv_path(env, root)
 
-    plan = args.plan_builder(args, root=root, env=env, config=config)
+    if args.command == "takeoff":
+        plan = args.plan_builder(args, root=root, env=env)
+    else:
+        config, _ = load_config(root, args.config)
+        plan = args.plan_builder(args, root=root, env=env, config=config)
     return run_command(
         plan.command,
         cwd=plan.cwd,
         env=plan.env,
         shown_env=plan.shown_env,
-        dry_run=args.dry_run,
+        dry_run=args.dry_run and args.command != "takeoff",
     )
 
 
