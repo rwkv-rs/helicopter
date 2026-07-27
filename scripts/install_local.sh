@@ -490,6 +490,30 @@ for module in sys.argv[1:]:
 PY
 }
 
+vllm_editable_ready() {
+  local target_venv="${1:-$VENV}"
+  "$target_venv/bin/python" - "$VLLM/vllm" <<'PY' >/dev/null
+import importlib.util
+import sys
+from pathlib import Path
+
+spec = importlib.util.find_spec("vllm")
+if spec is None:
+    raise SystemExit(1)
+
+locations = tuple(spec.submodule_search_locations or ())
+if len(locations) == 1:
+    package_root = Path(locations[0])
+elif spec.origin is not None:
+    package_root = Path(spec.origin).parent
+else:
+    raise SystemExit(1)
+
+expected_root = Path(sys.argv[1])
+raise SystemExit(package_root.resolve() != expected_root.resolve())
+PY
+}
+
 verl_ready() {
   "$VENV/bin/python" - <<'PY' >/dev/null
 import verl
@@ -519,7 +543,8 @@ install_vllm_package() {
 
   if [[ "$VLLM_REBUILD" != "1" && -f "$target_stamp" ]] &&
      [[ "$(cat "$target_stamp")" == "$fingerprint" ]] &&
-     vllm_native_ready "$target_venv"; then
+     vllm_native_ready "$target_venv" &&
+     vllm_editable_ready "$target_venv"; then
     echo "vLLM native extensions are already built for this source and environment; reusing existing install"
     return 0
   fi
@@ -532,6 +557,7 @@ install_vllm_package() {
     "${pip[@]}" --no-deps --no-build-isolation -e "$VLLM" --torch-backend=auto
 
   vllm_native_ready "$target_venv"
+  vllm_editable_ready "$target_venv"
   fingerprint="$(vllm_native_fingerprint "$target_venv")"
   printf '%s\n' "$fingerprint" >"$target_stamp"
 }
