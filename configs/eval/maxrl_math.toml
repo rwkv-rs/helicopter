@@ -9,8 +9,8 @@ weights = ["${MAXRL_EVAL_WEIGHT}"]
 wkv_modes = ["fp32io16"]
 
 benchmarks = [
-  "aime24",
   "aime25",
-  "amc23",
+  "gsm8k",
+  "asdiv",
   "math_500",
 ]

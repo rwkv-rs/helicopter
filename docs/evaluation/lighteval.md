@@ -47,8 +47,9 @@ benchmarks = [
 
 MaxRL 训练期验证使用
 [`configs/eval/maxrl_math.toml`](../../configs/eval/maxrl_math.toml)。它显式设置
-`publish = false`、`wkv_modes = ["fp32io16"]`，并只列出 `aime24`、`aime25`、
-`amc23`、`math_500`。权重与结果路径由 Verl 在每次验证触发时通过环境变量提供；
+`publish = false`、`wkv_modes = ["fp32io16"]`，并只列出 LightEval 原生支持的
+`aime25`、`gsm8k`、`asdiv`、`math_500`。权重与结果路径由 Verl 在每次验证触发时
+通过环境变量提供；
 该模式不会创建 Scoreboard client，不做 API preflight，也不会访问后端数据库。
 
 superset 由 LightEval 自己展开，所以配置不需要列出展开后的数百个 task。仓库默认

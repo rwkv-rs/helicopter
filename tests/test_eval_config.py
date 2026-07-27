@@ -68,7 +68,7 @@ publish = false
 result_path = "${MAXRL_EVAL_RESULT_PATH}"
 weights = ["${MAXRL_EVAL_WEIGHT}"]
 wkv_modes = ["fp32io16"]
-benchmarks = ["aime24", "aime25", "amc23", "math_500"]
+benchmarks = ["aime25", "gsm8k", "asdiv", "math_500"]
 """,
         ),
         environment,
@@ -213,12 +213,12 @@ publish = false
 result_path = "${MAXRL_EVAL_RESULT_PATH}"
 weights = ["${MAXRL_EVAL_WEIGHT}"]
 wkv_modes = ["fp32io16"]
-benchmarks = ["aime24", "aime25", "amc23", "math_500"]
+benchmarks = ["aime25", "gsm8k", "asdiv", "math_500"]
 """,
     )
     task = {
-        "selector": "aime24",
-        "task_name": "aime24|0",
+        "selector": "gsm8k",
+        "task_name": "gsm8k|0",
     }
     monkeypatch.setattr(
         evaluate,

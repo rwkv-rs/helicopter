@@ -38,7 +38,6 @@ benchmarks = [
   "math_500",
   "aime24",
   "aime25",
-  "amc23",
   "olympiad_bench",
   "minerva_math",
   "svamp",

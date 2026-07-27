@@ -9,9 +9,7 @@ import re
 import shutil
 import uuid
 from contextlib import contextmanager
-from functools import cache
 from pathlib import Path
-from types import ModuleType
 from typing import Mapping
 
 from .config import ConfigError, LightEvalConfig
@@ -26,23 +24,6 @@ from .publish import (
 
 
 MAX_NEW_TOKENS = 8192
-_AMC23_METADATA = """
-name:
-AMC 2023
-
-dataset:
-math-ai/amc23
-
-abstract:
-The 40 problems from the 2023 AMC 10A, AMC 10B, AMC 12A, and AMC 12B
-competitions.
-
-languages:
-english
-
-tags:
-math, reasoning
-"""
 _MARKUP = re.compile(r"\*\*|__|`+")
 _BOXED = re.compile(
     r"\\boxed\{\s*(?:([A-Z])|\\(?:text|mathrm)\{\s*([A-Z])\s*\})\s*\}",
@@ -58,40 +39,6 @@ _BARE = re.compile(
     r"^\s*(?:([A-Z])\.?|\(([A-Z])\)|\[([A-Z])\])\s*$",
     re.IGNORECASE,
 )
-
-
-@cache
-def _custom_tasks_module() -> ModuleType:
-    from lighteval.metrics.metrics import Metrics
-    from lighteval.tasks.lighteval_task import LightevalTaskConfig
-    from lighteval.tasks.requests import Doc
-    from lighteval.tasks.tasks.aime import MATH_PROMPT_TEMPLATE
-
-    def amc23_prompt(line, task_name: str | None = None) -> Doc:
-        return Doc(
-            task_name=task_name,
-            query=MATH_PROMPT_TEMPLATE.format(prompt=line["question"]),
-            choices=[str(line["answer"])],
-            gold_index=0,
-        )
-
-    module = ModuleType("helicopter_lighteval.evaluate", _AMC23_METADATA)
-    module.TASKS_TABLE = [
-        LightevalTaskConfig(
-            name="amc23",
-            prompt_function=amc23_prompt,
-            hf_repo="math-ai/amc23",
-            hf_subset="default",
-            hf_avail_splits=["test"],
-            evaluation_splits=["test"],
-            few_shots_split=None,
-            few_shots_select=None,
-            generation_size=None,
-            metrics=[Metrics.pass_at_k_math(sample_params={"k": 1, "n": 1})],
-            version=1,
-        )
-    ]
-    return module
 
 
 def run(*, config_path: Path, env: Mapping[str, str], dry_run: bool) -> int:
@@ -497,13 +444,11 @@ def _evaluate(
         ),
     )
     tracker = EvaluationTracker(output_dir=str(output_dir), save_details=True)
-    custom_tasks = _custom_tasks_module()
     parameters = PipelineParameters(
         launcher_type=ParallelismManager.VLLM,
         max_samples=None,
         remove_reasoning_tags=False,
         load_tasks_multilingual=True,
-        custom_tasks_directory=custom_tasks,
     )
     with _process_environment(
         {
@@ -542,11 +487,9 @@ def _resolve_benchmarks(
     version = importlib.metadata.version("lighteval")
     if version != "0.13.0":
         raise ConfigError(f"LightEval 0.13.0 is required, found {version}")
-    custom_tasks = _custom_tasks_module()
     inventory = Registry(
         tasks=None,
         load_multilingual=True,
-        custom_tasks=custom_tasks,
     ).get_tasks_dump()
     metadata: dict[str, tuple[str, dict[str, object]]] = {}
     for row in inventory:
@@ -569,7 +512,6 @@ def _resolve_benchmarks(
             registry = Registry(
                 tasks=selector,
                 load_multilingual=True,
-                custom_tasks=custom_tasks,
             )
         except ValueError:
             skipped.append(selector)
