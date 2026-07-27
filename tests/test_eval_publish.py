@@ -269,6 +269,39 @@ def test_sample_audit_retains_bounded_text_and_scorer_contract(
     assert "output_tokens" not in destination.read_text(encoding="utf-8")
 
 
+def test_sample_audit_preserves_asdiv_string_gold_bug(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    results, rows, artifact = _standard()
+    rows[0]["doc"].update(
+        task_name="asdiv|0",
+        choices="12",
+        gold_index=[0],
+    )
+    monkeypatch.setattr(
+        publish,
+        "_read_standard_results",
+        lambda _path: (results, rows, artifact),
+    )
+    destination = tmp_path / "lighteval_sample_audit.json"
+
+    publish.write_sample_audit(
+        output_dir=tmp_path,
+        destination=destination,
+        task_names=["asdiv|0"],
+        weight_sha256="a" * 64,
+        wkv_mode="fp32io16",
+        samples_per_task=1,
+    )
+
+    sample = json.loads(destination.read_text(encoding="utf-8"))["tasks"][
+        "asdiv|0"
+    ][0]
+    assert sample["standard_answer"] == ["12"]
+    assert sample["scorer_input"]["golds"] == ["1"]
+
+
 def test_prepare_staging_creates_private_owned_directory(tmp_path: Path) -> None:
     staging = tmp_path / "private" / "eval"
     resolved = publish.prepare_staging(staging)

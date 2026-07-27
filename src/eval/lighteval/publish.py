@@ -414,7 +414,7 @@ def _sample_audit_row(
         isinstance(document_index, bool)
         or not isinstance(document_index, int)
         or not isinstance(question, str)
-        or not isinstance(choices, list)
+        or not isinstance(choices, (str, list))
         or not isinstance(metric, dict)
         or not isinstance(model_outputs, list)
         or any(not isinstance(value, str) for value in model_outputs)
@@ -422,21 +422,29 @@ def _sample_audit_row(
         raise PublicationError(f"LightEval detail is invalid for {task_name}")
 
     indices = gold_index if isinstance(gold_index, list) else [gold_index]
+    choice_count = 1 if isinstance(choices, str) else len(choices)
     if any(
         isinstance(index, bool)
         or not isinstance(index, int)
         or index < 0
-        or index >= len(choices)
+        or index >= choice_count
         for index in indices
     ):
         raise PublicationError(f"LightEval gold index is invalid for {task_name}")
-    standard_answers = [
-        answer
-        for index in indices
-        for answer in (
-            choices[index] if isinstance(choices[index], list) else [choices[index]]
-        )
-    ]
+    if isinstance(choices, str):
+        standard_answers = [choices]
+        scorer_golds = [choices[index] for index in indices]
+    else:
+        standard_answers = [
+            answer
+            for index in indices
+            for answer in (
+                choices[index]
+                if isinstance(choices[index], list)
+                else [choices[index]]
+            )
+        ]
+        scorer_golds = list(standard_answers)
     if any(not isinstance(answer, str) for answer in standard_answers):
         raise PublicationError(f"LightEval gold answer is invalid for {task_name}")
 
@@ -453,7 +461,7 @@ def _sample_audit_row(
         "model_input_text": _model_input_text(task_name, model_input),
         "model_output_text": model_outputs,
         "scorer_input": {
-            "golds": standard_answers,
+            "golds": scorer_golds,
             "predictions": predictions,
         },
         "scorer_output": metric,
