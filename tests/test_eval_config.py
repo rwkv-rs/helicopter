@@ -81,6 +81,56 @@ benchmarks = ["aime25", "gsm8k", "asdiv", "math_500"]
     assert config.wkv_modes == ("fp32io16",)
 
 
+def test_http_backend_requires_runtime_pool_manifest(tmp_path: Path) -> None:
+    environment = _environment(tmp_path)
+    environment.pop("HELICOPTER_SCOREBOARD_URL")
+    environment.pop("HELICOPTER_SCOREBOARD_TOKEN")
+    environment.pop("HELICOPTER_EVAL_STAGING_ROOT")
+    environment["MAXRL_EVAL_WEIGHT"] = "a.pth"
+    environment["MAXRL_EVAL_RESULT_PATH"] = str(tmp_path / "metrics.json")
+    config_path = _write_config(
+        tmp_path / "eval.toml",
+        """
+schema_version = 1
+backend = "vllm_http"
+publish = false
+result_path = "${MAXRL_EVAL_RESULT_PATH}"
+weights = ["${MAXRL_EVAL_WEIGHT}"]
+wkv_modes = ["fp32io16"]
+benchmarks = ["aime25"]
+""",
+    )
+
+    with pytest.raises(ConfigError, match="HELICOPTER_VLLM_POOL_MANIFEST"):
+        LightEvalConfig.read(config_path, environment)
+
+    manifest = tmp_path / "pool.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "global_step": 7,
+                "wkv_mode": "fp32io16",
+                "vllm_version": "0.23.1.dev0",
+                "max_model_len": 10240,
+                "replicas": [
+                    {
+                        "base_url": "http://10.0.0.1:8000",
+                        "max_concurrency": 64,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    environment["HELICOPTER_VLLM_POOL_MANIFEST"] = str(manifest)
+    environment["MAXRL_EVAL_STEP"] = "7"
+    config = LightEvalConfig.read(config_path, environment)
+
+    assert config.backend == "vllm_http"
+    assert config.vllm_pool_manifest == manifest
+
+
 @pytest.mark.parametrize(
     ("body", "message"),
     [

@@ -1,4 +1,5 @@
 schema_version = 1
+backend = "vllm_http"
 prompt_template = "bot"
 
 # Training validation is local: do not call the Scoreboard API or publish to its

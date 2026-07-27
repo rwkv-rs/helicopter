@@ -233,90 +233,10 @@ def _evaluate(
     from lighteval.logging.evaluation_tracker import EvaluationTracker
     from lighteval.metrics.metrics_sample import ExactMatches
     from lighteval.metrics.utils.metric_utils import SampleLevelMetric
-    from lighteval.models.model_input import GenerationParameters
-    from lighteval.models.vllm.vllm_model import VLLMModel, VLLMModelConfig
     from lighteval.pipeline import ParallelismManager, Pipeline, PipelineParameters
     from lighteval.tasks.requests import SamplingMethod
-    from vllm import LLM
-    from vllm.transformers_utils.configs.rwkv7 import (
-        build_rwkv7_config_from_pth,
-    )
 
     raw_prompt_template, stop = config.prompt
-
-    class RWKVGenerationParameters(GenerationParameters):
-        penalty_decay: float = 0.988
-
-        def to_vllm_dict(self) -> dict[str, object]:
-            values = super().to_vllm_dict()
-            values.pop("stop", None)
-            values.update(
-                frequency_penalty=self.frequency_penalty,
-                repetition_penalty=1.0,
-                penalty_decay=self.penalty_decay,
-                stop_token_ids=[0],
-                ignore_eos=False,
-            )
-            return values
-
-    class RWKVModelConfig(VLLMModelConfig):
-        generation_parameters: RWKVGenerationParameters
-        rwkv_prompt_template: str
-        max_num_seqs: int | None = None
-        max_num_batched_tokens: int | None = None
-
-    class PromptRenderer:
-        def __init__(self, tokenizer) -> None:
-            self._tokenizer = tokenizer
-
-        def apply_chat_template(self, *args, **kwargs):
-            kwargs["rwkv_prompt_template"] = raw_prompt_template
-            return self._tokenizer.apply_chat_template(*args, **kwargs)
-
-        def __getattr__(self, name):
-            return getattr(self._tokenizer, name)
-
-    class RWKVModel(VLLMModel):
-        def __init__(self, model_config) -> None:
-            super().__init__(model_config)
-            self.prompt_manager.tokenizer = PromptRenderer(self.tokenizer)
-
-        def _create_auto_model(self, model_config):
-            self.model_args = {
-                "model": model_config.model_name,
-                "gpu_memory_utilization": model_config.gpu_memory_utilization,
-                "enable_prefix_caching": False,
-                "revision": model_config.revision
-                + (
-                    f"/{model_config.subfolder}"
-                    if model_config.subfolder is not None
-                    else ""
-                ),
-                "dtype": model_config.dtype,
-                "trust_remote_code": model_config.trust_remote_code,
-                "tensor_parallel_size": model_config.tensor_parallel_size,
-                "pipeline_parallel_size": model_config.pipeline_parallel_size,
-                "max_model_len": self._max_length,
-                "hf_overrides": {"model_max_length": self._max_length},
-                "swap_space": model_config.swap_space,
-                "seed": int(model_config.seed),
-                "enforce_eager": True,
-            }
-            if model_config.data_parallel_size > 1:
-                raise ValueError("RWKV evaluation does not use data parallel models")
-            if model_config.quantization is not None:
-                self.model_args["quantization"] = model_config.quantization
-            if model_config.load_format is not None:
-                self.model_args["load_format"] = model_config.load_format
-            return LLM(**self.model_args)
-
-        def _greedy_until(self, docs):
-            uses_chat_template = self.use_chat_template
-            self.use_chat_template = False
-            try:
-                return super()._greedy_until(docs)
-            finally:
-                self.use_chat_template = uses_chat_template
 
     class RWKVPipeline(Pipeline):
         def _init_tasks_and_requests(self, tasks: str):
@@ -407,9 +327,6 @@ def _evaluate(
                         for index, text in enumerate(response.text)
                     ]
 
-    checkpoint = build_rwkv7_config_from_pth(str(weight))
-    if checkpoint is None:
-        raise ValueError("weight is not a supported RWKV7 checkpoint")
     sampling_config = {
         "temperature": 0.96,
         "top_p": 0.76,
@@ -422,30 +339,62 @@ def _evaluate(
         "stop": [stop],
         "ignore_eos": False,
     }
-    model_config = RWKVModelConfig(
-        model_name=weight.as_uri(),
-        cache_dir=str(output_dir / "cache"),
-        dtype="float16",
-        max_model_length=checkpoint.max_position_embeddings + MAX_NEW_TOKENS,
-        max_num_seqs=None,
-        max_num_batched_tokens=None,
-        enable_prefix_caching=False,
-        override_chat_template=True,
-        rwkv_prompt_template=raw_prompt_template,
-        generation_parameters=RWKVGenerationParameters(
-            temperature=0.96,
-            top_p=0.76,
-            top_k=32,
-            presence_penalty=1.0,
-            frequency_penalty=0.1,
-            penalty_decay=0.988,
-            stop_tokens=[stop],
-            max_new_tokens=MAX_NEW_TOKENS,
-        ),
-    )
     tracker = EvaluationTracker(output_dir=str(output_dir), save_details=True)
+    if config.backend == "vllm_http":
+        if config.vllm_pool_manifest is None:
+            raise ConfigError("vLLM HTTP evaluation requires a pool manifest")
+        from .http_model import VLLMHttpModel
+        from .http_pool import PoolManifest
+
+        manifest = PoolManifest.read(config.vllm_pool_manifest)
+        if manifest.wkv_mode != wkv_mode:
+            raise ConfigError(
+                "vLLM pool WKV mode does not match the evaluation configuration"
+            )
+        backend = VLLMHttpModel(
+            manifest=manifest,
+            cache_dir=output_dir / "cache",
+            raw_prompt_template=raw_prompt_template,
+            generation_parameters={
+                "temperature": 0.96,
+                "top_p": 0.76,
+                "top_k": 32,
+                "presence_penalty": 1.0,
+                "frequency_penalty": 0.1,
+                "repetition_penalty": 1.0,
+                "penalty_decay": 0.988,
+                "stop_token_ids": [0],
+                "ignore_eos": False,
+            },
+        )
+        launcher_type = ParallelismManager.NONE
+        model_execution = _http_model_execution(
+            backend,
+            weight,
+            weight_hash,
+            wkv_mode,
+            config.prompt_template,
+        )
+    else:
+        from .local_model import create_local_model
+
+        backend = create_local_model(
+            weight=weight,
+            output_dir=output_dir,
+            raw_prompt_template=raw_prompt_template,
+            stop=stop,
+            max_new_tokens=MAX_NEW_TOKENS,
+        )
+        launcher_type = ParallelismManager.VLLM
+        model_execution = _model_execution(
+            backend,
+            weight,
+            weight_hash,
+            wkv_mode,
+            config.prompt_template,
+        )
     parameters = PipelineParameters(
-        launcher_type=ParallelismManager.VLLM,
+        launcher_type=launcher_type,
         max_samples=None,
         remove_reasoning_tags=False,
         load_tasks_multilingual=True,
@@ -459,14 +408,6 @@ def _evaluate(
             "VLLM_ALLOW_LONG_MAX_MODEL_LEN": "1",
         }
     ):
-        backend = RWKVModel(model_config)
-        model_execution = _model_execution(
-            backend,
-            weight,
-            weight_hash,
-            wkv_mode,
-            config.prompt_template,
-        )
         pipeline = RWKVPipeline(
             tasks=",".join(task_names),
             pipeline_parameters=parameters,
@@ -664,6 +605,33 @@ def _model_execution(
         "dependency_versions": {
             name: importlib.metadata.version(name)
             for name in ("lighteval", "vllm", "torch")
+        },
+    }
+
+
+def _http_model_execution(
+    backend,
+    weight: Path,
+    weight_hash: str,
+    wkv_mode: str,
+    prompt_template: str,
+) -> dict[str, object]:
+    manifest = backend.pool.manifest
+    return {
+        "weight_sha256": weight_hash,
+        "weight_display_name": weight.name,
+        "wkv_mode": wkv_mode,
+        "prompt_template": prompt_template,
+        "gemm_policy": (
+            "fp16-accumulation" if wkv_mode == "fp16" else "fp32-accumulation"
+        ),
+        "gpu": f"remote-vllm-pool:{len(manifest.replicas)}",
+        "max_num_seqs": manifest.total_capacity,
+        "max_num_batched_tokens": None,
+        "dependency_versions": {
+            "lighteval": importlib.metadata.version("lighteval"),
+            "vllm": manifest.vllm_version,
+            "httpx": importlib.metadata.version("httpx"),
         },
     }
 

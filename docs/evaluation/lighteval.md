@@ -37,6 +37,8 @@ benchmarks = [
 公共配置项为：
 
 - `schema_version`：固定为 `1`。
+- `backend`：可省略，默认 `local`；训练期或固定服务池评测使用
+  `vllm_http`。
 - `prompt_template`：可省略，默认 `bot`；也可选 `assistant` 或
   `function_calling`。
 - `publish`：可省略，默认 `true`，结果经 Scoreboard API 入库。
@@ -47,10 +49,11 @@ benchmarks = [
 
 MaxRL 训练期验证使用
 [`configs/eval/maxrl_math.toml`](../../configs/eval/maxrl_math.toml)。它显式设置
-`publish = false`、`wkv_modes = ["fp32io16"]`，并只列出 LightEval 原生支持的
-`aime25`、`gsm8k`、`asdiv`、`math_500`。权重与结果路径由 Verl 在每次验证触发时
-通过环境变量提供；
-该模式不会创建 Scoreboard client，不做 API preflight，也不会访问后端数据库。
+`backend = "vllm_http"`、`publish = false`、`wkv_modes = ["fp32io16"]`，并只列出
+LightEval 原生支持的 `aime25`、`gsm8k`、`asdiv`、`math_500`。权重、结果路径和
+vLLM pool manifest 由 Verl 在每次验证触发时通过环境变量提供；
+该模式不会创建 Scoreboard client，不做 Scoreboard API preflight，也不会访问
+后端数据库。
 
 superset 由 LightEval 自己展开，所以配置不需要列出展开后的数百个 task。仓库默认
 清单见 [`configs/eval/lighteval.toml`](../../configs/eval/lighteval.toml)；不支持的
@@ -97,6 +100,46 @@ helicopter eval \
 `publish = false` 时可省略，并自动使用 `result_path` 同目录下的
 `.lighteval-staging`。
 
+### vLLM HTTP pool
+
+`backend = "vllm_http"` 不会在 LightEval 进程中 import `vllm` 或构造第二份
+`vllm.LLM`。它读取 `HELICOPTER_VLLM_POOL_MANIFEST` 指向的运行期 JSON：
+
+```json
+{
+  "schema_version": 1,
+  "global_step": 50,
+  "wkv_mode": "fp32io16",
+  "vllm_version": "0.23.1.dev0",
+  "max_model_len": 10240,
+  "replicas": [
+    {
+      "base_url": "http://10.21.60.84:36731",
+      "max_concurrency": 64
+    }
+  ]
+}
+```
+
+TOML 只选择稳定的 backend；动态 endpoint 和每 replica 容量只存在于受控运行期
+manifest，不写进仓库或 `.env.remote`。manifest 必须是绝对路径下的普通文件；
+endpoint 必须是无凭据、无 path/query/fragment 的 HTTP(S) origin，且不能重复。
+训练器以 `0600` 创建唯一临时 manifest，外部评估结束后删除。固定推理服务也使用
+同一 schema，由服务生命周期控制面生成 manifest 后复用相同评估入口。
+
+评估启动时会对全部 replica 请求 `/health` 和 `/v1/models`；任一 replica
+不可用、model id 不一致或 WKV mode 不匹配都会 fail closed。实际生成请求使用
+`/v1/chat/completions`，明确传递 RWKV prompt template、Rapid sampler penalty、
+stop token 和 `return_token_ids`。HTTP client 不继承 shell proxy，避免同机或内网
+endpoint 被错误转发到外部代理。
+
+每个 LightEval sample 拆为一个独立 HTTP 请求。全局调度器选择
+`inflight / max_concurrency` 最小且仍有空位的 replica；所有空位占满时阻塞等待，
+因此 8 个 `max_concurrency = 64` 的 replica 可以同时承载 512 个请求。返回结果按
+原始 document/sample 顺序重组，不因完成顺序改变评测语义。传输错误、HTTP 429
+或 5xx 最多换一个 replica 重试；其他 4xx 直接失败，避免用重试掩盖无效 sampling
+contract。
+
 ## 查看计划
 
 ```bash
@@ -117,8 +160,10 @@ weight SHA、resolved/skipped selector、实际 task 和执行单元数。它不
 保存标准 results JSON 与 details parquet，Helicopter 只做 RWKV 必需的 model/prompt
 适配和发布。
 
-生成固定最多 8192 个 token。`max_model_len` 使用 checkpoint context 加 8192，
-capacity 由 vLLM-RWKV 根据模型、GPU 和 WKV mode 自动选择，不接受用户覆盖。
+生成固定最多 8192 个 token。本地 backend 的 `max_model_len` 使用 checkpoint
+context 加 8192，capacity 由 vLLM-RWKV 根据模型、GPU 和 WKV mode 自动选择，
+不接受用户覆盖。HTTP backend 使用部署 manifest 中实际的 `max_model_len` 和
+`max_concurrency`，但这些值仍不属于评估 TOML 的用户参数。
 `fp16` 记录 FP16 WKV state/FP16 accumulation，`fp32io16` 记录 FP32 WKV
 state/FP32 accumulation。
 
