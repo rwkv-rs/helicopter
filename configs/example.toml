@@ -1,6 +1,11 @@
 # Helicopter only owns serving launch settings. Training configs live with
 # their implementation in src/train/verl-rwkv.
 
+[models."g1h-1.5b"]
+path = "${WEIGHT_PATH}/rwkv7/pth/rwkv7-g1h-1.5b-20260710-ctx10240.pth"
+served_model_name = "g1h-1.5b"
+max_model_len = 10240
+
 [models."g1g-1.5b"]
 path = "${WEIGHT_PATH}/rwkv7-g1g-1.5b-20260526-ctx8192.pth"
 served_model_name = "g1g-1.5b"

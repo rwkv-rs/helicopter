@@ -133,10 +133,19 @@ class InferPlanTests(unittest.TestCase):
                 "--max-model-len": "8192",
             },
         )
-        self.assertEqual(plan.shown_env, {"VLLM_RWKV7_WKV_MODE": "fp32io16"})
+        self.assertEqual(
+            plan.shown_env,
+            {
+                "VLLM_USE_V2_MODEL_RUNNER": "1",
+                "VLLM_RWKV7_WKV_MODE": "fp32io16",
+            },
+        )
         self.assertEqual(
             {key for key in plan.env if key.startswith("VLLM_")},
-            {"VLLM_RWKV7_WKV_MODE"},
+            {
+                "VLLM_USE_V2_MODEL_RUNNER",
+                "VLLM_RWKV7_WKV_MODE",
+            },
         )
         self.assertEqual(plan.cwd, ROOT)
 
@@ -163,6 +172,7 @@ class InferPlanTests(unittest.TestCase):
                 "HELICOPTER_INFER_ALLOW_FP16_ACCUMULATION": "0",
                 "VLLM_GPU_MEMORY_UTILIZATION": "0.85",
                 "VLLM_MAX_NUM_SEQS": "2048",
+                "VLLM_USE_RAPID_SAMPLER": "1",
             },
             config=loaded,
         )
@@ -173,6 +183,8 @@ class InferPlanTests(unittest.TestCase):
         self.assertNotIn("VLLM_MAX_NUM_SEQS", plan.env)
         self.assertNotIn("--gpu-memory-utilization", options)
         self.assertNotIn("--max-num-seqs", options)
+        self.assertNotIn("VLLM_USE_RAPID_SAMPLER", plan.env)
+        self.assertEqual(plan.env["VLLM_USE_V2_MODEL_RUNNER"], "1")
 
     def test_fp16_accumulation_cli_false_overrides_environment(self) -> None:
         loaded, _ = config.load_config(ROOT, str(EXAMPLE_CONFIG))

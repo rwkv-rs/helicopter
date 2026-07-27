@@ -108,6 +108,7 @@ def _apply_rwkv_env(
             "RWKV7 Model Runner V2 derives GEMM accumulation from WKV mode: "
             f"{wkv_mode} requires allow_fp16_accumulation={expected_fp16_accumulation}"
         )
+    command_env["VLLM_USE_V2_MODEL_RUNNER"] = "1"
     if wkv_mode is not None:
         command_env["VLLM_RWKV7_WKV_MODE"] = wkv_mode
 
