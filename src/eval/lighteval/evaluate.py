@@ -75,7 +75,7 @@ def _custom_tasks_module() -> ModuleType:
             gold_index=0,
         )
 
-    module = ModuleType("helicopter_lighteval.evaluate.amc23", _AMC23_METADATA)
+    module = ModuleType("helicopter_lighteval.evaluate", _AMC23_METADATA)
     module.TASKS_TABLE = [
         LightevalTaskConfig(
             name="amc23",
