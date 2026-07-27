@@ -57,10 +57,10 @@ def build_parser() -> argparse.ArgumentParser:
     infer.set_defaults(plan_builder=build_infer_plan)
 
     takeoff = subparsers.add_parser(
-        "takeoff", help="launch a Verl-owned MaxRL config"
+        "takeoff", help="launch a MaxRL experiment through Verl"
     )
     add_runtime_options(takeoff)
-    takeoff.add_argument("--config", required=True, help="Verl-owned MaxRL TOML")
+    takeoff.add_argument("--config", required=True, help="MaxRL experiment TOML")
     takeoff.add_argument(
         "--override", action="append", help="operational override validated by Verl"
     )

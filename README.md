@@ -74,18 +74,19 @@ helicopter infer --config configs/example.toml g1g-7.2b \
 
 ## MaxRL training
 
-The MaxRL contract and canonical DAPO config are owned by `verl-rwkv`:
+Helicopter owns the runnable experiment config; `verl-rwkv` owns its schema,
+validation, and execution:
 
 ```text
+configs/rl/maxrl_dapo_math_17k.toml
 src/train/verl-rwkv/verl/trainer/maxrl.py
-src/train/verl-rwkv/examples/rwkv_trainer/config/maxrl_dapo_math_17k.toml
 ```
 
 Helicopter passes the file through without interpreting or merging it:
 
 ```bash
 helicopter takeoff \
-  --config src/train/verl-rwkv/examples/rwkv_trainer/config/maxrl_dapo_math_17k.toml \
+  --config configs/rl/maxrl_dapo_math_17k.toml \
   --dry-run
 ```
 
@@ -94,7 +95,7 @@ to Verl and validated there:
 
 ```bash
 helicopter takeoff \
-  --config src/train/verl-rwkv/examples/rwkv_trainer/config/maxrl_dapo_math_17k.toml \
+  --config configs/rl/maxrl_dapo_math_17k.toml \
   --override trainer.save_freq=10
 ```
 
@@ -107,7 +108,7 @@ filtering, sampling, optimization, and validation semantics.
 The same Verl config owns `val_before_train` and periodic validation triggers.
 At each trigger it exports the current RWKV weight and invokes the public
 `helicopter eval --config configs/eval/maxrl_math.toml` command. That config
-runs AIME 2024, AIME 2025, AMC 2023, and MATH-500 through LightEval in
+runs AIME 2025, GSM8K, ASDiv, and MATH-500 through LightEval in
 `fp32io16`, writes metrics back to Verl, and sets `publish = false`, so training
 validation does not access the Scoreboard API or database. Verl neither imports
 LightEval nor implements a second evaluator. The installer keeps LightEval in
