@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,7 +32,13 @@ class VLLMHttpModel(LightevalModel):
     ) -> None:
         self.pool = VLLMHttpPool(manifest)
         model_id = self.pool.preflight()
-        self.config = ModelConfig(model_name=model_id, cache_dir=str(cache_dir))
+        cache_identity = hashlib.sha256(
+            f"{model_id}\0{manifest.global_step}".encode()
+        ).hexdigest()[:16]
+        self.config = ModelConfig(
+            model_name=f"vllm-http-{cache_identity}",
+            cache_dir=str(cache_dir),
+        )
         self._cache = SampleCache(self.config)
         self.prompt_manager = PromptManager(use_chat_template=True, tokenizer=None)
         self._raw_prompt_template = raw_prompt_template

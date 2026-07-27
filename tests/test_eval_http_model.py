@@ -84,13 +84,18 @@ def test_model_splits_samples_into_requests_and_preserves_document_order() -> No
 
 def test_model_initialization_uses_remote_identity_without_local_vllm() -> None:
     closed: list[bool] = []
+    served_model_id = (
+        "/home/caizus/Weights/RWKV/rwkv7/pth/"
+        "rwkv7-g1h-1.5b-20260710-ctx10240.pth"
+    )
 
     class Pool:
         def __init__(self, manifest):
             self.manifest = manifest
 
         def preflight(self):
-            return "rwkv-current"
+            self._model_id = served_model_id
+            return self._model_id
 
         def close(self):
             closed.append(True)
@@ -99,18 +104,30 @@ def test_model_initialization_uses_remote_identity_without_local_vllm() -> None:
     http_model.VLLMHttpPool = Pool
     try:
         with tempfile.TemporaryDirectory() as temporary:
+            cache_dir = Path(temporary)
             model = VLLMHttpModel(
-                manifest=SimpleNamespace(max_model_len=10240),
-                cache_dir=Path(temporary),
+                manifest=SimpleNamespace(max_model_len=10240, global_step=0),
+                cache_dir=cache_dir,
                 raw_prompt_template="\nBot✿",
                 generation_parameters={"temperature": 0.96},
             )
-            assert model.config.model_name == "rwkv-current"
+            assert model.config.model_name.startswith("vllm-http-")
+            assert model.pool._model_id == served_model_id
+            assert model._cache.cache_dir.is_relative_to(cache_dir)
             assert model.max_length == 10240
             model.cleanup()
+
+            next_step = VLLMHttpModel(
+                manifest=SimpleNamespace(max_model_len=10240, global_step=1),
+                cache_dir=cache_dir,
+                raw_prompt_template="\nBot✿",
+                generation_parameters={"temperature": 0.96},
+            )
+            assert next_step.config.model_name != model.config.model_name
+            next_step.cleanup()
     finally:
         http_model.VLLMHttpPool = original
-    assert closed == [True]
+    assert closed == [True, True]
 
 
 if __name__ == "__main__":
