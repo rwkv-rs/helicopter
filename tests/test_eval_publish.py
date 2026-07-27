@@ -194,6 +194,81 @@ def test_standard_result_reader_uses_results_and_details_pair(tmp_path: Path) ->
     ]
 
 
+def test_sample_audit_retains_bounded_text_and_scorer_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    results, rows, artifact = _standard()
+    rows.append(
+        {
+            "doc": {
+                "task_name": "gsm8k|0",
+                "query": "2+2?",
+                "choices": ["4"],
+                "gold_index": 0,
+                "specific": {"helicopter_document_index": 1},
+            },
+            "metric": {"exact_match": 0.0},
+            "model_response": {
+                "input": [{"role": "user", "content": "2+2?"}],
+                "input_tokens": [7, 8],
+                "text": ["<think>x</think>5"],
+                "text_post_processed": ["5"],
+                "output_tokens": [[9, 10]],
+            },
+        }
+    )
+    rows[0]["doc"].update(choices=["2"], gold_index=0)
+    rows[0]["model_response"]["input"] = [
+        {"role": "user", "content": "1+1?"}
+    ]
+    monkeypatch.setattr(
+        publish,
+        "_read_standard_results",
+        lambda _path: (results, list(reversed(rows)), artifact),
+    )
+    destination = tmp_path / "actor" / "lighteval_sample_audit.json"
+
+    publish.write_sample_audit(
+        output_dir=tmp_path,
+        destination=destination,
+        task_names=["gsm8k|0"],
+        weight_sha256="a" * 64,
+        wkv_mode="fp32io16",
+        samples_per_task=1,
+    )
+
+    payload = json.loads(destination.read_text(encoding="utf-8"))
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+    assert payload == {
+        "schema_version": 1,
+        "weight_sha256": "a" * 64,
+        "wkv_mode": "fp32io16",
+        "samples_per_task": 1,
+        "tasks": {
+            "gsm8k|0": [
+                {
+                    "document_index": 0,
+                    "question": "1+1?",
+                    "model_input_text": "user: 1+1?",
+                    "model_output_text": [
+                        "<think>x</think>2",
+                        "bad\nUser:",
+                    ],
+                    "scorer_input": {
+                        "golds": ["2"],
+                        "predictions": ["2", "bad"],
+                    },
+                    "scorer_output": {"exact_match": 1.0},
+                    "standard_answer": ["2"],
+                }
+            ]
+        },
+    }
+    assert "input_tokens" not in destination.read_text(encoding="utf-8")
+    assert "output_tokens" not in destination.read_text(encoding="utf-8")
+
+
 def test_prepare_staging_creates_private_owned_directory(tmp_path: Path) -> None:
     staging = tmp_path / "private" / "eval"
     resolved = publish.prepare_staging(staging)

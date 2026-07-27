@@ -6,6 +6,7 @@ import json
 import math
 import os
 import stat
+import uuid
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
@@ -316,6 +317,167 @@ def read_aggregate_metrics(
     if not metrics:
         raise PublicationError("LightEval output contains no finite aggregate metrics")
     return metrics
+
+
+def write_sample_audit(
+    *,
+    output_dir: Path,
+    destination: Path,
+    task_names: list[str],
+    weight_sha256: str,
+    wkv_mode: str,
+    samples_per_task: int = 10,
+) -> None:
+    if samples_per_task <= 0:
+        raise PublicationError("sample audit size must be positive")
+    _, rows, _ = _read_standard_results(output_dir)
+    rows_by_task: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise PublicationError("LightEval details must contain objects")
+        try:
+            task_name = row["doc"]["task_name"]
+        except (KeyError, TypeError) as error:
+            raise PublicationError("LightEval detail lacks doc.task_name") from error
+        if not isinstance(task_name, str):
+            raise PublicationError("LightEval detail task_name must be a string")
+        rows_by_task.setdefault(task_name, []).append(row)
+
+    tasks: dict[str, list[dict[str, object]]] = {}
+    for task_name in task_names:
+        task_rows = rows_by_task.get(task_name, [])
+        try:
+            task_rows.sort(
+                key=lambda row: row["doc"]["specific"][
+                    "helicopter_document_index"
+                ]
+            )
+        except (KeyError, TypeError) as error:
+            raise PublicationError(
+                f"LightEval detail lacks a document index for {task_name}"
+            ) from error
+        if len(task_rows) < samples_per_task:
+            raise PublicationError(
+                f"LightEval output has fewer than {samples_per_task} samples "
+                f"for {task_name}"
+            )
+        tasks[task_name] = [
+            _sample_audit_row(task_name, row)
+            for row in task_rows[:samples_per_task]
+        ]
+
+    payload = {
+        "schema_version": 1,
+        "weight_sha256": weight_sha256,
+        "wkv_mode": wkv_mode,
+        "samples_per_task": samples_per_task,
+        "tasks": tasks,
+    }
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(
+        f".{destination.name}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, ensure_ascii=False, sort_keys=True)
+            stream.write("\n")
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _sample_audit_row(
+    task_name: str,
+    row: dict[str, Any],
+) -> dict[str, object]:
+    try:
+        doc = row["doc"]
+        metric = row["metric"]
+        model_response = row["model_response"]
+        document_index = doc["specific"]["helicopter_document_index"]
+        question = doc["query"]
+        choices = doc["choices"]
+        gold_index = doc["gold_index"]
+        model_input = model_response["input"]
+        model_outputs = model_response["text"]
+        post_processed = model_response.get("text_post_processed")
+    except (KeyError, TypeError) as error:
+        raise PublicationError(
+            f"LightEval detail is incomplete for {task_name}"
+        ) from error
+    if (
+        isinstance(document_index, bool)
+        or not isinstance(document_index, int)
+        or not isinstance(question, str)
+        or not isinstance(choices, list)
+        or not isinstance(metric, dict)
+        or not isinstance(model_outputs, list)
+        or any(not isinstance(value, str) for value in model_outputs)
+    ):
+        raise PublicationError(f"LightEval detail is invalid for {task_name}")
+
+    indices = gold_index if isinstance(gold_index, list) else [gold_index]
+    if any(
+        isinstance(index, bool)
+        or not isinstance(index, int)
+        or index < 0
+        or index >= len(choices)
+        for index in indices
+    ):
+        raise PublicationError(f"LightEval gold index is invalid for {task_name}")
+    standard_answers = [
+        answer
+        for index in indices
+        for answer in (
+            choices[index] if isinstance(choices[index], list) else [choices[index]]
+        )
+    ]
+    if any(not isinstance(answer, str) for answer in standard_answers):
+        raise PublicationError(f"LightEval gold answer is invalid for {task_name}")
+
+    predictions = post_processed if post_processed is not None else model_outputs
+    if not isinstance(predictions, list) or any(
+        not isinstance(value, str) for value in predictions
+    ):
+        raise PublicationError(
+            f"LightEval scorer predictions are invalid for {task_name}"
+        )
+    return {
+        "document_index": document_index,
+        "question": question,
+        "model_input_text": _model_input_text(task_name, model_input),
+        "model_output_text": model_outputs,
+        "scorer_input": {
+            "golds": standard_answers,
+            "predictions": predictions,
+        },
+        "scorer_output": metric,
+        "standard_answer": standard_answers,
+    }
+
+
+def _model_input_text(task_name: str, value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts: list[str] = []
+        for message in value:
+            if (
+                not isinstance(message, dict)
+                or not isinstance(message.get("role"), str)
+                or not isinstance(message.get("content"), str)
+            ):
+                raise PublicationError(
+                    f"LightEval model input is invalid for {task_name}"
+                )
+            parts.append(f"{message['role']}: {message['content']}")
+        return "\n".join(parts)
+    raise PublicationError(f"LightEval model input is invalid for {task_name}")
 
 
 def _read_standard_results(

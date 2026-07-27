@@ -20,6 +20,7 @@ from .publish import (
     prepare_staging,
     publish_results,
     read_aggregate_metrics,
+    write_sample_audit,
 )
 
 
@@ -180,6 +181,8 @@ def _run_local(
 ) -> int:
     if config.result_path is None:
         raise ConfigError("local evaluation requires result_path")
+    audit_path = config.result_path.with_name("lighteval_sample_audit.json")
+    audit_path.unlink(missing_ok=True)
     staging_root = prepare_staging(config.staging_root)
     run_root = staging_root / f"local-{uuid.uuid4()}"
     run_root.mkdir(mode=0o700)
@@ -201,6 +204,13 @@ def _run_local(
         output_dir=output_dir,
         task_names=task_names,
     )
+    write_sample_audit(
+        output_dir=output_dir,
+        destination=audit_path,
+        task_names=task_names,
+        weight_sha256=weight_hash,
+        wkv_mode=wkv_mode,
+    )
     result = {
         "schema_version": 1,
         "weight_sha256": weight_hash,
@@ -217,7 +227,10 @@ def _run_local(
     )
     temporary.replace(config.result_path)
     _remove_completed_run(run_root, staging_root)
-    print(f"evaluation metrics written to {config.result_path}")
+    print(
+        f"evaluation metrics written to {config.result_path}; "
+        f"sample audit written to {audit_path}"
+    )
     return 0
 
 
