@@ -485,8 +485,8 @@ def _resolve_benchmarks(
     from lighteval.tasks.registry import Registry
 
     version = importlib.metadata.version("lighteval")
-    if version != "0.13.0":
-        raise ConfigError(f"LightEval 0.13.0 is required, found {version}")
+    if version != "0.13.1.dev0":
+        raise ConfigError(f"LightEval 0.13.1.dev0 is required, found {version}")
     inventory = Registry(
         tasks=None,
         load_multilingual=True,

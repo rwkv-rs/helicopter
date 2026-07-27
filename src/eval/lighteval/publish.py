@@ -122,7 +122,7 @@ class ScoreboardClient:
         if (
             response.get("status") != "ready"
             or response.get("schema_version") != "lighteval-campaign-v3"
-            or response.get("lighteval_version") != "0.13.0"
+            or response.get("lighteval_version") != "0.13.1.dev0"
         ):
             raise PublicationError("Scoreboard publication API is incompatible")
         return response
@@ -349,7 +349,7 @@ def _read_standard_results(
         results,
         rows,
         {
-            "lighteval_version": "0.13.0",
+            "lighteval_version": "0.13.1.dev0",
             "results_path": str(result_file.relative_to(output_dir)),
             "details_paths": [
                 str(path.relative_to(output_dir)) for path in detail_files

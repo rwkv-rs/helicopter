@@ -16,7 +16,7 @@ lighteval = [
   { include-group = "vllm-rwkv" },
   "httpx[socks]",
   "langcodes[data]",
-  "lighteval[extended-tasks,math,multilingual]==0.13.0",
+  "lighteval[extended-tasks,math,multilingual] @ git+https://github.com/huggingface/lighteval.git@64f4f5ae173626509fad6e477ca4ee56ebb26129",
   "more-itertools",
   "pyarrow>=19.0.0",
   "ray",
