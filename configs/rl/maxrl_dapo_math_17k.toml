@@ -2,14 +2,14 @@
 # launching environment; no runtime profile is loaded or merged.
 
 [experiment]
-name = "maxrl-dapo-math-17k"
+name = "maxrl-dapo-math-17k-g1h-1.5b"
 project = "helicopter-math"
 seed = 42
 candidate_dataset_passes = 10
 
 [model]
-name = "g1h-7.2b"
-checkpoint = "${WEIGHT_PATH}/rwkv7/pth/rwkv7-g1h-7.2b-20260710-ctx10240.pth"
+name = "g1h-1.5b"
+checkpoint = "${WEIGHT_PATH}/rwkv7/pth/rwkv7-g1h-1.5b-20260710-ctx10240.pth"
 prompt_mode = "open_think"
 prompt_template = "\nBot✿"
 
@@ -70,7 +70,7 @@ command = [
 
 [checkpoint]
 every_optimizer_steps = 50
-directory = "${WEIGHT_PATH}/maxrl/maxrl-dapo-math-17k"
+directory = "${WEIGHT_PATH}/maxrl/maxrl-dapo-math-17k-g1h-1.5b"
 
 [logging]
 backends = ["console", "file", "wandb"]
