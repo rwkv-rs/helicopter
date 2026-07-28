@@ -210,7 +210,7 @@ def test_sample_audit_retains_bounded_text_and_scorer_contract(
             },
             "metric": {"exact_match": 0.0},
             "model_response": {
-                "input": [{"role": "user", "content": "2+2?"}],
+                "input": "User✿2+2?✿\nBot✿<think",
                 "input_tokens": [7, 8],
                 "text": ["<think>x</think>5"],
                 "text_post_processed": ["5"],
@@ -219,9 +219,7 @@ def test_sample_audit_retains_bounded_text_and_scorer_contract(
         }
     )
     rows[0]["doc"].update(choices=["2"], gold_index=0)
-    rows[0]["model_response"]["input"] = [
-        {"role": "user", "content": "1+1?"}
-    ]
+    rows[0]["model_response"]["input"] = "User✿1+1?✿\nBot✿<think"
     monkeypatch.setattr(
         publish,
         "_read_standard_results",
@@ -250,7 +248,7 @@ def test_sample_audit_retains_bounded_text_and_scorer_contract(
                 {
                     "document_index": 0,
                     "question": "1+1?",
-                    "model_input_text": "user: 1+1?",
+                    "model_input_text": "User✿1+1?✿\nBot✿<think",
                     "model_output_text": [
                         "<think>x</think>2",
                         "bad\nUser:",

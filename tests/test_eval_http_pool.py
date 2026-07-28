@@ -119,6 +119,9 @@ def test_pool_preflights_every_replica_and_uses_all_capacity(
             return Response({"data": [{"id": "rwkv-current"}]})
 
         def post(self, path, *, json):
+            if path == "/detokenize":
+                assert json == {"model": "rwkv-current", "tokens": [1, 2]}
+                return Response({"prompt": "User✿question✿\nBot✿<think"})
             assert path == "/v1/chat/completions"
             with lock:
                 calls.append((self.base_url, json))
@@ -170,5 +173,8 @@ def test_pool_preflights_every_replica_and_uses_all_capacity(
     }
     assert all(payload["model"] == "rwkv-current" for _, payload in calls)
     assert all(payload["n"] == 1 for _, payload in calls)
+    assert {result.prompt_text for result in results} == {
+        "User✿question✿\nBot✿<think"
+    }
     assert sorted(result.output_token_ids for result in results) == [(1,), (2,)]
     pool.close()

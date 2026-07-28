@@ -103,13 +103,18 @@ class VLLMHttpModel(LightevalModel):
                     response_slots[job.document_index][job.sample_index] = completion
 
         responses: list[ModelResponse] = []
-        for messages, slots in zip(prompts, response_slots, strict=True):
+        for slots in response_slots:
             if any(completion is None for completion in slots):
                 raise RuntimeError("vLLM HTTP evaluation returned incomplete samples")
             completions = [completion for completion in slots if completion is not None]
+            prompt_text = completions[0].prompt_text
+            if any(completion.prompt_text != prompt_text for completion in completions):
+                raise RuntimeError(
+                    "vLLM HTTP replicas rendered different model inputs"
+                )
             responses.append(
                 ModelResponse(
-                    input=messages,
+                    input=prompt_text,
                     input_tokens=list(completions[0].prompt_token_ids),
                     text=[completion.text for completion in completions],
                     reasonings=[completion.reasoning for completion in completions],

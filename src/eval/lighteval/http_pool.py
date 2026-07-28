@@ -214,6 +214,7 @@ class CapacityScheduler:
 class Completion:
     text: str
     reasoning: str | None
+    prompt_text: str
     prompt_token_ids: tuple[int, ...]
     output_token_ids: tuple[int, ...]
 
@@ -334,9 +335,18 @@ class VLLMHttpPool:
             raise ValueError("chat completion reasoning_content must be text")
         prompt_token_ids = self._token_ids(raw.get("prompt_token_ids"), "prompt")
         output_token_ids = self._token_ids(choice.get("token_ids"), "output")
+        detokenized = self._clients[index].post(
+            "/detokenize",
+            json={"model": self._model_id, "tokens": list(prompt_token_ids)},
+        )
+        detokenized.raise_for_status()
+        prompt_text = detokenized.json()["prompt"]
+        if not isinstance(prompt_text, str):
+            raise ValueError("vLLM detokenized prompt must be text")
         return Completion(
             text=text,
             reasoning=reasoning,
+            prompt_text=prompt_text,
             prompt_token_ids=prompt_token_ids,
             output_token_ids=output_token_ids,
         )

@@ -42,6 +42,7 @@ def test_model_splits_samples_into_requests_and_preserves_document_order() -> No
             return Completion(
                 text=messages[-1]["content"],
                 reasoning=None,
+                prompt_text=f"User✿{messages[-1]['content']}✿\nBot✿<think",
                 prompt_token_ids=(1, 2),
                 output_token_ids=(token,),
             )
@@ -67,6 +68,10 @@ def test_model_splits_samples_into_requests_and_preserves_document_order() -> No
     assert [response.text for response in responses] == [
         ["first", "first", "first"],
         ["second"],
+    ]
+    assert [response.input for response in responses] == [
+        "User✿first✿\nBot✿<think",
+        "User✿second✿\nBot✿<think",
     ]
     assert len(calls) == 4
     for messages, parameters in calls:
