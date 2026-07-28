@@ -108,6 +108,7 @@ dev = [
   "pre-commit",
   "pyarrow>=19.0.0",
   "pytest",
+  "pytest-asyncio",
 ]
 
 test = [
