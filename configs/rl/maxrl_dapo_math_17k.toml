@@ -52,7 +52,7 @@ state_chunk_tokens = 2048
 replicas = 8
 tensor_parallel_size_per_replica = 1
 pipeline_parallel_size_per_replica = 1
-max_concurrent_sequences_per_replica = 64
+max_concurrent_sequences_per_replica = 960
 generation_token_budget_per_replica = 8192
 weight_update_bucket_mib = 64
 
