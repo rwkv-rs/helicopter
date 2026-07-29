@@ -109,6 +109,7 @@ dev = [
   "pyarrow>=19.0.0",
   "pytest",
   "pytest-asyncio",
+  "tblib",
 ]
 
 test = [
