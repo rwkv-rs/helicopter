@@ -10,3 +10,6 @@
 [submodule "src/kernel/fla-rwkv"]
 	path = src/kernel/fla-rwkv
 	url = https://github.com/rwkv-rs/fla-rwkv
+[submodule "src/kernel/flash-rwkv"]
+	path = src/kernel/flash-rwkv
+	url = https://github.com/rwkv-rs/FlashRWKV.git
