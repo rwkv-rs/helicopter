@@ -7,3 +7,6 @@
 [submodule "src/infer/vllm-rwkv"]
 	path = src/infer/vllm-rwkv
 	url = https://github.com/rwkv-rs/vllm-rwkv
+[submodule "src/kernel/fla-rwkv"]
+	path = src/kernel/fla-rwkv
+	url = https://github.com/rwkv-rs/fla-rwkv

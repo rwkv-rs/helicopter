@@ -12,6 +12,10 @@ dependencies = []
 helicopter = "helicopter_cli.__main__:main"
 
 [dependency-groups]
+fla-rwkv = [
+  "flash-linear-attention[cuda]",
+]
+
 lighteval = [
   { include-group = "vllm-rwkv" },
   "httpx[socks]",
@@ -131,6 +135,9 @@ conflicts = [
     { group = "verl-rwkv" },
   ],
 ]
+
+[tool.uv.sources]
+flash-linear-attention = { path = "src/kernel/fla-rwkv", editable = true }
 
 [tool.setuptools]
 packages = ["helicopter_cli", "helicopter_lighteval"]

@@ -965,6 +965,44 @@ wheels = [
 ]
 
 [[package]]
+name = "flash-linear-attention"
+source = { editable = "src/kernel/fla-rwkv" }
+dependencies = [
+    { name = "einops" },
+    { name = "transformers" },
+]
+
+[package.optional-dependencies]
+cuda = [
+    { name = "torch" },
+    { name = "triton" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "causal-conv1d", marker = "extra == 'conv1d'", specifier = ">=1.4.0" },
+    { name = "datasets", marker = "extra == 'benchmark'", specifier = ">=3.3.0" },
+    { name = "einops" },
+    { name = "matplotlib", marker = "extra == 'benchmark'" },
+    { name = "pandas", marker = "extra == 'benchmark'" },
+    { name = "pytest", marker = "extra == 'test'" },
+    { name = "pytest-xdist", marker = "extra == 'test'" },
+    { name = "tilelang", marker = "extra == 'tilelang'", specifier = ">=0.1.9" },
+    { name = "torch", marker = "extra == 'cpu'", specifier = ">=2.7.0" },
+    { name = "torch", marker = "extra == 'cuda'", specifier = ">=2.7.0" },
+    { name = "torch", marker = "extra == 'npu'", specifier = "==2.7.1" },
+    { name = "torch", marker = "extra == 'rocm'", specifier = ">=2.7.0" },
+    { name = "torch", marker = "extra == 'xpu'", specifier = ">=2.7.0" },
+    { name = "torch-npu", marker = "extra == 'npu'", specifier = "==2.7.1.post4" },
+    { name = "torchvision", marker = "extra == 'npu'", specifier = "==0.22.1" },
+    { name = "transformers", specifier = ">=4.45.0" },
+    { name = "triton", marker = "extra == 'cpu'", specifier = ">=3.3" },
+    { name = "triton", marker = "extra == 'cuda'", specifier = ">=3.3" },
+    { name = "triton-ascend", marker = "extra == 'npu'", specifier = "==3.2.1" },
+]
+provides-extras = ["cuda", "rocm", "xpu", "npu", "cpu", "tilelang", "conv1d", "benchmark", "test"]
+
+[[package]]
 name = "frozendict"
 version = "2.4.7"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
@@ -1139,6 +1177,9 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "tblib" },
 ]
+fla-rwkv = [
+    { name = "flash-linear-attention", extra = ["cuda"] },
+]
 lighteval = [
     { name = "aiohttp" },
     { name = "blake3" },
@@ -1290,6 +1331,7 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "tblib" },
 ]
+fla-rwkv = [{ name = "flash-linear-attention", extras = ["cuda"], editable = "src/kernel/fla-rwkv" }]
 lighteval = [
     { name = "aiohttp", specifier = ">=3.13.3" },
     { name = "blake3" },
