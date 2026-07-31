@@ -5,16 +5,22 @@
 path = "${WEIGHT_PATH}/rwkv7/pth/rwkv7-g1h-1.5b-20260710-ctx10240.pth"
 served_model_name = "g1h-1.5b"
 max_model_len = 10240
+max_num_seqs = 2560
+max_num_batched_tokens = 2560
 
 [models."g1g-1.5b"]
 path = "${WEIGHT_PATH}/rwkv7-g1g-1.5b-20260526-ctx8192.pth"
 served_model_name = "g1g-1.5b"
 max_model_len = 8192
+max_num_seqs = 2560
+max_num_batched_tokens = 2560
 
 [models."g1g-7.2b"]
 path = "${WEIGHT_PATH}/rwkv7-g1g-7.2b-20260603-ctx8192.pth"
 served_model_name = "g1g-7.2b"
 max_model_len = 8192
+max_num_seqs = 1280
+max_num_batched_tokens = 1280
 
 [infer]
 wkv_mode = "fp32io16"

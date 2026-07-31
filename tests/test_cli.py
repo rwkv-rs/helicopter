@@ -131,6 +131,8 @@ class InferPlanTests(unittest.TestCase):
                 "--load-format": "auto",
                 "--served-model-name": "g1g-1.5b",
                 "--max-model-len": "8192",
+                "--max-num-seqs": "2560",
+                "--max-num-batched-tokens": "2560",
             },
         )
         self.assertEqual(
@@ -182,9 +184,23 @@ class InferPlanTests(unittest.TestCase):
         self.assertNotIn("VLLM_GPU_MEMORY_UTILIZATION", plan.env)
         self.assertNotIn("VLLM_MAX_NUM_SEQS", plan.env)
         self.assertNotIn("--gpu-memory-utilization", options)
-        self.assertNotIn("--max-num-seqs", options)
+        self.assertEqual(options["--max-num-seqs"], "2560")
+        self.assertEqual(options["--max-num-batched-tokens"], "2560")
         self.assertNotIn("VLLM_USE_RAPID_SAMPLER", plan.env)
         self.assertEqual(plan.env["VLLM_USE_V2_MODEL_RUNNER"], "1")
+
+    def test_cli_capacity_override_wins_over_model_profile(self) -> None:
+        loaded, _ = config.load_config(ROOT, str(EXAMPLE_CONFIG))
+        plan = commands.build_infer_plan(
+            infer_args(max_num_seqs=64, max_num_batched_tokens=512),
+            root=ROOT,
+            env={"WEIGHT_PATH": "/weights/RWKV"},
+            config=loaded,
+        )
+
+        options = command_options(plan.command)
+        self.assertEqual(options["--max-num-seqs"], "64")
+        self.assertEqual(options["--max-num-batched-tokens"], "512")
 
     def test_fp16_accumulation_cli_false_overrides_environment(self) -> None:
         loaded, _ = config.load_config(ROOT, str(EXAMPLE_CONFIG))

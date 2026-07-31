@@ -199,9 +199,14 @@ def build_infer_plan(
             model.get("max_model_len"),
             infer.get("max_model_len"),
         ),
-        "--max-num-seqs": pick(args.max_num_seqs, infer.get("max_num_seqs")),
+        "--max-num-seqs": pick(
+            args.max_num_seqs,
+            model.get("max_num_seqs"),
+            infer.get("max_num_seqs"),
+        ),
         "--max-num-batched-tokens": pick(
             args.max_num_batched_tokens,
+            model.get("max_num_batched_tokens"),
             infer.get("max_num_batched_tokens"),
         ),
     }
