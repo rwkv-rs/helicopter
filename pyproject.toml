@@ -64,6 +64,7 @@ vllm-rwkv = [
   "safetensors>=0.6.2",
   "setproctitle",
   "setuptools>=77.0.3,<81.0.0",
+  "setuptools-rust>=1.9.0",
   "setuptools-scm>=8.0",
   "starlette>=1.0.1",
   "tokenizers>=0.21.1",
