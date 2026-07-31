@@ -1003,6 +1003,17 @@ requires-dist = [
 provides-extras = ["cuda", "rocm", "xpu", "npu", "cpu", "tilelang", "conv1d", "benchmark", "test"]
 
 [[package]]
+name = "flash-rwkv"
+version = "0.1.0"
+source = { editable = "src/kernel/flash-rwkv" }
+dependencies = [
+    { name = "torch" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "torch", specifier = ">=2.4" }]
+
+[[package]]
 name = "frozendict"
 version = "2.4.7"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
@@ -1180,6 +1191,9 @@ dev = [
 fla-rwkv = [
     { name = "flash-linear-attention", extra = ["cuda"] },
 ]
+flash-rwkv = [
+    { name = "flash-rwkv" },
+]
 lighteval = [
     { name = "aiohttp" },
     { name = "blake3" },
@@ -1332,6 +1346,7 @@ dev = [
     { name = "tblib" },
 ]
 fla-rwkv = [{ name = "flash-linear-attention", extras = ["cuda"], editable = "src/kernel/fla-rwkv" }]
+flash-rwkv = [{ name = "flash-rwkv", editable = "src/kernel/flash-rwkv" }]
 lighteval = [
     { name = "aiohttp", specifier = ">=3.13.3" },
     { name = "blake3" },

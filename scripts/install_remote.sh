@@ -66,6 +66,7 @@ VLLM_BUILD_PROFILE="${VLLM_BUILD_PROFILE:-rwkv}"
 VLLM_VERSION_OVERRIDE="${VLLM_VERSION_OVERRIDE:-}"
 VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED:-0}"
 VLLM_REBUILD="${VLLM_REBUILD:-auto}"
+FLASH_RWKV_REBUILD="${FLASH_RWKV_REBUILD:-auto}"
 VERL_REINSTALL="${VERL_REINSTALL:-auto}"
 CMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-RelWithDebInfo}"
 BUILD_TMPDIR="${BUILD_TMPDIR:-$REMOTE_ROOT/.tmp}"
@@ -104,12 +105,12 @@ validate_install_components() {
   ((${#components[@]} > 0)) || die "INSTALL_COMPONENTS must select at least one dependency group"
   for component in "${components[@]}"; do
     case "$component" in
-      dev | vllm-rwkv | verl-rwkv | rwkv-lm | verl-liger | lighteval | scoreboard-server | scoreboard-client) ;;
+      dev | flash-rwkv | fla-rwkv | vllm-rwkv | verl-rwkv | rwkv-lm | verl-liger | lighteval | scoreboard-server | scoreboard-client) ;;
       full)
         die "INSTALL_COMPONENTS=full is disabled; select explicit dependency groups"
         ;;
       *)
-        die "unknown INSTALL_COMPONENTS entry '$component'; use a comma-separated subset of dev,vllm-rwkv,verl-rwkv,rwkv-lm,verl-liger,lighteval,scoreboard-server,scoreboard-client"
+        die "unknown INSTALL_COMPONENTS entry '$component'; use a comma-separated subset of dev,flash-rwkv,fla-rwkv,vllm-rwkv,verl-rwkv,rwkv-lm,verl-liger,lighteval,scoreboard-server,scoreboard-client"
         ;;
     esac
   done
@@ -319,6 +320,7 @@ remote_env_args() {
     "VLLM_VERSION_OVERRIDE=$VLLM_VERSION_OVERRIDE"
     "VLLM_USE_PRECOMPILED=$VLLM_USE_PRECOMPILED"
     "VLLM_REBUILD=$VLLM_REBUILD"
+    "FLASH_RWKV_REBUILD=$FLASH_RWKV_REBUILD"
     "VERL_REINSTALL=$VERL_REINSTALL"
     "CMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE"
     "BUILD_TMPDIR=$BUILD_TMPDIR"

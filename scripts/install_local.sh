@@ -18,6 +18,7 @@ VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE:-cuda}"
 VLLM_BUILD_PROFILE="${VLLM_BUILD_PROFILE:-rwkv}"
 VLLM_VERSION_OVERRIDE="${VLLM_VERSION_OVERRIDE:-}"
 VLLM_REBUILD="${VLLM_REBUILD:-auto}"
+FLASH_RWKV_REBUILD="${FLASH_RWKV_REBUILD:-auto}"
 VERL_REINSTALL="${VERL_REINSTALL:-auto}"
 CMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-RelWithDebInfo}"
 BUILD_TMPDIR="${BUILD_TMPDIR:-}"
@@ -32,12 +33,15 @@ BUN_LINUX_AARCH64_SHA256="a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c6533
 export VLLM_BUILD_PROFILE
 
 VLLM="$ROOT/src/infer/vllm-rwkv"
+FLASH_RWKV="$ROOT/src/kernel/flash-rwkv"
+FLA_RWKV="$ROOT/src/kernel/fla-rwkv"
 RWKV_LM="$ROOT/src/train/rwkv-lm"
 VERL="$ROOT/src/train/verl-rwkv"
 SCOREBOARD_SERVER="$ROOT/src/scoreboard-server"
 SCOREBOARD_CLIENT="$ROOT/src/scoreboard-client"
 STAMP_DIR="$VENV/.helicopter-stamps"
 VLLM_STAMP="$STAMP_DIR/vllm-native.sha256"
+FLASH_RWKV_STAMP="$STAMP_DIR/flash-rwkv-native.sha256"
 EVAL_STAMP_DIR="$EVAL_VENV/.helicopter-stamps"
 EVAL_VLLM_STAMP="$EVAL_STAMP_DIR/vllm-native.sha256"
 
@@ -80,12 +84,12 @@ validate_install_components() {
   ((${#components[@]} > 0)) || die "INSTALL_COMPONENTS must select at least one dependency group"
   for component in "${components[@]}"; do
     case "$component" in
-      dev | vllm-rwkv | verl-rwkv | rwkv-lm | verl-liger | lighteval | scoreboard-server | scoreboard-client) ;;
+      dev | flash-rwkv | fla-rwkv | vllm-rwkv | verl-rwkv | rwkv-lm | verl-liger | lighteval | scoreboard-server | scoreboard-client) ;;
       full)
         die "INSTALL_COMPONENTS=full is disabled; select explicit dependency groups"
         ;;
       *)
-        die "unknown INSTALL_COMPONENTS entry '$component'; use a comma-separated subset of dev,vllm-rwkv,verl-rwkv,rwkv-lm,verl-liger,lighteval,scoreboard-server,scoreboard-client"
+        die "unknown INSTALL_COMPONENTS entry '$component'; use a comma-separated subset of dev,flash-rwkv,fla-rwkv,vllm-rwkv,verl-rwkv,rwkv-lm,verl-liger,lighteval,scoreboard-server,scoreboard-client"
         ;;
     esac
   done
@@ -110,7 +114,8 @@ append_uv_sync_policy() {
 }
 
 native_component_enabled() {
-  component_enabled vllm-rwkv || component_enabled verl-rwkv ||
+  component_enabled flash-rwkv || component_enabled vllm-rwkv ||
+    component_enabled verl-rwkv ||
     component_enabled rwkv-lm || component_enabled lighteval
 }
 
@@ -185,7 +190,11 @@ clean_submodule_venvs() {
   [[ "$CLEAN_SUBMODULE_VENVS" == "1" ]] || return 0
 
   local env_dir
-  for env_dir in "$VLLM/.venv" "$VERL/.venv" "$RWKV_LM/.venv"; do
+  for env_dir in \
+    "$FLASH_RWKV/.venv" \
+    "$VLLM/.venv" \
+    "$VERL/.venv" \
+    "$RWKV_LM/.venv"; do
     [[ -e "$env_dir" ]] || continue
     [[ "$env_dir" == "$ROOT"/src/*/.venv ]] || die "refusing to remove unexpected venv path: $env_dir"
     run rm -rf "$env_dir"
@@ -520,6 +529,112 @@ import verl
 PY
 }
 
+flash_rwkv_editable_ready() {
+  "$VENV/bin/python" - "$FLASH_RWKV/flash_rwkv" <<'PY' >/dev/null
+import importlib.metadata
+import importlib.util
+import sys
+from pathlib import Path
+
+spec = importlib.util.find_spec("flash_rwkv")
+if spec is None:
+    raise SystemExit(1)
+
+locations = tuple(spec.submodule_search_locations or ())
+if len(locations) == 1:
+    package_root = Path(locations[0])
+elif spec.origin is not None:
+    package_root = Path(spec.origin).parent
+else:
+    raise SystemExit(1)
+
+expected_root = Path(sys.argv[1])
+if package_root.resolve() != expected_root.resolve():
+    raise SystemExit(1)
+if importlib.metadata.version("flash-rwkv") != "0.1.0":
+    raise SystemExit(1)
+PY
+}
+
+flash_rwkv_native_ready() {
+  flash_rwkv_editable_ready
+  "$VENV/bin/python" - <<'PY' >/dev/null
+import flash_rwkv._C
+PY
+}
+
+fla_rwkv_editable_ready() {
+  "$VENV/bin/python" - "$FLA_RWKV/fla" <<'PY' >/dev/null
+import importlib.util
+import sys
+from pathlib import Path
+
+spec = importlib.util.find_spec("fla")
+if spec is None:
+    raise SystemExit(1)
+
+locations = tuple(spec.submodule_search_locations or ())
+if len(locations) == 1:
+    package_root = Path(locations[0])
+elif spec.origin is not None:
+    package_root = Path(spec.origin).parent
+else:
+    raise SystemExit(1)
+
+expected_root = Path(sys.argv[1])
+raise SystemExit(package_root.resolve() != expected_root.resolve())
+PY
+}
+
+flash_rwkv_native_fingerprint() {
+  {
+    printf 'TORCH_CUDA_ARCH_LIST=%s\n' "${TORCH_CUDA_ARCH_LIST:-}"
+    printf 'CUDA_HOME=%s\n' "${CUDA_HOME:-}"
+    "$VENV/bin/python" - <<'PY'
+import platform
+import sys
+
+import torch
+
+print(f"python={sys.version}")
+print(f"platform={platform.platform()}")
+print(f"torch={torch.__version__}")
+print(f"torch_cuda={torch.version.cuda}")
+PY
+    find \
+      "$FLASH_RWKV/setup.py" \
+      "$FLASH_RWKV/pyproject.toml" \
+      "$FLASH_RWKV/csrc" \
+      -type f -print 2>/dev/null |
+      LC_ALL=C sort |
+      while IFS= read -r path; do
+        sha256sum "$path"
+      done
+  } | sha256sum | awk '{print $1}'
+}
+
+install_flash_rwkv_package() {
+  local pip=( "$UV" pip install )
+  [[ -n "$UV_INDEX_URL" ]] && pip+=(--index-url "$UV_INDEX_URL")
+  pip+=(--project "$ROOT" --python "$VENV/bin/python")
+
+  mkdir -p "$(dirname "$FLASH_RWKV_STAMP")"
+  local fingerprint
+  fingerprint="$(flash_rwkv_native_fingerprint)"
+  if [[ "$FLASH_RWKV_REBUILD" != "1" &&
+        -f "$FLASH_RWKV_STAMP" ]] &&
+     [[ "$(cat "$FLASH_RWKV_STAMP")" == "$fingerprint" ]] &&
+     flash_rwkv_native_ready; then
+    echo "FlashRWKV native extension is already built for this source and environment; reusing existing install"
+    return 0
+  fi
+
+  run "${pip[@]}" --no-deps --no-build-isolation -e "$FLASH_RWKV"
+  flash_rwkv_native_ready
+  fingerprint="$(flash_rwkv_native_fingerprint)"
+  printf '%s\n' "$fingerprint" >"$FLASH_RWKV_STAMP"
+}
+
 install_vllm_package() {
   local target_venv="${1:-$VENV}"
   local target_stamp="${2:-$VLLM_STAMP}"
@@ -655,6 +770,10 @@ component_enabled lighteval &&
   install_vllm_package "$EVAL_VENV" "$EVAL_VLLM_STAMP"
 component_enabled rwkv-lm && install_rwkv_lm_package
 component_enabled verl-rwkv && install_verl_package
+component_enabled flash-rwkv && install_flash_rwkv_package
+if component_enabled fla-rwkv && [[ "${DRY_RUN:-0}" != "1" ]]; then
+  fla_rwkv_editable_ready
+fi
 python_component_enabled && check_python_packages
 check_lighteval_packages
 
