@@ -99,7 +99,7 @@ verl-rwkv = [
   "torch==2.11.0",
   "torchdata",
   "transferqueue==0.1.8",
-  "transformers>=5.5.3,!=5.6.0",
+  "transformers>=5.5.3,!=5.6.0,<5.11",
   "uvicorn",
   "wandb",
   "zstandard",
@@ -113,6 +113,7 @@ rwkv-lm = [
 ]
 
 dev = [
+  "anthropic>=0.71.0",
   "pre-commit",
   "pyarrow>=19.0.0",
   "pytest",

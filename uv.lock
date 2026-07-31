@@ -190,6 +190,25 @@ wheels = [
 ]
 
 [[package]]
+name = "anthropic"
+version = "0.120.2"
+source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "distro" },
+    { name = "docstring-parser" },
+    { name = "httpx" },
+    { name = "jiter" },
+    { name = "pydantic" },
+    { name = "sniffio" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/d7/10/4ca013cb166f226bd89e0aeb0fcaff94f45ddf716d4925ce89475d3c587b/anthropic-0.120.2.tar.gz", hash = "sha256:9722efc10c27a30a69f5338ddacdb35bc6a64297a4e4ba729bf83af873d5fb3a", size = 1008421, upload-time = "2026-07-28T17:38:26.986Z" }
+wheels = [
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/63/af/0f5db57b9397a0f3b7fc204cbef143401a7cadaf982330f97f1ce3d39f34/anthropic-0.120.2-py3-none-any.whl", hash = "sha256:0f0bc2b381dc0eb41c8d886b815d79c2041cd2374f83aed36f574b6dc9c579c1", size = 1022851, upload-time = "2026-07-28T17:38:25.466Z" },
+]
+
+[[package]]
 name = "antlr4-python3-runtime"
 version = "4.9.3"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
@@ -1182,6 +1201,7 @@ source = { editable = "." }
 
 [package.dev-dependencies]
 dev = [
+    { name = "anthropic" },
     { name = "pre-commit" },
     { name = "pyarrow" },
     { name = "pytest" },
@@ -1251,6 +1271,7 @@ rwkv-lm = [
     { name = "torch" },
 ]
 test = [
+    { name = "anthropic" },
     { name = "datasets" },
     { name = "pre-commit" },
     { name = "pyarrow" },
@@ -1339,6 +1360,7 @@ vllm-rwkv = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "anthropic", specifier = ">=0.71.0" },
     { name = "pre-commit" },
     { name = "pyarrow", specifier = ">=19.0.0" },
     { name = "pytest" },
@@ -1404,6 +1426,7 @@ rwkv-lm = [
     { name = "torch", specifier = "==2.11.0" },
 ]
 test = [
+    { name = "anthropic", specifier = ">=0.71.0" },
     { name = "datasets" },
     { name = "pre-commit" },
     { name = "pyarrow", specifier = ">=19.0.0" },
@@ -1436,7 +1459,7 @@ verl-rwkv = [
     { name = "torch", specifier = "==2.11.0" },
     { name = "torchdata" },
     { name = "transferqueue", specifier = "==0.1.8" },
-    { name = "transformers", specifier = ">=5.5.3,!=5.6.0" },
+    { name = "transformers", specifier = ">=5.5.3,!=5.6.0,<5.11" },
     { name = "uvicorn" },
     { name = "wandb" },
     { name = "zstandard" },
@@ -4511,7 +4534,7 @@ wheels = [
 
 [[package]]
 name = "transformers"
-version = "5.12.1"
+version = "5.10.4"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
 dependencies = [
     { name = "huggingface-hub" },
@@ -4524,9 +4547,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "typer" },
 ]
-sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/aa/7c/8240f612819718100a9346dc28dea6a11370c3ca9c8c6eabadd3dea4ef29/transformers-5.12.1.tar.gz", hash = "sha256:679ee731c8225347889ad4fb3b2c926a62e9da3b7d284e9d12c791da7272466b", size = 8924054, upload-time = "2026-06-15T17:27:50.604Z" }
+sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/f7/5d/1df789ca27a436ce09de67c8fee6acd2a528d34c28685991f8203e5418ae/transformers-5.10.4.tar.gz", hash = "sha256:de37741509e64ccb88f7f5708beaf5b1914df447f5fe659f9c0fd95950413168", size = 8799021, upload-time = "2026-06-15T17:28:29.306Z" }
 wheels = [
-    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/df/56/bbd60dd8668055803bf8ba55a81f9b8a8b31497f620109a9671d26a2076d/transformers-5.12.1-py3-none-any.whl", hash = "sha256:2a5e109d2021265df7098ffbb738295acaf5ad256f12cbc586db2ea4dcbb1a8a", size = 11150587, upload-time = "2026-06-15T17:27:46.679Z" },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/d7/f1/d66881f28d3e64002a21d043c7c8db306c0ad5a711c85337ff551bfbc040/transformers-5.10.4-py3-none-any.whl", hash = "sha256:8c5b99b141b53619435a76629b0284f04d27ff46d788b463fc0ecb23b8ff130e", size = 11004075, upload-time = "2026-06-15T17:28:26.21Z" },
 ]
 
 [[package]]
