@@ -1,0 +1,94 @@
+{
+  "schema_version": 3,
+  "classification": "real-qwen35-2b-first-layer-activation-fit-resumable-slice",
+  "evidence_tier": "exploratory",
+  "seed": 20260714,
+  "experiment_comparison": {
+    "baseline_run_id": "qwen35-2b-zero-step",
+    "only_changes": [
+      "使用真实 prepared FineWeb-Edu activation 执行 layer 0 GDN mapping",
+      "将 activation-fit 报告与选中 mixer state 绑定到可恢复 layer-major cursor",
+      "用 CLI 运行时 optimizer-step 截止生成部分切片，不宣称整层蒸馏完成"
+    ]
+  },
+  "optimizer": {
+    "name": "adamw",
+    "learning_rate": 0.000001,
+    "final_learning_rate": 0.000001,
+    "warmup_steps": 10,
+    "betas": [0.9, 0.99],
+    "epsilon": 1e-8,
+    "weight_decay": 0.1
+  },
+  "learning_rate": 0.000001,
+  "local_learning_rate_by_mixer_kind": {},
+  "learning_rate_schedule": "warmup-constant",
+  "layer_learning_rate_schedule_epochs": 72,
+  "learning_rate_warmup_ratio": 0.0,
+  "min_learning_rate_ratio": 1.0,
+  "gradient_clip_norm": 1.0,
+  "max_parameter_update_relative_l2": null,
+  "optimizer_telemetry_interval_steps": 1,
+  "burn_in_tokens": 128,
+  "supervised_tokens": 512,
+  "accumulation_steps": 1,
+  "gradient_checkpointing": false,
+  "micro_batch_size": 1,
+  "distributed_world_size": 8,
+  "cache_shard_rows": 16,
+  "checkpoint_interval_micro_batches": 1,
+  "activation_fit_rows": 32,
+  "activation_fit_ridge": 0.001,
+  "activation_fit_functional_steps": 256,
+  "activation_fit_functional_learning_rate": 0.0003,
+  "activation_fit_attention_time_mix_ablation": false,
+  "max_layer_input_cache_bytes": 500000000000,
+  "max_cached_layer_input_bytes_per_rank": 4294967296,
+  "execution_mode": "streamed_layer_store",
+  "cache_teacher_layers": false,
+  "max_cuda_reserved_bytes": 90000000000,
+  "layer_min_epochs": 24,
+  "layer_max_epochs": 72,
+  "layer_min_delta": 0.00125785544514656,
+  "layer_patience": 2,
+  "exploratory_layer_limit": 1,
+  "corrective_min_sweeps": 1,
+  "corrective_max_sweeps": 1,
+  "corrective_min_delta": 0.0,
+  "local_loss_weights": {
+    "mixer_mse": 1.0,
+    "block_mse": 1.0,
+    "cosine": 0.1
+  },
+  "global_loss_weights": {
+    "token_kl": 1.0,
+    "shifted_ce": 0.25
+  },
+  "training_control_evidence": {
+    "status": "exploratory-unvalidated",
+    "artifact_sha256": null
+  },
+  "tracking": {
+    "mode": "online",
+    "project": "any2rwkv",
+    "entity": null,
+    "group": "qwen35-2b-first-layer-activation-fit",
+    "tags": [
+      "qwen35-2b",
+      "real-activation",
+      "layer-0",
+      "resumable-slice"
+    ],
+    "job_types": {
+      "profile": "performance-profile",
+      "distill": "layerwise-distillation",
+      "corrective": "fully-recurrent-corrective"
+    }
+  },
+  "notes": [
+    "本配置只把实际运行范围限制到 source layer 0；它不改变 source geometry、mapping identity 或最终正式配置。",
+    "distributed_world_size=8 是本次预期 torchrun 运行配置，runner 只要求它为正且与实际 world size 一致。",
+    "使用 --stop-after-optimizer-steps 生成的 artifact 明确标记 completed=false；后续通过 --resume 和更大的 step limit 继续。",
+    "micro_batch_size=1 是首次真实切片的保守运行值，不是吞吐或质量最优结论。"
+  ]
+}

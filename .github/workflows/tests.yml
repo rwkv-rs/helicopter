@@ -41,4 +41,55 @@ jobs:
         env:
           HF_HOME: ${{ runner.temp }}/huggingface
           PYTHONPATH: src/cli
-        run: uv run --no-sync pytest tests
+        run: >-
+          uv run --no-sync pytest tests
+          --ignore=tests/test_profile_candidate_contract.py
+          --ignore=tests/test_strict_any2rwkv_train.py
+
+  any-to-rwkv:
+    name: Any-to-RWKV package tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: src/train/any2rwkv/uv.lock
+
+      - name: Install package-owned CPU test environment
+        working-directory: src/train/any2rwkv
+        run: >-
+          uv sync --locked --group dev
+          --no-install-package causal-conv1d
+          --no-install-package flash-linear-attention
+          --no-install-package flash-rwkv
+
+      - name: Run root Any-to-RWKV profile contracts
+        env:
+          HF_HOME: ${{ runner.temp }}/huggingface
+          PYTHONPATH: src/cli:src/train/any2rwkv
+        run: >-
+          uv run --project src/train/any2rwkv --no-sync pytest -q
+          tests/test_profile_candidate_contract.py
+
+      # The strict launcher suite executes the exact self-owned CUDA runtime
+      # provenance preflight and belongs to the pinned PRO6000 acceptance gate.
+
+      - name: Run standalone conversion, resume, and packaging contracts
+        working-directory: src/train/any2rwkv
+        run: >-
+          uv run --no-sync pytest -q
+          tests/test_packaging.py
+          tests/test_core_registry.py
+          tests/test_layer_major_resume_integration.py::test_two_layer_checkpoint_resumes_and_strictly_generates_in_fresh_processes

@@ -1,0 +1,2316 @@
+{
+  "experiment": "qwen35-2b-real-layer-gqa-gdn-zero-step-probe",
+  "gdn": {
+    "canonical_recurrence_mapping": {
+      "output_max_abs": 1.6653345369377348e-16,
+      "output_relative_l2": 2.2389948186505566e-16
+    },
+    "native_decay_link": {
+      "clipped_core_output_vs_exact": {
+        "cosine": 0.9994511008262634,
+        "nmse": 0.0011113061336800456,
+        "relative_l2": 0.03333625569939613
+      },
+      "decay_quantiles": {
+        "q00": 0.003038321156054735,
+        "q01": 0.009868061169981956,
+        "q05": 0.031493090093135834,
+        "q100": 1.0,
+        "q50": 0.9991787075996399,
+        "q95": 1.0,
+        "q99": 1.0
+      },
+      "fraction_below_minimum": 0.2421875,
+      "minimum_reachable_decay": 0.5452392101287842
+    }
+  },
+  "gqa": {
+    "affine_state": {
+      "closure_scale": {
+        "maximum": 6.543704032897949,
+        "median": 2.1589794158935547,
+        "minimum": -1.0214745998382568
+      },
+      "with_calibrated_rank_one_closure": {
+        "attention_output": {
+          "cosine": 0.9472237825393677,
+          "nmse": 0.1028532087802887,
+          "relative_l2": 0.32070738077163696
+        },
+        "mixer_output": {
+          "cosine": 0.8861165642738342,
+          "nmse": 0.2161867916584015,
+          "relative_l2": 0.46495893597602844
+        }
+      },
+      "without_rank_one_closure": {
+        "attention_output": {
+          "cosine": 0.9459661841392517,
+          "nmse": 0.10560519993305206,
+          "relative_l2": 0.3249695599079132
+        },
+        "mixer_output": {
+          "cosine": 0.8881157040596008,
+          "nmse": 0.215210422873497,
+          "relative_l2": 0.46390777826309204
+        }
+      }
+    },
+    "exactness_checks": {
+      "hazard_recurrence_vs_softmax_attention": {
+        "cosine": 1.0000001192092896,
+        "nmse": 4.811977571505914e-14,
+        "relative_l2": 2.1936220662155392e-07
+      },
+      "manual_attention_vs_qwen_mixer": {
+        "cosine": 1.0000001192092896,
+        "nmse": 0.0,
+        "relative_l2": 0.0
+      }
+    },
+    "hazard_linearization": {
+      "logit_taylor_at_calibration_mean": {
+        "attention_output": {
+          "cosine": 0.9866815209388733,
+          "nmse": 0.027746567502617836,
+          "relative_l2": 0.16657301783561707
+        },
+        "hazard": {
+          "cosine": 0.9830933213233948,
+          "mae": 0.024088218808174133,
+          "nmse": 0.04538103938102722,
+          "outside_unit_interval_fraction": 0.0,
+          "relative_l2": 0.21302826702594757
+        },
+        "mixer_output": {
+          "cosine": 0.96664959192276,
+          "nmse": 0.07078547030687332,
+          "relative_l2": 0.2660553753376007
+        }
+      },
+      "logit_taylor_at_zero": {
+        "attention_output": {
+          "cosine": 0.9758669137954712,
+          "nmse": 0.051373858004808426,
+          "relative_l2": 0.22665803134441376
+        },
+        "hazard": {
+          "cosine": 0.9611845016479492,
+          "mae": 0.04795319586992264,
+          "nmse": 0.12627753615379333,
+          "outside_unit_interval_fraction": 0.0,
+          "relative_l2": 0.35535550117492676
+        },
+        "mixer_output": {
+          "cosine": 0.939271092414856,
+          "nmse": 0.13610045611858368,
+          "relative_l2": 0.36891794204711914
+        }
+      },
+      "probability_taylor_at_zero": {
+        "attention_output": {
+          "cosine": 0.940250813961029,
+          "nmse": 0.11816270649433136,
+          "relative_l2": 0.3437480330467224
+        },
+        "hazard": {
+          "cosine": 0.9464440941810608,
+          "mae": 0.04186714440584183,
+          "nmse": 0.10507149994373322,
+          "outside_unit_interval_fraction": 0.19176682829856873,
+          "relative_l2": 0.3241473138332367
+        },
+        "mixer_output": {
+          "cosine": 0.8562695384025574,
+          "nmse": 0.2855410575866699,
+          "relative_l2": 0.5343604683876038
+        }
+      },
+      "probability_taylor_at_zero_clipped": {
+        "attention_output": {
+          "cosine": 0.9653662443161011,
+          "nmse": 0.06886986643075943,
+          "relative_l2": 0.26243069767951965
+        },
+        "hazard": {
+          "cosine": 0.9647738337516785,
+          "mae": 0.030902253463864326,
+          "nmse": 0.06925252079963684,
+          "outside_unit_interval_fraction": 0.0,
+          "relative_l2": 0.26315873861312866
+        },
+        "mixer_output": {
+          "cosine": 0.9148622751235962,
+          "nmse": 0.165875643491745,
+          "relative_l2": 0.4072783291339874
+        }
+      }
+    },
+    "real_bf16_module_gate": {
+      "baseline_final_state_sha256": "78a9b437c9028f962c0e582ea507d058607d711187057f59fba39f6e2e9182e8",
+      "baseline_materialization": {
+        "aggregate_sha256": "2b68e0c0f85a1065cb2ad7d0279ec826f792276b04858bd4b7cb93ec397709f3",
+        "tensor_count": 26,
+        "tensors": {
+          "a_lora.lora.0.weight": {
+            "dtype": "torch.bfloat16",
+            "sha256": "5379c7b831e6f3e655c178bc7f1d26f1e9aacf4ca868aeaddaaf9691a4949d78",
+            "shape": [
+              64,
+              2048
+            ]
+          },
+          "a_lora.lora.2.bias": {
+            "dtype": "torch.bfloat16",
+            "sha256": "a67f0b6a3519165d81395690eb0c06f5d03a9ec93a71b64f1e4bc70351c459fc",
+            "shape": [
+              2048
+            ]
+          },
+          "a_lora.lora.2.weight": {
+            "dtype": "torch.bfloat16",
+            "sha256": "8a39d2abd3999ab73c34db2476849cddf303ce389b35826850f9a700589b4a90",
+            "shape": [
+              2048,
+              64
+            ]
+          },
+          "g_lora.lora.0.weight": {
+            "dtype": "torch.bfloat16",
+            "sha256": "b4573be6400bb0c5e126faca49e54aabb62bd4e40959b750919686d651aee985",
+            "shape": [
+              128,
+              2048
+            ]
+          },
+          "g_lora.lora.2.weight": {
+            "dtype": "torch.bfloat16",
+            "sha256": "ced324b55908c6e5f2af573c0b377464edac78ac1f0a6d415d2deb67790479b1",
+            "shape": [
+              2048,
+              128
+            ]
+          },
+          "g_norm.bias": {
+            "dtype": "torch.bfloat16",
+            "sha256": "ad7facb2586fc6e966c004d7d1d16b024f5805ff7cb47c7a85dabd8b48892ca7",
+            "shape": [
+              2048
+            ]
+          },
+          "g_norm.weight": {
+            "dtype": "torch.bfloat16",
+            "sha256": "045ad01d502fc9de7069fd37169060ce79a14a289444ffcd9881ec367a554644",
+            "shape": [
+              2048
+            ]
+          },
+          "k_a": {
+            "dtype": "torch.bfloat16",
+            "sha256": "ad7facb2586fc6e966c004d7d1d16b024f5805ff7cb47c7a85dabd8b48892ca7",
+            "shape": [
+              2048
+            ]
+          },
+          "k_k": {
+            "dtype": "torch.bfloat16",
+            "sha256": "045ad01d502fc9de7069fd37169060ce79a14a289444ffcd9881ec367a554644",
+            "shape": [
+              2048
+            ]
+          },
+          "k_proj.weight": {
+            "dtype": "torch.bfloat16",
+            "sha256": "0cc3c07b98495626eba0a4072b22fcb4b88c0daa8af7c059c8dbf4bc2c919fd6",
+            "shape": [
+              2048,
+              2048
+            ]
+          },
+          "o_proj.weight": {
+            "dtype": "torch.bfloat16",
+            "sha256": "12cb7bbe0aac40843d5e5a60cfb44ba2d33aa49538166a00f34fed862f457153",
+            "shape": [
+              2048,
+              2048
+            ]
+          },
+          "r_k": {
+            "dtype": "torch.bfloat16",
+            "sha256": "ad7facb2586fc6e966c004d7d1d16b024f5805ff7cb47c7a85dabd8b48892ca7",
+            "shape": [
+              16,
+              128
+            ]
+          },
+          "r_proj.weight": {
+            "dtype": "torch.bfloat16",
+            "sha256": "fbf9119f44376eeafa007c4ef301c780c3cfb4863c48c2b33ca3667a24eedffa",
+            "shape": [
+              2048,
+              2048
+            ]
+          },
+          "v_lora.lora.0.weight": {
+            "dtype": "torch.bfloat16",
+            "sha256": "4858971e29f3cf4f0fcdc3c651d12b19ddeffcf9afafeb44d1a8b87bb6bfa64e",
+            "shape": [
+              32,
+              2048
+            ]
+          },
+          "v_lora.lora.2.bias": {
+            "dtype": "torch.bfloat16",
+            "sha256": "a67f0b6a3519165d81395690eb0c06f5d03a9ec93a71b64f1e4bc70351c459fc",
+            "shape": [
+              2048
+            ]
+          },
+          "v_lora.lora.2.weight": {
+            "dtype": "torch.bfloat16",
+            "sha256": "fa43239bcee7b97ca62f007cc68487560a39e19f74f3dde7486db3f98df8e471",
+            "shape": [
+              2048,
+              32
+            ]
+          },
+          "v_proj.weight": {
+            "dtype": "torch.bfloat16",
+            "sha256": "9e7c2aaba4d231fedc55acda2c14cb5366b269b0b2692a83cafbaa143da692e3",
+            "shape": [
+              2048,
+              2048
+            ]
+          },
+          "w_lora.lora.0.weight": {
+            "dtype": "torch.bfloat16",
+            "sha256": "d80c93ceebf2c031997b435f58742bb9d190171f0d166960cb1995ebee520d33",
+            "shape": [
+              64,
+              2048
+            ]
+          },
+          "w_lora.lora.2.bias": {
+            "dtype": "torch.bfloat16",
+            "sha256": "a67f0b6a3519165d81395690eb0c06f5d03a9ec93a71b64f1e4bc70351c459fc",
+            "shape": [
+              2048
+            ]
+          },
+          "w_lora.lora.2.weight": {
+            "dtype": "torch.bfloat16",
+            "sha256": "8a39d2abd3999ab73c34db2476849cddf303ce389b35826850f9a700589b4a90",
+            "shape": [
+              2048,
+              64
+            ]
+          },
+          "x_a": {
+            "dtype": "torch.bfloat16",
+            "sha256": "ad7facb2586fc6e966c004d7d1d16b024f5805ff7cb47c7a85dabd8b48892ca7",
+            "shape": [
+              1,
+              1,
+              2048
+            ]
+          },
+          "x_g": {
+            "dtype": "torch.bfloat16",
+            "sha256": "ad7facb2586fc6e966c004d7d1d16b024f5805ff7cb47c7a85dabd8b48892ca7",
+            "shape": [
+              1,
+              1,
+              2048
+            ]
+          },
+          "x_k": {
+            "dtype": "torch.bfloat16",
+            "sha256": "ad7facb2586fc6e966c004d7d1d16b024f5805ff7cb47c7a85dabd8b48892ca7",
+            "shape": [
+              1,
+              1,
+              2048
+            ]
+          },
+          "x_r": {
+            "dtype": "torch.bfloat16",
+            "sha256": "ad7facb2586fc6e966c004d7d1d16b024f5805ff7cb47c7a85dabd8b48892ca7",
+            "shape": [
+              1,
+              1,
+              2048
+            ]
+          },
+          "x_v": {
+            "dtype": "torch.bfloat16",
+            "sha256": "ad7facb2586fc6e966c004d7d1d16b024f5805ff7cb47c7a85dabd8b48892ca7",
+            "shape": [
+              1,
+              1,
+              2048
+            ]
+          },
+          "x_w": {
+            "dtype": "torch.bfloat16",
+            "sha256": "ad7facb2586fc6e966c004d7d1d16b024f5805ff7cb47c7a85dabd8b48892ca7",
+            "shape": [
+              1,
+              1,
+              2048
+            ]
+          }
+        }
+      },
+      "baseline_output_sha256": "1f5d7cf7e2dcdb5a7105ab6eb5f9f1a3fbfcb92b23929cbfbfb4a98669a166f9",
+      "candidate_final_state_sha256": "6906afb838e6f1ac6e0d128651b655de342bd54eb0f063a1454feeccab4df9e8",
+      "candidate_gate": {
+        "cosine": 0.878500759601593,
+        "nmse": 0.22883455455303192,
+        "relative_l2": 0.47836652398109436
+      },
+      "candidate_materialization": {
+        "aggregate_sha256": "c91dc35d09c96d67d3a870505de3d8c233da78a5ce111fd448087f0ecf872266",
+        "tensor_count": 26,
+        "tensors": {
+          "a_lora.lora.0.weight": {
+            "dtype": "torch.bfloat16",
+            "sha256": "72b3bc2429229059962ab3b558df62a36f09b4bc827bcc3be939d127cf7e8bd1",
+            "shape": [
+              64,
+              2048
+            ]
+          },
+          "a_lora.lora.2.bias": {
+            "dtype": "torch.bfloat16",
+            "sha256": "0f217e597177c71fa6dfac93c4859f5a467ba9a0e9cd568a74dededae5d1a8e2",
+            "shape": [
+              2048
+            ]
+          },
+          "a_lora.lora.2.weight": {
+            "dtype": "torch.bfloat16",
+            "sha256": "bd39c07f79d0a907a6c3c8122881f42dfa4f4f01fc354268866d7bde8512dbb9",
+            "shape": [
+              2048,
+              64
+            ]
+          },
+          "g_lora.lora.0.weight": {
+            "dtype": "torch.bfloat16",
+            "sha256": "b4573be6400bb0c5e126faca49e54aabb62bd4e40959b750919686d651aee985",
+            "shape": [
+              128,
+              2048
+            ]
+          },
+          "g_lora.lora.2.weight": {
+            "dtype": "torch.bfloat16",
+            "sha256": "394ec3367370451ded5f5afc683c2f7eade609815bdf71e9f484653f231bbc89",
+            "shape": [
+              2048,
+              128
+            ]
+          },
+          "g_norm.bias": {
+            "dtype": "torch.bfloat16",
+            "sha256": "ad7facb2586fc6e966c004d7d1d16b024f5805ff7cb47c7a85dabd8b48892ca7",
+            "shape": [
+              2048
+            ]
+          },
+          "g_norm.weight": {
+            "dtype": "torch.bfloat16",
+            "sha256": "045ad01d502fc9de7069fd37169060ce79a14a289444ffcd9881ec367a554644",
+            "shape": [
+              2048
+            ]
+          },
+          "k_a": {
+            "dtype": "torch.bfloat16",
+            "sha256": "ad7facb2586fc6e966c004d7d1d16b024f5805ff7cb47c7a85dabd8b48892ca7",
+            "shape": [
+              2048
+            ]
+          },
+          "k_k": {
+            "dtype": "torch.bfloat16",
+            "sha256": "045ad01d502fc9de7069fd37169060ce79a14a289444ffcd9881ec367a554644",
+            "shape": [
+              2048
+            ]
+          },
+          "k_proj.weight": {
+            "dtype": "torch.bfloat16",
+            "sha256": "b72de888a233871ffcd86d54a81e5ba6381e4ff20da02ca141f60eb53ac397aa",
+            "shape": [
+              2048,
+              2048
+            ]
+          },
+          "o_proj.weight": {
+            "dtype": "torch.bfloat16",
+            "sha256": "058c450c82afc163e2b1773a89d571c977a8b78ff639bf02400f9f11084d3aed",
+            "shape": [
+              2048,
+              2048
+            ]
+          },
+          "r_k": {
+            "dtype": "torch.bfloat16",
+            "sha256": "ad7facb2586fc6e966c004d7d1d16b024f5805ff7cb47c7a85dabd8b48892ca7",
+            "shape": [
+              16,
+              128
+            ]
+          },
+          "r_proj.weight": {
+            "dtype": "torch.bfloat16",
+            "sha256": "be8d6c47bcdefc350c2fb6f3b265a961cd36f584a60a4393a989d839f588c779",
+            "shape": [
+              2048,
+              2048
+            ]
+          },
+          "v_lora.lora.0.weight": {
+            "dtype": "torch.bfloat16",
+            "sha256": "298e308e2e2a69a2b416219cda69f4e46425607970a5e42ff157e48a8091005f",
+            "shape": [
+              32,
+              2048
+            ]
+          },
+          "v_lora.lora.2.bias": {
+            "dtype": "torch.bfloat16",
+            "sha256": "a67f0b6a3519165d81395690eb0c06f5d03a9ec93a71b64f1e4bc70351c459fc",
+            "shape": [
+              2048
+            ]
+          },
+          "v_lora.lora.2.weight": {
+            "dtype": "torch.bfloat16",
+            "sha256": "fa43239bcee7b97ca62f007cc68487560a39e19f74f3dde7486db3f98df8e471",
+            "shape": [
+              2048,
+              32
+            ]
+          },
+          "v_proj.weight": {
+            "dtype": "torch.bfloat16",
+            "sha256": "f3ec65258ac65ba258a47c072937b133661230674ac9c773d185eed74e9c3d52",
+            "shape": [
+              2048,
+              2048
+            ]
+          },
+          "w_lora.lora.0.weight": {
+            "dtype": "torch.bfloat16",
+            "sha256": "ffaf3e2dd844a4db1a90ad366e4436e1dc52b2baa1d3b171468b86088b862c44",
+            "shape": [
+              64,
+              2048
+            ]
+          },
+          "w_lora.lora.2.bias": {
+            "dtype": "torch.bfloat16",
+            "sha256": "2e6829988a4cd3122c24e04e807c5f4a1e848626ac6199e99f245a62ccc3a7b7",
+            "shape": [
+              2048
+            ]
+          },
+          "w_lora.lora.2.weight": {
+            "dtype": "torch.bfloat16",
+            "sha256": "2d9bd6290b355ace3e86acd7f19395ea924243f169e6185c6004556d4dd42415",
+            "shape": [
+              2048,
+              64
+            ]
+          },
+          "x_a": {
+            "dtype": "torch.bfloat16",
+            "sha256": "ad7facb2586fc6e966c004d7d1d16b024f5805ff7cb47c7a85dabd8b48892ca7",
+            "shape": [
+              1,
+              1,
+              2048
+            ]
+          },
+          "x_g": {
+            "dtype": "torch.bfloat16",
+            "sha256": "ad7facb2586fc6e966c004d7d1d16b024f5805ff7cb47c7a85dabd8b48892ca7",
+            "shape": [
+              1,
+              1,
+              2048
+            ]
+          },
+          "x_k": {
+            "dtype": "torch.bfloat16",
+            "sha256": "ad7facb2586fc6e966c004d7d1d16b024f5805ff7cb47c7a85dabd8b48892ca7",
+            "shape": [
+              1,
+              1,
+              2048
+            ]
+          },
+          "x_r": {
+            "dtype": "torch.bfloat16",
+            "sha256": "ad7facb2586fc6e966c004d7d1d16b024f5805ff7cb47c7a85dabd8b48892ca7",
+            "shape": [
+              1,
+              1,
+              2048
+            ]
+          },
+          "x_v": {
+            "dtype": "torch.bfloat16",
+            "sha256": "ad7facb2586fc6e966c004d7d1d16b024f5805ff7cb47c7a85dabd8b48892ca7",
+            "shape": [
+              1,
+              1,
+              2048
+            ]
+          },
+          "x_w": {
+            "dtype": "torch.bfloat16",
+            "sha256": "ad7facb2586fc6e966c004d7d1d16b024f5805ff7cb47c7a85dabd8b48892ca7",
+            "shape": [
+              1,
+              1,
+              2048
+            ]
+          }
+        }
+      },
+      "candidate_output_sha256": "ff596382a864603cc3b5ea3925c5fad7fdf849718f737347ee018bc44535169d",
+      "candidate_vs_exact_qwen_mixer": {
+        "cosine": 0.5530790686607361,
+        "nmse": 0.6941207647323608,
+        "relative_l2": 0.8331391215324402
+      },
+      "candidate_vs_frozen_mapped_baseline": {
+        "cosine": 0.17272795736789703,
+        "nmse": 0.9895281791687012,
+        "relative_l2": 0.9947503209114075
+      },
+      "exact_component_counterfactuals": {
+        "ablations": {
+          "exact_r_k_v_dynamic_oracle": {
+            "all_other_components": "installed-bf16-candidate",
+            "final_state_sha256": "ee072696b6ce445db2d84d68f345d684d8b31578d5c87feb972d080dbda6b51e",
+            "nmse_delta_from_candidate": -0.030681610107421875,
+            "output_sha256": "027aff0042a1809796026c8def8921124ed5e994141613c559e732358ec7da20",
+            "output_vs_exact_qwen_mixer": {
+              "cosine": 0.5804120302200317,
+              "nmse": 0.663439154624939,
+              "relative_l2": 0.8145177364349365
+            },
+            "replaced_components": [
+              "key",
+              "read",
+              "value"
+            ]
+          },
+          "exact_source_gate": {
+            "all_other_components": "installed-bf16-candidate",
+            "final_state_sha256": "6906afb838e6f1ac6e0d128651b655de342bd54eb0f063a1454feeccab4df9e8",
+            "nmse_delta_from_candidate": -0.030860185623168945,
+            "output_sha256": "0794477e74266c0840cdd22f77b662334300fdc1565283c89d1357e4264e0db4",
+            "output_vs_exact_qwen_mixer": {
+              "cosine": 0.5804718136787415,
+              "nmse": 0.6632605791091919,
+              "relative_l2": 0.8144081234931946
+            },
+            "replaced_components": [
+              "gate"
+            ]
+          },
+          "exact_source_o_proj": {
+            "all_other_components": "installed-bf16-candidate",
+            "final_state_sha256": "6906afb838e6f1ac6e0d128651b655de342bd54eb0f063a1454feeccab4df9e8",
+            "nmse_delta_from_candidate": 1.8545175790786743,
+            "output_sha256": "774c3f8602d49cee14cf139aa4327904c7e17f3ff30d6c4972301c0298f4b5df",
+            "output_vs_exact_qwen_mixer": {
+              "cosine": 0.43331435322761536,
+              "nmse": 2.548638343811035,
+              "relative_l2": 1.5964454412460327
+            },
+            "replaced_components": [
+              "output_bias",
+              "output_weight"
+            ]
+          },
+          "exact_w_a_dynamic_oracle": {
+            "all_other_components": "installed-bf16-candidate",
+            "final_state_sha256": "addc3aa304595fbd1504ac56ed6547caccddc5e4c22518805dac7ab9407217b1",
+            "nmse_delta_from_candidate": -0.002952098846435547,
+            "output_sha256": "419a1a26434f90e0b72041cb12b51f0f6fe79569d2dd5b8c9fe7c378c0f92c3f",
+            "output_vs_exact_qwen_mixer": {
+              "cosine": 0.5558148622512817,
+              "nmse": 0.6911686658859253,
+              "relative_l2": 0.8313655853271484
+            },
+            "replaced_components": [
+              "decay_logits",
+              "erase"
+            ]
+          }
+        },
+        "candidate_signal_replay": {
+          "final_state_sha256": "6906afb838e6f1ac6e0d128651b655de342bd54eb0f063a1454feeccab4df9e8",
+          "output_sha256": "ff596382a864603cc3b5ea3925c5fad7fdf849718f737347ee018bc44535169d",
+          "output_vs_installed_module": {
+            "cosine": 1.0000001192092896,
+            "nmse": 0.0,
+            "relative_l2": 0.0
+          }
+        },
+        "scope": "frozen-final one-group-at-a-time diagnostic; oracle center, closure and query basis were frozen before final rows",
+        "selection_effect": "none-diagnostic-only"
+      },
+      "frozen_mapped_baseline_vs_exact_qwen_mixer": {
+        "cosine": 0.29192468523979187,
+        "nmse": 3.07023286819458,
+        "relative_l2": 1.75220787525177
+      },
+      "precision": {
+        "kernel_vectors": "torch.bfloat16",
+        "metrics": "torch.float32",
+        "module_input": "torch.bfloat16",
+        "module_parameters": "torch.bfloat16",
+        "recurrent_state": "torch.float32"
+      },
+      "real_bf16_forward_state_backward": {
+        "combined_loss": 0.0006065658526495099,
+        "final_state_requires_grad": true,
+        "head_size": 128,
+        "input_gradient": {
+          "finite": true,
+          "l2": 4.6149416448315606e-06
+        },
+        "kernel_vectors": "torch.bfloat16",
+        "nonzero_parameter_gradient_count": 25,
+        "output_loss": 0.0006065630586817861,
+        "parameter_gradients": {
+          "a_lora.lora.0.weight": {
+            "finite": true,
+            "l2": 9.073844557860866e-05,
+            "status": "present"
+          },
+          "a_lora.lora.2.bias": {
+            "finite": true,
+            "l2": 7.246771929203533e-07,
+            "status": "present"
+          },
+          "a_lora.lora.2.weight": {
+            "finite": true,
+            "l2": 5.96858899371e-06,
+            "status": "present"
+          },
+          "g_lora.lora.0.weight": {
+            "finite": true,
+            "l2": 0.0002299692278029397,
+            "status": "present"
+          },
+          "g_lora.lora.2.weight": {
+            "finite": true,
+            "l2": 4.570651799440384e-05,
+            "status": "present"
+          },
+          "g_norm.bias": {
+            "finite": true,
+            "l2": 5.943884389125742e-06,
+            "status": "present"
+          },
+          "g_norm.weight": {
+            "finite": true,
+            "l2": 8.035295650188345e-06,
+            "status": "present"
+          },
+          "k_a": {
+            "finite": true,
+            "l2": 3.250173222113517e-06,
+            "status": "present"
+          },
+          "k_k": {
+            "finite": true,
+            "l2": 9.472109354646818e-07,
+            "status": "present"
+          },
+          "k_proj.weight": {
+            "finite": true,
+            "l2": 0.05772924795746803,
+            "status": "present"
+          },
+          "o_proj.weight": {
+            "finite": true,
+            "l2": 0.0009739776141941547,
+            "status": "present"
+          },
+          "r_k": {
+            "finite": true,
+            "l2": 7.554912144769332e-07,
+            "status": "present"
+          },
+          "r_proj.weight": {
+            "finite": true,
+            "l2": 0.00017227570060640574,
+            "status": "present"
+          },
+          "v_lora.lora.0.weight": {
+            "finite": true,
+            "l2": 0.0,
+            "status": "present"
+          },
+          "v_lora.lora.2.bias": {
+            "finite": true,
+            "l2": 4.777184758886222e-10,
+            "status": "present"
+          },
+          "v_lora.lora.2.weight": {
+            "finite": true,
+            "l2": 1.2797887194437862e-09,
+            "status": "present"
+          },
+          "v_proj.weight": {
+            "finite": true,
+            "l2": 0.0005877051735296845,
+            "status": "present"
+          },
+          "w_lora.lora.0.weight": {
+            "finite": true,
+            "l2": 0.0059256600216031075,
+            "status": "present"
+          },
+          "w_lora.lora.2.bias": {
+            "finite": true,
+            "l2": 2.4061039312073262e-06,
+            "status": "present"
+          },
+          "w_lora.lora.2.weight": {
+            "finite": true,
+            "l2": 4.249384915055998e-07,
+            "status": "present"
+          },
+          "x_a": {
+            "finite": true,
+            "l2": 1.8583929204396554e-06,
+            "status": "present"
+          },
+          "x_g": {
+            "finite": true,
+            "l2": 3.866631686832989e-06,
+            "status": "present"
+          },
+          "x_k": {
+            "finite": true,
+            "l2": 7.644174729648512e-06,
+            "status": "present"
+          },
+          "x_r": {
+            "finite": true,
+            "l2": 7.498937861782906e-07,
+            "status": "present"
+          },
+          "x_v": {
+            "finite": true,
+            "l2": 2.562254849181045e-06,
+            "status": "present"
+          },
+          "x_w": {
+            "finite": true,
+            "l2": 4.986223416381108e-07,
+            "status": "present"
+          }
+        },
+        "recurrent_state": "torch.float32",
+        "state_loss": 0.002807493321597576,
+        "state_loss_coefficient": 1e-06,
+        "status": "accepted"
+      },
+      "selection_rule": "finite candidate NMSE strictly below the frozen mapped baseline on final sample IDs",
+      "status": "accepted",
+      "v_first_path": "source layer-0 canonical beta*value trace; v_lora uses deterministic source-value basis, zero up projection, and logit(BF16 eps^2) bias",
+      "zero_v_first_counterfactual": {
+        "output_vs_exact_qwen_mixer": {
+          "cosine": 0.5530792474746704,
+          "nmse": 0.6941206455230713,
+          "relative_l2": 0.8331390023231506
+        },
+        "output_vs_source_value_proxy_output": {
+          "cosine": 1.0000001192092896,
+          "nmse": 1.5421648402735855e-09,
+          "relative_l2": 3.927040961571038e-05
+        }
+      }
+    },
+    "state_compression": {
+      "four_state_128x128_exact_block_control_matrix_only": {
+        "cosine": 0.9999998807907104,
+        "nmse": 9.925228838130774e-15,
+        "relative_l2": 9.962544567088116e-08
+      },
+      "two_state_128x128": {
+        "bases": {
+          "first_127_coordinates_plus_dc": {
+            "attention_output_vs_exact_softmax": {
+              "cosine": 0.9184468388557434,
+              "nmse": 0.15666843950748444,
+              "relative_l2": 0.39581364393234253
+            },
+            "dc_indices": [
+              0,
+              0
+            ],
+            "materialized_read_shape": [
+              16,
+              64,
+              8,
+              2,
+              128
+            ],
+            "materialized_state_shape": [
+              16,
+              64,
+              8,
+              2,
+              128,
+              128
+            ],
+            "matrix_observable_loss_vs_full_affine_state": {
+              "cosine": 0.8820332288742065,
+              "nmse": 0.26730287075042725,
+              "relative_l2": 0.517013430595398
+            },
+            "mixer_output_vs_exact_softmax": {
+              "cosine": 0.8259011507034302,
+              "nmse": 0.3193904757499695,
+              "relative_l2": 0.5651464462280273
+            },
+            "native_bias_free_read_projection": {
+              "absolute_ridge": 374.337646484375,
+              "attention_output_vs_exact_softmax": {
+                "cosine": 0.6066705584526062,
+                "nmse": 0.6477984189987183,
+                "relative_l2": 0.8048592805862427
+              },
+              "attention_output_vs_materialized_two_state": {
+                "cosine": 0.6609023213386536,
+                "nmse": 0.5786410570144653,
+                "relative_l2": 0.7606845498085022
+              },
+              "calibration_selection_nmse_by_multiplier": {
+                "0.0001": 0.49467191100120544,
+                "0.001": 0.49443045258522034,
+                "0.01": 0.4922995865345001,
+                "0.1": 0.4816960096359253,
+                "1.0": 0.4739219844341278,
+                "10.0": 0.5319955945014954,
+                "100.0": 0.6581630706787109
+              },
+              "dc_channel": {
+                "cosine": 0.6360809206962585,
+                "nmse": 0.615570068359375,
+                "relative_l2": 0.7845827341079712
+              },
+              "mixer_output_vs_exact_softmax": {
+                "cosine": 0.627779483795166,
+                "nmse": 0.6215919852256775,
+                "relative_l2": 0.7884110808372498
+              },
+              "read_signal": {
+                "cosine": 0.7738764882087708,
+                "nmse": 0.40115925669670105,
+                "relative_l2": 0.6333713531494141
+              },
+              "ridge_scale": 374.337646484375,
+              "selected_ridge_multiplier": 1.0,
+              "weight_sha256": "4829d9c2c91e4bb8960f6e7b709e2b9b5440e629098cee9da70d4a4fb452358e",
+              "weight_shape": [
+                2048,
+                2048
+              ]
+            },
+            "native_dynamic_signal_oracle": {
+              "erase": {
+                "maximum": 0.5013765692710876,
+                "median": 0.02860143408179283,
+                "minimum": 0.0,
+                "one_fraction": 0.0,
+                "zero_fraction": 0.0233154296875
+              },
+              "free_running_attention_output_vs_exact_softmax": {
+                "cosine": 0.918644368648529,
+                "nmse": 0.15629370510578156,
+                "relative_l2": 0.3953399956226349
+              },
+              "free_running_attention_output_vs_materialized_two_state": {
+                "cosine": 0.999891996383667,
+                "nmse": 0.00021614256547763944,
+                "relative_l2": 0.014701787382364273
+              },
+              "free_running_mixer_output_vs_exact_softmax": {
+                "cosine": 0.8276007771492004,
+                "nmse": 0.3166424036026001,
+                "relative_l2": 0.5627098679542542
+              },
+              "free_running_with_bias_free_read_mixer_vs_exact_softmax": {
+                "cosine": 0.6311182379722595,
+                "nmse": 0.6165088415145874,
+                "relative_l2": 0.7851807475090027
+              },
+              "free_running_with_bias_free_read_vs_exact_softmax": {
+                "cosine": 0.6093292832374573,
+                "nmse": 0.6433911919593811,
+                "relative_l2": 0.8021166920661926
+              },
+              "free_running_with_bias_free_read_vs_materialized_two_state": {
+                "cosine": 0.663542628288269,
+                "nmse": 0.573954164981842,
+                "relative_l2": 0.7575976252555847
+              },
+              "realized_decay": {
+                "maximum": 0.9993928670883179,
+                "median": 0.97921222448349,
+                "minimum": 0.5452392101287842
+              },
+              "requested_decay": {
+                "clamped_fraction": 0.015625,
+                "maximum": 0.9993928670883179,
+                "median": 0.97921222448349,
+                "minimum": 0.0
+              },
+              "scope": "native-compatible k_k=1, k_a=0, scalar decay and channel-wise erase; source-to-weight fitting is not included",
+              "signal_shapes": {
+                "decay": [
+                  16,
+                  64,
+                  16
+                ],
+                "erase": [
+                  16,
+                  64,
+                  16,
+                  128
+                ],
+                "key": [
+                  16,
+                  64,
+                  16,
+                  128
+                ],
+                "value": [
+                  16,
+                  64,
+                  16,
+                  128
+                ]
+              },
+              "teacher_forced_attention_output_vs_materialized_two_state": {
+                "cosine": 0.9999967813491821,
+                "nmse": 6.425060291803675e-06,
+                "relative_l2": 0.0025347701739519835
+              }
+            },
+            "source_to_native_weight_projection": null,
+            "total_loss_vs_full_affine_state": {
+              "cosine": 0.9828424453735352,
+              "nmse": 0.03407510370016098,
+              "relative_l2": 0.18459442257881165
+            }
+          },
+          "future_read_observable_127_plus_dc": {
+            "attention_output_vs_exact_softmax": {
+              "cosine": 0.9388360381126404,
+              "nmse": 0.11864852160215378,
+              "relative_l2": 0.34445396065711975
+            },
+            "dc_indices": [
+              0,
+              0
+            ],
+            "materialized_read_shape": [
+              16,
+              64,
+              8,
+              2,
+              128
+            ],
+            "materialized_state_shape": [
+              16,
+              64,
+              8,
+              2,
+              128,
+              128
+            ],
+            "matrix_observable_loss_vs_full_affine_state": {
+              "cosine": 0.9642168879508972,
+              "nmse": 0.07811356335878372,
+              "relative_l2": 0.2794880270957947
+            },
+            "mixer_output_vs_exact_softmax": {
+              "cosine": 0.8671534657478333,
+              "nmse": 0.2491035759449005,
+              "relative_l2": 0.49910277128219604
+            },
+            "native_bias_free_read_projection": {
+              "absolute_ridge": 374.337646484375,
+              "attention_output_vs_exact_softmax": {
+                "cosine": 0.605143129825592,
+                "nmse": 0.6601085066795349,
+                "relative_l2": 0.8124706149101257
+              },
+              "attention_output_vs_materialized_two_state": {
+                "cosine": 0.6428185701370239,
+                "nmse": 0.6149213910102844,
+                "relative_l2": 0.7841692566871643
+              },
+              "calibration_selection_nmse_by_multiplier": {
+                "0.0001": 0.5528400540351868,
+                "0.001": 0.5525615811347961,
+                "0.01": 0.5501095652580261,
+                "0.1": 0.538197934627533,
+                "1.0": 0.532578706741333,
+                "10.0": 0.6053561568260193,
+                "100.0": 0.7431144714355469
+              },
+              "dc_channel": {
+                "cosine": 0.6173760890960693,
+                "nmse": 0.6533513069152832,
+                "relative_l2": 0.808301568031311
+              },
+              "mixer_output_vs_exact_softmax": {
+                "cosine": 0.6342388987541199,
+                "nmse": 0.6259955167770386,
+                "relative_l2": 0.7911987900733948
+              },
+              "read_signal": {
+                "cosine": 0.7545261383056641,
+                "nmse": 0.4306904077529907,
+                "relative_l2": 0.6562700867652893
+              },
+              "ridge_scale": 374.337646484375,
+              "selected_ridge_multiplier": 1.0,
+              "weight_sha256": "3388b4dfca56179078e3903bf9061ae5b9741dba8cd2215d99eb719db11c174d",
+              "weight_shape": [
+                2048,
+                2048
+              ]
+            },
+            "native_dynamic_signal_oracle": {
+              "erase": {
+                "maximum": 0.5509991645812988,
+                "median": 0.03012826293706894,
+                "minimum": 0.0,
+                "one_fraction": 0.0,
+                "zero_fraction": 0.023315906524658203
+              },
+              "free_running_attention_output_vs_exact_softmax": {
+                "cosine": 0.9389400482177734,
+                "nmse": 0.11847224831581116,
+                "relative_l2": 0.34419798851013184
+              },
+              "free_running_attention_output_vs_materialized_two_state": {
+                "cosine": 0.999811589717865,
+                "nmse": 0.0003788980538956821,
+                "relative_l2": 0.019465304911136627
+              },
+              "free_running_mixer_output_vs_exact_softmax": {
+                "cosine": 0.8688768148422241,
+                "nmse": 0.24624012410640717,
+                "relative_l2": 0.49622592329978943
+              },
+              "free_running_with_bias_free_read_mixer_vs_exact_softmax": {
+                "cosine": 0.6402298808097839,
+                "nmse": 0.615501880645752,
+                "relative_l2": 0.7845392823219299
+              },
+              "free_running_with_bias_free_read_vs_exact_softmax": {
+                "cosine": 0.6122820377349854,
+                "nmse": 0.6477360129356384,
+                "relative_l2": 0.8048205375671387
+              },
+              "free_running_with_bias_free_read_vs_materialized_two_state": {
+                "cosine": 0.6502207517623901,
+                "nmse": 0.6013749837875366,
+                "relative_l2": 0.7754836678504944
+              },
+              "realized_decay": {
+                "maximum": 0.9993928670883179,
+                "median": 0.97921222448349,
+                "minimum": 0.5452392101287842
+              },
+              "requested_decay": {
+                "clamped_fraction": 0.015625,
+                "maximum": 0.9993928670883179,
+                "median": 0.97921222448349,
+                "minimum": 0.0
+              },
+              "scope": "native-compatible k_k=1, k_a=0, scalar decay and channel-wise erase; source-to-weight fitting is not included",
+              "signal_shapes": {
+                "decay": [
+                  16,
+                  64,
+                  16
+                ],
+                "erase": [
+                  16,
+                  64,
+                  16,
+                  128
+                ],
+                "key": [
+                  16,
+                  64,
+                  16,
+                  128
+                ],
+                "value": [
+                  16,
+                  64,
+                  16,
+                  128
+                ]
+              },
+              "teacher_forced_attention_output_vs_materialized_two_state": {
+                "cosine": 0.9999924302101135,
+                "nmse": 1.9182361938874237e-05,
+                "relative_l2": 0.004379767458885908
+              }
+            },
+            "source_to_native_weight_projection": null,
+            "total_loss_vs_full_affine_state": {
+              "cosine": 0.9950228333473206,
+              "nmse": 0.009957721456885338,
+              "relative_l2": 0.09978838264942169
+            }
+          },
+          "operator_svd_127_plus_dc": {
+            "attention_output_vs_exact_softmax": {
+              "cosine": 0.9378762245178223,
+              "nmse": 0.1204972192645073,
+              "relative_l2": 0.34712710976600647
+            },
+            "dc_indices": [
+              0,
+              0
+            ],
+            "materialized_read_shape": [
+              16,
+              64,
+              8,
+              2,
+              128
+            ],
+            "materialized_state_shape": [
+              16,
+              64,
+              8,
+              2,
+              128,
+              128
+            ],
+            "matrix_observable_loss_vs_full_affine_state": {
+              "cosine": 0.9596818685531616,
+              "nmse": 0.08548818528652191,
+              "relative_l2": 0.2923836410045624
+            },
+            "mixer_output_vs_exact_softmax": {
+              "cosine": 0.8635027408599854,
+              "nmse": 0.25599831342697144,
+              "relative_l2": 0.5059627890586853
+            },
+            "native_bias_free_read_projection": {
+              "absolute_ridge": 37.4337646484375,
+              "attention_output_vs_exact_softmax": {
+                "cosine": 0.5495747327804565,
+                "nmse": 0.7788125872612,
+                "relative_l2": 0.8825035691261292
+              },
+              "attention_output_vs_materialized_two_state": {
+                "cosine": 0.5848365426063538,
+                "nmse": 0.7447032928466797,
+                "relative_l2": 0.8629618883132935
+              },
+              "calibration_selection_nmse_by_multiplier": {
+                "0.0001": 0.6234399676322937,
+                "0.001": 0.6231808662414551,
+                "0.01": 0.6209340691566467,
+                "0.1": 0.610992968082428,
+                "1.0": 0.6132282614707947,
+                "10.0": 0.7028694152832031,
+                "100.0": 0.8467536568641663
+              },
+              "dc_channel": {
+                "cosine": 0.5424810647964478,
+                "nmse": 0.817815899848938,
+                "relative_l2": 0.9043318033218384
+              },
+              "mixer_output_vs_exact_softmax": {
+                "cosine": 0.600447416305542,
+                "nmse": 0.7141804695129395,
+                "relative_l2": 0.8450919985771179
+              },
+              "read_signal": {
+                "cosine": 0.7106727361679077,
+                "nmse": 0.5001669526100159,
+                "relative_l2": 0.7072248458862305
+              },
+              "ridge_scale": 374.337646484375,
+              "selected_ridge_multiplier": 0.1,
+              "weight_sha256": "2a1d1525c5ddf0afa2d497d5c14dcc155e8f38dda32002846bfa392cac476d44",
+              "weight_shape": [
+                2048,
+                2048
+              ]
+            },
+            "native_dynamic_signal_oracle": {
+              "erase": {
+                "maximum": 0.6058812141418457,
+                "median": 0.03150903061032295,
+                "minimum": 0.0,
+                "one_fraction": 0.0,
+                "zero_fraction": 0.023317337036132812
+              },
+              "free_running_attention_output_vs_exact_softmax": {
+                "cosine": 0.9380784034729004,
+                "nmse": 0.12008346617221832,
+                "relative_l2": 0.34653061628341675
+              },
+              "free_running_attention_output_vs_materialized_two_state": {
+                "cosine": 0.9997864365577698,
+                "nmse": 0.00042898126412183046,
+                "relative_l2": 0.020711861550807953
+              },
+              "free_running_mixer_output_vs_exact_softmax": {
+                "cosine": 0.8655492067337036,
+                "nmse": 0.2523508071899414,
+                "relative_l2": 0.5023453235626221
+              },
+              "free_running_with_bias_free_read_mixer_vs_exact_softmax": {
+                "cosine": 0.6070824265480042,
+                "nmse": 0.6990443468093872,
+                "relative_l2": 0.8360887169837952
+              },
+              "free_running_with_bias_free_read_vs_exact_softmax": {
+                "cosine": 0.5574571490287781,
+                "nmse": 0.7608884572982788,
+                "relative_l2": 0.8722891807556152
+              },
+              "free_running_with_bias_free_read_vs_materialized_two_state": {
+                "cosine": 0.5929822325706482,
+                "nmse": 0.7251601815223694,
+                "relative_l2": 0.8515633344650269
+              },
+              "realized_decay": {
+                "maximum": 0.9993928670883179,
+                "median": 0.97921222448349,
+                "minimum": 0.5452392101287842
+              },
+              "requested_decay": {
+                "clamped_fraction": 0.015625,
+                "maximum": 0.9993928670883179,
+                "median": 0.97921222448349,
+                "minimum": 0.0
+              },
+              "scope": "native-compatible k_k=1, k_a=0, scalar decay and channel-wise erase; source-to-weight fitting is not included",
+              "signal_shapes": {
+                "decay": [
+                  16,
+                  64,
+                  16
+                ],
+                "erase": [
+                  16,
+                  64,
+                  16,
+                  128
+                ],
+                "key": [
+                  16,
+                  64,
+                  16,
+                  128
+                ],
+                "value": [
+                  16,
+                  64,
+                  16,
+                  128
+                ]
+              },
+              "teacher_forced_attention_output_vs_materialized_two_state": {
+                "cosine": 0.9999926686286926,
+                "nmse": 1.950288969965186e-05,
+                "relative_l2": 0.004416207317262888
+              }
+            },
+            "source_to_native_weight_projection": null,
+            "total_loss_vs_full_affine_state": {
+              "cosine": 0.994540810585022,
+              "nmse": 0.010897820815443993,
+              "relative_l2": 0.1043926253914833
+            }
+          },
+          "query_pca_127_plus_dc": {
+            "attention_output_vs_exact_softmax": {
+              "cosine": 0.9392383694648743,
+              "nmse": 0.11789506673812866,
+              "relative_l2": 0.34335851669311523
+            },
+            "dc_indices": [
+              0,
+              0
+            ],
+            "materialized_read_shape": [
+              16,
+              64,
+              8,
+              2,
+              128
+            ],
+            "materialized_state_shape": [
+              16,
+              64,
+              8,
+              2,
+              128,
+              128
+            ],
+            "matrix_observable_loss_vs_full_affine_state": {
+              "cosine": 0.9691300988197327,
+              "nmse": 0.0667516365647316,
+              "relative_l2": 0.25836336612701416
+            },
+            "mixer_output_vs_exact_softmax": {
+              "cosine": 0.8654276728630066,
+              "nmse": 0.2524901032447815,
+              "relative_l2": 0.5024839639663696
+            },
+            "native_bias_free_read_projection": {
+              "absolute_ridge": 37.4337646484375,
+              "attention_output_vs_exact_softmax": {
+                "cosine": 0.5772188305854797,
+                "nmse": 0.7240065336227417,
+                "relative_l2": 0.8508857488632202
+              },
+              "attention_output_vs_materialized_two_state": {
+                "cosine": 0.6118520498275757,
+                "nmse": 0.6881331205368042,
+                "relative_l2": 0.8295378684997559
+              },
+              "calibration_selection_nmse_by_multiplier": {
+                "0.0001": 0.5187579393386841,
+                "0.001": 0.518572986125946,
+                "0.01": 0.5169605016708374,
+                "0.1": 0.5096532702445984,
+                "1.0": 0.5136436820030212,
+                "10.0": 0.5965248346328735,
+                "100.0": 0.7371362447738647
+              },
+              "dc_channel": {
+                "cosine": 0.5710764527320862,
+                "nmse": 0.75584876537323,
+                "relative_l2": 0.8693956732749939
+              },
+              "mixer_output_vs_exact_softmax": {
+                "cosine": 0.6270732283592224,
+                "nmse": 0.6569300889968872,
+                "relative_l2": 0.8105123043060303
+              },
+              "read_signal": {
+                "cosine": 0.7763750553131104,
+                "nmse": 0.40304046869277954,
+                "relative_l2": 0.6348546743392944
+              },
+              "ridge_scale": 374.337646484375,
+              "selected_ridge_multiplier": 0.1,
+              "weight_sha256": "a2dfa6d6c54d88122f32df63b190ab0f4a04a34226c5f75462d0fd8b7a92f3d0",
+              "weight_shape": [
+                2048,
+                2048
+              ]
+            },
+            "native_dynamic_signal_oracle": {
+              "erase": {
+                "maximum": 0.5129475593566895,
+                "median": 0.02765686623752117,
+                "minimum": 0.0,
+                "one_fraction": 0.0,
+                "zero_fraction": 0.023315906524658203
+              },
+              "free_running_attention_output_vs_exact_softmax": {
+                "cosine": 0.9390196800231934,
+                "nmse": 0.11840897798538208,
+                "relative_l2": 0.3441060483455658
+              },
+              "free_running_attention_output_vs_materialized_two_state": {
+                "cosine": 0.9997617602348328,
+                "nmse": 0.0005037529044784606,
+                "relative_l2": 0.02244444005191326
+              },
+              "free_running_mixer_output_vs_exact_softmax": {
+                "cosine": 0.8665971755981445,
+                "nmse": 0.2511347532272339,
+                "relative_l2": 0.5011335015296936
+              },
+              "free_running_with_bias_free_read_mixer_vs_exact_softmax": {
+                "cosine": 0.6317148804664612,
+                "nmse": 0.6512042880058289,
+                "relative_l2": 0.806972324848175
+              },
+              "free_running_with_bias_free_read_vs_exact_softmax": {
+                "cosine": 0.5821700096130371,
+                "nmse": 0.715941846370697,
+                "relative_l2": 0.8461334705352783
+              },
+              "free_running_with_bias_free_read_vs_materialized_two_state": {
+                "cosine": 0.6171625852584839,
+                "nmse": 0.6790003776550293,
+                "relative_l2": 0.8240147829055786
+              },
+              "realized_decay": {
+                "maximum": 0.9993928670883179,
+                "median": 0.97921222448349,
+                "minimum": 0.5452392101287842
+              },
+              "requested_decay": {
+                "clamped_fraction": 0.015625,
+                "maximum": 0.9993928670883179,
+                "median": 0.97921222448349,
+                "minimum": 0.0
+              },
+              "scope": "native-compatible k_k=1, k_a=0, scalar decay and channel-wise erase; source-to-weight fitting is not included",
+              "signal_shapes": {
+                "decay": [
+                  16,
+                  64,
+                  16
+                ],
+                "erase": [
+                  16,
+                  64,
+                  16,
+                  128
+                ],
+                "key": [
+                  16,
+                  64,
+                  16,
+                  128
+                ],
+                "value": [
+                  16,
+                  64,
+                  16,
+                  128
+                ]
+              },
+              "teacher_forced_attention_output_vs_materialized_two_state": {
+                "cosine": 0.9999885559082031,
+                "nmse": 2.646731081767939e-05,
+                "relative_l2": 0.005144638940691948
+              }
+            },
+            "source_to_native_weight_projection": null,
+            "total_loss_vs_full_affine_state": {
+              "cosine": 0.9957510232925415,
+              "nmse": 0.008509332314133644,
+              "relative_l2": 0.09224604070186615
+            }
+          },
+          "rope_aligned_disjoint_127x2_plus_two_dc": {
+            "attention_output_vs_exact_softmax": {
+              "cosine": 0.9227327704429626,
+              "nmse": 0.14857128262519836,
+              "relative_l2": 0.38544946908950806
+            },
+            "dc_indices": [
+              127,
+              127
+            ],
+            "materialized_read_shape": [
+              16,
+              64,
+              8,
+              2,
+              128
+            ],
+            "materialized_state_shape": [
+              16,
+              64,
+              8,
+              2,
+              128,
+              128
+            ],
+            "matrix_observable_loss_vs_full_affine_state": {
+              "cosine": 0.774402379989624,
+              "nmse": 0.40062686800956726,
+              "relative_l2": 0.6329509615898132
+            },
+            "mixer_output_vs_exact_softmax": {
+              "cosine": 0.8145239353179932,
+              "nmse": 0.3365783095359802,
+              "relative_l2": 0.5801537036895752
+            },
+            "native_bias_free_read_projection": {
+              "absolute_ridge": 3.74337646484375,
+              "attention_output_vs_exact_softmax": {
+                "cosine": 0.9112454652786255,
+                "nmse": 0.16976472735404968,
+                "relative_l2": 0.41202518343925476
+              },
+              "attention_output_vs_materialized_two_state": {
+                "cosine": 0.9940665364265442,
+                "nmse": 0.012093392200767994,
+                "relative_l2": 0.10996996611356735
+              },
+              "calibration_selection_nmse_by_multiplier": {
+                "0.0001": 0.24071457982063293,
+                "0.001": 0.24069860577583313,
+                "0.01": 0.24057748913764954,
+                "0.1": 0.24071279168128967,
+                "1.0": 0.25082340836524963,
+                "10.0": 0.30195268988609314,
+                "100.0": 0.3914998769760132
+              },
+              "dc_channel": {
+                "cosine": 0.9983372688293457,
+                "nmse": 0.003527772380039096,
+                "relative_l2": 0.05939505621790886
+              },
+              "mixer_output_vs_exact_softmax": {
+                "cosine": 0.785346269607544,
+                "nmse": 0.38329389691352844,
+                "relative_l2": 0.6191073656082153
+              },
+              "read_signal": {
+                "cosine": 0.9130774140357971,
+                "nmse": 0.16629649698734283,
+                "relative_l2": 0.40779465436935425
+              },
+              "ridge_scale": 374.337646484375,
+              "selected_ridge_multiplier": 0.01,
+              "weight_sha256": "8f7a8a7942ec21fe585d86e825abc1215d1ce7a26c424c13ff08e092f3d97a3d",
+              "weight_shape": [
+                2048,
+                2048
+              ]
+            },
+            "native_dynamic_signal_oracle": {
+              "erase": {
+                "maximum": 0.6723755598068237,
+                "median": 0.02459345944225788,
+                "minimum": 0.0,
+                "one_fraction": 0.0,
+                "zero_fraction": 0.032928466796875
+              },
+              "free_running_attention_output_vs_exact_softmax": {
+                "cosine": 0.9191400408744812,
+                "nmse": 0.15554656088352203,
+                "relative_l2": 0.3943939208984375
+              },
+              "free_running_attention_output_vs_materialized_two_state": {
+                "cosine": 0.9923493266105652,
+                "nmse": 0.015441843308508396,
+                "relative_l2": 0.12426521629095078
+              },
+              "free_running_mixer_output_vs_exact_softmax": {
+                "cosine": 0.8105905652046204,
+                "nmse": 0.3429429829120636,
+                "relative_l2": 0.5856133103370667
+              },
+              "free_running_with_bias_free_read_mixer_vs_exact_softmax": {
+                "cosine": 0.7737517952919006,
+                "nmse": 0.4013371467590332,
+                "relative_l2": 0.6335117816925049
+              },
+              "free_running_with_bias_free_read_vs_exact_softmax": {
+                "cosine": 0.9036420583724976,
+                "nmse": 0.18428336083889008,
+                "relative_l2": 0.42928239703178406
+              },
+              "free_running_with_bias_free_read_vs_materialized_two_state": {
+                "cosine": 0.9857575297355652,
+                "nmse": 0.029530048370361328,
+                "relative_l2": 0.17184309661388397
+              },
+              "realized_decay": {
+                "maximum": 0.9993928670883179,
+                "median": 0.97921222448349,
+                "minimum": 0.5452392101287842
+              },
+              "requested_decay": {
+                "clamped_fraction": 0.015625,
+                "maximum": 0.9993928670883179,
+                "median": 0.97921222448349,
+                "minimum": 0.0
+              },
+              "scope": "native-compatible k_k=1, k_a=0, scalar decay and channel-wise erase; source-to-weight fitting is not included",
+              "signal_shapes": {
+                "decay": [
+                  16,
+                  64,
+                  16
+                ],
+                "erase": [
+                  16,
+                  64,
+                  16,
+                  128
+                ],
+                "key": [
+                  16,
+                  64,
+                  16,
+                  128
+                ],
+                "value": [
+                  16,
+                  64,
+                  16,
+                  128
+                ]
+              },
+              "teacher_forced_attention_output_vs_materialized_two_state": {
+                "cosine": 0.9995517730712891,
+                "nmse": 0.0009000336285680532,
+                "relative_l2": 0.030000561848282814
+              }
+            },
+            "source_to_native_weight_projection": null,
+            "total_loss_vs_full_affine_state": {
+              "cosine": 0.9742077589035034,
+              "nmse": 0.051070913672447205,
+              "relative_l2": 0.2259887456893921
+            }
+          },
+          "rope_aligned_observable_127x2_plus_two_dc": {
+            "attention_output_vs_exact_softmax": {
+              "cosine": 0.9339126944541931,
+              "nmse": 0.12781041860580444,
+              "relative_l2": 0.3575058579444885
+            },
+            "dc_indices": [
+              127,
+              127
+            ],
+            "materialized_read_shape": [
+              16,
+              64,
+              8,
+              2,
+              128
+            ],
+            "materialized_state_shape": [
+              16,
+              64,
+              8,
+              2,
+              128,
+              128
+            ],
+            "matrix_observable_loss_vs_full_affine_state": {
+              "cosine": 0.877081036567688,
+              "nmse": 0.23465289175510406,
+              "relative_l2": 0.4844098389148712
+            },
+            "mixer_output_vs_exact_softmax": {
+              "cosine": 0.846045970916748,
+              "nmse": 0.2842855155467987,
+              "relative_l2": 0.5331843495368958
+            },
+            "native_bias_free_read_projection": {
+              "absolute_ridge": 3.74337646484375,
+              "attention_output_vs_exact_softmax": {
+                "cosine": 0.9234111905097961,
+                "nmse": 0.147461399435997,
+                "relative_l2": 0.3840070366859436
+              },
+              "attention_output_vs_materialized_two_state": {
+                "cosine": 0.9930433630943298,
+                "nmse": 0.014238634146749973,
+                "relative_l2": 0.11932575702667236
+              },
+              "calibration_selection_nmse_by_multiplier": {
+                "0.0001": 0.24591787159442902,
+                "0.001": 0.24591131508350372,
+                "0.01": 0.24588030576705933,
+                "0.1": 0.24672044813632965,
+                "1.0": 0.26032063364982605,
+                "10.0": 0.3215274214744568,
+                "100.0": 0.42394205927848816
+              },
+              "dc_channel": {
+                "cosine": 0.9983372688293457,
+                "nmse": 0.003527772380039096,
+                "relative_l2": 0.05939505621790886
+              },
+              "mixer_output_vs_exact_softmax": {
+                "cosine": 0.8184593915939331,
+                "nmse": 0.3301243782043457,
+                "relative_l2": 0.574564516544342
+              },
+              "read_signal": {
+                "cosine": 0.9172539710998535,
+                "nmse": 0.1586659997701645,
+                "relative_l2": 0.3983290493488312
+              },
+              "ridge_scale": 374.337646484375,
+              "selected_ridge_multiplier": 0.01,
+              "weight_sha256": "032fcce351cf954640c1a9135d78d11ea5b73f07292bcc747d765fa0ba772605",
+              "weight_shape": [
+                2048,
+                2048
+              ]
+            },
+            "native_dynamic_signal_oracle": {
+              "erase": {
+                "maximum": 0.6888018846511841,
+                "median": 0.02565593272447586,
+                "minimum": 0.0,
+                "one_fraction": 0.0,
+                "zero_fraction": 0.032747745513916016
+              },
+              "free_running_attention_output_vs_exact_softmax": {
+                "cosine": 0.9289867281913757,
+                "nmse": 0.13699772953987122,
+                "relative_l2": 0.37013205885887146
+              },
+              "free_running_attention_output_vs_materialized_two_state": {
+                "cosine": 0.990258514881134,
+                "nmse": 0.01939040794968605,
+                "relative_l2": 0.13924945890903473
+              },
+              "free_running_mixer_output_vs_exact_softmax": {
+                "cosine": 0.8444575667381287,
+                "nmse": 0.2872161865234375,
+                "relative_l2": 0.535925567150116
+              },
+              "free_running_with_bias_free_read_mixer_vs_exact_softmax": {
+                "cosine": 0.8129549026489258,
+                "nmse": 0.33911168575286865,
+                "relative_l2": 0.582332968711853
+              },
+              "free_running_with_bias_free_read_vs_exact_softmax": {
+                "cosine": 0.916444718837738,
+                "nmse": 0.16072076559066772,
+                "relative_l2": 0.4008999466896057
+              },
+              "free_running_with_bias_free_read_vs_materialized_two_state": {
+                "cosine": 0.9838584661483765,
+                "nmse": 0.0329536534845829,
+                "relative_l2": 0.1815314143896103
+              },
+              "realized_decay": {
+                "maximum": 0.9993928670883179,
+                "median": 0.97921222448349,
+                "minimum": 0.5452392101287842
+              },
+              "requested_decay": {
+                "clamped_fraction": 0.015625,
+                "maximum": 0.9993928670883179,
+                "median": 0.97921222448349,
+                "minimum": 0.0
+              },
+              "scope": "native-compatible k_k=1, k_a=0, scalar decay and channel-wise erase; source-to-weight fitting is not included",
+              "signal_shapes": {
+                "decay": [
+                  16,
+                  64,
+                  16
+                ],
+                "erase": [
+                  16,
+                  64,
+                  16,
+                  128
+                ],
+                "key": [
+                  16,
+                  64,
+                  16,
+                  128
+                ],
+                "value": [
+                  16,
+                  64,
+                  16,
+                  128
+                ]
+              },
+              "teacher_forced_attention_output_vs_materialized_two_state": {
+                "cosine": 0.9993107914924622,
+                "nmse": 0.0013950149295851588,
+                "relative_l2": 0.037349898368120193
+              }
+            },
+            "source_to_native_weight_projection": {
+              "a_lora": {
+                "bias_sha256": "4cf5b3c9b076a4e48dcf6331e3c5e6aa519f965cc0edac6de384215e9c21e81e",
+                "bias_shape": [
+                  2048
+                ],
+                "down_weight_sha256": "1d511a1034dd64bf2a68e4c0580219732a3df892e930bccdba21d8d19604d2a0",
+                "down_weight_shape": [
+                  64,
+                  2048
+                ],
+                "heldout_signal": {
+                  "cosine": 0.9503185749053955,
+                  "nmse": 0.10599207878112793,
+                  "relative_l2": 0.32556426525115967
+                },
+                "hidden_activation": "identity",
+                "output_bias": true,
+                "up_weight_sha256": "aa167e6daae3510610e6d9f9786d877be5d819096742640782af4e64f8b0a3b6",
+                "up_weight_shape": [
+                  2048,
+                  64
+                ]
+              },
+              "complete_free_running_mixer_vs_exact_softmax": {
+                "cosine": 0.5833226442337036,
+                "nmse": 0.6607860326766968,
+                "relative_l2": 0.8128874897956848
+              },
+              "evaluation_split_role": "adaptive-development-heldout-not-final-generalization-estimate",
+              "free_running_recurrent_output_vs_dynamic_oracle": {
+                "cosine": 0.9027807116508484,
+                "nmse": 0.3596273362636566,
+                "relative_l2": 0.5996893644332886
+              },
+              "g_lora": {
+                "absolute_ridge": 0.42965087890625003,
+                "basis": "deterministic-source-gate-rows",
+                "basis_row_indices": [
+                  0,
+                  16,
+                  32,
+                  48,
+                  64,
+                  81,
+                  97,
+                  113,
+                  129,
+                  145,
+                  161,
+                  177,
+                  193,
+                  210,
+                  226,
+                  242,
+                  258,
+                  274,
+                  290,
+                  306,
+                  322,
+                  338,
+                  355,
+                  371,
+                  387,
+                  403,
+                  419,
+                  435,
+                  451,
+                  467,
+                  484,
+                  500,
+                  516,
+                  532,
+                  548,
+                  564,
+                  580,
+                  596,
+                  612,
+                  629,
+                  645,
+                  661,
+                  677,
+                  693,
+                  709,
+                  725,
+                  741,
+                  758,
+                  774,
+                  790,
+                  806,
+                  822,
+                  838,
+                  854,
+                  870,
+                  886,
+                  903,
+                  919,
+                  935,
+                  951,
+                  967,
+                  983,
+                  999,
+                  1015,
+                  1032,
+                  1048,
+                  1064,
+                  1080,
+                  1096,
+                  1112,
+                  1128,
+                  1144,
+                  1161,
+                  1177,
+                  1193,
+                  1209,
+                  1225,
+                  1241,
+                  1257,
+                  1273,
+                  1289,
+                  1306,
+                  1322,
+                  1338,
+                  1354,
+                  1370,
+                  1386,
+                  1402,
+                  1418,
+                  1435,
+                  1451,
+                  1467,
+                  1483,
+                  1499,
+                  1515,
+                  1531,
+                  1547,
+                  1563,
+                  1580,
+                  1596,
+                  1612,
+                  1628,
+                  1644,
+                  1660,
+                  1676,
+                  1692,
+                  1709,
+                  1725,
+                  1741,
+                  1757,
+                  1773,
+                  1789,
+                  1805,
+                  1821,
+                  1837,
+                  1854,
+                  1870,
+                  1886,
+                  1902,
+                  1918,
+                  1934,
+                  1950,
+                  1966,
+                  1983,
+                  1999,
+                  2015,
+                  2031,
+                  2047
+                ],
+                "bias_sha256": null,
+                "bias_shape": null,
+                "down_weight_sha256": "4ae39a7481056f68c681601457b856230613d77f322c61618d315bd08f9e7a77",
+                "down_weight_shape": [
+                  128,
+                  2048
+                ],
+                "heldout_signal": {
+                  "cosine": 0.8792777061462402,
+                  "nmse": 0.22783587872982025,
+                  "relative_l2": 0.4773215651512146
+                },
+                "hidden_activation": "sigmoid",
+                "output_bias": false,
+                "selected_ridge_multiplier": 0.1,
+                "up_weight_sha256": "c062ef37c69ba83f1c54092be87d442c4d779da35c45d66755f7d286b875372e",
+                "up_weight_shape": [
+                  2048,
+                  128
+                ]
+              },
+              "installation_rule": "install only when the complete held-out free-running mixer NMSE is finite and strictly below the frozen mapped baseline",
+              "k_proj": {
+                "absolute_ridge": 37.4337646484375,
+                "calibration_center_selection_nmse": {
+                  "source-compatible": 1220.612060546875,
+                  "zero": 0.1853286325931549
+                },
+                "heldout_signal": {
+                  "cosine": 0.9164509773254395,
+                  "nmse": 0.16195926070213318,
+                  "relative_l2": 0.4024416208267212
+                },
+                "selected_ridge_center": "zero",
+                "selected_ridge_multiplier": 0.1,
+                "weight_sha256": "ebe34298dc63bd05c103d50f01ad6c48df0d68afd8719336780990653bc82a09",
+                "weight_shape": [
+                  2048,
+                  2048
+                ]
+              },
+              "native_parameterization": {
+                "g_norm.bias": "zero",
+                "g_norm.weight": "one",
+                "k_a": "zero",
+                "k_k": "one",
+                "r_k": "zero",
+                "v_lora": "disabled",
+                "x_r/x_w/x_k/x_v/x_a/x_g": "zero-current-token"
+              },
+              "o_proj": {
+                "absolute_ridge": 40.63549041748047,
+                "calibration_center_selection_nmse": {
+                  "source-compatible": 0.9286980032920837,
+                  "zero": 0.693199634552002
+                },
+                "heldout_signal": {
+                  "cosine": 0.5833226442337036,
+                  "nmse": 0.6607860326766968,
+                  "relative_l2": 0.8128874897956848
+                },
+                "selected_ridge_center": "zero",
+                "selected_ridge_multiplier": 10.0,
+                "weight_sha256": "39c059853178662824b7c2f2ab40639c7d0b0df77187938dce4ea01696efd94c",
+                "weight_shape": [
+                  2048,
+                  2048
+                ]
+              },
+              "r_proj": {
+                "absolute_ridge": 374.337646484375,
+                "calibration_center_selection_nmse": {
+                  "source-compatible": 0.036969542503356934,
+                  "zero": 0.24588030576705933
+                },
+                "heldout_signal": {
+                  "cosine": 0.9866566061973572,
+                  "nmse": 0.02749575860798359,
+                  "relative_l2": 0.165818452835083
+                },
+                "selected_ridge_center": "source-compatible",
+                "selected_ridge_multiplier": 1.0,
+                "weight_sha256": "706c5995387bd6e01dc8578968fe21be0fcb31fc6e159f9f8038feaa2693910e",
+                "weight_shape": [
+                  2048,
+                  2048
+                ]
+              },
+              "required_next_gate": "materialize tensors into ProjectionBoundaryRWKV7Attention, run BF16 forward_sequence on previously unseen frozen sample IDs, and compare against the frozen mapped baseline",
+              "ridge_center_selection": "choose zero or source-compatible center independently for each bias-free projection using only the calibration validation split",
+              "scope": "fp32-signal-level-emulation",
+              "status": "diagnostic-not-installed",
+              "v_proj": {
+                "absolute_ridge": 374.337646484375,
+                "calibration_center_selection_nmse": {
+                  "source-compatible": 0.13808943331241608,
+                  "zero": 0.5614785552024841
+                },
+                "heldout_signal": {
+                  "cosine": 0.9375408291816711,
+                  "nmse": 0.1250319480895996,
+                  "relative_l2": 0.35359859466552734
+                },
+                "selected_ridge_center": "source-compatible",
+                "selected_ridge_multiplier": 1.0,
+                "weight_sha256": "a6498ed13441be909bc889f9b3bca4281ca77864fcda8ef57a5101c8316d185a",
+                "weight_shape": [
+                  2048,
+                  2048
+                ]
+              },
+              "w_lora": {
+                "bias_sha256": "cc5e01419a9f5bb9dfd083bec6ee83ac0871b33d067411d00e31a0ed48fe74df",
+                "bias_shape": [
+                  2048
+                ],
+                "down_weight_sha256": "d41b5530deb8ee2f3a3dd5e0e59a52b307b287842fa95f336e1b73f3e8f54442",
+                "down_weight_shape": [
+                  64,
+                  2048
+                ],
+                "heldout_signal": {
+                  "cosine": 0.9261386394500732,
+                  "nmse": 0.1511434018611908,
+                  "relative_l2": 0.388771653175354
+                },
+                "hidden_activation": "tanh",
+                "output_bias": true,
+                "up_weight_sha256": "2dcf3d96d186b9145c80c9ecc2639bc509bde999bdfc997a6d1e2822acf2b072",
+                "up_weight_shape": [
+                  2048,
+                  64
+                ]
+              }
+            },
+            "total_loss_vs_full_affine_state": {
+              "cosine": 0.9849521517753601,
+              "nmse": 0.02991296537220478,
+              "relative_l2": 0.17295363545417786
+            }
+          }
+        },
+        "feature_budget": {
+          "constraint": "each output-row block can read only its own native state; feature slots are not a shared arbitrary 254-dimensional input subspace",
+          "per_native_state": {
+            "constant_channels": 1,
+            "query_feature_channels": 127
+          },
+          "two_state_total": {
+            "constant_channels": 2,
+            "query_feature_slots": 254
+          }
+        },
+        "native_pipeline_selection": {
+          "baseline": "query_pca_127_plus_dc",
+          "combined_pipeline_improved": true,
+          "compression_non_regressed": false,
+          "proposed": "rope_aligned_observable_127x2_plus_two_dc",
+          "rule": "strictly lower finite held-out combined native-transition/read mixer NMSE; intermediate stages remain diagnostics",
+          "selected": "rope_aligned_observable_127x2_plus_two_dc",
+          "status": "accepted",
+          "transition_non_regressed": false
+        },
+        "selection": {
+          "baseline": "query_pca_127_plus_dc",
+          "mixer_non_regressed": true,
+          "observable_improved": false,
+          "proposed": "future_read_observable_127_plus_dc",
+          "rule": "strictly lower held-out total affine-state NMSE and non-regressed held-out mixer NMSE",
+          "selected": "query_pca_127_plus_dc",
+          "status": "rejected"
+        }
+      }
+    }
+  },
+  "provenance": {
+    "activation_dtype": "torch.float32",
+    "counterfactual_policy": "GQA group center, rank-one closure, RoPE-aligned query basis and native weights are frozen on calibration/development; fresh final rows only replay one-group-at-a-time exact component diagnostics and cannot alter installation",
+    "dataset": "/home/caizus/Datasets/fineweb-edu/87f09149ef4734204d70ed1d046ddc9ca3f2b8f9/qwen35-2b-70m.jsonl",
+    "dataset_sha256": "302189332fce81c74bf7bfc01ec01d5518a214c77d84ceb33f756b9be11060a5",
+    "device": "cuda",
+    "device_name": "NVIDIA GB10",
+    "final_split_policy": "final sample IDs are selected by a pre-fit row offset and excluded from every solver and method-selection metric; an optional gap retires previously exposed final rows",
+    "gdn_layer": 0,
+    "gqa_layer": 3,
+    "loaded_layer_source_bytes": {
+      "0": 117629536,
+      "1": 117629536,
+      "2": 117629536,
+      "3": 104866816
+    },
+    "mapping_check_dtype": "torch.float64",
+    "metric_dtype": "torch.float32",
+    "sample_ids": [
+      "fineweb-edu:<urn:uuid:0d8a309d-25c5-405d-a08a-c11239f0d717>",
+      "fineweb-edu:<urn:uuid:316c7af5-14e1-4d0b-9576-753e17ef2cc5>",
+      "fineweb-edu:<urn:uuid:a3e140cd-7f25-48c9-a2f0-a7d0b1954e0d>",
+      "fineweb-edu:<urn:uuid:c337bcd8-6aa1-4f2d-8c48-b916442ebbee>",
+      "fineweb-edu:<urn:uuid:c0b175bb-65fb-420e-a881-a80b91d00ecd>",
+      "fineweb-edu:<urn:uuid:373cc951-d17e-4d57-b0f5-122effe3a054>",
+      "fineweb-edu:<urn:uuid:78cbe1bd-1849-4138-b59a-5521e93122a3>",
+      "fineweb-edu:<urn:uuid:a63f6870-f496-4355-adfd-f3296c1577e5>",
+      "fineweb-edu:<urn:uuid:0428aaca-1b84-4407-9b6f-93b230a692b3>",
+      "fineweb-edu:<urn:uuid:6665d40b-fee1-4353-8a03-3268af4a76bb>",
+      "fineweb-edu:<urn:uuid:d55ba202-34fa-4fe6-b6ae-698c282eb244>",
+      "fineweb-edu:<urn:uuid:be22c535-4fcb-4d7e-9507-2ace71b51909>",
+      "fineweb-edu:<urn:uuid:3cd46b83-2936-49a0-9b1f-a7fc2baa9e50>",
+      "fineweb-edu:<urn:uuid:672e69ee-fd10-42dc-8e01-f4fde95914a0>",
+      "fineweb-edu:<urn:uuid:c63d3de8-6d63-4687-b45d-41b137a97594>",
+      "fineweb-edu:<urn:uuid:c183066d-32a9-42eb-91b6-191fdb0980c2>",
+      "fineweb-edu:<urn:uuid:c2dcc337-4538-4bf9-8838-d2005b03e76d>",
+      "fineweb-edu:<urn:uuid:cc2f6ff5-32a8-4803-8794-bd3c0c07dc53>",
+      "fineweb-edu:<urn:uuid:c9bd6a3e-3426-45f4-8eec-ef2af2ae747f>",
+      "fineweb-edu:<urn:uuid:566c0f69-f932-4d46-abcd-00f058076cf6>",
+      "fineweb-edu:<urn:uuid:8026eb8e-2045-4425-bfb5-1eb355f7472a>",
+      "fineweb-edu:<urn:uuid:4fafe4c1-2dd0-49fd-8b1b-41d1829f7cdf>",
+      "fineweb-edu:<urn:uuid:5bf543a8-f7b4-40fe-ba47-2b49b4e5396f>",
+      "fineweb-edu:<urn:uuid:f8131c7f-1b2a-41bd-9eaa-951dad06e313>",
+      "fineweb-edu:<urn:uuid:9dafa879-7f20-47af-9000-4507980185f0>",
+      "fineweb-edu:<urn:uuid:c9d71a03-1a5c-4380-b591-b22abec06ba2>",
+      "fineweb-edu:<urn:uuid:6cd796d0-6c60-4c49-88fe-b887ea27aa1d>",
+      "fineweb-edu:<urn:uuid:2069c051-8762-4c3d-a0d3-651a55fe3924>",
+      "fineweb-edu:<urn:uuid:0abbeab1-fafa-4389-9f7e-7573eb693c9e>",
+      "fineweb-edu:<urn:uuid:a2bf4085-1745-4ba3-afd8-5a46d9ad2a75>",
+      "fineweb-edu:<urn:uuid:cec56b3f-1f86-4cf0-8456-717120369364>",
+      "fineweb-edu:<urn:uuid:2db016d0-d509-4003-8288-668024b1c2bf>",
+      "fineweb-edu:<urn:uuid:cb5db99f-40e4-45b6-9b59-e96df82a88dc>",
+      "fineweb-edu:<urn:uuid:76a4c6bc-e63f-4d77-8492-c24be187795c>",
+      "fineweb-edu:<urn:uuid:dde9296d-febe-4cf0-8ed1-a0f99cdc6029>",
+      "fineweb-edu:<urn:uuid:b48891ec-4670-49b3-85a7-ec1a2ad95bf5>",
+      "fineweb-edu:<urn:uuid:775f924c-1e42-4c9d-96ef-70a47ee35ac0>",
+      "fineweb-edu:<urn:uuid:e7cb4707-ca52-448e-b78d-9bafd1458d65>",
+      "fineweb-edu:<urn:uuid:10459212-d96b-47fa-9ead-4447c5ba731f>",
+      "fineweb-edu:<urn:uuid:c4c19472-691a-44c6-a55b-21fbb183475b>"
+    ],
+    "sequence_length": 64,
+    "source": "/home/caizus/Weights/Qwen/Qwen3.5-2B",
+    "source_shards": {
+      "model.safetensors-00001-of-00001.safetensors": "aa33250c4fc64891ddfaba3a314fd9542ea371843c387178b425fbcc5ed680b1"
+    },
+    "split_rows": {
+      "adaptive_development": 8,
+      "calibration": 8,
+      "frozen_final": 8,
+      "unused_gap": 16
+    },
+    "split_sample_ids": {
+      "adaptive_development": [
+        "fineweb-edu:<urn:uuid:0428aaca-1b84-4407-9b6f-93b230a692b3>",
+        "fineweb-edu:<urn:uuid:6665d40b-fee1-4353-8a03-3268af4a76bb>",
+        "fineweb-edu:<urn:uuid:d55ba202-34fa-4fe6-b6ae-698c282eb244>",
+        "fineweb-edu:<urn:uuid:be22c535-4fcb-4d7e-9507-2ace71b51909>",
+        "fineweb-edu:<urn:uuid:3cd46b83-2936-49a0-9b1f-a7fc2baa9e50>",
+        "fineweb-edu:<urn:uuid:672e69ee-fd10-42dc-8e01-f4fde95914a0>",
+        "fineweb-edu:<urn:uuid:c63d3de8-6d63-4687-b45d-41b137a97594>",
+        "fineweb-edu:<urn:uuid:c183066d-32a9-42eb-91b6-191fdb0980c2>"
+      ],
+      "calibration": [
+        "fineweb-edu:<urn:uuid:0d8a309d-25c5-405d-a08a-c11239f0d717>",
+        "fineweb-edu:<urn:uuid:316c7af5-14e1-4d0b-9576-753e17ef2cc5>",
+        "fineweb-edu:<urn:uuid:a3e140cd-7f25-48c9-a2f0-a7d0b1954e0d>",
+        "fineweb-edu:<urn:uuid:c337bcd8-6aa1-4f2d-8c48-b916442ebbee>",
+        "fineweb-edu:<urn:uuid:c0b175bb-65fb-420e-a881-a80b91d00ecd>",
+        "fineweb-edu:<urn:uuid:373cc951-d17e-4d57-b0f5-122effe3a054>",
+        "fineweb-edu:<urn:uuid:78cbe1bd-1849-4138-b59a-5521e93122a3>",
+        "fineweb-edu:<urn:uuid:a63f6870-f496-4355-adfd-f3296c1577e5>"
+      ],
+      "frozen_final": [
+        "fineweb-edu:<urn:uuid:cb5db99f-40e4-45b6-9b59-e96df82a88dc>",
+        "fineweb-edu:<urn:uuid:76a4c6bc-e63f-4d77-8492-c24be187795c>",
+        "fineweb-edu:<urn:uuid:dde9296d-febe-4cf0-8ed1-a0f99cdc6029>",
+        "fineweb-edu:<urn:uuid:b48891ec-4670-49b3-85a7-ec1a2ad95bf5>",
+        "fineweb-edu:<urn:uuid:775f924c-1e42-4c9d-96ef-70a47ee35ac0>",
+        "fineweb-edu:<urn:uuid:e7cb4707-ca52-448e-b78d-9bafd1458d65>",
+        "fineweb-edu:<urn:uuid:10459212-d96b-47fa-9ead-4447c5ba731f>",
+        "fineweb-edu:<urn:uuid:c4c19472-691a-44c6-a55b-21fbb183475b>"
+      ],
+      "unused_gap": [
+        "fineweb-edu:<urn:uuid:c2dcc337-4538-4bf9-8838-d2005b03e76d>",
+        "fineweb-edu:<urn:uuid:cc2f6ff5-32a8-4803-8794-bd3c0c07dc53>",
+        "fineweb-edu:<urn:uuid:c9bd6a3e-3426-45f4-8eec-ef2af2ae747f>",
+        "fineweb-edu:<urn:uuid:566c0f69-f932-4d46-abcd-00f058076cf6>",
+        "fineweb-edu:<urn:uuid:8026eb8e-2045-4425-bfb5-1eb355f7472a>",
+        "fineweb-edu:<urn:uuid:4fafe4c1-2dd0-49fd-8b1b-41d1829f7cdf>",
+        "fineweb-edu:<urn:uuid:5bf543a8-f7b4-40fe-ba47-2b49b4e5396f>",
+        "fineweb-edu:<urn:uuid:f8131c7f-1b2a-41bd-9eaa-951dad06e313>",
+        "fineweb-edu:<urn:uuid:9dafa879-7f20-47af-9000-4507980185f0>",
+        "fineweb-edu:<urn:uuid:c9d71a03-1a5c-4380-b591-b22abec06ba2>",
+        "fineweb-edu:<urn:uuid:6cd796d0-6c60-4c49-88fe-b887ea27aa1d>",
+        "fineweb-edu:<urn:uuid:2069c051-8762-4c3d-a0d3-651a55fe3924>",
+        "fineweb-edu:<urn:uuid:0abbeab1-fafa-4389-9f7e-7573eb693c9e>",
+        "fineweb-edu:<urn:uuid:a2bf4085-1745-4ba3-afd8-5a46d9ad2a75>",
+        "fineweb-edu:<urn:uuid:cec56b3f-1f86-4cf0-8456-717120369364>",
+        "fineweb-edu:<urn:uuid:2db016d0-d509-4003-8288-668024b1c2bf>"
+      ]
+    },
+    "torch_version": "2.11.0+cu130"
+  },
+  "schema_version": 2
+}

@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "any2rwkv"
+version = "0.1.0"
+description = "Contract-first heterogeneous architecture distillation toolkit"
+requires-python = ">=3.12"
+dependencies = [
+  "causal-conv1d==1.6.2.post1",
+  "datasets>=5.0.0",
+  "flash-linear-attention[flash-rwkv] @ git+https://github.com/rwkv-rs/fla-rwkv.git@a4a8aa98df6ec5322f194a80ec57363dd045adfc",
+  "huggingface-hub",
+  "numpy>=2.0.0",
+  "safetensors>=0.6.2",
+  "tokenizers>=0.21.1",
+  "torch==2.11.0",
+  "transformers @ git+https://github.com/rwkv-rs/transformers-rwkv.git@2696927df9363b5fa175076bb827ba4da2c4e581",
+  "wandb>=0.28,<0.29",
+]
+
+[project.scripts]
+any2rwkv = "any2rwkv.cli:main"
+
+[[tool.uv.index]]
+name = "tuna"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
+[dependency-groups]
+dev = ["pytest>=8.0", "ruff>=0.14,<1"]
+
+[tool.uv.extra-build-dependencies]
+causal-conv1d = [{ requirement = "torch", match-runtime = true }]
+
+[tool.uv.extra-build-variables]
+causal-conv1d = { CAUSAL_CONV1D_FORCE_BUILD = "TRUE" }
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["any2rwkv*"]
