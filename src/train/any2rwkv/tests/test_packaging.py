@@ -10,10 +10,12 @@ from pathlib import Path
 
 from packaging.requirements import Requirement
 
+from any2rwkv.kernel import (
+    FLA_RWKV7_REQUIREMENT,
+    FLA_RWKV7_REVISION,
+    FLA_RWKV7_SOURCE_URL,
+)
 from any2rwkv.preflight import (
-    RWKV_HF_REQUIREMENT,
-    RWKV_HF_REVISION,
-    RWKV_HF_SOURCE_URL,
     TRANSFORMERS_REQUIREMENT,
     TRANSFORMERS_REVISION,
     TRANSFORMERS_SOURCE_URL,
@@ -33,9 +35,11 @@ def _assert_exact_vcs_requirements(requirements: dict[str, Requirement]) -> None
     assert transformers.url == f"git+{TRANSFORMERS_SOURCE_URL}@{TRANSFORMERS_REVISION}"
     assert not transformers.specifier
 
-    rwkv_hf = requirements["rwkv7-hf-adapter"]
-    assert rwkv_hf.url == f"git+{RWKV_HF_SOURCE_URL}@{RWKV_HF_REVISION}"
-    assert not rwkv_hf.specifier
+    fla = requirements["flash-linear-attention"]
+    assert fla.url == f"git+{FLA_RWKV7_SOURCE_URL}@{FLA_RWKV7_REVISION}"
+    assert fla.extras == {"flash-rwkv"}
+    assert not fla.specifier
+    assert "rwkv7-hf-adapter" not in requirements
 
 
 def test_manifest_pins_standalone_runtime_revisions() -> None:
@@ -47,8 +51,8 @@ def test_manifest_pins_standalone_runtime_revisions() -> None:
     assert Requirement(TRANSFORMERS_REQUIREMENT).url == (
         f"git+{TRANSFORMERS_SOURCE_URL}@{TRANSFORMERS_REVISION}"
     )
-    assert Requirement(RWKV_HF_REQUIREMENT).url == (
-        f"git+{RWKV_HF_SOURCE_URL}@{RWKV_HF_REVISION}"
+    assert Requirement(FLA_RWKV7_REQUIREMENT).url == (
+        f"git+{FLA_RWKV7_SOURCE_URL}@{FLA_RWKV7_REVISION}"
     )
 
 
@@ -100,4 +104,5 @@ def test_standalone_wheel_metadata_retains_exact_runtime_revisions(
         requirement.name: requirement for requirement in parsed_requirements
     }
     _assert_exact_vcs_requirements(requirements)
+    assert b"rwkv7-hf-adapter" not in metadata_bytes
     assert b"../rwkv-hf" not in metadata_bytes

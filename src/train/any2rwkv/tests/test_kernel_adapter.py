@@ -1,103 +1,190 @@
 from __future__ import annotations
 
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 import torch.nn.functional as F
 
-from any2rwkv.errors import ContractError
+from any2rwkv import kernel as kernel_module
 from any2rwkv.configuration_any2rwkv import Any2RWKV7Config
 from any2rwkv.contract import build_target_config
+from any2rwkv.errors import ContractError
 from any2rwkv.fixture import tiny_qwen35_config
-from any2rwkv.kernel import NativeRwkv7Kernel
-from any2rwkv import kernel as kernel_module
+from any2rwkv.kernel import Rwkv7OperatorAdapter
 from any2rwkv.mixer import ProjectionBoundaryRWKV7Attention, apply_partial_rope
 
 
 class KernelAdapterTests(unittest.TestCase):
     @staticmethod
-    def reference_operation(state, r, w, k, v, a, b):
-        batch, tokens, channels = r.shape
-        heads = state.shape[1]
-        size = channels // heads
+    def reference_operation(
+        r,
+        log_decay,
+        k,
+        v,
+        a,
+        b,
+        *,
+        initial_state,
+        output_final_state,
+        cu_seqlens=None,
+        cu_seqlens_cpu=None,
+        state_indices=None,
+        mode,
+    ):
+        assert output_final_state is True
+        assert cu_seqlens is None
+        assert cu_seqlens_cpu is None
+        assert state_indices is None
+        assert mode == "fp32io16"
+        _batch, tokens, _heads, _size = r.shape
         outputs = []
-        current = state
+        current = initial_state
         for index in range(tokens):
-            values = [value[:, index].view(batch, heads, size) for value in (r, w, k, v, a, b)]
-            rt, wt, kt, vt, at, bt = values
-            decay = torch.exp(-0.6065306597 * torch.sigmoid(wt.float()))
-            current = (
-                current * decay.unsqueeze(-2)
-                + (current @ at.float().unsqueeze(-1)) @ bt.float().unsqueeze(-2)
-                + vt.float().unsqueeze(-1) @ kt.float().unsqueeze(-2)
+            rt, wt, kt, vt, at, bt = (
+                value[:, index] for value in (r, log_decay, k, v, a, b)
             )
-            outputs.append((current @ rt.float().unsqueeze(-1)).squeeze(-1))
-        return torch.stack(outputs, dim=1).reshape(batch, tokens, channels).to(r.dtype), current
+            projection = torch.einsum("bhk,bhkv->bhv", at.float(), current)
+            current = (
+                wt.float().exp().unsqueeze(-1) * current
+                + bt.float().unsqueeze(-1) * projection.unsqueeze(-2)
+                + kt.float().unsqueeze(-1) * vt.float().unsqueeze(-2)
+            )
+            outputs.append(torch.einsum("bhk,bhkv->bhv", rt.float(), current))
+        return torch.stack(outputs, dim=1).to(r.dtype), current
 
     def test_adapter_forwards_exact_six_signal_contract(self) -> None:
         seen = []
 
-        def operation(state, *signals):
-            seen.append((state.shape, len(signals)))
-            return signals[3], state
+        def operation(*signals, initial_state, **kwargs):
+            seen.append((initial_state.shape, len(signals), kwargs))
+            return signals[3], initial_state
 
-        adapter = NativeRwkv7Kernel(operation, head_size=64)
+        adapter = Rwkv7OperatorAdapter(
+            operation,
+            lambda: "fla",
+            head_size=64,
+            require_flash=False,
+        )
         state = torch.zeros(2, 2, 64, 64, dtype=torch.float32)
-        signals = [torch.zeros(2, 16, 128, dtype=torch.bfloat16) for _ in range(6)]
-        output, final = adapter(state, *signals)
-        self.assertEqual(seen, [(state.shape, 6)])
+        signals = [torch.zeros(2, 16, 2, 64, dtype=torch.bfloat16) for _ in range(6)]
+        output, final = adapter(*signals, initial_state=state)
+        self.assertEqual(seen[0][0:2], (state.shape, 6))
+        self.assertEqual(seen[0][2]["mode"], "fp32io16")
         self.assertEqual(output.shape, signals[0].shape)
         self.assertIs(final, state)
+        self.assertEqual(adapter.last_provider, "fla")
 
-    def test_loader_resolves_relative_cuda_sources_from_pinned_checkout(self) -> None:
-        checkout = Path(kernel_module.__file__).resolve().parents[4] / "src/train/rwkv-lm"
-        seen_head_sizes = []
-
+    def test_loader_consumes_only_public_pinned_rwkv_rs_contract(self) -> None:
+        operation = lambda *args, **kwargs: (args[3], kwargs["initial_state"])
         module = SimpleNamespace(
-            __file__=str(checkout / "src/infctx_kernel.py"),
-            load_statepassing_kernel=lambda head_size: (
-                seen_head_sizes.append(head_size)
-                or (lambda state, *signals: (signals[3], state))
-            )
+            chunk_rwkv7=operation,
+            get_last_rwkv7_provider=lambda: "flash_rwkv",
         )
-        loader = SimpleNamespace(exec_module=lambda candidate: None)
-        spec = SimpleNamespace(loader=loader)
-
-        kernel_module.load_rwkv_lm_kernel.cache_clear()
+        kernel_module.load_rwkv7_operator_adapter.cache_clear()
         with (
             patch.object(
-                kernel_module.importlib.util,
-                "spec_from_file_location",
-                return_value=spec,
-            ),
-            patch.object(
-                kernel_module.importlib.util,
-                "module_from_spec",
-                return_value=module,
-            ),
+                kernel_module, "_require_exact_vcs_distribution"
+            ) as provenance,
+            patch.object(kernel_module.importlib, "import_module", return_value=module),
         ):
-            previous = Path.cwd()
-            loaded = kernel_module.load_rwkv_lm_kernel(128)
-            self.assertIsInstance(loaded, NativeRwkv7Kernel)
+            loaded = kernel_module.load_rwkv7_operator_adapter(128)
+            self.assertIsInstance(loaded, Rwkv7OperatorAdapter)
             self.assertEqual(loaded.head_size, 128)
-            self.assertEqual(Path.cwd(), previous)
-        self.assertEqual(seen_head_sizes, [128])
-        kernel_module.load_rwkv_lm_kernel.cache_clear()
+            self.assertTrue(loaded.require_flash)
+        self.assertEqual(provenance.call_count, 2)
+        kernel_module.load_rwkv7_operator_adapter.cache_clear()
 
-    def test_adapter_rejects_wrong_dtype_tail_and_state(self) -> None:
-        adapter = NativeRwkv7Kernel(
-            lambda state, *signals: (signals[0], state), head_size=64
+    def test_adapter_rejects_wrong_layout_state_and_provider(self) -> None:
+        adapter = Rwkv7OperatorAdapter(
+            lambda *signals, initial_state, **_kwargs: (signals[0], initial_state),
+            lambda: None,
+            head_size=64,
+            require_flash=False,
         )
         state = torch.zeros(1, 1, 64, 64, dtype=torch.float32)
-        signals = [torch.zeros(1, 15, 64, dtype=torch.bfloat16) for _ in range(6)]
-        with self.assertRaisesRegex(ContractError, "tokens"):
-            adapter(state, *signals)
-        signals = [torch.zeros(1, 16, 64, dtype=torch.float16) for _ in range(6)]
-        with self.assertRaisesRegex(ContractError, "bfloat16"):
-            adapter(state, *signals)
+        signals = [torch.zeros(1, 15, 1, 64, dtype=torch.bfloat16) for _ in range(6)]
+        with self.assertRaisesRegex(ContractError, "provider"):
+            adapter(*signals, initial_state=state)
+        with self.assertRaisesRegex(ContractError, "float32"):
+            adapter(*signals, initial_state=state.to(torch.bfloat16))
+
+        flash_required = Rwkv7OperatorAdapter(
+            lambda *values, initial_state, **_kwargs: (values[0], initial_state),
+            lambda: "fla",
+            head_size=64,
+            require_flash=True,
+        )
+        with self.assertRaisesRegex(ContractError, "FlashRWKV operator is required"):
+            flash_required(*signals, initial_state=state)
+
+    def test_public_operator_forward_backward_and_fixed_state_continuation(
+        self,
+    ) -> None:
+        generator = torch.Generator().manual_seed(20260802)
+        shape = (2, 6, 2, 4)
+        signals = [torch.randn(shape, generator=generator) for _ in range(6)]
+        signals[1] = -signals[1].abs()
+        initial_state = torch.randn(2, 2, 4, 4, generator=generator)
+        kernel = Rwkv7OperatorAdapter(
+            self.reference_operation,
+            lambda: "fla",
+            head_size=4,
+            require_flash=False,
+        )
+
+        with torch.no_grad():
+            complete, complete_state = kernel(
+                *signals,
+                initial_state=initial_state,
+            )
+            first, first_state = kernel(
+                *(signal[:, :3] for signal in signals),
+                initial_state=initial_state,
+            )
+            second, resumed_state = kernel(
+                *(signal[:, 3:] for signal in signals),
+                initial_state=first_state,
+            )
+        torch.testing.assert_close(torch.cat((first, second), dim=1), complete)
+        torch.testing.assert_close(resumed_state, complete_state)
+
+        differentiable_signals = [signal.clone().requires_grad_() for signal in signals]
+        differentiable_state = initial_state.clone().requires_grad_()
+        output, final_state = kernel(
+            *differentiable_signals,
+            initial_state=differentiable_state,
+        )
+        (output.square().mean() + final_state.square().mean()).backward()
+        for value in (*differentiable_signals, differentiable_state):
+            self.assertIsNotNone(value.grad)
+            self.assertTrue(torch.isfinite(value.grad).all())
+
+    def test_provenance_gate_rejects_registry_and_local_editable_installs(
+        self,
+    ) -> None:
+        registry_distribution = SimpleNamespace(read_text=lambda _name: None)
+        local_distribution = SimpleNamespace(
+            read_text=lambda _name: (
+                '{"url":"file:///tmp/fla-rwkv","dir_info":{"editable":true}}'
+            )
+        )
+        for distribution in (registry_distribution, local_distribution):
+            with (
+                self.subTest(distribution=distribution),
+                patch.object(
+                    kernel_module.importlib.metadata,
+                    "distribution",
+                    return_value=distribution,
+                ),
+                self.assertRaisesRegex(ContractError, "pinned rwkv-rs|mismatch"),
+            ):
+                kernel_module._require_exact_vcs_distribution(
+                    "flash-linear-attention",
+                    expected_url=kernel_module.FLA_RWKV7_SOURCE_URL,
+                    expected_revision=kernel_module.FLA_RWKV7_REVISION,
+                )
 
     def test_sequence_kernel_path_matches_token_recurrence(self) -> None:
         source = tiny_qwen35_config(layers=1, moe=False)
@@ -115,8 +202,11 @@ class KernelAdapterTests(unittest.TestCase):
         torch.manual_seed(17)
         values = torch.randn(1, 16, 64, dtype=torch.bfloat16)
         positions = torch.arange(16).view(1, -1)
-        kernel = NativeRwkv7Kernel(
-            self.reference_operation, head_size=config.head_dim
+        kernel = Rwkv7OperatorAdapter(
+            self.reference_operation,
+            lambda: "fla",
+            head_size=config.head_dim,
+            require_flash=False,
         )
         sequence, v_first, final_state, signals = mixer.forward_sequence(
             values, positions=positions, kernel=kernel
@@ -153,7 +243,9 @@ class KernelAdapterTests(unittest.TestCase):
             sequence, torch.stack(token_outputs, dim=1), rtol=0.04, atol=0.04
         )
         torch.testing.assert_close(final_state, state, rtol=0.04, atol=0.04)
-        torch.testing.assert_close(v_first, torch.stack(token_v_rows, dim=1), rtol=0, atol=0)
+        torch.testing.assert_close(
+            v_first, torch.stack(token_v_rows, dim=1), rtol=0, atol=0
+        )
 
     def test_sequence_kernel_supports_expanded_recurrent_width(self) -> None:
         source = tiny_qwen35_config(layers=1, moe=False)
@@ -187,8 +279,11 @@ class KernelAdapterTests(unittest.TestCase):
         sequence, v_first, final_state, signals = mixer.forward_sequence(
             values,
             positions=positions,
-            kernel=NativeRwkv7Kernel(
-                self.reference_operation, head_size=config.head_dim
+            kernel=Rwkv7OperatorAdapter(
+                self.reference_operation,
+                lambda: "fla",
+                head_size=config.head_dim,
+                require_flash=False,
             ),
         )
         self.assertEqual(sequence.shape, (1, 16, 32))
@@ -268,9 +363,8 @@ class KernelAdapterTests(unittest.TestCase):
                     bias=None,
                     eps=head_dim * 1e-5,
                 ).view(batch, tokens, hidden)
-                decomposed = (
-                    norm_base * weight.reshape(1, 1, hidden)
-                    + bias.reshape(1, 1, hidden)
+                decomposed = norm_base * weight.reshape(1, 1, hidden) + bias.reshape(
+                    1, 1, hidden
                 )
 
                 torch.testing.assert_close(

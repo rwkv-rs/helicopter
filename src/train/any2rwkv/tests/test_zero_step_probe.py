@@ -3,23 +3,22 @@ from __future__ import annotations
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
-import torch
 import pytest
+import torch
 
 from any2rwkv.configuration_any2rwkv import Any2RWKV7Config
 from any2rwkv.contract import build_target_config
 from any2rwkv.fixture import tiny_qwen35_config
-from any2rwkv.kernel import NativeRwkv7Kernel
-from any2rwkv.mixer import ProjectionBoundaryRWKV7Attention
-from any2rwkv.mixer import apply_partial_rope
+from any2rwkv.kernel import Rwkv7OperatorAdapter
+from any2rwkv.mixer import ProjectionBoundaryRWKV7Attention, apply_partial_rope
 from any2rwkv.recipes.qwen35_to_rwkv7.gqa_zero_step import (
+    GQANativeFitConfig,
+    GQANativeFitTrace,
     _AffineSufficientStatistics,
     _fit_native_projection,
     _native_parameter_set,
     _select_bias_free_statistics,
     _solve_affine_statistics,
-    GQANativeFitConfig,
-    GQANativeFitTrace,
     estimate_gqa_native_streamed_peak_bytes,
     fit_gqa_native_zero_step,
     validate_gqa_native_fit_trace,
@@ -44,41 +43,52 @@ from any2rwkv.zero_step_probe import (
     probability_tangent_parameters,
     probability_taylor_hazards,
     qwen35_l2_normalize,
+    rollout_hazards,
     rope_aligned_two_state_bases,
     rope_aligned_two_state_bases_streamed,
-    rollout_hazards,
     select_bias_free_projection,
     streamed_hazard_attention,
-    two_state_projection,
     two_state_outputs,
+    two_state_projection,
     verify_gdn_mapping,
 )
 
 
-def reference_native_kernel(state, r, w, k, v, a, b):
-    batch, tokens, channels = r.shape
-    heads = state.shape[1]
-    head_dim = channels // heads
+def reference_rwkv7_operator(
+    r,
+    log_decay,
+    k,
+    v,
+    a,
+    b,
+    *,
+    initial_state,
+    output_final_state,
+    cu_seqlens=None,
+    cu_seqlens_cpu=None,
+    state_indices=None,
+    mode,
+):
+    assert output_final_state is True
+    assert cu_seqlens is None
+    assert cu_seqlens_cpu is None
+    assert state_indices is None
+    assert mode == "fp32io16"
+    _batch, tokens, _heads, _head_dim = r.shape
     outputs = []
-    current = state
+    current = initial_state
     for index in range(tokens):
         rt, wt, kt, vt, at, bt = (
-            value[:, index].view(batch, heads, head_dim)
-            for value in (r, w, k, v, a, b)
+            value[:, index] for value in (r, log_decay, k, v, a, b)
         )
-        decay = torch.exp(-0.6065306597 * torch.sigmoid(wt.float()))
+        projection = torch.einsum("bhk,bhkv->bhv", at.float(), current)
         current = (
-            current * decay.unsqueeze(-2)
-            + (current @ at.float().unsqueeze(-1)) @ bt.float().unsqueeze(-2)
-            + vt.float().unsqueeze(-1) @ kt.float().unsqueeze(-2)
+            wt.float().exp().unsqueeze(-1) * current
+            + bt.float().unsqueeze(-1) * projection.unsqueeze(-2)
+            + kt.float().unsqueeze(-1) * vt.float().unsqueeze(-2)
         )
-        outputs.append((current @ rt.float().unsqueeze(-1)).squeeze(-1))
-    return (
-        torch.stack(outputs, dim=1)
-        .reshape(batch, tokens, channels)
-        .to(r.dtype),
-        current,
-    )
+        outputs.append(torch.einsum("bhk,bhkv->bhv", rt.float(), current))
+    return torch.stack(outputs, dim=1).to(r.dtype), current
 
 
 class _ThreadCollective:
@@ -452,9 +462,9 @@ def test_streamed_native_steps_match_dense_two_state_rollout() -> None:
         "value": dense_native.value,
         "free_running_output": dense_native.free_running_output,
     }
-    for name in collected:
+    for name, value in collected.items():
         torch.testing.assert_close(
-            collected[name],
+            value,
             expected[name],
             rtol=2e-4,
             atol=2e-5,
@@ -1179,9 +1189,11 @@ def test_materialized_nonfirst_native_projection_runs_real_bf16_sequence() -> No
     output, _, final_state, signals = mixer.forward_sequence(
         values,
         positions=positions,
-        kernel=NativeRwkv7Kernel(
-            reference_native_kernel,
+        kernel=Rwkv7OperatorAdapter(
+            reference_rwkv7_operator,
+            lambda: "fla",
             head_size=config.head_dim,
+            require_flash=False,
         ),
         v_first=torch.zeros(
             2,
@@ -1499,9 +1511,11 @@ def test_gqa_native_fit_materializes_exact_module_shapes_and_runs_bf16() -> None
     output, _, final_state, _ = mixer.forward_sequence(
         values,
         positions=positions,
-        kernel=NativeRwkv7Kernel(
-            reference_native_kernel,
+        kernel=Rwkv7OperatorAdapter(
+            reference_rwkv7_operator,
+            lambda: "fla",
             head_size=config.head_dim,
+            require_flash=False,
         ),
         v_first=torch.zeros(
             batch,

@@ -10,10 +10,9 @@ requires-python = ">=3.12"
 dependencies = [
   "causal-conv1d==1.6.2.post1",
   "datasets>=5.0.0",
-  "flash-linear-attention==0.5.1",
+  "flash-linear-attention[flash-rwkv] @ git+https://github.com/rwkv-rs/fla-rwkv.git@a4a8aa98df6ec5322f194a80ec57363dd045adfc",
   "huggingface-hub",
   "numpy>=2.0.0",
-  "rwkv7-hf-adapter @ git+https://github.com/rwkv-rs/hf-adapter.git@15cd7d7e896efe852f6994a22c34fd14cb60c2c6",
   "safetensors>=0.6.2",
   "tokenizers>=0.21.1",
   "torch==2.11.0",

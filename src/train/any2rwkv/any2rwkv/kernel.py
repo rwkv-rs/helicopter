@@ -1,85 +1,196 @@
 from __future__ import annotations
 
+import importlib
+import importlib.metadata
+import json
 from collections.abc import Callable
 from functools import lru_cache
-from pathlib import Path
-import importlib
-import os
-import threading
 
 import torch
 from torch import Tensor
 
 from .errors import ContractError
 
+FLA_RWKV7_REVISION = "a4a8aa98df6ec5322f194a80ec57363dd045adfc"
+FLA_RWKV7_SOURCE_URL = "https://github.com/rwkv-rs/fla-rwkv.git"
+FLA_RWKV7_REQUIREMENT = (
+    "flash-linear-attention[flash-rwkv] @ git+"
+    f"{FLA_RWKV7_SOURCE_URL}@{FLA_RWKV7_REVISION}"
+)
+FLASH_RWKV_REVISION = "866aafd2eed146b0eda1ce03444009ae030f89e3"
+FLASH_RWKV_SOURCE_URL = "https://github.com/rwkv-rs/FlashRWKV.git"
+_INJECTABLE_PROVIDERS = frozenset({"fla", "flash_rwkv"})
 
-_RWKV_LM_IMPORT_LOCK = threading.Lock()
+
+def _require_exact_vcs_distribution(
+    name: str,
+    *,
+    expected_url: str,
+    expected_revision: str,
+) -> None:
+    try:
+        distribution = importlib.metadata.distribution(name)
+    except importlib.metadata.PackageNotFoundError as error:
+        raise ContractError(
+            f"required distribution is not installed: {name}"
+        ) from error
+    raw_direct_url = distribution.read_text("direct_url.json")
+    if not raw_direct_url:
+        raise ContractError(
+            f"{name} must be installed from the pinned rwkv-rs VCS source, not a registry"
+        )
+    try:
+        direct_url = json.loads(raw_direct_url)
+    except json.JSONDecodeError as error:
+        raise ContractError(f"{name} has invalid PEP 610 direct_url.json") from error
+    vcs_info = direct_url.get("vcs_info", {})
+    actual = (
+        direct_url.get("url"),
+        vcs_info.get("vcs"),
+        vcs_info.get("requested_revision"),
+        vcs_info.get("commit_id"),
+    )
+    expected = (expected_url, "git", expected_revision, expected_revision)
+    if actual != expected:
+        raise ContractError(
+            f"{name} VCS provenance mismatch: expected={expected!r} actual={actual!r}"
+        )
 
 
-class NativeRwkv7Kernel:
-    """Single adapter boundary for rwkv-lm's state-passing CUDA contract."""
+class Rwkv7OperatorAdapter:
+    """Pinned rwkv-rs operator boundary for Any-to-RWKV conversion."""
 
     def __init__(
         self,
         operation: Callable[..., tuple[Tensor, Tensor]],
+        provider: Callable[[], str | None],
         *,
         head_size: int,
-        chunk_size: int = 16,
+        require_flash: bool = True,
     ) -> None:
+        if head_size <= 0:
+            raise ContractError("RWKV7 operator head_size must be positive")
         self.operation = operation
-        self.head_size = head_size
-        self.chunk_size = chunk_size
+        self.provider = provider
+        self.head_size = int(head_size)
+        self.require_flash = bool(require_flash)
+        self.last_provider: str | None = None
 
-    def __call__(self, state: Tensor, r: Tensor, w: Tensor, k: Tensor, v: Tensor, a: Tensor, b: Tensor) -> tuple[Tensor, Tensor]:
-        if state.dtype != torch.float32:
-            raise ContractError(f"native RWKV7 state must be float32, got {state.dtype}")
-        vectors = (r, w, k, v, a, b)
-        if any(value.dtype != torch.bfloat16 for value in vectors):
-            raise ContractError("native RWKV7 r/w/k/v/a/b must all be bfloat16")
+    def __call__(
+        self,
+        r: Tensor,
+        log_decay: Tensor,
+        k: Tensor,
+        v: Tensor,
+        a: Tensor,
+        b: Tensor,
+        *,
+        initial_state: Tensor,
+        cu_seqlens: Tensor | None = None,
+        cu_seqlens_cpu: Tensor | None = None,
+        state_indices: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        vectors = (r, log_decay, k, v, a, b)
+        if any(value.ndim != 4 for value in vectors):
+            raise ContractError("RWKV7 operator signals must use [B,T,H,K] layout")
         if any(value.shape != r.shape for value in vectors):
-            raise ContractError("native RWKV7 six signal tensors must have identical [B,T,C] shapes")
-        batch, tokens, channels = r.shape
-        if channels % self.head_size or tokens % self.chunk_size:
             raise ContractError(
-                f"native RWKV7 requires channels%{self.head_size}=0 and tokens%{self.chunk_size}=0; "
-                f"got channels={channels} tokens={tokens}"
+                "RWKV7 operator six signal tensors must have identical shapes"
             )
-        expected_state = (batch, channels // self.head_size, self.head_size, self.head_size)
-        if tuple(state.shape) != expected_state:
-            raise ContractError(f"native RWKV7 state shape must be {expected_state}, got {tuple(state.shape)}")
-        return self.operation(state.contiguous(), *(value.contiguous() for value in vectors))
+        batch, _tokens, heads, head_size = r.shape
+        if head_size != self.head_size:
+            raise ContractError(
+                f"RWKV7 operator signal head size must be {self.head_size}, got {head_size}"
+            )
+        if initial_state.dtype != torch.float32:
+            raise ContractError(
+                f"RWKV7 operator state must be float32, got {initial_state.dtype}"
+            )
+        if initial_state.ndim != 4 or tuple(initial_state.shape[1:]) != (
+            heads,
+            head_size,
+            head_size,
+        ):
+            raise ContractError(
+                "RWKV7 operator initial state must use [N,H,K,V] layout matching signals"
+            )
+        if (
+            cu_seqlens is None
+            and state_indices is None
+            and initial_state.shape[0] != batch
+        ):
+            raise ContractError(
+                "fixed-batch RWKV7 operator state rows must equal the batch size"
+            )
+
+        try:
+            result = self.operation(
+                *(value.contiguous() for value in vectors),
+                initial_state=initial_state.contiguous(),
+                output_final_state=True,
+                cu_seqlens=cu_seqlens,
+                cu_seqlens_cpu=cu_seqlens_cpu,
+                state_indices=state_indices,
+                mode="fp32io16",
+            )
+        except (RuntimeError, TypeError, ValueError) as error:
+            raise ContractError(f"RWKV7 operator execution failed: {error}") from error
+        selected_provider = self.provider()
+        self.last_provider = selected_provider
+        if selected_provider not in _INJECTABLE_PROVIDERS:
+            raise ContractError(
+                "RWKV7 operator adapter did not report an accepted provider: "
+                f"{selected_provider!r}"
+            )
+        if self.require_flash and selected_provider != "flash_rwkv":
+            raise ContractError(
+                "FlashRWKV operator is required; selected provider was "
+                f"{selected_provider!r}"
+            )
+        if not isinstance(result, tuple) or len(result) != 2:
+            raise ContractError("RWKV7 operator must return (output, final_state)")
+        output, final_state = result
+        if not isinstance(output, Tensor) or output.shape != r.shape:
+            raise ContractError("RWKV7 operator returned an invalid output")
+        if (
+            not isinstance(final_state, Tensor)
+            or final_state.shape != initial_state.shape
+        ):
+            raise ContractError("RWKV7 operator returned an invalid final state")
+        return output, final_state
 
 
 @lru_cache(maxsize=4)
-def load_rwkv_lm_kernel(head_size: int) -> NativeRwkv7Kernel:
-    """Load the pinned rwkv-lm kernel from this product checkout only."""
-    configured_head_size = int(os.environ.get("RWKV_HEAD_SIZE", "0"))
-    expected_head_size = int(head_size)
-    if expected_head_size <= 0:
-        raise ContractError("RWKV_HEAD_SIZE must select a positive native head size")
-    if configured_head_size not in {0, expected_head_size}:
+def load_rwkv7_operator_adapter(
+    head_size: int,
+) -> Rwkv7OperatorAdapter:
+    """Load the pinned rwkv-rs operator chain and require FlashRWKV."""
+    _require_exact_vcs_distribution(
+        "flash-linear-attention",
+        expected_url=FLA_RWKV7_SOURCE_URL,
+        expected_revision=FLA_RWKV7_REVISION,
+    )
+    _require_exact_vcs_distribution(
+        "flash-rwkv",
+        expected_url=FLASH_RWKV_SOURCE_URL,
+        expected_revision=FLASH_RWKV_REVISION,
+    )
+    try:
+        rwkv7 = importlib.import_module("fla.ops.rwkv7")
+    except ImportError as error:
         raise ContractError(
-            "requested RWKV7 head size differs from RWKV_HEAD_SIZE: "
-            f"requested={expected_head_size} configured={configured_head_size}"
-        )
-    product_root = Path(__file__).resolve().parents[4]
-    checkout = product_root / "src/train/rwkv-lm"
-    loader_file = checkout / "src/infctx_kernel.py"
-    if not loader_file.is_file():
-        raise ContractError(f"pinned rwkv-lm kernel source is missing: {loader_file}")
-    module_name = f"_any2rwkv_rwkv_lm_infctx_kernel_n{expected_head_size}"
-    with _RWKV_LM_IMPORT_LOCK:
-        spec = importlib.util.spec_from_file_location(module_name, loader_file)
-        if spec is None or spec.loader is None:
-            raise ContractError(
-                f"could not create pinned RWKV7 loader spec: {loader_file}"
-            )
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-    resolved = Path(str(getattr(module, "__file__", ""))).resolve()
-    if resolved != loader_file.resolve():
+            f"RWKV7 operator runtime is unavailable; install {FLA_RWKV7_REQUIREMENT}"
+        ) from error
+    operation = getattr(rwkv7, "chunk_rwkv7", None)
+    provider = getattr(rwkv7, "get_last_rwkv7_provider", None)
+    if not callable(operation) or not callable(provider):
         raise ContractError(
-            f"loaded RWKV7 kernel from unexpected checkout: {resolved}"
+            "RWKV7 operator distribution must expose chunk_rwkv7 and "
+            "get_last_rwkv7_provider"
         )
-    operation = module.load_statepassing_kernel(expected_head_size)
-    return NativeRwkv7Kernel(operation, head_size=expected_head_size)
+    return Rwkv7OperatorAdapter(
+        operation,
+        provider,
+        head_size=head_size,
+        require_flash=True,
+    )

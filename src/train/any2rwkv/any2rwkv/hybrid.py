@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+
 import torch
 from torch import Tensor, nn
 
 from .errors import ContractError
-from .kernel import load_rwkv_lm_kernel
+from .kernel import load_rwkv7_operator_adapter
 from .mixer import ProjectionBoundaryRWKV7Attention
 
 
@@ -22,14 +23,14 @@ def _valid_tokens(attention_mask: Tensor | None, hidden: Tensor) -> Tensor:
 
 
 class QwenRWKV7MixerAdapter(nn.Module):
-    """Make one native RWKV7 mixer obey either Qwen GDN or attention API."""
+    """Make one RWKV7 mixer obey either the Qwen GDN or attention API."""
 
     def __init__(
         self,
         rwkv: ProjectionBoundaryRWKV7Attention,
         *,
         returns_attention_tuple: bool,
-        context: "HybridRecurrentContext",
+        context: HybridRecurrentContext,
     ):
         super().__init__()
         self.rwkv = rwkv
@@ -38,6 +39,7 @@ class QwenRWKV7MixerAdapter(nn.Module):
         self.last_state: Tensor | None = None
         self.last_signals: dict[str, Tensor] | None = None
         self.last_output: Tensor | None = None
+        self.last_provider: str | None = None
 
     def forward(
         self,
@@ -61,17 +63,19 @@ class QwenRWKV7MixerAdapter(nn.Module):
         if hidden_states.is_cuda and hidden_states.dtype == torch.bfloat16:
             if torch.any(valid[:, 1:].to(torch.int8) > valid[:, :-1].to(torch.int8)):
                 raise ContractError(
-                    "native RWKV7 training kernel requires right-padded contiguous sequences"
+                    "FlashRWKV training operator requires right-padded contiguous sequences"
                 )
+            kernel = load_rwkv7_operator_adapter(self.rwkv.head_dim)
             output, candidate_v_first, state, signals = self.rwkv.forward_sequence(
                 hidden_states,
                 positions=position_ids,
-                kernel=load_rwkv_lm_kernel(self.rwkv.head_dim),
+                kernel=kernel,
                 v_first=self.context.v_first,
             )
             output = torch.where(valid[..., None], output, torch.zeros_like(output))
             self.last_state = state
             self.last_signals = signals
+            self.last_provider = kernel.last_provider
             if self.rwkv.layer_idx == 0:
                 self.context.v_first = candidate_v_first
             self.last_output = output

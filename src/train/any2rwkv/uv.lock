@@ -157,10 +157,9 @@ source = { editable = "." }
 dependencies = [
     { name = "causal-conv1d" },
     { name = "datasets" },
-    { name = "flash-linear-attention" },
+    { name = "flash-linear-attention", extra = ["flash-rwkv"] },
     { name = "huggingface-hub" },
     { name = "numpy" },
-    { name = "rwkv7-hf-adapter" },
     { name = "safetensors" },
     { name = "tokenizers" },
     { name = "torch" },
@@ -178,10 +177,9 @@ dev = [
 requires-dist = [
     { name = "causal-conv1d", specifier = "==1.6.2.post1" },
     { name = "datasets", specifier = ">=5.0.0" },
-    { name = "flash-linear-attention", specifier = "==0.5.1" },
+    { name = "flash-linear-attention", extras = ["flash-rwkv"], git = "https://github.com/rwkv-rs/fla-rwkv.git?rev=a4a8aa98df6ec5322f194a80ec57363dd045adfc" },
     { name = "huggingface-hub" },
     { name = "numpy", specifier = ">=2.0.0" },
-    { name = "rwkv7-hf-adapter", git = "https://github.com/rwkv-rs/hf-adapter.git?rev=15cd7d7e896efe852f6994a22c34fd14cb60c2c6" },
     { name = "safetensors", specifier = ">=0.6.2" },
     { name = "tokenizers", specifier = ">=0.21.1" },
     { name = "torch", specifier = "==2.11.0" },
@@ -442,28 +440,25 @@ wheels = [
 ]
 
 [[package]]
-name = "fla-core"
-version = "0.5.1"
-source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
+name = "flash-linear-attention"
+version = "0.5.2"
+source = { git = "https://github.com/rwkv-rs/fla-rwkv.git?rev=a4a8aa98df6ec5322f194a80ec57363dd045adfc#a4a8aa98df6ec5322f194a80ec57363dd045adfc" }
 dependencies = [
     { name = "einops" },
+    { name = "transformers" },
 ]
-sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/4e/62/99e149f19a447ce809d7f4fa64ae61c073da337505b9db7f389502470820/fla_core-0.5.1.tar.gz", hash = "sha256:7f3cf56edfbaa9115f4937d1181372e5c7b11809ad8eb2e411fffc3caf729f48", size = 498800, upload-time = "2026-06-18T18:17:15.377Z" }
-wheels = [
-    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/ce/78/a55ee7a62515dcb9220770dd99dfe59ac6599da8af84ad1d20f9f407df4d/fla_core-0.5.1-py3-none-any.whl", hash = "sha256:02150d34aa1e37f6b8ed9b2feec5d29af93680573e5077ed981238179c11fb06", size = 702955, upload-time = "2026-06-18T18:17:12.229Z" },
+
+[package.optional-dependencies]
+flash-rwkv = [
+    { name = "flash-rwkv" },
 ]
 
 [[package]]
-name = "flash-linear-attention"
-version = "0.5.1"
-source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
+name = "flash-rwkv"
+version = "0.1.0"
+source = { git = "https://github.com/rwkv-rs/FlashRWKV.git?rev=866aafd2eed146b0eda1ce03444009ae030f89e3#866aafd2eed146b0eda1ce03444009ae030f89e3" }
 dependencies = [
-    { name = "fla-core" },
-    { name = "transformers" },
-]
-sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/4c/e8/8f115be585a046795e4a1f7ade727889219bb66b8d96cc668b8c9e437c0e/flash_linear_attention-0.5.1.tar.gz", hash = "sha256:8840fd4c37de8b0612dc8fd493867f3d330672ba2f17c024a2ce37239634e247", size = 221733, upload-time = "2026-06-18T18:17:16.661Z" }
-wheels = [
-    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/68/3c/5819fb19dc071302ca818616a4e64d4454e1f1193929eb8365c8d38e9052/flash_linear_attention-0.5.1-py3-none-any.whl", hash = "sha256:9022862f0a238752372c81290694b8b2ed1cb2d13fc40d340ffeeb554d6bee5c", size = 403096, upload-time = "2026-06-18T18:17:14.025Z" },
+    { name = "torch" },
 ]
 
 [[package]]
@@ -1721,16 +1716,6 @@ wheels = [
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/3a/3c/37d0ecb729a7cc2d393ea7dce316fc585680f35d93b8d62139d7d0a3700c/ruff-0.15.21-py3-none-win32.whl", hash = "sha256:01f8d5be84823c172b389e123174f781f9daf86d6c58719d603f941932195cdd", size = 10896555, upload-time = "2026-07-09T20:01:26.941Z" },
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/c0/b8/e43466b2a6067ce91e669068f6e28d6c719a920f014b070d5c8731725de3/ruff-0.15.21-py3-none-win_amd64.whl", hash = "sha256:d4b8d9a2f0f12b816b50447f6eccb9f4bb01a6b82c86b50fb3b5354b458dc6d3", size = 12038772, upload-time = "2026-07-09T20:01:29.497Z" },
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/dd/75/e90ab9aeece218a9fc5a5bc3ec97d0ee6bb3c4ff95869463c1de58e29a1c/ruff-0.15.21-py3-none-win_arm64.whl", hash = "sha256:6e83115d4b9377c1cbc13abf0e051f069fab0ef815ea0504a8a008cee24dd0a8", size = 11375265, upload-time = "2026-07-09T20:01:31.772Z" },
-]
-
-[[package]]
-name = "rwkv7-hf-adapter"
-version = "0.5.0"
-source = { git = "https://github.com/rwkv-rs/hf-adapter.git?rev=15cd7d7e896efe852f6994a22c34fd14cb60c2c6#15cd7d7e896efe852f6994a22c34fd14cb60c2c6" }
-dependencies = [
-    { name = "safetensors" },
-    { name = "torch" },
-    { name = "transformers" },
 ]
 
 [[package]]
