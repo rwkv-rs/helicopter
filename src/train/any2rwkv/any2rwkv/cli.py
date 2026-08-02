@@ -277,21 +277,32 @@ def run_preflight(args: argparse.Namespace) -> int:
 
 
 def run_existing_stage(args: argparse.Namespace) -> int:
-    resolved = resolve_recipe(args.recipe)
     output = Path(args.output).resolve()
     if not (output / "metadata.json").is_file():
         raise ContractError(f"run metadata not found: {output / 'metadata.json'}; run convert first")
     metadata = json.loads((output / "metadata.json").read_text(encoding="utf-8"))
+    recipe_binding = metadata.get("recipe")
+    if not isinstance(recipe_binding, dict):
+        raise ContractError("initialized run metadata has no recipe binding")
+    expected_recipe = recipe_binding.get("id")
+    if expected_recipe != args.recipe:
+        raise ContractError(
+            f"run recipe differs from initialized metadata: "
+            f"expected={expected_recipe!r} requested={args.recipe!r}"
+        )
+    source_adapter_id = recipe_binding.get("source_adapter")
+    target_adapter_id = recipe_binding.get("target_adapter")
+    if not isinstance(source_adapter_id, str) or not isinstance(target_adapter_id, str):
+        raise ContractError("initialized run metadata has an incomplete adapter binding")
+    resolved = resolve_recipe(
+        args.recipe,
+        source_adapter_id=source_adapter_id,
+        target_adapter_id=target_adapter_id,
+    )
     if metadata.get("submodules", {}).get("rwkv-hf") != args.rwkv_hf_sha:
         raise ContractError("rwkv-hf SHA differs from initialized run metadata")
     if metadata.get("submodules", {}).get("rwkv-lm") != args.rwkv_lm_sha:
         raise ContractError("rwkv-lm SHA differs from initialized run metadata")
-    expected_recipe = metadata.get("recipe", {}).get("id")
-    if expected_recipe != resolved.recipe.recipe_id:
-        raise ContractError(
-            f"run recipe differs from initialized metadata: "
-            f"expected={expected_recipe!r} requested={resolved.recipe.recipe_id!r}"
-        )
     if args.action == "distill":
         distributed: DistributedContext | None = None
         try:

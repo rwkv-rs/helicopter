@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -54,6 +56,64 @@ def test_core_registry_resolves_synthetic_recipe_without_model_dependencies() ->
     resolved.recipe.validate_source(inspection)
     assert inspection.num_layers == 3
     assert resolved.target.adapter_id == "synthetic_target"
+
+
+def test_core_registry_resolves_explicit_compatible_adapter_ids() -> None:
+    registry = AdapterRecipeRegistry()
+    registry.register_source(SyntheticSource())
+    registry.register_target(SyntheticTarget())
+    registry.register_recipe(SyntheticRecipe())
+
+    resolved = registry.resolve(
+        "synthetic_to_synthetic",
+        source_adapter_id="synthetic_source",
+        target_adapter_id="synthetic_target",
+    )
+
+    assert resolved.source.adapter_id == "synthetic_source"
+    assert resolved.target.adapter_id == "synthetic_target"
+
+
+@pytest.mark.parametrize(
+    ("source_adapter_id", "target_adapter_id", "message"),
+    (
+        ("unknown_source", "synthetic_target", "unknown source adapter"),
+        ("alternate_source", "synthetic_target", "incompatible with source adapter"),
+        ("synthetic_source", "unknown_target", "unknown target adapter"),
+        ("synthetic_source", "alternate_target", "incompatible with target adapter"),
+    ),
+)
+def test_core_registry_fails_closed_for_unknown_or_incompatible_adapter_ids(
+    source_adapter_id: str,
+    target_adapter_id: str,
+    message: str,
+) -> None:
+    registry = AdapterRecipeRegistry()
+    registry.register_source(SyntheticSource())
+    registry.register_source(SyntheticSource(adapter_id="alternate_source"))
+    registry.register_target(SyntheticTarget())
+    registry.register_target(SyntheticTarget(adapter_id="alternate_target"))
+    registry.register_recipe(SyntheticRecipe())
+
+    with pytest.raises(ContractError, match=message):
+        registry.resolve(
+            "synthetic_to_synthetic",
+            source_adapter_id=source_adapter_id,
+            target_adapter_id=target_adapter_id,
+        )
+
+
+def test_core_registry_import_does_not_load_concrete_architectures() -> None:
+    script = """
+import sys
+from any2rwkv.core import AdapterRecipeRegistry
+
+assert AdapterRecipeRegistry.__module__ == "any2rwkv.core.registry"
+
+for prefix in ("any2rwkv.adapters", "any2rwkv.recipes", "torch", "safetensors"):
+    assert not any(name == prefix or name.startswith(prefix + ".") for name in sys.modules)
+"""
+    subprocess.run([sys.executable, "-c", script], check=True)
 
 
 def test_core_registry_rejects_unknown_and_duplicate_ids_precisely() -> None:

@@ -77,7 +77,11 @@ def test_gqa_metadata_publish_failure_propagates_without_barrier(
             "rwkv-hf": "a" * 40,
             "rwkv-lm": "b" * 40,
         },
-        "recipe": {"id": "qwen35_to_rwkv7"},
+        "recipe": {
+            "id": "qwen35_to_rwkv7",
+            "source_adapter": "qwen35",
+            "target_adapter": "rwkv7",
+        },
     }
     (output / "metadata.json").write_text(
         json.dumps(metadata),
@@ -99,7 +103,7 @@ def test_gqa_metadata_publish_failure_propagates_without_barrier(
     monkeypatch.setattr(
         cli_module,
         "resolve_recipe",
-        lambda _recipe: SimpleNamespace(
+        lambda _recipe, **_adapter_ids: SimpleNamespace(
             recipe=SimpleNamespace(recipe_id="qwen35_to_rwkv7")
         ),
     )
@@ -139,6 +143,48 @@ def test_gqa_metadata_publish_failure_propagates_without_barrier(
         ContractError,
         match="GQA validation metadata publish failed",
     ):
+        cli_module.run_existing_stage(args)
+
+
+def test_existing_stage_resolves_persisted_adapter_binding_before_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "run"
+    output.mkdir()
+    (output / "metadata.json").write_text(
+        json.dumps(
+            {
+                "submodules": {
+                    "rwkv-hf": "a" * 40,
+                    "rwkv-lm": "b" * 40,
+                },
+                "recipe": {
+                    "id": "qwen35_to_rwkv7",
+                    "source_adapter": "unknown-source",
+                    "target_adapter": "rwkv7",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        cli_module,
+        "run_distillation",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("binding failure must precede distillation work")
+        ),
+    )
+    args = SimpleNamespace(
+        action="distill",
+        recipe="qwen35_to_rwkv7",
+        output=str(output),
+        rwkv_hf_sha="a" * 40,
+        rwkv_lm_sha="b" * 40,
+    )
+
+    with pytest.raises(ContractError, match="unknown source adapter"):
         cli_module.run_existing_stage(args)
 
 

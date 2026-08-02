@@ -37,7 +37,13 @@ class AdapterRecipeRegistry:
         self._require_methods(recipe, ("validate_source", "run_layerwise_distillation"), "recipe")
         self._register(self._recipes, recipe.recipe_id, recipe, "recipe")
 
-    def resolve(self, recipe_id: str) -> ResolvedRecipe:
+    def resolve(
+        self,
+        recipe_id: str,
+        *,
+        source_adapter_id: str | None = None,
+        target_adapter_id: str | None = None,
+    ) -> ResolvedRecipe:
         try:
             recipe = self._recipes[recipe_id]
         except KeyError as error:
@@ -45,6 +51,20 @@ class AdapterRecipeRegistry:
                 f"unknown distillation recipe {recipe_id!r}; "
                 f"registered={sorted(self._recipes)}"
             ) from error
+        self._require_compatible_adapter_id(
+            self._sources,
+            requested_id=source_adapter_id,
+            required_id=recipe.source_adapter_id,
+            recipe_id=recipe_id,
+            kind="source",
+        )
+        self._require_compatible_adapter_id(
+            self._targets,
+            requested_id=target_adapter_id,
+            required_id=recipe.target_adapter_id,
+            recipe_id=recipe_id,
+            kind="target",
+        )
         try:
             source = self._sources[recipe.source_adapter_id]
         except KeyError as error:
@@ -60,6 +80,27 @@ class AdapterRecipeRegistry:
                 f"{recipe.target_adapter_id!r}; registered={sorted(self._targets)}"
             ) from error
         return ResolvedRecipe(recipe, source, target)
+
+    @staticmethod
+    def _require_compatible_adapter_id(
+        registry: dict[str, object],
+        *,
+        requested_id: str | None,
+        required_id: str,
+        recipe_id: str,
+        kind: str,
+    ) -> None:
+        if requested_id is None:
+            return
+        if requested_id not in registry:
+            raise ContractError(
+                f"unknown {kind} adapter {requested_id!r}; registered={sorted(registry)}"
+            )
+        if requested_id != required_id:
+            raise ContractError(
+                f"recipe {recipe_id!r} is incompatible with {kind} adapter "
+                f"{requested_id!r}; requires {required_id!r}"
+            )
 
     @staticmethod
     def _register(registry: dict[str, object], identifier: str, value: object, kind: str) -> None:

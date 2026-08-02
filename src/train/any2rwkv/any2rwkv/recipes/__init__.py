@@ -14,8 +14,17 @@ def default_registry() -> AdapterRecipeRegistry:
     return registry
 
 
-def resolve_recipe(recipe_id: str) -> ResolvedRecipe:
-    return default_registry().resolve(recipe_id)
+def resolve_recipe(
+    recipe_id: str,
+    *,
+    source_adapter_id: str | None = None,
+    target_adapter_id: str | None = None,
+) -> ResolvedRecipe:
+    return default_registry().resolve(
+        recipe_id,
+        source_adapter_id=source_adapter_id,
+        target_adapter_id=target_adapter_id,
+    )
 
 
 __all__ = ["default_registry", "resolve_recipe"]
