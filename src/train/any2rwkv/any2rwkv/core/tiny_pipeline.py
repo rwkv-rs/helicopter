@@ -299,7 +299,28 @@ def run_tiny_pipeline(
         script = """
 import sys, torch
 import any2rwkv
+import any2rwkv.modeling_any2rwkv as modeling
+from any2rwkv.kernel import Rwkv7OperatorAdapter
 from transformers import AutoModelForCausalLM
+
+def test_recurrent(r, w, k, v, a, b, *, initial_state, output_final_state,
+                   cu_seqlens=None, state_indices=None, mode):
+    assert output_final_state and cu_seqlens is None and state_indices is None
+    assert mode == 'fp32io16'
+    state = initial_state
+    output = []
+    for token in range(r.shape[1]):
+        projection = torch.einsum('bhk,bhkv->bhv', a[:, token].float(), state)
+        state = (w[:, token].float().exp().unsqueeze(-1) * state
+                 + b[:, token].float().unsqueeze(-1) * projection.unsqueeze(-2)
+                 + k[:, token].float().unsqueeze(-1)
+                 * v[:, token].float().unsqueeze(-2))
+        output.append(torch.einsum('bhk,bhkv->bhv', r[:, token].float(), state))
+    return torch.stack(output, dim=1).to(r.dtype), state
+
+modeling.load_rwkv7_operator_adapter = lambda head_size: Rwkv7OperatorAdapter(
+    test_recurrent, lambda: 'flash_rwkv', head_size=head_size, require_flash=True
+)
 artifact, expected_path = sys.argv[1:]
 any2rwkv.register_any_to_rwkv_auto_classes()
 expected = torch.load(expected_path, map_location='cpu', weights_only=True)

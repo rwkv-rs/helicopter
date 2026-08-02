@@ -139,7 +139,7 @@ class ProjectionBoundaryRWKV7Attention(nn.Module):
             theta=self.rope_theta,
         ).reshape(shape)
 
-    def forward(
+    def forward_reference(
         self,
         x: Tensor,
         x_prev: Tensor,
@@ -148,6 +148,7 @@ class ProjectionBoundaryRWKV7Attention(nn.Module):
         *,
         positions: Tensor,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, dict[str, Tensor]]:
+        """Explicit one-token PyTorch oracle; never a product runtime fallback."""
         batch = int(x.shape[0])
         heads, head_dim = self.num_heads, self.head_dim
         hidden = self.hidden_size
@@ -261,6 +262,7 @@ class ProjectionBoundaryRWKV7Attention(nn.Module):
         kernel: Rwkv7OperatorAdapter,
         v_first: Tensor | None = None,
         initial_state: Tensor | None = None,
+        previous: Tensor | None = None,
         cu_seqlens: Tensor | None = None,
         state_indices: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, dict[str, Tensor]]:
@@ -271,7 +273,11 @@ class ProjectionBoundaryRWKV7Attention(nn.Module):
             )
         batch, tokens, hidden = x.shape
         recurrent_width = self.num_heads * self.head_dim
-        previous = torch.cat((torch.zeros_like(x[:, :1]), x[:, :-1]), dim=1)
+        if previous is None:
+            previous = torch.zeros_like(x[:, 0])
+        if previous.shape != (batch, hidden):
+            raise ValueError("previous RWKV7 input must use [B,C] layout")
+        previous = torch.cat((previous[:, None], x[:, :-1]), dim=1)
         if cu_seqlens is not None:
             if batch != 1 or cu_seqlens.ndim != 1 or cu_seqlens.numel() < 2:
                 raise ValueError(

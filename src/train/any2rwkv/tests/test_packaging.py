@@ -36,7 +36,9 @@ def _dependency_group_requirements(
     group: str,
 ) -> dict[str, Requirement]:
     document = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-    requirements = (Requirement(value) for value in document["dependency-groups"][group])
+    requirements = (
+        Requirement(value) for value in document["dependency-groups"][group]
+    )
     return {requirement.name: requirement for requirement in requirements}
 
 
@@ -69,7 +71,7 @@ def test_manifest_pins_standalone_runtime_revisions() -> None:
 def test_root_runtime_group_pins_the_same_rwkv_rs_revisions() -> None:
     requirements = _dependency_group_requirements(
         PRODUCT_ROOT / "pyproject.toml",
-        "rwkv-hf",
+        "any2rwkv",
     )
 
     _assert_exact_vcs_requirements(requirements)

@@ -13,6 +13,7 @@ import torch
 
 from .artifacts import file_sha256, sha256_json
 from .errors import ContractError
+from .provenance import github_repository_matches
 
 TRANSFORMERS_REVISION = "2696927df9363b5fa175076bb827ba4da2c4e581"
 TRANSFORMERS_SOURCE_URL = "https://github.com/rwkv-rs/transformers-rwkv.git"
@@ -58,7 +59,7 @@ def _distribution_binding(
     commit_id = vcs_info.get("commit_id")
     requested_revision = vcs_info.get("requested_revision")
     vcs = vcs_info.get("vcs")
-    source_matches = actual_url == expected_url
+    source_matches = github_repository_matches(actual_url, expected_url)
     requested_revision_matches = requested_revision == expected_revision
     revision_matches = commit_id == expected_revision
     return {

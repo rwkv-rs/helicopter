@@ -19,7 +19,9 @@ def _valid_tokens(attention_mask: Tensor | None, hidden: Tensor) -> Tensor:
     if attention_mask.ndim == 4:
         query_rows = attention_mask[:, 0, -tokens:, -tokens:]
         return (torch.diagonal(query_rows, dim1=-2, dim2=-1) >= 0).to(torch.bool)
-    raise ContractError(f"unsupported hybrid attention mask rank: {attention_mask.ndim}")
+    raise ContractError(
+        f"unsupported hybrid attention mask rank: {attention_mask.ndim}"
+    )
 
 
 class QwenRWKV7MixerAdapter(nn.Module):
@@ -52,83 +54,37 @@ class QwenRWKV7MixerAdapter(nn.Module):
     ):
         if cache_params is not None or past_key_values is not None:
             raise ContractError("hybrid distillation adapter requires use_cache=False")
-        batch, tokens, hidden = hidden_states.shape
+        batch, tokens, _hidden = hidden_states.shape
         if position_ids is None:
-            position_ids = torch.arange(tokens, device=hidden_states.device).view(1, -1).expand(batch, -1)
+            position_ids = (
+                torch.arange(tokens, device=hidden_states.device)
+                .view(1, -1)
+                .expand(batch, -1)
+            )
         valid = _valid_tokens(attention_mask, hidden_states)
         if not torch.all(valid):
             raise ContractError(
                 "RWKV7 distillation uses fixed packed rows and does not permit padding"
             )
-        if hidden_states.is_cuda and hidden_states.dtype == torch.bfloat16:
-            if torch.any(valid[:, 1:].to(torch.int8) > valid[:, :-1].to(torch.int8)):
-                raise ContractError(
-                    "FlashRWKV training operator requires right-padded contiguous sequences"
-                )
-            kernel = load_rwkv7_operator_adapter(self.rwkv.head_dim)
-            output, candidate_v_first, state, signals = self.rwkv.forward_sequence(
-                hidden_states,
-                positions=position_ids,
-                kernel=kernel,
-                v_first=self.context.v_first,
-            )
-            output = torch.where(valid[..., None], output, torch.zeros_like(output))
-            self.last_state = state
-            self.last_signals = signals
-            self.last_provider = kernel.last_provider
-            if self.rwkv.layer_idx == 0:
-                self.context.v_first = candidate_v_first
-            self.last_output = output
-            return (output, None) if self.returns_attention_tuple else output
-        state = torch.zeros(
-            batch,
-            self.rwkv.num_heads,
-            self.rwkv.head_dim,
-            self.rwkv.head_dim,
-            device=hidden_states.device,
-            dtype=torch.float32,
-        )
-        previous = torch.zeros(batch, hidden, device=hidden_states.device, dtype=hidden_states.dtype)
-        outputs: list[Tensor] = []
-        signal_rows: dict[str, list[Tensor]] = {}
-        v_first_rows: list[Tensor] = []
-        if self.rwkv.layer_idx and self.context.v_first is None:
+        if torch.any(valid[:, 1:].to(torch.int8) > valid[:, :-1].to(torch.int8)):
             raise ContractError(
-                "nonzero RWKV7 layers require the aligned frozen layer-0 v_first stream"
+                "FlashRWKV training operator requires right-padded contiguous sequences"
             )
-        for token in range(tokens):
-            if self.rwkv.layer_idx:
-                v_first = self.context.v_first[:, token]
-            else:
-                v_first = torch.zeros(
-                    batch,
-                    self.rwkv.attention_hidden_size,
-                    device=hidden_states.device,
-                    dtype=hidden_states.dtype,
-                )
-            old_state, old_previous = state, previous
-            output, candidate_previous, candidate_state, candidate_v_first, signals = self.rwkv(
-                hidden_states[:, token],
-                previous,
-                v_first,
-                state,
-                positions=position_ids[:, token],
-            )
-            vector_mask = valid[:, token, None]
-            state_mask = valid[:, token, None, None, None]
-            state = torch.where(state_mask, candidate_state, old_state)
-            previous = torch.where(vector_mask, candidate_previous, old_previous)
-            outputs.append(torch.where(vector_mask, output, torch.zeros_like(output)))
-            v_first_rows.append(torch.where(vector_mask, candidate_v_first, v_first))
-            for name, value in signals.items():
-                signal_rows.setdefault(name, []).append(value)
+        kernel = load_rwkv7_operator_adapter(self.rwkv.head_dim)
+        output, candidate_v_first, state, signals = self.rwkv.forward_sequence(
+            hidden_states,
+            positions=position_ids,
+            kernel=kernel,
+            v_first=self.context.v_first,
+        )
+        output = torch.where(valid[..., None], output, torch.zeros_like(output))
         self.last_state = state
-        self.last_signals = {name: torch.stack(values, dim=1) for name, values in signal_rows.items()}
+        self.last_signals = signals
+        self.last_provider = kernel.last_provider
         if self.rwkv.layer_idx == 0:
-            self.context.v_first = torch.stack(v_first_rows, dim=1)
-        result = torch.stack(outputs, dim=1)
-        self.last_output = result
-        return (result, None) if self.returns_attention_tuple else result
+            self.context.v_first = candidate_v_first
+        self.last_output = output
+        return (output, None) if self.returns_attention_tuple else output
 
 
 @dataclass
@@ -154,7 +110,9 @@ class _StopAfterActiveLayer(RuntimeError):
 class HybridModelPatcher:
     """Patch a frozen Qwen shell for suffix-free active-layer comparison."""
 
-    def __init__(self, teacher: nn.Module, mixers: list[ProjectionBoundaryRWKV7Attention]):
+    def __init__(
+        self, teacher: nn.Module, mixers: list[ProjectionBoundaryRWKV7Attention]
+    ):
         self.teacher = teacher.eval().requires_grad_(False)
         self.layers = self._layers(teacher)
         if len(self.layers) != len(mixers):
@@ -165,9 +123,17 @@ class HybridModelPatcher:
         self._original_layer_forwards = [layer.forward for layer in self.layers]
         for index, (layer, mixer) in enumerate(zip(self.layers, mixers, strict=True)):
             if hasattr(layer, "linear_attn"):
-                attribute, source_kind, returns_tuple = "linear_attn", "linear_attention", False
+                attribute, source_kind, returns_tuple = (
+                    "linear_attn",
+                    "linear_attention",
+                    False,
+                )
             elif hasattr(layer, "self_attn"):
-                attribute, source_kind, returns_tuple = "self_attn", "full_attention", True
+                attribute, source_kind, returns_tuple = (
+                    "self_attn",
+                    "full_attention",
+                    True,
+                )
             else:
                 raise ContractError(f"teacher layer {index} has no recognized mixer")
             original = getattr(layer, attribute)
@@ -175,7 +141,9 @@ class HybridModelPatcher:
                 mixer, returns_attention_tuple=returns_tuple, context=self.context
             )
             adapter.eval().requires_grad_(False)
-            self.records.append(PatchedLayer(index, source_kind, attribute, original, adapter))
+            self.records.append(
+                PatchedLayer(index, source_kind, attribute, original, adapter)
+            )
 
     @staticmethod
     def _layers(model: nn.Module) -> list[nn.Module]:
@@ -204,7 +172,9 @@ class HybridModelPatcher:
             )
         if converted_prefix is not None:
             if not 0 <= converted_prefix <= active_layer:
-                raise ContractError("converted_prefix must end at or before active_layer")
+                raise ContractError(
+                    "converted_prefix must end at or before active_layer"
+                )
             frozen_students = set(range(converted_prefix))
         else:
             frozen_students = set(converted_layers or ())
@@ -215,8 +185,14 @@ class HybridModelPatcher:
         self._remove_v_first_shadow()
         self._restore_layer_forwards()
         for record in self.records:
-            use_student = record.index in frozen_students or record.index == active_layer
-            setattr(self.layers[record.index], record.attribute, record.adapter if use_student else record.original)
+            use_student = (
+                record.index in frozen_students or record.index == active_layer
+            )
+            setattr(
+                self.layers[record.index],
+                record.attribute,
+                record.adapter if use_student else record.original,
+            )
             record.adapter.requires_grad_(record.index == active_layer)
             if reset_gradients:
                 for parameter in record.adapter.parameters():
@@ -229,9 +205,13 @@ class HybridModelPatcher:
                 if hidden is None and args:
                     hidden = args[0]
                 if hidden is None:
-                    raise ContractError("teacher layer-0 shadow could not resolve hidden_states")
+                    raise ContractError(
+                        "teacher layer-0 shadow could not resolve hidden_states"
+                    )
                 with torch.no_grad():
-                    self.context.v_first = shadow.project_v_first_sequence(hidden).detach()
+                    self.context.v_first = shadow.project_v_first_sequence(
+                        hidden
+                    ).detach()
 
             self._v_first_shadow_handle = self.layers[0].register_forward_pre_hook(
                 populate_v_first,
@@ -329,12 +309,19 @@ class HybridModelPatcher:
             except _StopAfterActiveLayer as stopped:
                 student_block = stopped.output
             else:
-                raise ContractError("active-layer local forward unexpectedly executed the suffix")
+                raise ContractError(
+                    "active-layer local forward unexpectedly executed the suffix"
+                )
         finally:
             before.remove()
             after.remove()
-        if record.adapter.last_output is None or set(captured) != {"teacher_mixer", "teacher_block"}:
-            raise ContractError("active-layer local forward did not capture all targets")
+        if record.adapter.last_output is None or set(captured) != {
+            "teacher_mixer",
+            "teacher_block",
+        }:
+            raise ContractError(
+                "active-layer local forward did not capture all targets"
+            )
         return (
             record.adapter.last_output,
             student_block,

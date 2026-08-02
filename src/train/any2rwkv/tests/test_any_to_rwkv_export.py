@@ -4,12 +4,16 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import torch
 
 from any2rwkv.checkpoint import read_checkpoint
-from any2rwkv.configuration_any2rwkv import AnyToRWKVProxyConfig
+from any2rwkv.configuration_any2rwkv import (
+    AnyToRWKVHybridConfig,
+    AnyToRWKVProxyConfig,
+)
 from any2rwkv.contract import build_target_config
 from any2rwkv.errors import ContractError
 from any2rwkv.export import (
@@ -17,7 +21,11 @@ from any2rwkv.export import (
     export_hf_checkpoint,
 )
 from any2rwkv.fixture import write_fixture
-from any2rwkv.modeling_any2rwkv import AnyToRWKVProxyForCausalLM
+from any2rwkv.kernel import Rwkv7OperatorAdapter
+from any2rwkv.modeling_any2rwkv import (
+    AnyToRWKVHybridForCausalLM,
+    AnyToRWKVProxyForCausalLM,
+)
 from any2rwkv.target import build_zero_step_ledger
 
 
@@ -42,6 +50,42 @@ def _proxy_export_inputs(tmp_path: Path):
             source.config,
             require_final_layers=False,
         ),
+    )
+
+
+def _test_recurrent_adapter(head_size: int) -> Rwkv7OperatorAdapter:
+    def recurrent(
+        r,
+        w,
+        k,
+        v,
+        a,
+        b,
+        *,
+        initial_state,
+        output_final_state,
+        cu_seqlens=None,
+        state_indices=None,
+        mode,
+    ):
+        del output_final_state, cu_seqlens, state_indices, mode
+        state = initial_state
+        outputs = []
+        for token in range(r.shape[1]):
+            projection = torch.einsum("bhk,bhkv->bhv", a[:, token].float(), state)
+            state = (
+                w[:, token].float().exp().unsqueeze(-1) * state
+                + b[:, token].float().unsqueeze(-1) * projection.unsqueeze(-2)
+                + k[:, token].float().unsqueeze(-1) * v[:, token].float().unsqueeze(-2)
+            )
+            outputs.append(torch.einsum("bhk,bhkv->bhv", r[:, token].float(), state))
+        return torch.stack(outputs, dim=1).to(r.dtype), state
+
+    return Rwkv7OperatorAdapter(
+        recurrent,
+        lambda: "flash_rwkv",
+        head_size=head_size,
+        require_flash=True,
     )
 
 
@@ -135,20 +179,45 @@ def test_independent_export_fresh_auto_model_roundtrip(tmp_path: Path) -> None:
     model = model.eval()
     input_ids = torch.tensor([[1, 2, 3, 4]])
     expected_path = tmp_path / "expected.pt"
-    torch.save(
-        {
-            "input_ids": input_ids,
-            "logits": model(input_ids).logits.detach(),
-        },
-        expected_path,
-    )
+    with patch(
+        "any2rwkv.modeling_any2rwkv.load_rwkv7_operator_adapter",
+        return_value=_test_recurrent_adapter(model.config.head_dim),
+    ):
+        torch.save(
+            {
+                "input_ids": input_ids,
+                "logits": model(input_ids).logits.detach(),
+            },
+            expected_path,
+        )
 
     script = """
 import sys
 
 import torch
 import any2rwkv
+import any2rwkv.modeling_any2rwkv as modeling
+from any2rwkv.kernel import Rwkv7OperatorAdapter
 from transformers import AutoConfig, AutoModelForCausalLM
+
+def recurrent(r, w, k, v, a, b, *, initial_state, output_final_state,
+              cu_seqlens=None, state_indices=None, mode):
+    assert output_final_state is True
+    assert cu_seqlens is None and state_indices is None and mode == "fp32io16"
+    state = initial_state
+    outputs = []
+    for token in range(r.shape[1]):
+        projection = torch.einsum("bhk,bhkv->bhv", a[:, token].float(), state)
+        state = (w[:, token].float().exp().unsqueeze(-1) * state
+                 + b[:, token].float().unsqueeze(-1) * projection.unsqueeze(-2)
+                 + k[:, token].float().unsqueeze(-1)
+                 * v[:, token].float().unsqueeze(-2))
+        outputs.append(torch.einsum("bhk,bhkv->bhv", r[:, token].float(), state))
+    return torch.stack(outputs, dim=1).to(r.dtype), state
+
+modeling.load_rwkv7_operator_adapter = lambda head_size: Rwkv7OperatorAdapter(
+    recurrent, lambda: "flash_rwkv", head_size=head_size, require_flash=True
+)
 
 artifact, expected_path = sys.argv[1:]
 any2rwkv.register_any_to_rwkv_auto_classes()
@@ -167,6 +236,101 @@ torch.testing.assert_close(actual, expected["logits"], rtol=0, atol=0)
 """
     subprocess.run(
         [sys.executable, "-c", script, str(output), str(expected_path)],
+        check=True,
+    )
+
+
+def test_mixed_hybrid_forward_save_and_fresh_auto_reload(tmp_path: Path) -> None:
+    source_config = read_checkpoint(
+        write_fixture(tmp_path / "mixed-source", layers=4, moe=False),
+        require_final_layers=False,
+    ).config
+    target = build_target_config(
+        source_config,
+        converted_layers=1,
+        require_final_layers=False,
+    )
+    config = AnyToRWKVHybridConfig(**target)
+    model = AnyToRWKVHybridForCausalLM(config).eval()
+    assert [layer.mixer_type for layer in model.model.layers] == [
+        "rwkv7",
+        "linear_attention",
+        "linear_attention",
+        "full_attention",
+    ]
+    assert hasattr(model.model.layers[0], "attn")
+    assert hasattr(model.model.layers[1], "linear_attn")
+    assert hasattr(model.model.layers[3], "self_attn")
+    input_ids = torch.tensor([[1, 2, 3]])
+    with patch(
+        "any2rwkv.modeling_any2rwkv.load_rwkv7_operator_adapter",
+        return_value=_test_recurrent_adapter(config.head_dim),
+    ):
+        first = model(input_ids, use_cache=True)
+        cache = None
+        resumed_rows = []
+        for token in range(input_ids.shape[1]):
+            resumed = model(
+                input_ids[:, token : token + 1],
+                past_key_values=cache,
+                use_cache=True,
+            )
+            cache = resumed.past_key_values
+            resumed_rows.append(resumed.logits)
+    torch.testing.assert_close(first.logits, torch.cat(resumed_rows, dim=1))
+    assert first.past_key_values.states[0].abs().sum().item() >= 0
+    assert first.past_key_values.histories[1][0].shape[1] == input_ids.shape[1]
+
+    artifact = tmp_path / "mixed-artifact"
+    model.save_pretrained(artifact, safe_serialization=True)
+    expected_path = tmp_path / "mixed-expected.pt"
+    torch.save({"input_ids": input_ids, "logits": first.logits.detach()}, expected_path)
+    script = """
+import sys
+import torch
+import any2rwkv
+import any2rwkv.modeling_any2rwkv as modeling
+from any2rwkv.kernel import Rwkv7OperatorAdapter
+from transformers import AutoConfig, AutoModelForCausalLM
+
+def recurrent(r, w, k, v, a, b, *, initial_state, output_final_state,
+              cu_seqlens=None, state_indices=None, mode):
+    assert output_final_state and cu_seqlens is None and state_indices is None
+    assert mode == "fp32io16"
+    state = initial_state
+    outputs = []
+    for token in range(r.shape[1]):
+        projection = torch.einsum("bhk,bhkv->bhv", a[:, token].float(), state)
+        state = (w[:, token].float().exp().unsqueeze(-1) * state
+                 + b[:, token].float().unsqueeze(-1) * projection.unsqueeze(-2)
+                 + k[:, token].float().unsqueeze(-1)
+                 * v[:, token].float().unsqueeze(-2))
+        outputs.append(torch.einsum("bhk,bhkv->bhv", r[:, token].float(), state))
+    return torch.stack(outputs, dim=1).to(r.dtype), state
+
+modeling.load_rwkv7_operator_adapter = lambda head_size: Rwkv7OperatorAdapter(
+    recurrent, lambda: "flash_rwkv", head_size=head_size, require_flash=True
+)
+artifact, expected_path = sys.argv[1:]
+any2rwkv.register_any_to_rwkv_auto_classes()
+expected = torch.load(expected_path, map_location="cpu", weights_only=True)
+config = AutoConfig.from_pretrained(artifact)
+assert config.__class__.__name__ == "AnyToRWKVHybridConfig"
+assert config.mixer_types == [
+    "rwkv7", "linear_attention", "linear_attention", "full_attention"
+]
+model, info = AutoModelForCausalLM.from_pretrained(
+    artifact, output_loading_info=True
+)
+assert model.__class__.__name__ == "AnyToRWKVHybridForCausalLM"
+assert not info["missing_keys"] and not info["unexpected_keys"]
+assert hasattr(model.model.layers[1], "linear_attn")
+assert hasattr(model.model.layers[3], "self_attn")
+actual = model.eval()(expected["input_ids"]).logits
+torch.testing.assert_close(actual, expected["logits"], rtol=0, atol=0)
+"""
+    subprocess.run(
+        [sys.executable, "-c", script, str(artifact), str(expected_path)],
         check=True,
     )
 

@@ -16,7 +16,8 @@ from .configuration_any2rwkv import (
     AnyToRWKVHybridConfig,
     AnyToRWKVProxyConfig,
 )
-from .mixer import ProjectionBoundaryRWKV7Attention
+from .kernel import load_rwkv7_operator_adapter
+from .mixer import ProjectionBoundaryRWKV7Attention, apply_partial_rope
 
 
 class AnyToRWKVRMSNorm(nn.Module):
@@ -185,12 +186,155 @@ class AnyToRWKVPreservedAttention(nn.Module):
         self.o_proj = nn.Linear(source_heads * source_head_dim, hidden_size, bias=False)
         self.q_norm = AnyToRWKVRMSNorm(source_head_dim, eps=config.rms_norm_eps)
         self.k_norm = AnyToRWKVRMSNorm(source_head_dim, eps=config.rms_norm_eps)
+        self.num_heads = source_heads
+        self.num_key_value_heads = source_kv_heads
+        self.head_dim = source_head_dim
+        self.rotary_dim = int(
+            source_head_dim
+            * float(config.rope_parameters.get("partial_rotary_factor", 1.0))
+        )
+        self.rotary_dim -= self.rotary_dim % 2
+        self.rope_theta = float(
+            config.rope_parameters.get("rope_theta", source.get("rope_theta", 10_000.0))
+        )
+
+    def forward_sequence(self, hidden: Tensor, positions: Tensor) -> Tensor:
+        """Run package-owned causal GQA for a preserved source layer."""
+        batch, tokens, _hidden = hidden.shape
+        query, gate = (
+            self.q_proj(hidden)
+            .view(batch, tokens, self.num_heads, self.head_dim * 2)
+            .chunk(2, dim=-1)
+        )
+        key = self.k_proj(hidden).view(
+            batch, tokens, self.num_key_value_heads, self.head_dim
+        )
+        value = self.v_proj(hidden).view(
+            batch, tokens, self.num_key_value_heads, self.head_dim
+        )
+        query = self.q_norm(query)
+        key = self.k_norm(key)
+        query = apply_partial_rope(
+            query,
+            positions,
+            rotary_dim=self.rotary_dim,
+            theta=self.rope_theta,
+        )
+        key = apply_partial_rope(
+            key,
+            positions,
+            rotary_dim=self.rotary_dim,
+            theta=self.rope_theta,
+        )
+        groups = self.num_heads // self.num_key_value_heads
+        if groups * self.num_key_value_heads != self.num_heads:
+            raise ValueError("preserved GQA heads are not evenly grouped")
+        key = key.repeat_interleave(groups, dim=2)
+        value = value.repeat_interleave(groups, dim=2)
+        scores = torch.einsum("bthd,bshd->bhts", query.float(), key.float())
+        scores = scores / self.head_dim**0.5
+        causal = torch.ones(
+            tokens, tokens, device=hidden.device, dtype=torch.bool
+        ).tril()
+        scores.masked_fill_(~causal, torch.finfo(scores.dtype).min)
+        probabilities = torch.softmax(scores, dim=-1).to(value.dtype)
+        output = torch.einsum("bhts,bshd->bthd", probabilities, value)
+        output = output * torch.sigmoid(gate)
+        return self.o_proj(output.reshape(batch, tokens, -1))
+
+
+class AnyToRWKVPreservedGDN(nn.Module):
+    """Package-owned preserved Gated DeltaNet tensor layout and recurrence."""
+
+    def __init__(self, config: AnyToRWKVConfig):
+        super().__init__()
+        source = config.any_to_rwkv.get("source_text_config", {})
+        hidden = config.hidden_size
+        self.num_key_heads = int(source.get("linear_num_key_heads", config.num_heads))
+        self.num_value_heads = int(
+            source.get("linear_num_value_heads", self.num_key_heads)
+        )
+        self.key_head_dim = int(source.get("linear_key_head_dim", config.head_dim))
+        self.value_head_dim = int(source.get("linear_value_head_dim", config.head_dim))
+        self.key_dim = self.num_key_heads * self.key_head_dim
+        self.value_dim = self.num_value_heads * self.value_head_dim
+        self.conv_dim = self.key_dim * 2 + self.value_dim
+        self.conv_kernel_size = int(source.get("linear_conv_kernel_dim", 4))
+        self.in_proj_qkv = nn.Linear(hidden, self.conv_dim, bias=False)
+        self.in_proj_z = nn.Linear(hidden, self.value_dim, bias=False)
+        self.in_proj_b = nn.Linear(hidden, self.num_value_heads, bias=False)
+        self.in_proj_a = nn.Linear(hidden, self.num_value_heads, bias=False)
+        self.conv1d = nn.Conv1d(
+            self.conv_dim,
+            self.conv_dim,
+            self.conv_kernel_size,
+            groups=self.conv_dim,
+            bias=False,
+        )
+        self.dt_bias = nn.Parameter(torch.zeros(self.num_value_heads))
+        self.A_log = nn.Parameter(torch.zeros(self.num_value_heads))
+        self.norm = AnyToRWKVRMSNorm(self.value_head_dim, eps=config.rms_norm_eps)
+        self.out_proj = nn.Linear(self.value_dim, hidden, bias=False)
+
+    def forward_sequence(self, hidden: Tensor) -> Tensor:
+        batch, tokens, _hidden = hidden.shape
+        projected = self.in_proj_qkv(hidden).transpose(1, 2)
+        projected = nn.functional.conv1d(
+            projected,
+            self.conv1d.weight,
+            padding=self.conv_kernel_size - 1,
+            groups=self.conv_dim,
+        )[:, :, :tokens]
+        query, key, value = torch.split(
+            nn.functional.silu(projected.transpose(1, 2)),
+            [self.key_dim, self.key_dim, self.value_dim],
+            dim=-1,
+        )
+        query = query.view(batch, tokens, self.num_key_heads, self.key_head_dim)
+        key = key.view(batch, tokens, self.num_key_heads, self.key_head_dim)
+        value = value.view(batch, tokens, self.num_value_heads, self.value_head_dim)
+        groups = self.num_value_heads // self.num_key_heads
+        if groups * self.num_key_heads != self.num_value_heads:
+            raise ValueError("preserved GDN key heads do not divide value heads")
+        query = query.repeat_interleave(groups, dim=2)
+        key = key.repeat_interleave(groups, dim=2)
+        query = nn.functional.normalize(query.float(), dim=-1)
+        key = nn.functional.normalize(key.float(), dim=-1)
+        beta = torch.sigmoid(self.in_proj_b(hidden).float())
+        decay = torch.exp(
+            -self.A_log.float().exp()
+            * nn.functional.softplus(self.in_proj_a(hidden).float() + self.dt_bias)
+        )
+        state = torch.zeros(
+            batch,
+            self.num_value_heads,
+            self.key_head_dim,
+            self.value_head_dim,
+            device=hidden.device,
+            dtype=torch.float32,
+        )
+        rows: list[Tensor] = []
+        for token in range(tokens):
+            current_key = key[:, token]
+            current_value = value[:, token].float()
+            prediction = torch.einsum("bhk,bhkv->bhv", current_key, state)
+            correction = beta[:, token, :, None] * (current_value - prediction)
+            state = decay[:, token, :, None, None] * state + torch.einsum(
+                "bhk,bhv->bhkv", current_key, correction
+            )
+            rows.append(torch.einsum("bhk,bhkv->bhv", query[:, token], state))
+        output = torch.stack(rows, dim=1).to(hidden.dtype)
+        output = self.norm(output)
+        gate = nn.functional.silu(self.in_proj_z(hidden)).view_as(output)
+        return self.out_proj((output * gate).reshape(batch, tokens, self.value_dim))
 
 
 @dataclass
 class AnyToRWKVCache(Cache):
     states: list[Tensor]
     previous: list[Tensor]
+    histories: list[list[Tensor]]
+    history_positions: list[list[Tensor]]
     seen_tokens: int = 0
 
     def get_seq_length(self, layer_idx: int | None = 0, cache_position=None) -> int:
@@ -227,6 +371,12 @@ class AnyToRWKVCache(Cache):
     def reset(self) -> None:
         for value in (*self.states, *self.previous):
             value.zero_()
+        self.histories = [
+            [row[:0] for row in layer_rows] for layer_rows in self.histories
+        ]
+        self.history_positions = [
+            [row[:0] for row in layer_rows] for layer_rows in self.history_positions
+        ]
         self.seen_tokens = 0
 
     def batch_repeat_interleave(self, repeats: int) -> AnyToRWKVCache:
@@ -236,6 +386,13 @@ class AnyToRWKVCache(Cache):
         self.previous = [
             value.repeat_interleave(repeats, dim=0) for value in self.previous
         ]
+        self.histories = [
+            [row for row in rows for _ in range(repeats)] for rows in self.histories
+        ]
+        self.history_positions = [
+            [row for row in rows for _ in range(repeats)]
+            for rows in self.history_positions
+        ]
         return self
 
     def batch_select_indices(self, indices: Tensor) -> AnyToRWKVCache:
@@ -244,6 +401,13 @@ class AnyToRWKVCache(Cache):
         ]
         self.previous = [
             value.index_select(0, indices.to(value.device)) for value in self.previous
+        ]
+        selected = indices.detach().cpu().tolist()
+        self.histories = [
+            [rows[index] for index in selected] for rows in self.histories
+        ]
+        self.history_positions = [
+            [rows[index] for index in selected] for rows in self.history_positions
         ]
         return self
 
@@ -274,6 +438,8 @@ class AnyToRWKVCache(Cache):
 class AnyToRWKVDecoderLayer(nn.Module):
     def __init__(self, config: AnyToRWKVConfig, layer_index: int):
         super().__init__()
+        self.layer_index = layer_index
+        self.mixer_type = config.mixer_types[layer_index]
         self.input_layernorm = AnyToRWKVRMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
@@ -281,58 +447,120 @@ class AnyToRWKVDecoderLayer(nn.Module):
             config.hidden_size, eps=config.rms_norm_eps
         )
         self.mlp = _feed_forward(config)
-        source_types = config.any_to_rwkv["source_layer_types"]
-        source_text = config.any_to_rwkv["source_text_config"]
-        source_used_rope = source_types[layer_index] == "full_attention"
-        source_head_dim = int(source_text.get("head_dim", config.head_dim))
-        source_num_heads = int(source_text.get("num_attention_heads", config.num_heads))
-        rotary_dim = int(
-            source_head_dim
-            * float(config.rope_parameters.get("partial_rotary_factor", 1.0))
-        )
-        rotary_dim -= rotary_dim % 2
-        self.attn = ProjectionBoundaryRWKV7Attention(
-            config,
-            layer_index,
-            source_used_rope=source_used_rope,
-            rotary_dim=rotary_dim,
-            rope_theta=float(config.rope_parameters.get("rope_theta", 10_000.0)),
-            rope_num_heads=source_num_heads,
-            rope_head_dim=source_head_dim,
-        )
+        if self.mixer_type == "rwkv7":
+            source_types = config.any_to_rwkv["source_layer_types"]
+            source_text = config.any_to_rwkv["source_text_config"]
+            source_used_rope = source_types[layer_index] == "full_attention"
+            source_head_dim = int(source_text.get("head_dim", config.head_dim))
+            source_num_heads = int(
+                source_text.get("num_attention_heads", config.num_heads)
+            )
+            rotary_dim = int(
+                source_head_dim
+                * float(config.rope_parameters.get("partial_rotary_factor", 1.0))
+            )
+            rotary_dim -= rotary_dim % 2
+            self.attn = ProjectionBoundaryRWKV7Attention(
+                config,
+                layer_index,
+                source_used_rope=source_used_rope,
+                rotary_dim=rotary_dim,
+                rope_theta=float(config.rope_parameters.get("rope_theta", 10_000.0)),
+                rope_num_heads=source_num_heads,
+                rope_head_dim=source_head_dim,
+            )
+        elif self.mixer_type == "full_attention":
+            self.self_attn = AnyToRWKVPreservedAttention(config)
+        elif self.mixer_type == "linear_attention":
+            self.linear_attn = AnyToRWKVPreservedGDN(config)
+        else:
+            raise ValueError(f"unsupported Any-to-RWKV mixer type: {self.mixer_type}")
 
-    def step(
+    def forward_sequence(
         self,
         hidden: Tensor,
-        previous: Tensor,
-        state: Tensor,
-        v_first: Tensor,
+        *,
         positions: Tensor,
         valid: Tensor,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor, dict[str, Tensor]]:
+        cache: AnyToRWKVCache,
+        v_first: Tensor | None,
+        kernel=None,
+    ) -> tuple[Tensor, Tensor | None]:
         residual = hidden
-        old_state = state
-        old_previous = previous
-        mixed, candidate_previous, candidate_state, candidate_v_first, signals = (
-            self.attn(
-                self.input_layernorm(hidden),
-                previous,
-                v_first,
-                state,
-                positions=positions,
-            )
-        )
-        state_mask = valid[:, None, None, None]
-        vector_mask = valid[:, None]
-        state = torch.where(state_mask, candidate_state, old_state)
-        previous = torch.where(vector_mask, candidate_previous, old_previous)
-        v_first = torch.where(vector_mask, candidate_v_first, v_first)
-        mixed = torch.where(vector_mask, mixed, torch.zeros_like(mixed))
+        normalized = self.input_layernorm(hidden)
+        mixed = torch.zeros_like(hidden)
+        next_v_first = v_first
+        if self.mixer_type == "rwkv7":
+            if kernel is None:
+                raise RuntimeError(
+                    "RWKV7 product forward requires a recurrent operator"
+                )
+            if self.layer_index and v_first is None:
+                raise RuntimeError("nonzero RWKV7 layer requires layer-0 v_first")
+            if self.layer_index == 0:
+                next_v_first = torch.zeros(
+                    *hidden.shape[:2],
+                    self.attn.attention_hidden_size,
+                    device=hidden.device,
+                    dtype=hidden.dtype,
+                )
+            for row in range(hidden.shape[0]):
+                indices = torch.nonzero(valid[row], as_tuple=False).flatten()
+                if not indices.numel():
+                    continue
+                row_input = normalized[row : row + 1].index_select(1, indices)
+                row_positions = positions[row : row + 1].index_select(1, indices)
+                row_v_first = (
+                    None
+                    if self.layer_index == 0
+                    else v_first[row : row + 1].index_select(1, indices)
+                )
+                output, candidate_v_first, final_state, _signals = (
+                    self.attn.forward_sequence(
+                        row_input,
+                        positions=row_positions,
+                        kernel=kernel,
+                        v_first=row_v_first,
+                        initial_state=cache.states[self.layer_index][row : row + 1],
+                        previous=cache.previous[self.layer_index][row : row + 1],
+                    )
+                )
+                mixed[row].index_copy_(0, indices, output[0])
+                if self.layer_index == 0:
+                    next_v_first[row].index_copy_(0, indices, candidate_v_first[0])
+                cache.states[self.layer_index][row : row + 1].copy_(
+                    final_state.detach()
+                )
+                cache.previous[self.layer_index][row].copy_(row_input[0, -1].detach())
+        else:
+            for row in range(hidden.shape[0]):
+                indices = torch.nonzero(valid[row], as_tuple=False).flatten()
+                if not indices.numel():
+                    continue
+                current = normalized[row : row + 1].index_select(1, indices)
+                current_positions = positions[row : row + 1].index_select(1, indices)
+                history = cache.histories[self.layer_index][row]
+                history_positions = cache.history_positions[self.layer_index][row]
+                complete = torch.cat((history, current), dim=1)
+                complete_positions = torch.cat(
+                    (history_positions, current_positions), dim=1
+                )
+                if self.mixer_type == "full_attention":
+                    complete_output = self.self_attn.forward_sequence(
+                        complete, complete_positions
+                    )
+                else:
+                    complete_output = self.linear_attn.forward_sequence(complete)
+                mixed[row].index_copy_(
+                    0, indices, complete_output[0, -indices.numel() :]
+                )
+                cache.histories[self.layer_index][row] = complete.detach()
+                cache.history_positions[self.layer_index][row] = (
+                    complete_positions.detach()
+                )
         hidden = residual + mixed
-        hidden = hidden + self.mlp(
-            self.post_attention_layernorm(hidden).unsqueeze(1)
-        ).squeeze(1)
-        return hidden, previous, state, v_first, signals
+        hidden = hidden + self.mlp(self.post_attention_layernorm(hidden))
+        return hidden, next_v_first
 
 
 class AnyToRWKVMTPDecoderLayer(nn.Module):
@@ -420,13 +648,13 @@ class AnyToRWKVForCausalLM(PreTrainedModel, GenerationMixin):
         states = [
             torch.zeros(
                 batch_size,
-                layer.attn.num_heads,
-                layer.attn.head_dim,
-                layer.attn.head_dim,
+                self.config.num_heads,
+                self.config.head_dim,
+                self.config.head_dim,
                 device=device,
                 dtype=torch.float32,
             )
-            for layer in self.model.layers
+            for _layer in self.model.layers
         ]
         previous = [
             torch.zeros(
@@ -437,7 +665,27 @@ class AnyToRWKVForCausalLM(PreTrainedModel, GenerationMixin):
             )
             for _ in self.model.layers
         ]
-        return AnyToRWKVCache(states, previous)
+        histories = [
+            [
+                torch.empty(
+                    1,
+                    0,
+                    self.config.hidden_size,
+                    device=device,
+                    dtype=dtype,
+                )
+                for _ in range(batch_size)
+            ]
+            for _ in self.model.layers
+        ]
+        history_positions = [
+            [
+                torch.empty(1, 0, device=device, dtype=torch.long)
+                for _ in range(batch_size)
+            ]
+            for _ in self.model.layers
+        ]
+        return AnyToRWKVCache(states, previous, histories, history_positions)
 
     def forward(
         self,
@@ -519,33 +767,21 @@ class AnyToRWKVForCausalLM(PreTrainedModel, GenerationMixin):
         else:
             attention_mask = attention_mask[:, -sequence_length:].to(torch.bool)
 
-        outputs: list[Tensor] = []
-        for token_index in range(sequence_length):
-            hidden = hidden_sequence[:, token_index]
-            v_first = torch.zeros(
-                batch_size,
-                self.config.attention_hidden_size,
-                device=hidden.device,
-                dtype=hidden.dtype,
+        kernel = None
+        if any(layer.mixer_type == "rwkv7" for layer in self.model.layers):
+            kernel = load_rwkv7_operator_adapter(self.config.head_dim)
+        hidden_states = hidden_sequence
+        v_first = None
+        for layer in self.model.layers:
+            hidden_states, v_first = layer.forward_sequence(
+                hidden_states,
+                positions=position_ids,
+                valid=attention_mask,
+                cache=cache,
+                v_first=v_first,
+                kernel=kernel,
             )
-            valid = attention_mask[:, token_index]
-            for layer_index, layer in enumerate(self.model.layers):
-                (
-                    hidden,
-                    cache.previous[layer_index],
-                    cache.states[layer_index],
-                    v_first,
-                    _,
-                ) = layer.step(
-                    hidden,
-                    cache.previous[layer_index],
-                    cache.states[layer_index],
-                    v_first,
-                    position_ids[:, token_index],
-                    valid,
-                )
-            outputs.append(self.model.norm(hidden))
-        hidden_states = torch.stack(outputs, dim=1)
+        hidden_states = self.model.norm(hidden_states)
         logits = self.lm_head(hidden_states)
         loss = None
         if labels is not None:
@@ -619,14 +855,6 @@ class AnyToRWKVProxyForCausalLM(AnyToRWKVForCausalLM):
 
 class AnyToRWKVHybridForCausalLM(AnyToRWKVForCausalLM):
     config_class = AnyToRWKVHybridConfig
-
-    def __init__(self, config: AnyToRWKVHybridConfig):
-        if any(mixer_type != "rwkv7" for mixer_type in config.mixer_types):
-            raise ValueError(
-                "hybrid Any-to-RWKV checkpoints are training intermediates; resume "
-                "conversion instead of loading them as final models"
-            )
-        super().__init__(config)
 
 
 __all__ = [

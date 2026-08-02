@@ -46,6 +46,13 @@ class AnyToRWKVConfigBase(PretrainedConfig):
             raise ValueError("attention_hidden_size must equal num_heads * head_dim")
         self.num_attention_heads = self.num_heads
         self.mixer_types = list(requested_mixers or ["rwkv7"] * self.num_hidden_layers)
+        if len(self.mixer_types) != self.num_hidden_layers:
+            raise ValueError("mixer_types must contain exactly one entry per layer")
+        unsupported_mixers = sorted(
+            set(self.mixer_types) - {"rwkv7", "linear_attention", "full_attention"}
+        )
+        if unsupported_mixers:
+            raise ValueError(f"unsupported mixer_types: {unsupported_mixers}")
         self.decay_low_rank_dim = int(kwargs.get("decay_low_rank_dim", 64))
         self.gate_low_rank_dim = int(kwargs.get("gate_low_rank_dim", 128))
         self.a_low_rank_dim = int(kwargs.get("a_low_rank_dim", 64))

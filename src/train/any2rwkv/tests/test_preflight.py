@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.metadata
 import json
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,6 +19,10 @@ from any2rwkv.preflight import (
     _require_module_ownership,
     collect_full_loop_preflight,
     collect_preflight,
+)
+from any2rwkv.provenance import (
+    canonical_github_repository,
+    github_repository_matches,
 )
 
 PRODUCT_ROOT = Path(__file__).resolve().parents[4]
@@ -151,7 +157,7 @@ def test_preflight_fails_closed_when_public_runtime_provenance_rejects(
     ("url", "requested_revision", "commit_id", "satisfied"),
     [
         (
-            TRANSFORMERS_SOURCE_URL,
+            "git+https://GITHUB.COM/RWKV-RS/TRANSFORMERS-RWKV/",
             TRANSFORMERS_REVISION,
             TRANSFORMERS_REVISION,
             True,
@@ -202,6 +208,54 @@ def test_distribution_binding_requires_exact_vcs_url_and_revision(
     )
 
     assert binding["requirement_satisfied"] is satisfied
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://user@github.com/rwkv-rs/transformers-rwkv.git",
+        "https://github.com:443/rwkv-rs/transformers-rwkv.git",
+        "https://github.com/rwkv‐rs/transformers-rwkv.git",
+        "https://github.com/rwkv-rs%2Ffork/transformers-rwkv.git",
+        "https://github.com//rwkv-rs/transformers-rwkv.git",
+        "https://github.com/rwkv-rs/transformers-rwkv.git?ref=main",
+        "https://github.com/rwkv-rs/transformers-rwkv.git#main",
+        "https://gitlab.com/rwkv-rs/transformers-rwkv.git",
+    ],
+)
+def test_github_repository_canonicalizer_rejects_hostile_urls(url: str) -> None:
+    with pytest.raises(ValueError):
+        canonical_github_repository(url)
+
+
+def test_github_repository_match_rejects_foreign_or_fork_repository() -> None:
+    assert not github_repository_matches(
+        "https://github.com/foreign/transformers-rwkv.git",
+        TRANSFORMERS_SOURCE_URL,
+    )
+
+
+def test_github_repository_canonicalizer_fresh_process() -> None:
+    script = """
+from any2rwkv.provenance import canonical_github_repository
+
+expected = "https://github.com/rwkv-rs/fla-rwkv"
+assert canonical_github_repository(
+    "git+https://GITHUB.COM/RWKV-RS/FLA-RWKV.git/"
+) == expected
+for hostile in (
+    "https://user@github.com/rwkv-rs/fla-rwkv.git",
+    "https://github.com/rwkv-rs%2Ffork/fla-rwkv.git",
+    "https://github.com//rwkv-rs/fla-rwkv.git",
+):
+    try:
+        canonical_github_repository(hostile)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(hostile)
+"""
+    subprocess.run([sys.executable, "-c", script], check=True)
 
 
 def test_distribution_binding_diagnoses_a_missing_distribution(monkeypatch) -> None:

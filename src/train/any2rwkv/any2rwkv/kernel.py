@@ -11,6 +11,7 @@ import torch
 from torch import Tensor
 
 from .errors import ContractError
+from .provenance import github_repository_matches
 
 FLA_RWKV7_REVISION = "a4a8aa98df6ec5322f194a80ec57363dd045adfc"
 FLA_RWKV7_SOURCE_URL = "https://github.com/rwkv-rs/fla-rwkv.git"
@@ -61,14 +62,16 @@ def _require_exact_vcs_distribution(
     except json.JSONDecodeError as error:
         raise ContractError(f"{name} has invalid PEP 610 direct_url.json") from error
     vcs_info = direct_url.get("vcs_info", {})
+    actual_url = direct_url.get("url")
     actual = (
-        direct_url.get("url"),
+        actual_url,
         vcs_info.get("vcs"),
         vcs_info.get("requested_revision"),
         vcs_info.get("commit_id"),
     )
     expected = (expected_url, "git", expected_revision, expected_revision)
-    if actual != expected:
+    exact_metadata = actual[1:] == expected[1:]
+    if not github_repository_matches(actual_url, expected_url) or not exact_metadata:
         raise ContractError(
             f"{name} VCS provenance mismatch: expected={expected!r} actual={actual!r}"
         )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -206,6 +207,30 @@ class KernelAdapterTests(unittest.TestCase):
                     expected_revision=kernel_module.FLA_RWKV7_REVISION,
                 )
 
+    def test_provenance_gate_accepts_canonical_lowercase_pep610_url(self) -> None:
+        distribution = SimpleNamespace(
+            read_text=lambda _name: json.dumps(
+                {
+                    "url": "https://github.com/rwkv-rs/fla-rwkv",
+                    "vcs_info": {
+                        "vcs": "git",
+                        "requested_revision": kernel_module.FLA_RWKV7_REVISION,
+                        "commit_id": kernel_module.FLA_RWKV7_REVISION,
+                    },
+                }
+            )
+        )
+        with patch.object(
+            kernel_module.importlib.metadata,
+            "distribution",
+            return_value=distribution,
+        ):
+            kernel_module._require_exact_vcs_distribution(
+                "flash-linear-attention",
+                expected_url=kernel_module.FLA_RWKV7_SOURCE_URL,
+                expected_revision=kernel_module.FLA_RWKV7_REVISION,
+            )
+
     def test_sequence_kernel_path_matches_token_recurrence(self) -> None:
         source = tiny_qwen35_config(layers=1, moe=False)
         source["mtp_num_hidden_layers"] = 0
@@ -250,7 +275,7 @@ class KernelAdapterTests(unittest.TestCase):
         token_v_rows = []
         token_v_first = torch.zeros_like(previous)
         for index in range(16):
-            output, previous, state, token_v_first, _ = mixer(
+            output, previous, state, token_v_first, _ = mixer.forward_reference(
                 values[:, index],
                 previous,
                 token_v_first,
