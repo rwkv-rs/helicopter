@@ -8,8 +8,6 @@ import tomllib
 import zipfile
 from pathlib import Path
 
-from packaging.requirements import Requirement
-
 from any2rwkv.kernel import (
     FLA_RWKV7_REQUIREMENT,
     FLA_RWKV7_REVISION,
@@ -20,6 +18,7 @@ from any2rwkv.preflight import (
     TRANSFORMERS_REVISION,
     TRANSFORMERS_SOURCE_URL,
 )
+from packaging.requirements import Requirement
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 PRODUCT_ROOT = PACKAGE_ROOT.parents[2]
@@ -55,6 +54,13 @@ def test_manifest_pins_standalone_runtime_revisions() -> None:
     assert Requirement(FLA_RWKV7_REQUIREMENT).url == (
         f"git+{FLA_RWKV7_SOURCE_URL}@{FLA_RWKV7_REVISION}"
     )
+    uv = document["tool"]["uv"]
+    assert uv["extra-build-dependencies"]["causal-conv1d"] == [
+        {"requirement": "torch", "match-runtime": True}
+    ]
+    assert uv["extra-build-variables"]["causal-conv1d"] == {
+        "CAUSAL_CONV1D_FORCE_BUILD": "TRUE"
+    }
 
 
 def test_product_root_does_not_duplicate_standalone_runtime_dependencies() -> None:
