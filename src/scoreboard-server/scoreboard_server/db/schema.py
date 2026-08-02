@@ -18,15 +18,18 @@ CREATE TABLE IF NOT EXISTS evaluation_schema_metadata (
     contract_version integer NOT NULL
 );
 INSERT INTO evaluation_schema_metadata (singleton, contract_version)
-VALUES (true, 3)
+VALUES (true, 4)
 ON CONFLICT (singleton) DO NOTHING;
+UPDATE evaluation_schema_metadata
+SET contract_version = 4
+WHERE singleton = true AND contract_version = 3;
 DO $$
 BEGIN
     IF (
         SELECT contract_version
         FROM evaluation_schema_metadata
         WHERE singleton = true
-    ) <> 3 THEN
+    ) <> 4 THEN
         RAISE EXCEPTION
             'unsupported evaluation schema version; create a fresh Scoreboard database';
     END IF;
@@ -41,6 +44,9 @@ CREATE TABLE IF NOT EXISTS evaluation_campaign (
     registry_digest text NOT NULL CHECK (registry_digest ~ '^[0-9a-f]{64}$'),
     eval_contract_digest text NOT NULL CHECK (eval_contract_digest ~ '^[0-9a-f]{64}$'),
     lighteval_version text NOT NULL,
+    evaluator_name text NOT NULL DEFAULT 'lighteval'
+        CONSTRAINT evaluation_campaign_evaluator_name_check
+        CHECK (evaluator_name IN ('lighteval', 'lm-eval')),
     configured_selectors jsonb NOT NULL,
     resolved_selectors jsonb NOT NULL,
     skipped_selectors jsonb NOT NULL,
@@ -53,6 +59,23 @@ CREATE TABLE IF NOT EXISTS evaluation_campaign (
         OR (status = 'complete' AND completed_at IS NOT NULL)
     )
 );
+
+ALTER TABLE evaluation_campaign
+    ADD COLUMN IF NOT EXISTS evaluator_name text NOT NULL DEFAULT 'lighteval';
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'evaluation_campaign'::regclass
+          AND conname = 'evaluation_campaign_evaluator_name_check'
+    ) THEN
+        ALTER TABLE evaluation_campaign
+            ADD CONSTRAINT evaluation_campaign_evaluator_name_check
+            CHECK (evaluator_name IN ('lighteval', 'lm-eval'));
+    END IF;
+END
+$$;
 
 CREATE UNIQUE INDEX IF NOT EXISTS evaluation_campaign_run_key_idx
     ON evaluation_campaign(run_key);

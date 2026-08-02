@@ -1,0 +1,28 @@
+schema_version = 1
+backend = "vllm_http"
+publish = true
+
+tasks = [
+  "arc_easy",
+  "hellaswag",
+  "mmlu",
+  "truthfulqa_mc2",
+  "gsm8k",
+  "ifeval",
+  "wikitext",
+]
+output_dir = ".tmp/eval/lm-eval-campaign"
+weights = ["${LM_EVAL_CAMPAIGN_WEIGHT}"]
+wkv_modes = ["fp16", "fp32io16"]
+
+# Matrix order is weight-major, then wkv_modes order. Each manifest must include
+# the matching lowercase weight_sha256.
+pool_manifests = [
+  "${LM_EVAL_FP16_POOL_MANIFEST}",
+  "${LM_EVAL_FP32IO16_POOL_MANIFEST}",
+]
+
+batch_size = 64
+eot_token_id = 0
+max_gen_toks = 2048
+log_samples = true

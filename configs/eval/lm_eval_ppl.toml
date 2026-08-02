@@ -1,0 +1,8 @@
+schema_version = 1
+backend = "vllm_http"
+
+tasks = ["wikitext"]
+output_dir = ".tmp/eval/lm-eval-ppl"
+batch_size = 64
+eot_token_id = 0
+log_samples = false

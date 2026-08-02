@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "evaluated_at": "2026-08-02",
+  "suite_config": "configs/eval/lm_eval_catalog_delta.toml",
+  "report": "docs/evaluation/lm_eval_catalog_delta_results.md",
+  "scope": {
+    "native_selectors": ["gpqa_extended_zeroshot", "cmmlu"],
+    "completed_selectors": ["cmmlu"],
+    "blocked": [
+      {
+        "selector": "gpqa_extended_zeroshot",
+        "dataset": "Idavidrein/gpqa",
+        "dataset_name": "gpqa_extended",
+        "status": "blocked",
+        "reason": "gated dataset requires accepted terms and an authorized read-only Hugging Face token"
+      }
+    ],
+    "excluded_non_native": [
+      "AMC23",
+      "SWE-bench Verified",
+      "SWE-bench Multilingual",
+      "SWE-bench Pro"
+    ]
+  },
+  "protocol": {
+    "lm_eval_version": "0.4.12",
+    "datasets_version": "3.6.0",
+    "max_length": 16382,
+    "chat_template": null,
+    "num_fewshot": 0,
+    "limit": null,
+    "log_samples": true,
+    "task": {
+      "selector": "cmmlu",
+      "version": 1,
+      "leaf_task_count": 67,
+      "sample_count": 11582,
+      "choice_request_count": 46328,
+      "metrics": ["acc", "acc_norm"]
+    },
+    "dataset_archive": {
+      "name": "cmmlu_v1_0_1.zip",
+      "size_bytes": 1078656,
+      "sha256": "22ecf70b28bef447ee7d8aa5fe144f56996762f901a8537b03b7693773c672a6"
+    }
+  },
+  "models": [
+    {
+      "comparison_role": "target",
+      "model": "RWKV7 1.5B",
+      "parameter_count_billions": 1.5,
+      "identity": {
+        "model_id": "rwkv7-g1i-1.5b",
+        "weight": "models/rwkv7/rwkv7-g1i_preview5445-1.5b-20260729-ctx16384.pth",
+        "weight_sha256": "22fe129988f6e98480b344075597259a13ae4201c1d8dedf987246772e613586"
+      },
+      "backend": {"name": "rwkv-vllm-http", "wkv_mode": "fp16"},
+      "batch_size": 64,
+      "sample_record_count": 11582,
+      "metrics": {
+        "acc": {"value": 0.4602831980659644, "stderr": 0.004531423737547352},
+        "acc_norm": {"value": 0.4602831980659644, "stderr": 0.004531423737547352}
+      },
+      "artifacts": {
+        "results": {
+          "path": ".tmp/eval/lm-eval-catalog-delta-20260802/rwkv-full/results.json",
+          "sha256": "04cffddee77508f1ba3f9368db9007421f67cfd22a89445e0ddfc8fae08088ea"
+        },
+        "summary": {
+          "path": ".tmp/eval/lm-eval-catalog-delta-20260802/rwkv-full/summary.json",
+          "sha256": "98539f2ba69bbd594a6f9676e1bab94f547512fe9209aa79da592d33f60b92f4"
+        },
+        "manifest": {
+          "path": ".tmp/eval/lm-eval-catalog-delta-20260802/rwkv-full/artifacts.json",
+          "sha256": "578cdda8057cc8d274b4309b343342429717fb97e27cd81f177ac237379cdc40"
+        }
+      }
+    },
+    {
+      "comparison_role": "lower_bound",
+      "model": "Qwen3.5-0.8B-Base",
+      "parameter_count_billions": 0.8,
+      "identity": {"revision": "dc7cdfe2ee4154fa7e30f5b51ca41bfa40174e68"},
+      "backend": {"name": "lm-eval-hf", "dtype": "bfloat16"},
+      "batch_size": 4,
+      "sample_record_count": 11582,
+      "metrics": {
+        "acc": {"value": 0.5319461232947678, "stderr": 0.004541723086236827},
+        "acc_norm": {"value": 0.5319461232947678, "stderr": 0.004541723086236827}
+      },
+      "artifact": {
+        "path": ".tmp/eval/lm-eval-catalog-delta-20260802/qwen08-full/Qwen__Qwen3.5-0.8B-Base/results_2026-08-02T12-04-34.989800.json",
+        "sha256": "f1e92a80db95a430df044befdc5c91f0fd5692404898f05440265efc3d7e224b"
+      }
+    },
+    {
+      "comparison_role": "upper_bound",
+      "model": "Qwen3.5-2B-Base",
+      "parameter_count_billions": 2.0,
+      "identity": {"revision": "b1485b2fa6dfa1287294f269f5fb618e03d52d7c"},
+      "backend": {"name": "lm-eval-hf", "dtype": "bfloat16"},
+      "batch_size": 2,
+      "sample_record_count": 11582,
+      "metrics": {
+        "acc": {"value": 0.6405629424969781, "stderr": 0.004336289694537776},
+        "acc_norm": {"value": 0.6405629424969781, "stderr": 0.004336289694537776}
+      },
+      "artifact": {
+        "path": ".tmp/eval/lm-eval-catalog-delta-20260802/qwen2b-full/Qwen__Qwen3.5-2B-Base/results_2026-08-02T12-20-40.710600.json",
+        "sha256": "0e60912dfbfc66107e87731f21bdf73a17e058db71088f5298333d4f4d6ae2eb"
+      }
+    }
+  ]
+}

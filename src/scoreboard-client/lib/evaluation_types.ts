@@ -1,5 +1,5 @@
 export type WkvMode = "fp16" | "fp32io16";
-export type PromptTemplate = "bot" | "assistant" | "function_calling";
+export type PromptTemplate = "bot" | "assistant" | "function_calling" | "none";
 export type AnswerOutcome =
   | "correct"
   | "incorrect"
@@ -33,6 +33,7 @@ export interface ModelExecution {
   max_num_seqs: number;
   max_num_batched_tokens: number;
   dependency_versions: Record<string, string>;
+  evaluator?: "lighteval" | "lm-eval";
 }
 
 export interface Diagnostics {
@@ -53,7 +54,8 @@ export interface EvaluationSummary {
   completed_at: string;
   task: TaskIdentity;
   artifact: {
-    lighteval_version: string;
+    lighteval_version?: string | null;
+    evaluator?: { name: "lighteval" | "lm-eval"; version: string } | null;
     results_path: string;
     details_paths: string[];
   };
@@ -67,7 +69,8 @@ export interface EvaluationSummary {
     config_digest: string;
     registry_digest: string;
     eval_contract_digest: string;
-    lighteval_version: string;
+    lighteval_version?: string | null;
+    evaluator?: { name: "lighteval" | "lm-eval"; version: string } | null;
     configured_selectors: string[];
     resolved_selectors: string[];
     skipped_selectors: string[];

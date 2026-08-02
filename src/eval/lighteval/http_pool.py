@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import math
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Mapping, Sequence
+from typing import Callable, Iterator, Mapping, Sequence, TypeVar
 from urllib.parse import urlsplit
 
 import httpx
@@ -29,6 +31,8 @@ class PoolManifest:
     vllm_version: str
     max_model_len: int
     replicas: tuple[Replica, ...]
+    weight_sha256: str | None = None
+    weight_display_name: str | None = None
 
     @classmethod
     def read(cls, path: Path) -> PoolManifest:
@@ -49,6 +53,8 @@ class PoolManifest:
             "vllm_version",
             "max_model_len",
             "replicas",
+            "weight_sha256",
+            "weight_display_name",
         }
         unknown = sorted(set(raw) - allowed)
         if unknown:
@@ -82,6 +88,21 @@ class PoolManifest:
             or max_model_len <= 0
         ):
             raise PoolError("vLLM pool manifest max_model_len must be positive")
+        weight_sha256 = raw.get("weight_sha256")
+        if weight_sha256 is not None and (
+            not isinstance(weight_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", weight_sha256) is None
+        ):
+            raise PoolError("vLLM pool manifest weight_sha256 must be lowercase SHA-256")
+        weight_display_name = raw.get("weight_display_name")
+        if weight_display_name is not None and (
+            not isinstance(weight_display_name, str)
+            or not weight_display_name
+            or weight_display_name != weight_display_name.strip()
+        ):
+            raise PoolError(
+                "vLLM pool manifest weight_display_name must be non-empty"
+            )
 
         configured_replicas = raw.get("replicas")
         if not isinstance(configured_replicas, list) or not configured_replicas:
@@ -102,6 +123,8 @@ class PoolManifest:
             vllm_version=vllm_version,
             max_model_len=max_model_len,
             replicas=replicas,
+            weight_sha256=weight_sha256,
+            weight_display_name=weight_display_name,
         )
 
     @staticmethod
@@ -219,6 +242,25 @@ class Completion:
     output_token_ids: tuple[int, ...]
 
 
+@dataclass(frozen=True)
+class PromptLogprobs:
+    token_ids: tuple[int, ...]
+    token_logprobs: tuple[float | None, ...]
+    top_logprobs: tuple[Mapping[str, float] | None, ...]
+
+
+@dataclass(frozen=True)
+class TextCompletion:
+    text: str
+    prompt_token_ids: tuple[int, ...]
+    output_token_ids: tuple[int, ...]
+    finish_reason: str | None
+    stop_reason: int | str | None
+
+
+_Result = TypeVar("_Result")
+
+
 class VLLMHttpPool:
     def __init__(self, manifest: PoolManifest) -> None:
         self.manifest = manifest
@@ -282,6 +324,179 @@ class VLLMHttpPool:
         messages: list[dict[str, str]],
         parameters: Mapping[str, object],
     ) -> Completion:
+        return self._with_retry(
+            "chat completion",
+            lambda index: self._complete_on(index, messages, parameters),
+        )
+
+    def generate_text(
+        self,
+        prompt_token_ids: Sequence[int],
+        parameters: Mapping[str, object],
+    ) -> TextCompletion:
+        tokens = self._token_ids(list(prompt_token_ids), "generation prompt")
+        if not tokens:
+            raise PoolError("generation prompt must contain at least one token")
+        return self._with_retry(
+            "text completion",
+            lambda index: self._generate_text_on(index, tokens, parameters),
+        )
+
+    def tokenize(self, text: str) -> tuple[int, ...]:
+        if not isinstance(text, str):
+            raise TypeError("text to tokenize must be a string")
+        return self._with_retry(
+            "tokenization",
+            lambda index: self._tokenize_on(index, text),
+        )
+
+    def _tokenize_on(self, index: int, text: str) -> tuple[int, ...]:
+        response = self._clients[index].post(
+            "/tokenize",
+            json={
+                "model": self.model_id,
+                "prompt": text,
+                "add_special_tokens": False,
+            },
+        )
+        response.raise_for_status()
+        raw = response.json()
+        if not isinstance(raw, dict):
+            raise ValueError("tokenization response must be an object")
+        return self._token_ids(raw.get("tokens"), "tokenization")
+
+    def score_tokens(
+        self,
+        token_ids: Sequence[int],
+        *,
+        implicit_prefix_token_id: int | None = None,
+    ) -> PromptLogprobs:
+        tokens = self._token_ids(list(token_ids), "prompt")
+        if len(tokens) < 2:
+            raise PoolError("prompt scoring requires at least two token ids")
+        if len(tokens) > self.manifest.max_model_len - 2:
+            raise PoolError(
+                "prompt scoring exceeds the effective vLLM context length"
+            )
+        return self._with_retry(
+            "prompt scoring",
+            lambda index: self._score_tokens_on(
+                index,
+                tokens,
+                implicit_prefix_token_id=implicit_prefix_token_id,
+            ),
+        )
+
+    def _score_tokens_on(
+        self,
+        index: int,
+        token_ids: tuple[int, ...],
+        *,
+        implicit_prefix_token_id: int | None,
+    ) -> PromptLogprobs:
+        response = self._clients[index].post(
+            "/v1/completions",
+            json={
+                "model": self.model_id,
+                "prompt": list(token_ids),
+                "echo": True,
+                "max_tokens": 0,
+                "logprobs": 1,
+                "prompt_logprobs": 1,
+                "return_token_ids": True,
+                "return_tokens_as_token_ids": True,
+                "add_special_tokens": False,
+                "stream": False,
+                "n": 1,
+            },
+        )
+        response.raise_for_status()
+        raw = response.json()
+        choices = raw.get("choices") if isinstance(raw, dict) else None
+        if not isinstance(choices, list) or len(choices) != 1:
+            raise ValueError("prompt scoring must return exactly one choice")
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            raise ValueError("prompt scoring choice must be an object")
+        returned_tokens = choice.get("prompt_token_ids")
+        if returned_tokens is None:
+            returned_tokens = raw.get("prompt_token_ids")
+        parsed_tokens = self._token_ids(returned_tokens, "prompt scoring")
+        has_implicit_prefix = (
+            implicit_prefix_token_id is not None
+            and parsed_tokens == (implicit_prefix_token_id,) + token_ids
+        )
+        if parsed_tokens != token_ids and not has_implicit_prefix:
+            raise ValueError(
+                "prompt scoring returned different token ids: "
+                f"expected len={len(token_ids)} head={token_ids[:4]} "
+                f"tail={token_ids[-4:]}; returned len={len(parsed_tokens)} "
+                f"head={parsed_tokens[:4]} tail={parsed_tokens[-4:]}"
+            )
+        logprobs = choice.get("logprobs")
+        if not isinstance(logprobs, dict):
+            raise ValueError("prompt scoring logprobs are missing or invalid")
+        raw_token_logprobs = logprobs.get("token_logprobs")
+        if (
+            not isinstance(raw_token_logprobs, list)
+            or len(raw_token_logprobs) != len(parsed_tokens)
+        ):
+            raise ValueError("prompt scoring token logprobs are misaligned")
+        token_logprobs: list[float | None] = []
+        for position, value in enumerate(raw_token_logprobs):
+            if position == 0:
+                if value is not None:
+                    raise ValueError(
+                        "prompt scoring first token logprob must be null"
+                    )
+                token_logprobs.append(None)
+                continue
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+            ):
+                raise ValueError("prompt scoring token logprobs are invalid")
+            token_logprobs.append(float(value))
+
+        raw_top_logprobs = logprobs.get("top_logprobs")
+        if not isinstance(raw_top_logprobs, list):
+            raw_top_logprobs = [None] * len(parsed_tokens)
+        if len(raw_top_logprobs) != len(parsed_tokens):
+            raise ValueError("prompt scoring top logprobs are misaligned")
+        top_logprobs: list[Mapping[str, float] | None] = []
+        for value in raw_top_logprobs:
+            if value is None:
+                top_logprobs.append(None)
+                continue
+            if not isinstance(value, dict) or any(
+                not isinstance(key, str)
+                or not isinstance(logprob, (int, float))
+                or isinstance(logprob, bool)
+                or not math.isfinite(logprob)
+                for key, logprob in value.items()
+            ):
+                raise ValueError("prompt scoring top logprobs are invalid")
+            top_logprobs.append(
+                {key: float(logprob) for key, logprob in value.items()}
+            )
+        if has_implicit_prefix:
+            token_logprobs = token_logprobs[1:]
+            top_logprobs = top_logprobs[1:]
+            token_logprobs[0] = None
+            top_logprobs[0] = None
+            parsed_tokens = token_ids
+        return PromptLogprobs(
+            token_ids=parsed_tokens,
+            token_logprobs=tuple(token_logprobs),
+            top_logprobs=tuple(top_logprobs),
+        )
+
+    def _with_retry(
+        self,
+        operation: str,
+        request: Callable[[int], _Result],
+    ) -> _Result:
         if self._model_id is None:
             raise PoolError("vLLM pool must pass preflight before evaluation")
         attempted: set[int] = set()
@@ -291,13 +506,13 @@ class VLLMHttpPool:
             with self._scheduler.lease(frozenset(attempted)) as index:
                 attempted.add(index)
                 try:
-                    return self._complete_on(index, messages, parameters)
+                    return request(index)
                 except httpx.HTTPStatusError as error:
                     status = error.response.status_code
                     if status < 500 and status != 429:
                         detail = error.response.text[:500]
                         raise PoolError(
-                            f"vLLM rejected chat completion with HTTP {status}: {detail}"
+                            f"vLLM rejected {operation} with HTTP {status}: {detail}"
                         ) from error
                     failures.append(
                         f"{self.manifest.replicas[index].base_url}: HTTP {status}"
@@ -307,7 +522,7 @@ class VLLMHttpPool:
                         f"{self.manifest.replicas[index].base_url}: "
                         f"{type(error).__name__}: {error}"
                     )
-        raise PoolError("vLLM chat completion failed: " + "; ".join(failures))
+        raise PoolError(f"vLLM {operation} failed: " + "; ".join(failures))
 
     def _complete_on(
         self,
@@ -351,12 +566,59 @@ class VLLMHttpPool:
             output_token_ids=output_token_ids,
         )
 
+    def _generate_text_on(
+        self,
+        index: int,
+        prompt_token_ids: tuple[int, ...],
+        parameters: Mapping[str, object],
+    ) -> TextCompletion:
+        payload = dict(parameters)
+        payload.update(
+            model=self._model_id,
+            prompt=list(prompt_token_ids),
+            add_special_tokens=False,
+            return_token_ids=True,
+            n=1,
+            stream=False,
+        )
+        response = self._clients[index].post("/v1/completions", json=payload)
+        response.raise_for_status()
+        raw = response.json()
+        choices = raw.get("choices") if isinstance(raw, dict) else None
+        if not isinstance(choices, list) or len(choices) != 1:
+            raise ValueError("text completion must return exactly one choice")
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            raise ValueError("text completion choice must be an object")
+        generated = choice.get("text")
+        if not isinstance(generated, str):
+            raise ValueError("text completion content must be text")
+        returned_prompt = choice.get("prompt_token_ids")
+        if returned_prompt is None:
+            returned_prompt = raw.get("prompt_token_ids")
+        output_token_ids = self._token_ids(choice.get("token_ids"), "output")
+        finish_reason = choice.get("finish_reason")
+        if finish_reason is not None and not isinstance(finish_reason, str):
+            raise ValueError("text completion finish_reason must be text")
+        stop_reason = choice.get("stop_reason")
+        if stop_reason is not None and (
+            not isinstance(stop_reason, (int, str)) or isinstance(stop_reason, bool)
+        ):
+            raise ValueError("text completion stop_reason must be an integer or text")
+        return TextCompletion(
+            text=generated,
+            prompt_token_ids=self._token_ids(returned_prompt, "prompt"),
+            output_token_ids=output_token_ids,
+            finish_reason=finish_reason,
+            stop_reason=stop_reason,
+        )
+
     @staticmethod
     def _token_ids(value: object, name: str) -> tuple[int, ...]:
         if not isinstance(value, list) or any(
             not isinstance(token, int) or isinstance(token, bool) for token in value
         ):
-            raise ValueError(f"chat completion {name} token ids are missing or invalid")
+            raise ValueError(f"{name} token ids are missing or invalid")
         return tuple(value)
 
     @property

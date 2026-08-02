@@ -571,6 +571,14 @@ async def test_campaign_publication_finalize_and_complete_queries(
                 "publisher_principal": "lighteval-production",
                 "schema_version": "lighteval-campaign-v3",
                 "lighteval_version": "0.13.0",
+                "supported_campaign_schemas": [
+                    "lighteval-campaign-v3",
+                    "lm-eval-campaign-v1",
+                ],
+                "evaluator_versions": {
+                    "lighteval": "0.13.0",
+                    "lm-eval": "0.4.12",
+                },
             }
             unauthorized = await client.post(
                 "/api/v1/evaluation-campaigns",

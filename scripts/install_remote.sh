@@ -56,7 +56,7 @@ REMOTE_SSH_HOST="${REMOTE_SSH_HOST:-$REMOTE_WORKSPACE_ID.devpod}"
 REMOTE_ROOT="${REMOTE_ROOT:-/workspace/Projects/MachineLearning/helicopter}"
 REMOTE_VENV="${REMOTE_VENV:-$REMOTE_ROOT/.venv}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
-INSTALL_COMPONENTS="${INSTALL_COMPONENTS:-rwkv-lm,vllm-rwkv,verl-rwkv,lighteval,dev}"
+INSTALL_COMPONENTS="${INSTALL_COMPONENTS:-rwkv-lm,vllm-rwkv,verl-rwkv,lighteval,lm-eval,dev}"
 UPDATE_UV="${UPDATE_UV:-0}"
 UV_UPGRADE="${UV_UPGRADE:-0}"
 RUN_PIP_CHECK="${RUN_PIP_CHECK:-1}"
@@ -105,12 +105,12 @@ validate_install_components() {
   ((${#components[@]} > 0)) || die "INSTALL_COMPONENTS must select at least one dependency group"
   for component in "${components[@]}"; do
     case "$component" in
-      dev | flash-rwkv | fla-rwkv | vllm-rwkv | verl-rwkv | rwkv-lm | verl-liger | lighteval | scoreboard-server | scoreboard-client) ;;
+      dev | flash-rwkv | fla-rwkv | vllm-rwkv | verl-rwkv | rwkv-lm | verl-liger | lighteval | lm-eval | scoreboard-server | scoreboard-client) ;;
       full)
         die "INSTALL_COMPONENTS=full is disabled; select explicit dependency groups"
         ;;
       *)
-        die "unknown INSTALL_COMPONENTS entry '$component'; use a comma-separated subset of dev,flash-rwkv,fla-rwkv,vllm-rwkv,verl-rwkv,rwkv-lm,verl-liger,lighteval,scoreboard-server,scoreboard-client"
+        die "unknown INSTALL_COMPONENTS entry '$component'; use a comma-separated subset of dev,flash-rwkv,fla-rwkv,vllm-rwkv,verl-rwkv,rwkv-lm,verl-liger,lighteval,lm-eval,scoreboard-server,scoreboard-client"
         ;;
     esac
   done
@@ -277,6 +277,7 @@ sync_remote_repo() {
     --exclude '.git' \
     --exclude '.venv/' \
     --exclude '.venv-lighteval/' \
+    --exclude '.venv-lm-eval/' \
     --exclude '.env' \
     --exclude '.env.local' \
     --exclude '__pycache__/' \

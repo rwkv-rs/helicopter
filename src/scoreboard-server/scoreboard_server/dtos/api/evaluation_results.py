@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 AnswerOutcome = Literal["correct", "incorrect", "unanswered", "undetermined"]
 WkvMode = Literal["fp16", "fp32io16"]
-PromptTemplate = Literal["bot", "assistant", "function_calling"]
+PromptTemplate = Literal["bot", "assistant", "function_calling", "none"]
 PROMPT_TEMPLATE_STOPS: dict[str, str] = {
     "bot": "✿",
     "assistant": "\nUser:",
@@ -23,6 +23,11 @@ PROMPT_TEMPLATE_STOPS: dict[str, str] = {
 
 class Contract(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False, strict=True)
+
+
+class EvaluatorMetadata(Contract):
+    name: Literal["lighteval", "lm-eval"]
+    version: str = Field(min_length=1, max_length=100)
 
 
 class ExpectedTask(Contract):
@@ -75,12 +80,13 @@ class ExpectedTask(Contract):
 
 
 class CampaignCreate(Contract):
-    schema_version: Literal["lighteval-campaign-v3"]
+    schema_version: Literal["lighteval-campaign-v3", "lm-eval-campaign-v1"]
     run_key: str = Field(pattern=r"^[0-9a-f]{64}$")
     config_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     registry_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     eval_contract_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
-    lighteval_version: Literal["0.13.0"]
+    lighteval_version: Literal["0.13.0"] | None = None
+    evaluator: EvaluatorMetadata | None = None
     configured_selectors: list[str] = Field(min_length=1)
     resolved_selectors: list[str] = Field(min_length=1)
     skipped_selectors: list[str]
@@ -88,6 +94,16 @@ class CampaignCreate(Contract):
 
     @model_validator(mode="after")
     def unique_expected_tasks(self) -> "CampaignCreate":
+        if self.schema_version == "lighteval-campaign-v3":
+            if self.lighteval_version != "0.13.0" or self.evaluator is not None:
+                raise ValueError("LightEval campaign requires lighteval_version")
+        elif (
+            self.lighteval_version is not None
+            or self.evaluator is None
+            or self.evaluator.name != "lm-eval"
+            or self.evaluator.version != "0.4.12"
+        ):
+            raise ValueError("lm-eval campaign requires evaluator version 0.4.12")
         for name in (
             "configured_selectors",
             "resolved_selectors",
@@ -151,6 +167,14 @@ class CampaignCreate(Contract):
                         )
         return self
 
+    @property
+    def evaluator_name(self) -> str:
+        return "lighteval" if self.evaluator is None else self.evaluator.name
+
+    @property
+    def evaluator_version(self) -> str:
+        return self.lighteval_version or self.evaluator.version  # type: ignore[union-attr]
+
 
 class CampaignReceipt(Contract):
     campaign_id: str
@@ -165,6 +189,8 @@ class PublicationPreflight(Contract):
     publisher_principal: str
     schema_version: Literal["lighteval-campaign-v3"]
     lighteval_version: Literal["0.13.0"]
+    supported_campaign_schemas: list[str]
+    evaluator_versions: dict[str, str]
 
 
 class CampaignStatus(Contract):
@@ -185,27 +211,31 @@ class ModelExecution(Contract):
     max_num_seqs: int = Field(gt=0)
     max_num_batched_tokens: int = Field(gt=0)
     dependency_versions: dict[str, str]
+    evaluator: Literal["lighteval", "lm-eval"] = "lighteval"
 
     @model_validator(mode="after")
     def required_dependency_versions(self) -> "ModelExecution":
-        required = {"lighteval", "vllm", "torch"}
+        required = {self.evaluator, "vllm", "torch"}
         if not required.issubset(self.dependency_versions) or any(
             not name or not version
             for name, version in self.dependency_versions.items()
         ):
             raise ValueError(
-                "model execution must record lighteval, vllm, and torch versions"
+                "model execution must record evaluator, vllm, and torch versions"
             )
         return self
 
 
 class ArtifactMetadata(Contract):
-    lighteval_version: Literal["0.13.0"]
+    lighteval_version: Literal["0.13.0"] | None = None
+    evaluator: EvaluatorMetadata | None = None
     results_path: str = Field(min_length=1)
     details_paths: list[str] = Field(min_length=1)
 
     @model_validator(mode="after")
     def relative_standard_paths(self) -> "ArtifactMetadata":
+        if (self.lighteval_version is None) == (self.evaluator is None):
+            raise ValueError("artifact requires exactly one evaluator version")
         for raw in (self.results_path, *self.details_paths):
             path = PurePosixPath(raw)
             if (
@@ -215,13 +245,23 @@ class ArtifactMetadata(Contract):
                 or str(path) != raw
             ):
                 raise ValueError("artifact paths must be normalized relative paths")
-        if not self.results_path.startswith("results/"):
+        if self.evaluator is None and not self.results_path.startswith("results/"):
             raise ValueError("results_path must name a standard results child")
-        if any(not path.startswith("details/") for path in self.details_paths):
+        if self.evaluator is None and any(
+            not path.startswith("details/") for path in self.details_paths
+        ):
             raise ValueError("details_paths must name standard details children")
         if len(self.details_paths) != len(set(self.details_paths)):
             raise ValueError("details_paths must be unique")
         return self
+
+    @property
+    def evaluator_name(self) -> str:
+        return "lighteval" if self.evaluator is None else self.evaluator.name
+
+    @property
+    def evaluator_version(self) -> str:
+        return self.lighteval_version or self.evaluator.version  # type: ignore[union-attr]
 
 
 class Diagnostics(Contract):
@@ -243,7 +283,7 @@ class StandardDetail(Contract):
 
 
 class TaskPublication(Contract):
-    schema_version: Literal["lighteval-task-v2"]
+    schema_version: Literal["lighteval-task-v2", "lm-eval-task-v1"]
     campaign_id: str
     task: ExpectedTask
     artifact: ArtifactMetadata
@@ -257,6 +297,13 @@ class TaskPublication(Contract):
 
     @model_validator(mode="after")
     def validate_result(self) -> "TaskPublication":
+        is_lm_eval = self.schema_version == "lm-eval-task-v1"
+        if is_lm_eval != (self.model.evaluator == "lm-eval"):
+            raise ValueError("task schema and model evaluator differ")
+        if is_lm_eval != (self.model.prompt_template == "none"):
+            raise ValueError("task schema and prompt template differ")
+        if self.artifact.evaluator_name != self.model.evaluator:
+            raise ValueError("artifact and model evaluators differ")
         if not self.aggregates or any(
             not key.strip() or key != key.strip() for key in self.aggregates
         ):
@@ -297,10 +344,10 @@ class TaskPublication(Contract):
         )
         if self.model.gemm_policy != expected_gemm_policy:
             raise ValueError("model GEMM policy does not match WKV mode")
-        if self.artifact.lighteval_version != self.model.dependency_versions.get(
-            "lighteval"
+        if self.artifact.evaluator_version != self.model.dependency_versions.get(
+            self.model.evaluator
         ):
-            raise ValueError("artifact and model LightEval versions differ")
+            raise ValueError("artifact and model evaluator versions differ")
         original_docs = self.task_config.get("original_num_docs")
         effective_docs = self.task_config.get("effective_num_docs")
         skipped_multiselect_docs = self.task_config.get("skipped_multiselect_docs")
@@ -321,6 +368,17 @@ class TaskPublication(Contract):
             raise ValueError(
                 "task config and details do not account for the full evaluation split"
             )
+        if is_lm_eval:
+            if self.artifact.evaluator_version != "0.4.12":
+                raise ValueError("lm-eval artifact version must be 0.4.12")
+            if (
+                self.diagnostics.samples != len(self.details)
+                or self.diagnostics.truncated
+                + self.diagnostics.non_truncated
+                != self.diagnostics.completions
+            ):
+                raise ValueError("lm-eval diagnostics do not match task details")
+            return self
         required_sampling: dict[str, JsonValue] = {
             "temperature": 0.96,
             "top_p": 0.76,
@@ -367,11 +425,18 @@ class CampaignProvenance(Contract):
     config_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     registry_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     eval_contract_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
-    lighteval_version: Literal["0.13.0"]
+    lighteval_version: Literal["0.13.0"] | None = None
+    evaluator: EvaluatorMetadata | None = None
     configured_selectors: list[str]
     resolved_selectors: list[str]
     skipped_selectors: list[str]
     publisher_principal: str
+
+    @model_validator(mode="after")
+    def exactly_one_evaluator(self) -> "CampaignProvenance":
+        if (self.lighteval_version is None) == (self.evaluator is None):
+            raise ValueError("provenance requires exactly one evaluator version")
+        return self
 
 
 class EvaluationSummary(Contract):
@@ -596,6 +661,10 @@ def sample_outcome(detail: StandardDetail, primary_metric: str) -> AnswerOutcome
         response.get(key) not in (None, [])
         for key in ("logprobs", "argmax_logits_eq_gold")
     )
-    if not has_text and not has_logprob:
+    has_native_response = any(
+        response.get(key) not in (None, [], {})
+        for key in ("filtered_resps", "resps")
+    )
+    if not has_text and not has_logprob and not has_native_response:
         return "unanswered"
     return "undetermined"

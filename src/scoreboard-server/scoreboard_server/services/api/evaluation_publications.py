@@ -74,6 +74,11 @@ class EvaluationPublicationService:
             publisher_principal=self.principal_for_authorization(authorization),
             schema_version="lighteval-campaign-v3",
             lighteval_version="0.13.0",
+            supported_campaign_schemas=[
+                "lighteval-campaign-v3",
+                "lm-eval-campaign-v1",
+            ],
+            evaluator_versions={"lighteval": "0.13.0", "lm-eval": "0.4.12"},
         )
 
     @staticmethod

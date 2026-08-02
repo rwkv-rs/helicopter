@@ -1,0 +1,17 @@
+schema_version = 1
+backend = "vllm_http"
+
+tasks = [
+  "arc_easy",
+  "hellaswag",
+  "mmlu",
+  "truthfulqa_mc2",
+  "gsm8k",
+  "ifeval",
+  "wikitext",
+]
+output_dir = ".tmp/eval/lm-eval"
+batch_size = 64
+eot_token_id = 0
+max_gen_toks = 2048
+log_samples = false

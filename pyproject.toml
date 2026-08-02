@@ -30,6 +30,14 @@ lighteval = [
   "ray",
 ]
 
+lm-eval = [
+  # lm-eval 0.4.12 still ships dataset-script tasks such as CMMLU. Datasets 4+
+  # removed script loading, so keep this evaluator environment compatible.
+  "datasets==3.6.0",
+  "httpx[socks]",
+  "lm-eval[ifeval,longbench]==0.4.12",
+]
+
 vllm-rwkv = [
   "aiohttp>=3.13.3",
   "blake3",
@@ -140,6 +148,12 @@ conflicts = [
     { group = "lighteval" },
     { group = "verl-rwkv" },
   ],
+  [
+    # These evaluators intentionally use separate virtual environments:
+    # LightEval requires datasets>=4 while lm-eval CMMLU requires 3.6.
+    { group = "lighteval" },
+    { group = "lm-eval" },
+  ],
 ]
 
 [tool.uv.sources]
@@ -147,11 +161,12 @@ flash-rwkv = { path = "src/kernel/flash-rwkv", editable = true }
 flash-linear-attention = { path = "src/kernel/fla-rwkv", editable = true }
 
 [tool.setuptools]
-packages = ["helicopter_cli", "helicopter_lighteval"]
+packages = ["helicopter_cli", "helicopter_lighteval", "helicopter_lm_eval"]
 
 [tool.setuptools.package-dir]
 helicopter_cli = "src/cli/helicopter_cli"
 helicopter_lighteval = "src/eval/lighteval"
+helicopter_lm_eval = "src/eval/lm_eval"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

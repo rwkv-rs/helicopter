@@ -115,15 +115,26 @@ class ScoreboardClient:
             raise PublicationError("Scoreboard response must be a JSON object")
         return value
 
-    def preflight(self) -> dict[str, Any]:
+    def preflight(
+        self,
+        evaluator: str = "lighteval",
+        version: str = "0.13.0",
+    ) -> dict[str, Any]:
         response = self._request(
             "GET",
             "/api/v1/evaluation-publication-preflight",
         )
-        if (
+        if evaluator == "lighteval" and (
             response.get("status") != "ready"
             or response.get("schema_version") != "lighteval-campaign-v3"
-            or response.get("lighteval_version") != "0.13.1.dev0"
+            or response.get("lighteval_version") != version
+        ):
+            raise PublicationError("Scoreboard publication API is incompatible")
+        if evaluator != "lighteval" and (
+            response.get("status") != "ready"
+            or f"{evaluator}-campaign-v1"
+            not in response.get("supported_campaign_schemas", [])
+            or response.get("evaluator_versions", {}).get(evaluator) != version
         ):
             raise PublicationError("Scoreboard publication API is incompatible")
         return response

@@ -1,0 +1,15 @@
+schema_version = 1
+backend = "vllm_http"
+
+# Delta from the user-requested benchmark catalog after removing selectors
+# already owned by configs/eval/lighteval.toml and tasks unavailable in the
+# pinned lm-eval==0.4.12 registry. Keep this list exact and reviewable.
+tasks = [
+  "gpqa_extended_zeroshot",
+  "cmmlu",
+]
+output_dir = ".tmp/eval/lm-eval-catalog-delta"
+batch_size = 64
+eot_token_id = 0
+max_gen_toks = 256
+log_samples = true

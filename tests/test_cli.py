@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from helicopter_cli import commands, config, env
+from helicopter_cli import __main__ as cli_main
 from helicopter_cli.__main__ import build_parser
 
 
@@ -98,9 +99,45 @@ class EvaluationCliTests(unittest.TestCase):
         )
 
         self.assertEqual(args.command, "eval")
+        self.assertEqual(args.evaluator, "lighteval")
         self.assertEqual(args.config, "configs/eval/maxrl_math.toml")
         self.assertEqual(args.env_file, ".env.remote")
         self.assertTrue(args.dry_run)
+
+    def test_eval_dispatches_lm_eval_to_its_isolated_environment(self) -> None:
+        root = Path("/workspace/helicopter")
+        with (
+            mock.patch.object(cli_main, "find_root", return_value=root),
+            mock.patch.object(cli_main, "find_env_path", return_value=None),
+            mock.patch.object(
+                cli_main,
+                "load_env",
+                return_value=(
+                    {
+                        "HELICOPTER_LM_EVAL_PYTHON": ".venv-lm-eval/bin/python"
+                    },
+                    None,
+                ),
+            ),
+            mock.patch.object(cli_main.os, "access", return_value=True),
+            mock.patch.object(cli_main, "run_command", return_value=0) as run,
+        ):
+            result = cli_main.main(
+                [
+                    "eval",
+                    "--evaluator",
+                    "lm-eval",
+                    "--config",
+                    "configs/eval/lm_eval_ppl.toml",
+                    "--dry-run",
+                ]
+            )
+
+        self.assertEqual(result, 0)
+        command = run.call_args.args[0]
+        self.assertEqual(command[0], str(root / ".venv-lm-eval/bin/python"))
+        self.assertEqual(command[1:3], ["-m", "helicopter_lm_eval"])
+        self.assertEqual(command[-1], "--dry-run")
 
 
 class InferPlanTests(unittest.TestCase):

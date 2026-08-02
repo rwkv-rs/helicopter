@@ -3,11 +3,12 @@
 产品入口只有一个：
 
 ```bash
-helicopter eval --config ./configs/eval/lighteval.toml
+helicopter eval --evaluator lighteval --config ./configs/eval/lighteval.toml
 ```
 
 公开 CLI 会把评估委托给独立的 `.venv-lighteval`。LightEval 及其数学解析依赖不会
 安装进 Verl 使用的训练 `.venv`；可用 `HELICOPTER_EVAL_PYTHON` 显式覆盖该解释器。
+`--evaluator` 省略时仍默认使用 `lighteval`，兼容现有训练验证命令。
 
 命令按配置顺序处理每个权重。发布型配置默认运行 `fp16`、`fp32io16` 两种 WKV mode。
 每个 weight/mode 使用一次 LightEval 官方 `Pipeline`，评估 `benchmarks` 中全部可解析

@@ -57,16 +57,17 @@ function reference(doc: Record<string, unknown>): string {
   return "null";
 }
 
-const PROMPT_STOPS: Record<PromptTemplate, string> = {
+const PROMPT_STOPS: Record<PromptTemplate, string | null> = {
   bot: "✿",
   assistant: "\nUser:",
   function_calling: "\n### User",
+  none: null,
 };
 
 function completionRows(
   sample: SampleDetail,
   limit: number,
-  turnBoundary: string,
+  turnBoundary: string | null,
 ) {
   const raw = strings(sample.model_response.text);
   const processed = strings(sample.model_response.text_post_processed);
@@ -85,7 +86,8 @@ function completionRows(
       answer: processed[index] ?? (split.length === 2 ? split[1] : null),
       tokens: tokens[index] ?? [],
       truncated: (tokens[index]?.length ?? 0) >= limit,
-      boundaryViolation: text.includes(turnBoundary),
+      boundaryViolation:
+        turnBoundary !== null && text.includes(turnBoundary),
     };
   });
 }
@@ -94,10 +96,12 @@ function SampleCard({
   sample,
   limit,
   turnBoundary,
+  evaluator,
 }: {
   sample: SampleDetail;
   limit: number;
-  turnBoundary: string;
+  turnBoundary: string | null;
+  evaluator: "lighteval" | "lm-eval";
 }) {
   const completions = completionRows(sample, limit, turnBoundary);
   const logprobs = sample.model_response.logprobs;
@@ -161,6 +165,12 @@ function SampleCard({
           </dl>
         </section>
       ) : null}
+      {evaluator === "lm-eval" ? (
+        <details className="completion native-response">
+          <summary>lm-eval native response</summary>
+          <pre>{JSON.stringify(sample.model_response, null, 2)}</pre>
+        </details>
+      ) : null}
       {!completions.length ? <p>该样本没有生成 completion。</p> : null}
     </article>
   );
@@ -221,6 +231,7 @@ export function EvaluationDetails() {
         <span>campaign: {selected.campaign_id}</span>
         <span>selector: {selected.task.selector}</span>
         <span>module: {selected.task.module_family}</span>
+        <span>evaluator: {selected.model.evaluator ?? "lighteval"}</span>
         <span>prompt template: {selected.model.prompt_template}</span>
         <span>
           tags:{" "}
@@ -270,6 +281,7 @@ export function EvaluationDetails() {
       {!page && !error ? <p>正在加载样本…</p> : null}
       {page?.items.map((sample) => (
         <SampleCard
+          evaluator={selected.model.evaluator ?? "lighteval"}
           key={sample.id}
           limit={outputLimit}
           sample={sample}

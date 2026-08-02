@@ -35,7 +35,7 @@ jobs:
           enable-cache: true
 
       - name: Install test dependencies
-        run: uv sync --locked --group test
+        run: uv sync --locked --group test --group lm-eval
 
       - name: Run lightweight tests
         env:

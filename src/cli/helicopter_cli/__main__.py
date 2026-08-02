@@ -68,9 +68,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     evaluate = subparsers.add_parser(
         "eval",
-        help="run configured LightEval benchmarks",
+        help="run configured evaluation benchmarks",
     )
-    evaluate.add_argument("--config", required=True, help="LightEval TOML")
+    evaluate.add_argument(
+        "--evaluator",
+        choices=("lighteval", "lm-eval"),
+        default="lighteval",
+        help="evaluation harness; defaults to lighteval",
+    )
+    evaluate.add_argument("--config", required=True, help="evaluation TOML")
     evaluate.add_argument(
         "--env-file",
         default=DEFAULT_ENV_FILE,
@@ -79,7 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument(
         "--dry-run",
         action="store_true",
-        help="validate, resolve selectors, and print a redacted plan",
+        help="validate configuration and print evaluator readiness",
     )
 
     return parser
@@ -118,23 +124,36 @@ def main(argv: list[str] | None = None) -> int:
         config_path = Path(args.config).expanduser()
         if not config_path.is_absolute():
             config_path = Path.cwd() / config_path
-        configured_python = eval_env.get("HELICOPTER_EVAL_PYTHON")
+        is_lm_eval = args.evaluator == "lm-eval"
+        python_variable = (
+            "HELICOPTER_LM_EVAL_PYTHON"
+            if is_lm_eval
+            else "HELICOPTER_EVAL_PYTHON"
+        )
+        configured_python = eval_env.get(python_variable)
         eval_python = (
             Path(configured_python).expanduser()
             if configured_python
-            else root / ".venv-lighteval/bin/python"
+            else root
+            / (
+                ".venv-lm-eval/bin/python"
+                if is_lm_eval
+                else ".venv-lighteval/bin/python"
+            )
         )
         if not eval_python.is_absolute():
             eval_python = root / eval_python
         if not os.access(eval_python, os.X_OK):
+            evaluator_name = "lm-eval" if is_lm_eval else "LightEval"
+            component = "lm-eval" if is_lm_eval else "lighteval"
             parser.error(
-                f"LightEval Python executable not found: {eval_python}; "
-                "prepare the lighteval component"
+                f"{evaluator_name} Python executable not found: {eval_python}; "
+                f"prepare the {component} component"
             )
         command = [
             str(eval_python),
             "-m",
-            "helicopter_lighteval",
+            "helicopter_lm_eval" if is_lm_eval else "helicopter_lighteval",
             "--config",
             str(config_path),
         ]

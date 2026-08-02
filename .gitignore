@@ -15,6 +15,7 @@ htmlcov/
 
 .venv/
 .venv-lighteval/
+.venv-lm-eval/
 venv/
 env/
 .uv/

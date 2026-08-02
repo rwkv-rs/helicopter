@@ -54,7 +54,7 @@ class ScoreboardRepository:
             existing = await connection.fetchrow(
                 """
                 SELECT id, status, config_digest, registry_digest,
-                       eval_contract_digest, lighteval_version,
+                       eval_contract_digest, lighteval_version, evaluator_name,
                        configured_selectors, resolved_selectors,
                        skipped_selectors, expected_tasks, publisher_principal
                 FROM evaluation_campaign
@@ -74,7 +74,8 @@ class ScoreboardRepository:
                     "config_digest": campaign.config_digest,
                     "registry_digest": campaign.registry_digest,
                     "eval_contract_digest": campaign.eval_contract_digest,
-                    "lighteval_version": campaign.lighteval_version,
+                    "lighteval_version": campaign.evaluator_version,
+                    "evaluator_name": campaign.evaluator_name,
                     "configured_selectors": campaign.configured_selectors,
                     "resolved_selectors": campaign.resolved_selectors,
                     "skipped_selectors": campaign.skipped_selectors,
@@ -110,11 +111,11 @@ class ScoreboardRepository:
                 """
                 INSERT INTO evaluation_campaign (
                     id, run_key, status, config_digest, registry_digest,
-                    eval_contract_digest, lighteval_version,
+                    eval_contract_digest, lighteval_version, evaluator_name,
                     configured_selectors, resolved_selectors, skipped_selectors,
                     expected_tasks, publisher_principal
                 ) VALUES (
-                    $1, $2, 'incomplete', $3, $4, $5, $6, $7, $8, $9, $10, $11
+                    $1, $2, 'incomplete', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
                 )
                 """,
                 campaign_id,
@@ -122,7 +123,8 @@ class ScoreboardRepository:
                 campaign.config_digest,
                 campaign.registry_digest,
                 campaign.eval_contract_digest,
-                campaign.lighteval_version,
+                campaign.evaluator_version,
+                campaign.evaluator_name,
                 campaign.configured_selectors,
                 campaign.resolved_selectors,
                 campaign.skipped_selectors,
@@ -193,7 +195,7 @@ class ScoreboardRepository:
             )
             campaign = await connection.fetchrow(
                 """
-                SELECT status, expected_tasks, lighteval_version
+                SELECT status, expected_tasks, lighteval_version, evaluator_name
                 FROM evaluation_campaign
                 WHERE id = $1 AND publisher_principal = $2
                 """,
@@ -217,9 +219,13 @@ class ScoreboardRepository:
                 raise CampaignContractError(
                     "task metadata does not match campaign expected set"
                 )
-            if publication.artifact.lighteval_version != campaign["lighteval_version"]:
+            if (
+                publication.artifact.evaluator_name != campaign["evaluator_name"]
+                or publication.artifact.evaluator_version
+                != campaign["lighteval_version"]
+            ):
                 raise CampaignContractError(
-                    "artifact LightEval version does not match campaign"
+                    "artifact evaluator does not match campaign"
                 )
 
             existing = await connection.fetchrow(
@@ -371,7 +377,7 @@ class ScoreboardRepository:
             SELECT t.id, t.campaign_id, t.task_identity, t.created_at,
                    c.completed_at, c.publisher_principal, c.config_digest,
                    c.registry_digest, c.eval_contract_digest,
-                   c.lighteval_version, c.configured_selectors,
+                   c.lighteval_version, c.evaluator_name, c.configured_selectors,
                    c.resolved_selectors, c.skipped_selectors,
                    t.task, t.artifact, t.task_config,
                    t.model, t.sampling_config, t.primary_metric,
@@ -407,7 +413,19 @@ class ScoreboardRepository:
                         config_digest=row["config_digest"],
                         registry_digest=row["registry_digest"],
                         eval_contract_digest=row["eval_contract_digest"],
-                        lighteval_version=row["lighteval_version"],
+                        lighteval_version=(
+                            row["lighteval_version"]
+                            if row["evaluator_name"] == "lighteval"
+                            else None
+                        ),
+                        evaluator=(
+                            {
+                                "name": row["evaluator_name"],
+                                "version": row["lighteval_version"],
+                            }
+                            if row["evaluator_name"] != "lighteval"
+                            else None
+                        ),
                         configured_selectors=row["configured_selectors"],
                         resolved_selectors=row["resolved_selectors"],
                         skipped_selectors=row["skipped_selectors"],

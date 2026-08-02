@@ -1,0 +1,16 @@
+schema_version = 1
+backend = "vllm_http"
+
+tasks = [
+  "mmlu_pro",
+  "mmlu_redux_generative",
+  "ceval-valid",
+  "gpqa_diamond_cot_zeroshot",
+  "ifeval",
+  "mmmlu",
+]
+output_dir = ".tmp/eval/lm-eval-qwen35"
+batch_size = 64
+eot_token_id = 0
+max_gen_toks = 2048
+log_samples = false

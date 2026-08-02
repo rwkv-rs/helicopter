@@ -1,0 +1,18 @@
+schema_version = 1
+backend = "vllm_http"
+
+# This suite is intentionally disjoint from configs/eval/lighteval.toml.
+# It covers harness-native reading, translation, linguistic knowledge, language
+# modeling, and long-context passage retrieval.
+tasks = [
+  "race",
+  "wmt14-en-fr",
+  "lambada_openai",
+  "blimp",
+  "longbench_passage_retrieval_en",
+]
+output_dir = ".tmp/eval/lm-eval-capabilities"
+batch_size = 64
+eot_token_id = 0
+max_gen_toks = 256
+log_samples = true

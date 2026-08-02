@@ -5,8 +5,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
 VENV="${VENV:-$ROOT/.venv}"
 EVAL_VENV="${EVAL_VENV:-$ROOT/.venv-lighteval}"
+LM_EVAL_VENV="${LM_EVAL_VENV:-$ROOT/.venv-lm-eval}"
 UV="${UV:-uv}"
-INSTALL_COMPONENTS="${INSTALL_COMPONENTS:-rwkv-lm,vllm-rwkv,verl-rwkv,lighteval,dev}"
+INSTALL_COMPONENTS="${INSTALL_COMPONENTS:-rwkv-lm,vllm-rwkv,verl-rwkv,lighteval,lm-eval,dev}"
 INSTALL_SYSTEM_DEPS="${INSTALL_SYSTEM_DEPS:-0}"
 UPDATE_UV="${UPDATE_UV:-0}"
 UV_UPGRADE="${UV_UPGRADE:-0}"
@@ -84,12 +85,12 @@ validate_install_components() {
   ((${#components[@]} > 0)) || die "INSTALL_COMPONENTS must select at least one dependency group"
   for component in "${components[@]}"; do
     case "$component" in
-      dev | flash-rwkv | fla-rwkv | vllm-rwkv | verl-rwkv | rwkv-lm | verl-liger | lighteval | scoreboard-server | scoreboard-client) ;;
+      dev | flash-rwkv | fla-rwkv | vllm-rwkv | verl-rwkv | rwkv-lm | verl-liger | lighteval | lm-eval | scoreboard-server | scoreboard-client) ;;
       full)
         die "INSTALL_COMPONENTS=full is disabled; select explicit dependency groups"
         ;;
       *)
-        die "unknown INSTALL_COMPONENTS entry '$component'; use a comma-separated subset of dev,flash-rwkv,fla-rwkv,vllm-rwkv,verl-rwkv,rwkv-lm,verl-liger,lighteval,scoreboard-server,scoreboard-client"
+        die "unknown INSTALL_COMPONENTS entry '$component'; use a comma-separated subset of dev,flash-rwkv,fla-rwkv,vllm-rwkv,verl-rwkv,rwkv-lm,verl-liger,lighteval,lm-eval,scoreboard-server,scoreboard-client"
         ;;
     esac
   done
@@ -390,7 +391,7 @@ sync_uv_env() {
   IFS=, read -r -a components <<<"$INSTALL_COMPONENTS"
   for component in "${components[@]}"; do
     case "$component" in
-      lighteval | scoreboard-server | scoreboard-client) ;;
+      lighteval | lm-eval | scoreboard-server | scoreboard-client) ;;
       *) sync_args+=(--group "$component") ;;
     esac
   done
@@ -415,6 +416,25 @@ sync_lighteval_env() {
   append_uv_sync_policy sync_args
   [[ -n "$UV_INDEX_URL" ]] && sync_args+=(--index-url "$UV_INDEX_URL")
   run env VIRTUAL_ENV="$EVAL_VENV" "$UV" "${sync_args[@]}"
+}
+
+sync_lm_eval_env() {
+  component_enabled lm-eval || return 0
+  if [[ ! -x "$LM_EVAL_VENV/bin/python" ]]; then
+    run "$UV" venv --allow-existing --python "$PYTHON_VERSION" "$LM_EVAL_VENV"
+  fi
+
+  local sync_args=(
+    sync
+    --project "$ROOT"
+    --active
+    --inexact
+    --no-default-groups
+    --group lm-eval
+  )
+  append_uv_sync_policy sync_args
+  [[ -n "$UV_INDEX_URL" ]] && sync_args+=(--index-url "$UV_INDEX_URL")
+  run env VIRTUAL_ENV="$LM_EVAL_VENV" "$UV" "${sync_args[@]}"
 }
 
 sync_scoreboard_server() {
@@ -752,6 +772,12 @@ check_lighteval_packages() {
   return 1
 }
 
+check_lm_eval_packages() {
+  component_enabled lm-eval || return 0
+  [[ "$RUN_PIP_CHECK" == "1" ]] || return 0
+  run "$UV" pip check --project "$ROOT" --python "$LM_EVAL_VENV/bin/python"
+}
+
 configure_network
 configure_build_dirs
 clean_submodule_venvs
@@ -759,6 +785,7 @@ python_component_enabled && ensure_uv
 check_compiler_env
 python_component_enabled && sync_uv_env
 sync_lighteval_env
+sync_lm_eval_env
 sync_scoreboard_server
 sync_scoreboard_client
 check_native_env
@@ -776,10 +803,14 @@ if component_enabled fla-rwkv && [[ "${DRY_RUN:-0}" != "1" ]]; then
 fi
 python_component_enabled && check_python_packages
 check_lighteval_packages
+check_lm_eval_packages
 
 clean_submodule_venvs
 
 echo "Environment ready: $VENV"
 if component_enabled lighteval; then
   echo "LightEval environment ready: $EVAL_VENV"
+fi
+if component_enabled lm-eval; then
+  echo "lm-eval environment ready: $LM_EVAL_VENV"
 fi

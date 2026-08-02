@@ -5,22 +5,23 @@ Domain behavior stays with the component that implements it:
 
 - `helicopter infer` launches `vllm-rwkv`.
 - `helicopter takeoff` delegates a complete MaxRL config to `verl-rwkv`.
-- `helicopter eval` runs the repository's LightEval adapter.
+- `helicopter eval` dispatches to the LightEval or lm-eval adapter.
 - `scripts/install_local.sh` and `scripts/install_remote.sh` prepare the
   selected product environment.
 
 Helicopter does not compile MaxRL configs, prepare training datasets, inspect
-rollouts, verify optimizer rounds, or implement a second evaluator.
+rollouts, verify optimizer rounds, or reimplement evaluator task logic.
 
 ## Repository layout
 
 ```text
 configs/example.toml        # serving-only example
-configs/eval/               # LightEval campaign and MaxRL validation configs
+configs/eval/               # LightEval and lm-eval evaluation configs
 scripts/install_local.sh    # prepare this checkout
 scripts/install_remote.sh   # sync and prepare the configured remote checkout
 src/cli/helicopter_cli/     # thin product launcher
 src/eval/lighteval/         # LightEval adapter and result publication
+src/eval/lm_eval/           # lm-eval RWKV-vLLM HTTP model backend
 src/infer/vllm-rwkv/        # RWKV vLLM implementation
 src/train/rwkv-lm/          # RWKV training engine
 src/train/verl-rwkv/        # Verl RWKV and MaxRL implementation
@@ -34,7 +35,7 @@ datasets, credentials, and machine-local paths out of Git.
 Prepare the current checkout:
 
 ```bash
-INSTALL_COMPONENTS=rwkv-lm,vllm-rwkv,verl-rwkv,lighteval,dev \
+INSTALL_COMPONENTS=rwkv-lm,vllm-rwkv,verl-rwkv,lighteval,lm-eval,dev \
   scripts/install_local.sh
 ```
 
@@ -131,10 +132,36 @@ local result mode bypasses Scoreboard entirely. See
 [`docs/evaluation/lighteval.md`](docs/evaluation/lighteval.md) for the campaign
 contract and private environment requirements.
 
+The lm-eval-harness backend uses the already running RWKV-vLLM HTTP pool and
+supports rolling perplexity, choice scoring, and text generation:
+
+```bash
+helicopter eval \
+  --evaluator lm-eval \
+  --config configs/eval/lm_eval.toml \
+  --dry-run
+
+helicopter eval \
+  --evaluator lm-eval \
+  --config configs/eval/lm_eval.toml
+```
+
+This path runs in `.venv-lm-eval`; task names, groups, tags, and glob selectors
+are resolved by lm-eval itself. The smaller `configs/eval/lm_eval_ppl.toml`
+continues to provide a WikiText-only run. The
+`configs/eval/lm_eval_qwen35.toml` suite fixes the public Qwen3.5 language-task
+selectors for local protocol-aligned comparisons. All write local
+`results.json` plus `summary.json` and do not publish to Scoreboard. Production
+matrix publication is available through `configs/eval/lm_eval_campaign.toml`,
+with weight SHA verification, both WKV modes, standard sample artifacts, and an
+evaluator-aware Scoreboard campaign. See
+[`docs/evaluation/lm_eval.md`](docs/evaluation/lm_eval.md) for the HTTP and
+result contracts.
+
 ## Lightweight checks
 
 ```bash
-PYTHONPATH=src/cli python3 -m pytest -q tests/test_cli.py tests/test_install_policy.py
-PYTHONPATH=src/cli python3 -m compileall -q src/cli/helicopter_cli tests
+TMPDIR=/tmp uv run --locked --group lm-eval --group test pytest -q tests
+python3 -m compileall -q src/cli/helicopter_cli src/eval/lighteval src/eval/lm_eval
 bash -n scripts/install_local.sh scripts/install_remote.sh
 ```
