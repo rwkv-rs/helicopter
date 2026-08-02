@@ -84,6 +84,17 @@ class Qwen35GeometryContractTests(unittest.TestCase):
             )
         torch.testing.assert_close(reconstructed, observable_output, rtol=0, atol=0)
 
+    def test_official_config_without_hub_id_uses_unique_native_geometry(self) -> None:
+        config = _config("Qwen/Qwen3.5-2B", gdn_heads=16, query_heads=8)
+        config.pop("model_id")
+        contract = validate_qwen35_geometry(config)
+        self.assertEqual(contract.model_id, "Qwen/Qwen3.5-2B")
+
+        config["linear_num_key_heads"] = 12
+        config["linear_num_value_heads"] = 12
+        with self.assertRaisesRegex(ContractError, "uniquely supported"):
+            validate_qwen35_geometry(config)
+
     def test_unknown_or_drifted_geometry_and_mapping_coverage_fail_closed(self) -> None:
         base = _config("Qwen/Qwen3.5-2B", gdn_heads=16, query_heads=8)
         mutations = (

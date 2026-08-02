@@ -36,14 +36,31 @@ def model_id_from_config(config: Mapping[str, object]) -> str:
         config.get("name_or_path"),
     )
     model_ids = {str(value) for value in candidates if isinstance(value, str) and value}
-    if len(model_ids) != 1:
+    if len(model_ids) > 1:
         raise ContractError(
             "Qwen3.5 source must declare exactly one canonical model ID"
         )
-    model_id = model_ids.pop()
-    if model_id not in _MODEL_GEOMETRY:
-        raise ContractError(f"unknown Qwen3.5 text model ID: {model_id!r}")
-    return model_id
+    if model_ids:
+        model_id = model_ids.pop()
+        if model_id not in _MODEL_GEOMETRY:
+            raise ContractError(f"unknown Qwen3.5 text model ID: {model_id!r}")
+        return model_id
+    text = _text_config(config)
+    observed = (
+        int(text.get("linear_num_value_heads", 0)),
+        int(text.get("linear_value_head_dim", 0)),
+    )
+    matches = tuple(
+        model_id
+        for model_id, geometry in _MODEL_GEOMETRY.items()
+        if geometry == observed
+    )
+    if len(matches) != 1:
+        raise ContractError(
+            "Qwen3.5 source without a model ID must have uniquely supported "
+            "source-native GDN geometry"
+        )
+    return matches[0]
 
 
 def canonical_gqa_state_mappings(

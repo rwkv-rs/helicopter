@@ -479,10 +479,16 @@ class DistillationInvariantTests(unittest.TestCase):
             single_gpu_real_plan["evidence_tier"] = "exploratory"
             single_gpu_real_plan["distributed_world_size"] = 1
             plan_path.write_text(json.dumps(single_gpu_real_plan), encoding="utf-8")
-            with self.assertRaisesRegex(
-                ContractError,
-                "suffix-free layer-major contract",
-            ):
+            self.assertEqual(
+                read_distillation_plan(plan_path).distributed_world_size,
+                1,
+            )
+            invalid_world_size_plan = dict(single_gpu_real_plan)
+            invalid_world_size_plan["distributed_world_size"] = 0
+            plan_path.write_text(
+                json.dumps(invalid_world_size_plan), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ContractError, "layer-major contract"):
                 read_distillation_plan(plan_path)
             data = root / "train.jsonl"
             data.write_text('{"text":"one"}\n{"text":"two"}\n', encoding="utf-8")

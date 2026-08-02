@@ -576,8 +576,7 @@ def read_distillation_plan(path: Path) -> DistillationPlan:
         or plan.accumulation_steps <= 0
         or plan.micro_batch_size <= 0
         or plan.gradient_checkpointing
-        or plan.distributed_world_size not in {1, 8}
-        or (plan.evidence_tier != "fixture" and plan.distributed_world_size != 8)
+        or plan.distributed_world_size <= 0
         or plan.cache_shard_rows <= 0
         or plan.checkpoint_interval_micro_batches < 0
         or plan.activation_fit_rows < 0

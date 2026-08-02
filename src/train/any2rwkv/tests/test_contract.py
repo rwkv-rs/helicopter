@@ -277,14 +277,12 @@ class ContractTests(unittest.TestCase):
                 (target / "modeling_any2rwkv.py").read_text(encoding="utf-8"),
             )
 
-    def test_scale_source_verification_hashes_pinned_read_only_60_layer_tree(self) -> None:
+    def test_scale_source_verification_accepts_equivalent_materialization(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             revision = "a" * 40
-            source_dir = write_fixture(root / revision, layers=60)
-            for path in source_dir.iterdir():
-                if path.is_file():
-                    path.chmod(0o444)
+            source_dir = write_fixture(root / "materialized", layers=60)
+            files = read_checkpoint(source_dir).file_hashes
             manifest = root / "scale.json"
             manifest.write_text(
                 json.dumps(
@@ -292,7 +290,8 @@ class ContractTests(unittest.TestCase):
                         "classification": "final-scale-source-preflight-only",
                         "repository": "Qwen/Qwen3.5-397B-A17B",
                         "revision": revision,
-                        "remote_read_only_path": str(source_dir),
+                        "remote_read_only_path": str(root / revision),
+                        "files": files,
                     }
                 ),
                 encoding="utf-8",
@@ -300,7 +299,8 @@ class ContractTests(unittest.TestCase):
             result = verify_source(manifest, source_dir)
             self.assertEqual(result["layers"], 60)
             self.assertEqual(len(result["combined_sha256"]), 64)
-            self.assertTrue(result["read_only"])
+            self.assertTrue(result["equivalent_materialization"])
+            self.assertFalse(result["read_only"])
 
     def test_scale_source_fetch_is_rejected_before_proxy_gate_without_network(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -322,12 +322,13 @@ class ContractTests(unittest.TestCase):
                     fetch_source(manifest, root / ("a" * 40))
                 download.assert_not_called()
 
-    def test_proxy_source_verification_requires_frozen_revision_path_and_read_only_weight(self) -> None:
+    def test_proxy_source_verification_uses_identity_and_digest_not_path(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             revision = "b" * 40
-            source = write_fixture(root / revision, layers=4)
+            source = write_fixture(root / "materialized", layers=4)
             weight = source / "model.safetensors"
+            files = read_checkpoint(source, require_final_layers=False).file_hashes
             manifest = root / "proxy.json"
             manifest.write_text(
                 json.dumps(
@@ -337,15 +338,34 @@ class ContractTests(unittest.TestCase):
                         "revision": revision,
                         "weight_file": weight.name,
                         "weight_sha256": sha256_file(weight),
-                        "remote_read_only_path": str(source),
+                        "remote_read_only_path": str(root / revision),
+                        "files": files,
                     }
                 ),
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(ContractError, "writable"):
+            result = verify_source(manifest, source)
+            self.assertEqual(result["repository"], "fixture/proxy")
+            self.assertEqual(result["revision"], revision)
+            self.assertTrue(result["equivalent_materialization"])
+            self.assertFalse(result["read_only"])
+            files["config.json"] = "0" * 64
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "classification": "real-proxy-model-not-60-layer-isomorphic",
+                        "repository": "fixture/proxy",
+                        "revision": revision,
+                        "weight_file": weight.name,
+                        "weight_sha256": sha256_file(weight),
+                        "remote_read_only_path": str(root / revision),
+                        "files": files,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ContractError, "config.json"):
                 verify_source(manifest, source)
-            weight.chmod(0o444)
-            self.assertTrue(verify_source(manifest, source)["read_only"])
 
     def test_proxy_source_fetch_can_freeze_a_manifest_bound_local_seed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

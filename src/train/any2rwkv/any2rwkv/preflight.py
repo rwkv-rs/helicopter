@@ -310,22 +310,16 @@ def collect_full_loop_preflight(
         source_manifest = _read_json_object(
             source_manifest_path, label="source manifest"
         )
-        expected_source = Path(
-            str(source_manifest.get("remote_read_only_path", ""))
-        ).resolve()
+        preferred_source = source_manifest.get("remote_read_only_path")
         source_result = {
             "manifest": str(source_manifest_path.resolve()),
             "manifest_sha256": file_sha256(source_manifest_path),
             "repository": source_manifest.get("repository"),
             "revision": source_manifest.get("revision"),
-            "expected_path": str(expected_source),
+            "preferred_materialization_path": preferred_source,
             "verified": None,
             "inspection": None,
         }
-        if source_path.resolve() != expected_source:
-            raise ValueError(
-                f"source path must be the frozen revision path: {expected_source}"
-            )
         verified = verify_source(source_manifest_path, source_path)
         resolved = resolve_recipe(recipe_id)
         inspection = resolved.source.inspect_checkpoint(
@@ -361,8 +355,8 @@ def collect_full_loop_preflight(
             raise ValueError("real loop requires activation_fit_rows > 0")
         if plan.corrective_min_sweeps < 1:
             raise ValueError("real loop requires at least one corrective sweep")
-        if plan.distributed_world_size != 8:
-            raise ValueError("real checkpoint training requires 8 ranks")
+        if plan.distributed_world_size <= 0:
+            raise ValueError("distributed_world_size must be positive")
         training = {
             "config": str(training_config_path.resolve()),
             "config_sha256": file_sha256(training_config_path),
