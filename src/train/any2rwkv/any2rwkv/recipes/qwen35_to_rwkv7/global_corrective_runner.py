@@ -1215,7 +1215,7 @@ def _local_checkpoint_fingerprint(run_dir: Path) -> str:
     if not config_path.is_file():
         raise ContractError("layerwise-local checkpoint is missing before corrective stage")
     payload = json.loads(config_path.read_text(encoding="utf-8"))
-    value = str(payload.get("any2rwkv", {}).get("mixer_overlay_fingerprint", ""))
+    value = str(payload.get("any_to_rwkv", {}).get("mixer_overlay_fingerprint", ""))
     if len(value) != 64:
         raise ContractError("layerwise-local checkpoint lacks mixer fingerprint")
     return value

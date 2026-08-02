@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.metadata
+import inspect
 import json
 from collections.abc import Callable
 from functools import lru_cache
@@ -20,6 +21,22 @@ FLA_RWKV7_REQUIREMENT = (
 FLASH_RWKV_REVISION = "866aafd2eed146b0eda1ce03444009ae030f89e3"
 FLASH_RWKV_SOURCE_URL = "https://github.com/rwkv-rs/FlashRWKV.git"
 _INJECTABLE_PROVIDERS = frozenset({"fla", "flash_rwkv"})
+_RECURRENT_RWKV7_PARAMETERS = frozenset(
+    {
+        "r",
+        "w",
+        "k",
+        "v",
+        "a",
+        "b",
+        "scale",
+        "initial_state",
+        "output_final_state",
+        "cu_seqlens",
+        "state_indices",
+        "mode",
+    }
+)
 
 
 def _require_exact_vcs_distribution(
@@ -87,7 +104,6 @@ class Rwkv7OperatorAdapter:
         *,
         initial_state: Tensor,
         cu_seqlens: Tensor | None = None,
-        cu_seqlens_cpu: Tensor | None = None,
         state_indices: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
         vectors = (r, log_decay, k, v, a, b)
@@ -129,7 +145,6 @@ class Rwkv7OperatorAdapter:
                 initial_state=initial_state.contiguous(),
                 output_final_state=True,
                 cu_seqlens=cu_seqlens,
-                cu_seqlens_cpu=cu_seqlens_cpu,
                 state_indices=state_indices,
                 mode="fp32io16",
             )
@@ -184,12 +199,24 @@ def load_rwkv7_operator_adapter(
         raise ContractError(
             f"RWKV7 operator runtime is unavailable; install {FLA_RWKV7_REQUIREMENT}"
         ) from error
-    operation = getattr(rwkv7, "chunk_rwkv7", None)
+    operation = getattr(rwkv7, "recurrent_rwkv7", None)
     provider = getattr(rwkv7, "get_last_rwkv7_provider", None)
     if not callable(operation) or not callable(provider):
         raise ContractError(
-            "RWKV7 operator distribution must expose chunk_rwkv7 and "
+            "RWKV7 operator distribution must expose recurrent_rwkv7 and "
             "get_last_rwkv7_provider"
+        )
+    try:
+        parameters = inspect.signature(operation).parameters
+    except (TypeError, ValueError) as error:
+        raise ContractError(
+            "RWKV7 recurrent operator has no inspectable public signature"
+        ) from error
+    missing = sorted(_RECURRENT_RWKV7_PARAMETERS - parameters.keys())
+    if missing:
+        raise ContractError(
+            "RWKV7 recurrent operator public signature is incompatible; "
+            f"missing={missing}"
         )
     return Rwkv7OperatorAdapter(
         operation,

@@ -1,10 +1,10 @@
 # any2rwkv
 
-本包是通用异构蒸馏套件。架构无关的 core 负责 adapter/recipe 注册、layer-major schedule、rolling hidden cache、单层 optimizer、resume 与证据；具体架构语义由 adapter 和 recipe 提供。本 change 首先交付 `qwen35_to_rwkv7`：受约束的 Qwen3.5 text backbone → 原生 RWKV7 conversion、逐层蒸馏、评测与导出。core 只拒绝未知/不兼容 adapter 或 recipe；不唯一的 GQA layout、vision tensor、最终 60 层等限制仅由 `qwen35_to_rwkv7` recipe 在读取大权重或启动 GPU workload 前校验，不能外推为 `any2rwkv` 的固有限制。
+本包是通用异构蒸馏套件。架构无关的 core 负责 adapter/recipe 注册、layer-major schedule、rolling hidden cache、单层 optimizer、resume 与证据；具体架构语义由 adapter 和 recipe 提供。本 change 首先交付 `qwen35_to_rwkv7`：受约束的 Qwen3.5 source/teacher → 独立 Any-to-RWKV artifact（RWKV7 recurrent mixer/kernel lineage）的逐层蒸馏、评测与导出。core 只拒绝未知/不兼容 adapter 或 recipe；不唯一的 GQA layout、vision tensor、最终 60 层等限制仅由 `qwen35_to_rwkv7` recipe 在读取大权重或启动 GPU workload 前校验，不能外推为 `any2rwkv` 的固有限制。
 
 ## 固定边界
 
-- 最终 identity 是 `model_type=any2rwkv_qwen35_rwkv7`、`recurrence=native_rwkv7`，60 个 text layer 全部 recurrent。
+- 最终 artifact 是独立的 Any-to-RWKV model family：`model_type=any_to_rwkv`、`architectures=["AnyToRWKVForCausalLM"]`，并使用 `fla.ops.rwkv7.recurrent_rwkv7`；60 个 text layer 全部 recurrent。
 - MoE、MTP、embedding、Norm、RoPE boundary、LM head 与 tokenizer 语义保留；只替换 GDN/full-attention/GQA mixer。
 - GDN 只在通过 FP64 oracle 的动态 state 子空间声明解析等价；conv、融合 projection、gate、Norm、activation、head/state geometry 仍标记为 `fitted` 或 `initialized`。
 - 每次 backward 只允许 active layer 的 RWKV7 mixer 参数更新；teacher、其余 layer 和保留外围参数只 forward。

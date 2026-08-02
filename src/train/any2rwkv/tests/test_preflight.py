@@ -45,19 +45,35 @@ def _exact_distribution(
     }
 
 
-def test_preflight_calls_public_transformers_rwkv7_provenance(monkeypatch) -> None:
+def _recurrent_rwkv7(
+    r,
+    w,
+    k,
+    v,
+    a,
+    b,
+    scale=1.0,
+    initial_state=None,
+    output_final_state=False,
+    cu_seqlens=None,
+    state_indices=None,
+    mode="fp32io16",
+):
+    del w, k, v, a, b, scale, output_final_state, cu_seqlens, state_indices, mode
+    return r, initial_state
+
+
+def test_preflight_calls_public_fla_recurrent_provenance(monkeypatch) -> None:
     calls = []
-    runtime_manifest = {
-        "repository": "https://github.com/rwkv-rs/fla-rwkv.git",
-        "revision": "a4a8aa98df6ec5322f194a80ec57363dd045adfc",
-        "flash_rwkv_repository": "https://github.com/rwkv-rs/FlashRWKV.git",
-        "flash_rwkv_revision": "866aafd2eed146b0eda1ce03444009ae030f89e3",
-    }
-    public_rwkv7 = SimpleNamespace(
-        Rwkv7Config=SimpleNamespace(model_type="rwkv7"),
-        Rwkv7ForCausalLM=SimpleNamespace(base_model_prefix="model"),
-        validate_rwkv7_runtime_provenance=lambda: (
-            calls.append("validated") or runtime_manifest
+    flash_provenance = SimpleNamespace(
+        repository="https://github.com/rwkv-rs/FlashRWKV.git",
+        revision="866aafd2eed146b0eda1ce03444009ae030f89e3",
+    )
+    public_recurrent = SimpleNamespace(
+        recurrent_rwkv7=_recurrent_rwkv7,
+        get_last_rwkv7_provider=lambda: "flash_rwkv",
+        validate_flash_rwkv_installation=lambda: (
+            calls.append("validated") or flash_provenance
         ),
     )
     monkeypatch.setattr(
@@ -70,9 +86,11 @@ def test_preflight_calls_public_transformers_rwkv7_provenance(monkeypatch) -> No
     )
     monkeypatch.setattr(
         "any2rwkv.preflight.importlib.import_module",
-        lambda name: public_rwkv7
-        if name == "transformers.models.rwkv7"
-        else pytest.fail(f"unexpected import: {name}"),
+        lambda name: (
+            public_recurrent
+            if name == "fla.ops.rwkv7"
+            else pytest.fail(f"unexpected import: {name}")
+        ),
     )
 
     result = collect_preflight()
@@ -87,7 +105,9 @@ def test_preflight_calls_public_transformers_rwkv7_provenance(monkeypatch) -> No
         TRANSFORMERS_REVISION
     )
     assert result["transformers"]["public_interface"] is True
-    assert result["transformers"]["runtime_provenance"] == runtime_manifest
+    assert result["transformers"]["runtime_provenance"]["operation"] == (
+        "fla.ops.rwkv7.recurrent_rwkv7"
+    )
     assert result["transformers"]["runtime_provenance_error"] is None
     assert result["transformers"]["requirement_satisfied"] is True
 
@@ -98,10 +118,10 @@ def test_preflight_fails_closed_when_public_runtime_provenance_rejects(
     def reject_runtime() -> None:
         raise RuntimeError("FlashRWKV revision provenance mismatch")
 
-    public_rwkv7 = SimpleNamespace(
-        Rwkv7Config=SimpleNamespace(model_type="rwkv7"),
-        Rwkv7ForCausalLM=SimpleNamespace(base_model_prefix="model"),
-        validate_rwkv7_runtime_provenance=reject_runtime,
+    public_recurrent = SimpleNamespace(
+        recurrent_rwkv7=_recurrent_rwkv7,
+        get_last_rwkv7_provider=lambda: None,
+        validate_flash_rwkv_installation=reject_runtime,
     )
     monkeypatch.setattr(
         "any2rwkv.preflight._distribution_binding",
@@ -113,15 +133,16 @@ def test_preflight_fails_closed_when_public_runtime_provenance_rejects(
     )
     monkeypatch.setattr(
         "any2rwkv.preflight.importlib.import_module",
-        lambda _name: public_rwkv7,
+        lambda _name: public_recurrent,
     )
 
     result = collect_preflight()
 
     assert result["transformers"]["runtime_provenance"] is None
-    assert "FlashRWKV revision provenance mismatch" in result["transformers"][
-        "runtime_provenance_error"
-    ]
+    assert (
+        "FlashRWKV revision provenance mismatch"
+        in result["transformers"]["runtime_provenance_error"]
+    )
     assert result["transformers"]["requirement_satisfied"] is False
     assert result["passed"] is False
 

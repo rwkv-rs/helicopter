@@ -6,16 +6,20 @@ from typing import Any
 
 from .errors import ContractError
 
-SUPPORTED_MODEL_TYPES = frozenset({"qwen3_5_text", "qwen3_5_moe_text", "qwen3_5", "qwen3_5_moe"})
-SUPPORTED_ARCHITECTURES = frozenset({
-    "Qwen3_5ForCausalLM",
-    "Qwen3_5MoeForCausalLM",
-    "Qwen3_5ForConditionalGeneration",
-    "Qwen3_5MoeForConditionalGeneration",
-})
+SUPPORTED_MODEL_TYPES = frozenset(
+    {"qwen3_5_text", "qwen3_5_moe_text", "qwen3_5", "qwen3_5_moe"}
+)
+SUPPORTED_ARCHITECTURES = frozenset(
+    {
+        "Qwen3_5ForCausalLM",
+        "Qwen3_5MoeForCausalLM",
+        "Qwen3_5ForConditionalGeneration",
+        "Qwen3_5MoeForConditionalGeneration",
+    }
+)
 SUPPORTED_LAYER_TYPES = frozenset({"linear_attention", "full_attention"})
 FINAL_LAYER_COUNT = 60
-PRIVATE_ANY2RWKV_ARTIFACT_CONTRACT = "private-any2rwkv-qwen-shell-v1"
+ANY_TO_RWKV_ARTIFACT_CONTRACT = "any-to-rwkv-v1"
 
 
 def _text_config(config: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -43,8 +47,8 @@ class SourceContract:
 class TargetContract:
     num_hidden_layers: int
     layer_types: tuple[str, ...]
-    model_type: str = "any2rwkv_qwen35_rwkv7"
-    architecture: str = "Any2RWKV7ForCausalLM"
+    model_type: str = "any_to_rwkv"
+    architecture: str = "AnyToRWKVForCausalLM"
 
     @property
     def final(self) -> bool:
@@ -112,10 +116,7 @@ def derive_recurrent_head_geometry(
 
     attention_heads = int(text.get("num_attention_heads", 0))
     attention_head_size = int(text.get("head_dim", 0))
-    if (
-        attention_heads <= 0
-        or attention_head_size <= 0
-    ):
+    if attention_heads <= 0 or attention_head_size <= 0:
         raise ContractError(
             "attention-only source must declare a positive query-head geometry"
         )
@@ -136,8 +137,15 @@ def validate_source_config(
 ) -> SourceContract:
     model_type = str(config.get("model_type", ""))
     architectures = config.get("architectures", [])
-    architecture = str(architectures[0]) if isinstance(architectures, list) and architectures else ""
-    if model_type not in SUPPORTED_MODEL_TYPES or architecture not in SUPPORTED_ARCHITECTURES:
+    architecture = (
+        str(architectures[0])
+        if isinstance(architectures, list) and architectures
+        else ""
+    )
+    if (
+        model_type not in SUPPORTED_MODEL_TYPES
+        or architecture not in SUPPORTED_ARCHITECTURES
+    ):
         raise ContractError(
             f"unsupported source architecture model_type={model_type!r} architecture={architecture!r}; "
             f"supported model_types={sorted(SUPPORTED_MODEL_TYPES)} architectures={sorted(SUPPORTED_ARCHITECTURES)}"
@@ -152,7 +160,9 @@ def validate_source_config(
     text = _text_config(config)
     layer_count = int(text.get("num_hidden_layers", 0))
     if require_final_layers and layer_count != FINAL_LAYER_COUNT:
-        raise ContractError(f"expected {FINAL_LAYER_COUNT} decoder layers, found {layer_count}")
+        raise ContractError(
+            f"expected {FINAL_LAYER_COUNT} decoder layers, found {layer_count}"
+        )
     layer_types = tuple(str(value) for value in text.get("layer_types", ()))
     if len(layer_types) != layer_count or set(layer_types) - SUPPORTED_LAYER_TYPES:
         raise ContractError(
@@ -161,7 +171,9 @@ def validate_source_config(
     heads = int(text.get("num_attention_heads", 0))
     kv_heads = int(text.get("num_key_value_heads", heads))
     if heads <= 0 or kv_heads <= 0 or heads % kv_heads:
-        raise ContractError(f"invalid attention head layout heads={heads} kv_heads={kv_heads}")
+        raise ContractError(
+            f"invalid attention head layout heads={heads} kv_heads={kv_heads}"
+        )
     rope = text.get("rope_parameters", text.get("rope_scaling", {}))
     rope = rope if isinstance(rope, Mapping) else {}
     return SourceContract(
@@ -173,7 +185,9 @@ def validate_source_config(
         num_attention_heads=heads,
         num_key_value_heads=kv_heads,
         has_moe="moe" in model_type or int(text.get("num_experts", 0)) > 0,
-        mtp_num_hidden_layers=int(text.get("mtp_num_hidden_layers", config.get("mtp_num_hidden_layers", 0))),
+        mtp_num_hidden_layers=int(
+            text.get("mtp_num_hidden_layers", config.get("mtp_num_hidden_layers", 0))
+        ),
         rope_theta=float(rope.get("rope_theta", text.get("rope_theta", 10_000.0))),
         partial_rotary_factor=float(
             rope.get("partial_rotary_factor", text.get("partial_rotary_factor", 1.0))
@@ -193,37 +207,41 @@ def build_target_config(
         require_final_layers=require_final_layers,
         text_backbone_only=True,
     )
-    converted = source.num_hidden_layers if converted_layers is None else int(converted_layers)
+    converted = (
+        source.num_hidden_layers if converted_layers is None else int(converted_layers)
+    )
     if not 0 <= converted <= source.num_hidden_layers:
-        raise ContractError(f"converted_layers must be in [0,{source.num_hidden_layers}], got {converted}")
+        raise ContractError(
+            f"converted_layers must be in [0,{source.num_hidden_layers}], got {converted}"
+        )
     final = converted == source.num_hidden_layers == FINAL_LAYER_COUNT
-    layout = ["rwkv7" if index < converted else source.layer_types[index] for index in range(source.num_hidden_layers)]
+    layout = [
+        "rwkv7" if index < converted else source.layer_types[index]
+        for index in range(source.num_hidden_layers)
+    ]
     source_text = _text_config(source_config)
     recurrent_geometry = derive_recurrent_head_geometry(source_config)
     target = dict(source_text)
     fully_recurrent_proxy = converted == source.num_hidden_layers and not final
-    target["model_type"] = "any2rwkv_qwen35_rwkv7" if final else ("any2rwkv_proxy" if fully_recurrent_proxy else "any2rwkv_hybrid")
+    target["model_type"] = (
+        "any_to_rwkv"
+        if final
+        else ("any_to_rwkv_proxy" if fully_recurrent_proxy else "any_to_rwkv_hybrid")
+    )
     architecture = (
-        "Any2RWKV7ForCausalLM"
+        "AnyToRWKVForCausalLM"
         if final
         else (
-            "Any2RWKVProxyForCausalLM"
+            "AnyToRWKVProxyForCausalLM"
             if fully_recurrent_proxy
-            else "Any2RWKVHybridForCausalLM"
+            else "AnyToRWKVHybridForCausalLM"
         )
     )
     target["architectures"] = [architecture]
-    config_class = (
-        "Any2RWKV7Config"
-        if final
-        else ("Any2RWKVProxyConfig" if fully_recurrent_proxy else "Any2RWKVHybridConfig")
-    )
-    target["auto_map"] = {
-        "AutoConfig": f"configuration_any2rwkv.{config_class}",
-        "AutoModelForCausalLM": f"modeling_any2rwkv.{architecture}",
-    }
+    target.pop("auto_map", None)
     target["num_hidden_layers"] = source.num_hidden_layers
-    target["layer_types"] = layout
+    target.pop("layer_types", None)
+    target["mixer_types"] = layout
     target["head_dim"] = recurrent_geometry.head_size
     target["head_size"] = recurrent_geometry.head_size
     target["num_heads"] = recurrent_geometry.num_heads
@@ -243,8 +261,8 @@ def build_target_config(
         "architectures": source_config.get("architectures"),
         "text_config_model_type": source_text.get("model_type"),
     }
-    target["any2rwkv"] = {
-        "artifact_contract": PRIVATE_ANY2RWKV_ARTIFACT_CONTRACT,
+    target["any_to_rwkv"] = {
+        "artifact_contract": ANY_TO_RWKV_ARTIFACT_CONTRACT,
         "source_model_type": source.model_type,
         "source_architecture": source.architecture,
         "source_was_multimodal": source.extracted_text_backbone,
@@ -252,9 +270,18 @@ def build_target_config(
         "converted_layers": converted,
         "final_recurrent": final,
         "fully_recurrent_proxy": fully_recurrent_proxy,
-        "preserved": ["moe", "mtp", "embedding", "norm", "rope", "lm_head", "tokenizer"],
+        "preserved": [
+            "moe",
+            "mtp",
+            "embedding",
+            "norm",
+            "rope",
+            "lm_head",
+            "tokenizer",
+        ],
         "rope_boundary": "source_projection_then_native_rwkv7_mixer",
-        "recurrence": "native_rwkv7",
+        "mixer_lineage": "rwkv7",
+        "kernel_contract": "fla.ops.rwkv7.recurrent_rwkv7",
         "recurrent_head_geometry": {
             "num_heads": recurrent_geometry.num_heads,
             "head_size": recurrent_geometry.head_size,
@@ -268,8 +295,7 @@ def build_target_config(
         "ignored_multimodal_rope_fields": [
             key
             for key in ("mrope_section", "mrope_interleaved")
-            if isinstance(raw_rope_parameters, Mapping)
-            and key in raw_rope_parameters
+            if isinstance(raw_rope_parameters, Mapping) and key in raw_rope_parameters
         ],
     }
     if final and not TargetContract(source.num_hidden_layers, tuple(layout)).final:

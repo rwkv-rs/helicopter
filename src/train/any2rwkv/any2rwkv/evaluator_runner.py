@@ -11,8 +11,11 @@ from typing import Any, Mapping, Sequence
 import torch
 from torch import Tensor, nn
 
-from .artifacts import checkpoint_sha256, write_json
-from .artifacts import file_sha256
+from . import register_any_to_rwkv_auto_classes
+from .artifacts import checkpoint_sha256, file_sha256, write_json
+from .distill import MIGRATION_BASELINE_STAGES
+from .distributed import DistributedContext
+from .errors import ContractError
 from .evaluate import (
     P0_REQUIRED,
     QualityMetrics,
@@ -23,9 +26,6 @@ from .evaluate import (
     quality_gate,
     read_quality_threshold_profile,
 )
-from .distributed import DistributedContext
-from .distill import MIGRATION_BASELINE_STAGES
-from .errors import ContractError
 
 
 @dataclass(frozen=True)
@@ -1076,18 +1076,19 @@ def evaluate_hf_checkpoints(
     student_sha = checkpoint_sha256(student_path)
     device = str(distributed.device) if torch.cuda.is_available() else "cpu"
     dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+    register_any_to_rwkv_auto_classes()
     teacher = AutoModelForCausalLM.from_pretrained(
         teacher_path, torch_dtype=dtype, device_map=device
     ).eval()
     student = AutoModelForCausalLM.from_pretrained(
         student_path,
-        trust_remote_code=True,
+        trust_remote_code=False,
         torch_dtype=dtype,
         device_map=device,
     ).eval()
     tokenizer = AutoTokenizer.from_pretrained(
         student_path,
-        trust_remote_code=True,
+        trust_remote_code=False,
         fix_mistral_regex=True,
     )
     p0_evidence = read_p0_evidence(
@@ -1273,6 +1274,7 @@ def evaluate_hf_migration_stage(
     candidate_sha = checkpoint_sha256(candidate_path)
     device = str(distributed.device) if torch.cuda.is_available() else "cpu"
     dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+    register_any_to_rwkv_auto_classes()
     teacher = AutoModelForCausalLM.from_pretrained(
         teacher_path,
         trust_remote_code=True,
@@ -1281,7 +1283,7 @@ def evaluate_hf_migration_stage(
     ).eval()
     candidate = AutoModelForCausalLM.from_pretrained(
         candidate_path,
-        trust_remote_code=True,
+        trust_remote_code=False,
         torch_dtype=dtype,
         device_map=device,
     ).eval()

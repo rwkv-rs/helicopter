@@ -10,7 +10,7 @@ from unittest import mock
 from any2rwkv.artifacts import checkpoint_sha256
 from any2rwkv.evaluate import P0_REQUIRED
 from any2rwkv.evaluator_runner import read_p0_evidence
-from any2rwkv.p0_runner import P0ValidationInputs, _PYTEST_EVIDENCE, run_p0_validation
+from any2rwkv.p0_runner import _PYTEST_EVIDENCE, P0ValidationInputs, run_p0_validation
 
 
 class P0RunnerTests(unittest.TestCase):
@@ -42,7 +42,7 @@ class P0RunnerTests(unittest.TestCase):
                 json.dumps(
                     {
                         "status": "pass",
-                        "kernel": "rwkv-lm/RWKV7_STATEPASSING_CLAMPW_CUDA",
+                        "kernel": "rwkv-rs/fla-rwkv/FlashRWKV",
                         "gradient_finite": [True] * 7,
                     }
                 ),

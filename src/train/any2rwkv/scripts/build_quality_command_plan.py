@@ -104,8 +104,9 @@ def main() -> None:
                 "task": task["name"],
                 "metric": task["metric"],
                 "argv": [
-                    "lm-eval", "run", "--model", "hf", "--model_args",
-                    f"pretrained={args.model},tokenizer={args.tokenizer},trust_remote_code=True,dtype=bfloat16",
+                    "python", "-m", "any2rwkv.lm_eval_entrypoint", "run",
+                    "--model", "hf", "--model_args",
+                    f"pretrained={args.model},tokenizer={args.tokenizer},trust_remote_code=False,dtype=bfloat16",
                     "--tasks", task["name"], "--num_fewshot", str(task["num_fewshot"]),
                     "--device", "cuda", "--batch_size", "auto",
                     "--seed", str(suite["generation"]["seed"]),

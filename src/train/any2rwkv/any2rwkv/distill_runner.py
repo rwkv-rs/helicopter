@@ -11,8 +11,6 @@ from pathlib import Path
 import torch
 
 from .artifacts import file_sha256, write_json
-from .errors import ContractError
-from .recipes import resolve_recipe
 from .core import (
     DistillationExecutionRequest,
     ExperimentTracker,
@@ -21,6 +19,8 @@ from .core import (
     write_experiment_report,
 )
 from .core.training_control_calibration import validate_training_control_artifact
+from .errors import ContractError
+from .recipes import resolve_recipe
 
 
 @dataclass(frozen=True)
@@ -1445,10 +1445,11 @@ def _select_parent_recurrent_checkpoint(parent_run: Path) -> Path:
         if not config_path.is_file():
             continue
         config = json.loads(config_path.read_text(encoding="utf-8"))
-        metadata = config.get("any2rwkv")
+        metadata = config.get("any_to_rwkv")
         if (
             isinstance(metadata, dict)
-            and metadata.get("recurrence") == "native_rwkv7"
+            and metadata.get("kernel_contract")
+            == "fla.ops.rwkv7.recurrent_rwkv7"
             and (
                 metadata.get("final_recurrent") is True
                 or metadata.get("fully_recurrent_proxy") is True
@@ -1462,7 +1463,7 @@ def _checkpoint_binding(checkpoint: Path) -> dict[str, object]:
     binding = _hf_checkpoint_files_binding(checkpoint)
     binding["mixer_fingerprint"] = json.loads(
         (checkpoint / "config.json").read_text(encoding="utf-8")
-    )["any2rwkv"]["mixer_overlay_fingerprint"]
+    )["any_to_rwkv"]["mixer_overlay_fingerprint"]
     return binding
 
 
@@ -1762,7 +1763,7 @@ def _verify_materialized_corrective_base(
         raise ContractError("corrective continuation base marker is missing")
     marker_payload = json.loads(marker.read_text(encoding="utf-8"))
     if (
-        marker_payload.get("any2rwkv", {}).get("mixer_overlay_fingerprint")
+        marker_payload.get("any_to_rwkv", {}).get("mixer_overlay_fingerprint")
         != parent_binding["mixer_fingerprint"]
     ):
         raise ContractError("corrective continuation base fingerprint mismatch")

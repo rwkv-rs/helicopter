@@ -7,22 +7,23 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from any2rwkv import export as export_module
 from any2rwkv.checkpoint import read_checkpoint, sha256_file
 from any2rwkv.configuration_any2rwkv import (
-    Any2RWKV7Config,
-    Any2RWKVHybridConfig,
-    Any2RWKVProxyConfig,
+    AnyToRWKVConfig,
+    AnyToRWKVHybridConfig,
+    AnyToRWKVProxyConfig,
 )
-from any2rwkv.modeling_any2rwkv import Any2RWKVProxyForCausalLM
 from any2rwkv.contract import build_target_config, validate_source_config
 from any2rwkv.errors import ContractError
 from any2rwkv.export import (
+    CHECKPOINT_LOCAL_RUNTIME_MODULES,
     export_hf_checkpoint,
     export_text_teacher_checkpoint,
-    refresh_hf_runtime_files,
+    require_no_checkpoint_local_runtime,
 )
-from any2rwkv import export as export_module
 from any2rwkv.fixture import tiny_qwen35_config, write_fixture
+from any2rwkv.modeling_any2rwkv import AnyToRWKVProxyForCausalLM
 from any2rwkv.roundtrip import validate_sharded_checkpoint
 from any2rwkv.source import fetch_source, verify_source
 from any2rwkv.target import build_zero_step_ledger
@@ -47,7 +48,7 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(target["head_size"], 128)
         self.assertEqual(target["num_heads"], 16)
         self.assertEqual(
-            target["any2rwkv"]["recurrent_head_geometry"],
+            target["any_to_rwkv"]["recurrent_head_geometry"],
             {
                 "num_heads": 16,
                 "head_size": 128,
@@ -77,7 +78,7 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(target["num_heads"], 64)
         self.assertEqual(target["head_size"], 128)
         self.assertEqual(
-            target["any2rwkv"]["recurrent_head_geometry"]["recurrent_width"],
+            target["any_to_rwkv"]["recurrent_head_geometry"]["recurrent_width"],
             8192,
         )
 
@@ -91,8 +92,8 @@ class ContractTests(unittest.TestCase):
         source = tiny_qwen35_config(layers=4)
         source["tie_word_embeddings"] = True
         target = build_target_config(source, require_final_layers=False)
-        config = Any2RWKVProxyConfig(**target)
-        model = Any2RWKVProxyForCausalLM(config)
+        config = AnyToRWKVProxyConfig(**target)
+        model = AnyToRWKVProxyForCausalLM(config)
 
         self.assertEqual(
             model.all_tied_weights_keys,
@@ -106,22 +107,22 @@ class ContractTests(unittest.TestCase):
     def test_final_target_is_text_only_and_all_60_layers_recurrent(self) -> None:
         source = tiny_qwen35_config()
         target = build_target_config(source)
-        self.assertEqual(target["model_type"], "any2rwkv_qwen35_rwkv7")
-        self.assertEqual(Any2RWKV7Config.model_type, target["model_type"])
-        self.assertEqual(target["architectures"], ["Any2RWKV7ForCausalLM"])
-        self.assertIn("AutoModelForCausalLM", target["auto_map"])
-        self.assertEqual(target["layer_types"], ["rwkv7"] * 60)
-        self.assertTrue(target["any2rwkv"]["final_recurrent"])
-        self.assertTrue(target["any2rwkv"]["preserved"])
+        self.assertEqual(target["model_type"], "any_to_rwkv")
+        self.assertEqual(AnyToRWKVConfig.model_type, target["model_type"])
+        self.assertEqual(target["architectures"], ["AnyToRWKVForCausalLM"])
+        self.assertNotIn("auto_map", target)
+        self.assertEqual(target["mixer_types"], ["rwkv7"] * 60)
+        self.assertTrue(target["any_to_rwkv"]["final_recurrent"])
+        self.assertTrue(target["any_to_rwkv"]["preserved"])
 
     def test_hybrid_cannot_masquerade_as_final_rwkv7(self) -> None:
         target = build_target_config(tiny_qwen35_config(), converted_layers=17)
-        self.assertEqual(target["model_type"], "any2rwkv_hybrid")
-        self.assertEqual(Any2RWKVHybridConfig.model_type, target["model_type"])
-        self.assertEqual(target["architectures"], ["Any2RWKVHybridForCausalLM"])
-        self.assertTrue(target["auto_map"]["AutoConfig"].endswith("Any2RWKVHybridConfig"))
-        self.assertFalse(target["any2rwkv"]["final_recurrent"])
-        self.assertEqual(target["layer_types"].count("rwkv7"), 17)
+        self.assertEqual(target["model_type"], "any_to_rwkv_hybrid")
+        self.assertEqual(AnyToRWKVHybridConfig.model_type, target["model_type"])
+        self.assertEqual(target["architectures"], ["AnyToRWKVHybridForCausalLM"])
+        self.assertNotIn("auto_map", target)
+        self.assertFalse(target["any_to_rwkv"]["final_recurrent"])
+        self.assertEqual(target["mixer_types"].count("rwkv7"), 17)
 
     def test_multimodal_unknown_and_non_60_layouts_are_rejected(self) -> None:
         source = tiny_qwen35_config()
@@ -135,7 +136,9 @@ class ContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "expected 60"):
             validate_source_config(tiny_qwen35_config(layers=4))
 
-    def test_text_rope_is_active_while_multimodal_fields_are_metadata_only(self) -> None:
+    def test_text_rope_is_active_while_multimodal_fields_are_metadata_only(
+        self,
+    ) -> None:
         text = tiny_qwen35_config()
         text["rope_parameters"] = {
             "rope_theta": 10_000_000,
@@ -158,23 +161,25 @@ class ContractTests(unittest.TestCase):
             {"rope_theta": 10_000_000, "partial_rotary_factor": 0.25},
         )
         self.assertEqual(
-            target["any2rwkv"]["source_text_config"]["rope_parameters"],
+            target["any_to_rwkv"]["source_text_config"]["rope_parameters"],
             text["rope_parameters"],
         )
         self.assertEqual(
-            target["any2rwkv"]["ignored_multimodal_rope_fields"],
+            target["any_to_rwkv"]["ignored_multimodal_rope_fields"],
             ["mrope_section", "mrope_interleaved"],
         )
 
     def test_real_proxy_can_be_fully_recurrent_but_never_marked_final(self) -> None:
-        target = build_target_config(tiny_qwen35_config(layers=24), require_final_layers=False)
-        self.assertEqual(target["layer_types"], ["rwkv7"] * 24)
-        self.assertEqual(target["model_type"], "any2rwkv_proxy")
-        self.assertEqual(Any2RWKVProxyConfig.model_type, target["model_type"])
-        self.assertEqual(target["architectures"], ["Any2RWKVProxyForCausalLM"])
-        self.assertTrue(target["auto_map"]["AutoConfig"].endswith("Any2RWKVProxyConfig"))
-        self.assertFalse(target["any2rwkv"]["final_recurrent"])
-        self.assertTrue(target["any2rwkv"]["fully_recurrent_proxy"])
+        target = build_target_config(
+            tiny_qwen35_config(layers=24), require_final_layers=False
+        )
+        self.assertEqual(target["mixer_types"], ["rwkv7"] * 24)
+        self.assertEqual(target["model_type"], "any_to_rwkv_proxy")
+        self.assertEqual(AnyToRWKVProxyConfig.model_type, target["model_type"])
+        self.assertEqual(target["architectures"], ["AnyToRWKVProxyForCausalLM"])
+        self.assertNotIn("auto_map", target)
+        self.assertFalse(target["any_to_rwkv"]["final_recurrent"])
+        self.assertTrue(target["any_to_rwkv"]["fully_recurrent_proxy"])
 
     def test_reader_validates_hf_safetensors_and_tokenizer_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -197,7 +202,9 @@ class ContractTests(unittest.TestCase):
                 layer_count=60,
                 hidden_size=64,
                 head_dim=16,
-                source_shard_hashes=tuple(source.file_hashes[path.name] for path in source.shards),
+                source_shard_hashes=tuple(
+                    source.file_hashes[path.name] for path in source.shards
+                ),
             )
             manifest = export_hf_checkpoint(
                 source,
@@ -206,22 +213,30 @@ class ContractTests(unittest.TestCase):
                 target_specs=specs,
                 max_shard_bytes=64 * 1024,
             )
-            index = json.loads((root / "target/model.safetensors.index.json").read_text())
+            index = json.loads(
+                (root / "target/model.safetensors.index.json").read_text()
+            )
             self.assertGreater(manifest["shard_count"], 1)
             self.assertEqual(set(index["weight_map"]), set(target_names))
-            backbone_names = (name for name in index["weight_map"] if name.startswith("model.layers."))
-            self.assertFalse(any("linear_attn" in name or "self_attn" in name for name in backbone_names))
+            backbone_names = (
+                name for name in index["weight_map"] if name.startswith("model.layers.")
+            )
+            self.assertFalse(
+                any(
+                    "linear_attn" in name or "self_attn" in name
+                    for name in backbone_names
+                )
+            )
             self.assertIn("mtp.layers.0.self_attn.q_proj.weight", index["weight_map"])
-            self.assertTrue(all("PLACEHOLDER" not in name for name in index["weight_map"].values()))
-            self.assertEqual(validate_sharded_checkpoint(root / "target")["tensor_count"], len(target_names))
-            for module_name in (
-                "configuration_any2rwkv.py",
-                "modeling_any2rwkv.py",
-                "mixer.py",
-                "kernel.py",
-                "errors.py",
-            ):
-                self.assertTrue((root / "target" / module_name).is_file(), module_name)
+            self.assertTrue(
+                all("PLACEHOLDER" not in name for name in index["weight_map"].values())
+            )
+            self.assertEqual(
+                validate_sharded_checkpoint(root / "target")["tensor_count"],
+                len(target_names),
+            )
+            for module_name in CHECKPOINT_LOCAL_RUNTIME_MODULES:
+                self.assertFalse((root / "target" / module_name).exists(), module_name)
 
     def test_text_teacher_extraction_keeps_source_mixers_but_excludes_mtp(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -237,7 +252,7 @@ class ContractTests(unittest.TestCase):
             self.assertTrue(any("self_attn" in name for name in index))
             self.assertFalse(any(name.startswith("mtp.") for name in index))
 
-    def test_runtime_refresh_repairs_checkpoint_code_and_manifest_hash(self) -> None:
+    def test_checkpoint_local_runtime_code_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = read_checkpoint(
@@ -263,19 +278,8 @@ class ContractTests(unittest.TestCase):
                 target_specs=specs,
             )
             (target / "modeling_any2rwkv.py").write_text("stale\n", encoding="utf-8")
-
-            hashes = refresh_hf_runtime_files(target)
-            manifest = json.loads(
-                (target / "roundtrip-manifest.json").read_text(encoding="utf-8")
-            )
-            self.assertEqual(
-                manifest["files"]["modeling_any2rwkv.py"],
-                hashes["modeling_any2rwkv.py"],
-            )
-            self.assertIn(
-                "_tied_weights_keys",
-                (target / "modeling_any2rwkv.py").read_text(encoding="utf-8"),
-            )
+            with self.assertRaisesRegex(ContractError, "checkpoint-local model code"):
+                require_no_checkpoint_local_runtime(target)
 
     def test_scale_source_verification_accepts_equivalent_materialization(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -302,7 +306,9 @@ class ContractTests(unittest.TestCase):
             self.assertTrue(result["equivalent_materialization"])
             self.assertFalse(result["read_only"])
 
-    def test_scale_source_fetch_is_rejected_before_proxy_gate_without_network(self) -> None:
+    def test_scale_source_fetch_is_rejected_before_proxy_gate_without_network(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             manifest = root / "scale.json"

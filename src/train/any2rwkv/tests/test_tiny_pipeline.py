@@ -50,7 +50,8 @@ class TinyPipelineTests(unittest.TestCase):
             config = json.loads(
                 (output / "export" / "checkpoint" / "config.json").read_text()
             )
-            self.assertEqual(config["model_type"], "rwkv7")
+            self.assertEqual(config["model_type"], "any_to_rwkv")
+            self.assertEqual(config["architectures"], ["AnyToRWKVForCausalLM"])
             self.assertNotIn("auto_map", config)
             uninterrupted = run_tiny_pipeline(source, root / "uninterrupted")
             self.assertEqual(uninterrupted["status"], "complete")

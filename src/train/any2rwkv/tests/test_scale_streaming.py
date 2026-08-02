@@ -8,31 +8,31 @@ from unittest import mock
 
 import torch
 
-from any2rwkv.checkpoint import read_checkpoint
 from any2rwkv.artifacts import write_json
-from any2rwkv.configuration_any2rwkv import Any2RWKVProxyConfig
+from any2rwkv.checkpoint import read_checkpoint
+from any2rwkv.configuration_any2rwkv import AnyToRWKVProxyConfig
 from any2rwkv.contract import build_target_config
 from any2rwkv.distill import chunked_token_kl, normalized_mse, token_kl
 from any2rwkv.distributed import DistributedContext, _gradient_buckets
-from any2rwkv.fixture import write_fixture
-from any2rwkv.export import export_hf_checkpoint
 from any2rwkv.errors import ContractError
+from any2rwkv.export import export_hf_checkpoint
+from any2rwkv.fixture import write_fixture
 from any2rwkv.layer_store import LayerTensorStore
+from any2rwkv.migration import qwen35_l2_normalize
 from any2rwkv.migration_init import (
     WarmStartTensorProvider,
     WarmStartVariant,
     apply_warm_start_plan,
     plan_warm_start,
 )
-from any2rwkv.migration import qwen35_l2_normalize
 from any2rwkv.mixer import ProjectionBoundaryRWKV7Attention
 from any2rwkv.mixer_store import RWKV7MixerLayerStore
-from any2rwkv.streaming_training import ActiveLayerOptimizer
 from any2rwkv.streamed_teacher import (
     Qwen35TeacherLayerLoader,
     StreamedQwen35HybridExecutor,
     StreamedQwen35Teacher,
 )
+from any2rwkv.streaming_training import ActiveLayerOptimizer
 from any2rwkv.target import build_zero_step_ledger, rwkv7_mixer_specs
 
 
@@ -223,7 +223,7 @@ class LayerTensorStoreTests(unittest.TestCase):
             source_dir = Path(temporary) / "source"
             write_fixture(source_dir, layers=4)
             source = read_checkpoint(source_dir, require_final_layers=False)
-            config = Any2RWKVProxyConfig(
+            config = AnyToRWKVProxyConfig(
                 **build_target_config(source.config, require_final_layers=False)
             )
             source_text = source.config.get("text_config", source.config)
@@ -319,7 +319,7 @@ class LayerTensorStoreTests(unittest.TestCase):
             source_dir = Path(temporary) / "source"
             write_fixture(source_dir, layers=4)
             source = read_checkpoint(source_dir, require_final_layers=False)
-            config = Any2RWKVProxyConfig(
+            config = AnyToRWKVProxyConfig(
                 **build_target_config(source.config, require_final_layers=False)
             )
             source_text = source.config.get("text_config", source.config)
@@ -939,7 +939,7 @@ class RWKV7MixerLayerStoreTests(unittest.TestCase):
                 root / "materialized", fitted_evidence_root=root
             )
             payload = json.loads((materialized / "config.json").read_text(encoding="utf-8"))
-            self.assertEqual(payload["any2rwkv"]["training_stage"], "layerwise-local-complete")
+            self.assertEqual(payload["any_to_rwkv"]["training_stage"], "layerwise-local-complete")
             mapping = json.loads(
                 (materialized / "mapping.json").read_text(encoding="utf-8")
             )
@@ -960,7 +960,7 @@ class RWKV7MixerLayerStoreTests(unittest.TestCase):
             self.assertEqual(len(provenance["activation_fit_reports"]), 1)
             self.assertEqual(
                 provenance["mixer_overlay_fingerprint"],
-                payload["any2rwkv"]["mixer_overlay_fingerprint"],
+                payload["any_to_rwkv"]["mixer_overlay_fingerprint"],
             )
             reloaded = RWKV7MixerLayerStore(materialized, root / "reload-overlays")
             for layer_index in range(4):

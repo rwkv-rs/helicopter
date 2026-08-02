@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
-import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,15 +12,15 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from .artifacts import file_sha256, write_json
-from .configuration_any2rwkv import Any2RWKV7Config, Any2RWKVProxyConfig
+from .configuration_any2rwkv import AnyToRWKVConfig, AnyToRWKVProxyConfig
 from .errors import ContractError
-from .mixer import ProjectionBoundaryRWKV7Attention
 from .mapping import finalize_trained_checkpoint_mapping
+from .mixer import ProjectionBoundaryRWKV7Attention
 
 
 @dataclass(frozen=True)
 class RWKV7MixerFactory:
-    config: Any2RWKV7Config | Any2RWKVProxyConfig
+    config: AnyToRWKVConfig | AnyToRWKVProxyConfig
     source_layer_types: tuple[str, ...]
     rope_num_heads: int
     rope_head_dim: int
@@ -31,21 +31,21 @@ class RWKV7MixerFactory:
     def from_checkpoint_config(cls, checkpoint_dir: Path) -> "RWKV7MixerFactory":
         payload = json.loads((checkpoint_dir / "config.json").read_text(encoding="utf-8"))
         model_type = payload.get("model_type")
-        if model_type == Any2RWKV7Config.model_type:
-            config = Any2RWKV7Config(**payload)
-        elif model_type == Any2RWKVProxyConfig.model_type:
-            config = Any2RWKVProxyConfig(**payload)
+        if model_type == AnyToRWKVConfig.model_type:
+            config = AnyToRWKVConfig(**payload)
+        elif model_type == AnyToRWKVProxyConfig.model_type:
+            config = AnyToRWKVProxyConfig(**payload)
         else:
-            raise ContractError(f"mixer store requires a final/proxy Any2RWKV checkpoint, got {model_type}")
-        metadata = payload.get("any2rwkv")
+            raise ContractError(f"mixer store requires a final/proxy Any-to-RWKV checkpoint, got {model_type}")
+        metadata = payload.get("any_to_rwkv")
         if not isinstance(metadata, dict):
-            raise ContractError("Any2RWKV checkpoint lacks source metadata")
+            raise ContractError("Any-to-RWKV checkpoint lacks source provenance")
         source_layer_types = tuple(metadata.get("source_layer_types", ()))
         if len(source_layer_types) != config.num_hidden_layers:
             raise ContractError("source layer types do not cover every RWKV7 mixer")
         source_text = metadata.get("source_text_config")
         if not isinstance(source_text, dict):
-            raise ContractError("Any2RWKV checkpoint lacks source text config")
+            raise ContractError("Any-to-RWKV checkpoint lacks source text config")
         rope = source_text.get("rope_parameters", {})
         if not isinstance(rope, dict):
             rope = {}
@@ -373,7 +373,7 @@ class RWKV7MixerLayerStore:
             save_file(tensors, temporary / shard_name, metadata=metadata)
         config_path = temporary / "config.json"
         config = json.loads(config_path.read_text(encoding="utf-8"))
-        metadata = config.setdefault("any2rwkv", {})
+        metadata = config.setdefault("any_to_rwkv", {})
         metadata["training_stage"] = training_stage
         metadata["mixer_overlay_fingerprint"] = overlay_fingerprint
         write_json(config_path, config)

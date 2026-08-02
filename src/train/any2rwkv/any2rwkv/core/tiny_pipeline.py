@@ -14,10 +14,10 @@ from torch import nn
 
 from ..adapters.qwen35 import Qwen35SourceAdapter
 from ..artifacts import file_sha256, write_json
+from ..configuration_any2rwkv import AnyToRWKVConfig
 from ..errors import ContractError
-from ..export import export_transformers_rwkv7_checkpoint
 from ..mapping import SourceDisposition, TargetProvenance
-from ..transformers_rwkv7 import build_transformers_rwkv7_config
+from ..modeling_any2rwkv import AnyToRWKVForCausalLM
 from .layer_major_contract import (
     LayerMajorResumeContract,
     activate_layer_major_training,
@@ -217,33 +217,69 @@ def run_tiny_pipeline(
 
     export_payload = _read_stage(output, "export")
     if export_payload is None:
-        from transformers.models.rwkv7.configuration_rwkv7 import Rwkv7Config
-        from transformers.models.rwkv7.modeling_rwkv7 import Rwkv7ForCausalLM
-
-        config = build_transformers_rwkv7_config(
+        config = AnyToRWKVConfig(
             vocab_size=31,
-            context_length=16,
             hidden_size=16,
             intermediate_size=32,
             num_hidden_layers=2,
+            head_dim=4,
             head_size=4,
-            dtype="float32",
+            num_heads=4,
+            attention_hidden_size=16,
+            mixer_types=["rwkv7", "rwkv7"],
+            mtp_num_hidden_layers=0,
+            torch_dtype="float32",
+            any_to_rwkv={
+                "artifact_contract": "any-to-rwkv-v1",
+                "source_model_type": "qwen3_5_text",
+                "source_architecture": "Qwen3_5ForCausalLM",
+                "source_layer_types": ["linear_attention", "full_attention"],
+                "source_text_config": {
+                    "model_type": "qwen3_5_text",
+                    "hidden_size": 16,
+                    "intermediate_size": 32,
+                    "num_attention_heads": 4,
+                    "num_key_value_heads": 2,
+                    "head_dim": 4,
+                    "hidden_act": "silu",
+                },
+                "mixer_lineage": "rwkv7",
+                "kernel_contract": "fla.ops.rwkv7.recurrent_rwkv7",
+            },
         )
         torch.manual_seed(int(str(train_payload["state_sha256"])[:16], 16))
-        model = Rwkv7ForCausalLM(Rwkv7Config.from_dict(config)).eval()
+        model = AnyToRWKVForCausalLM(config).eval()
         artifact = output / "export" / "checkpoint"
-        manifest = export_transformers_rwkv7_checkpoint(
+        model.save_pretrained(
             artifact,
-            config=config,
-            state_dict=model.state_dict(),
-            max_shard_bytes=16 * 1024,
+            safe_serialization=True,
+            max_shard_size=16 * 1024,
         )
+        persisted_config = json.loads(
+            (artifact / "config.json").read_text(encoding="utf-8")
+        )
+        if (
+            persisted_config.get("model_type") != "any_to_rwkv"
+            or persisted_config.get("architectures") != ["AnyToRWKVForCausalLM"]
+            or "auto_map" in persisted_config
+        ):
+            raise ContractError("tiny Any-to-RWKV export changed model identity")
         input_ids = torch.tensor([[1, 2, 3, 4]])
         expected = model(input_ids).logits.detach()
         expected_sha = _atomic_torch(
             output / "export" / "expected.pt",
             {"input_ids": input_ids, "logits": expected},
         )
+        manifest = {
+            "artifact_contract": "any-to-rwkv-v1",
+            "model_type": "any_to_rwkv",
+            "architecture": "AnyToRWKVForCausalLM",
+            "files": {
+                path.name: file_sha256(path)
+                for path in sorted(artifact.iterdir())
+                if path.is_file()
+            },
+        }
         export_payload = {"manifest": manifest, "expected_sha256": expected_sha}
         _complete_stage(output, "export", export_payload)
     expected_path = output / "export" / "expected.pt"
@@ -262,13 +298,15 @@ def run_tiny_pipeline(
     if verify_payload is None:
         script = """
 import sys, torch
+import any2rwkv
 from transformers import AutoModelForCausalLM
 artifact, expected_path = sys.argv[1:]
+any2rwkv.register_any_to_rwkv_auto_classes()
 expected = torch.load(expected_path, map_location='cpu', weights_only=True)
 model = AutoModelForCausalLM.from_pretrained(artifact).eval()
 actual = model(expected['input_ids']).logits
 torch.testing.assert_close(actual, expected['logits'], rtol=0, atol=0)
-assert model.__class__.__name__ == 'Rwkv7ForCausalLM'
+assert model.__class__.__name__ == 'AnyToRWKVForCausalLM'
 """
         subprocess.run(
             [

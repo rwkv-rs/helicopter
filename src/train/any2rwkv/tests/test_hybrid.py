@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import torch
 from torch import Tensor, nn
 
-from any2rwkv.configuration_any2rwkv import Any2RWKV7Config
+from any2rwkv.configuration_any2rwkv import AnyToRWKVConfig
 from any2rwkv.contract import build_target_config
 from any2rwkv.fixture import tiny_qwen35_config
 from any2rwkv.hybrid import HybridModelPatcher
@@ -50,7 +50,7 @@ class HybridCheckpointTests(unittest.TestCase):
     def test_nonzero_active_layer_gets_detached_frozen_layer0_v_first(self) -> None:
         source = tiny_qwen35_config(layers=3, moe=False)
         source["mtp_num_hidden_layers"] = 0
-        config = Any2RWKV7Config(
+        config = AnyToRWKVConfig(
             **build_target_config(source, require_final_layers=False)
         )
         teacher = SourceModel(3, config.hidden_size)

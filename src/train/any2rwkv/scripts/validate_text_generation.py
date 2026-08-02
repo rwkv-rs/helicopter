@@ -9,9 +9,9 @@ from pathlib import Path
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from any2rwkv import register_any_to_rwkv_auto_classes
 from any2rwkv.artifacts import write_json
 from any2rwkv.distributed import DistributedContext
-
 
 DEFAULT_PROMPTS = (
     "请用两句话解释为什么天空看起来是蓝色的。",
@@ -56,18 +56,19 @@ def main() -> int:
         distributed.close()
         raise SystemExit("real CUDA generation validation requires 8 ranks")
     checkpoint = args.checkpoint.resolve()
+    register_any_to_rwkv_auto_classes()
     device = distributed.device if torch.cuda.is_available() else torch.device("cpu")
     dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
     tokenizer = AutoTokenizer.from_pretrained(
         checkpoint,
         local_files_only=True,
-        trust_remote_code=True,
+        trust_remote_code=False,
         fix_mistral_regex=True,
     )
     model, loading = AutoModelForCausalLM.from_pretrained(
         checkpoint,
         local_files_only=True,
-        trust_remote_code=True,
+        trust_remote_code=False,
         dtype=dtype,
         output_loading_info=True,
     )

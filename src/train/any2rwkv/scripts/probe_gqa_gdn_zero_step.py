@@ -15,7 +15,7 @@ from transformers import AutoTokenizer
 from transformers.masking_utils import create_causal_mask
 
 from any2rwkv.checkpoint import read_checkpoint, sha256_file
-from any2rwkv.configuration_any2rwkv import Any2RWKV7Config
+from any2rwkv.configuration_any2rwkv import AnyToRWKVConfig
 from any2rwkv.contract import build_target_config
 from any2rwkv.kernel import load_rwkv_lm_kernel
 from any2rwkv.migration_init import (
@@ -47,13 +47,13 @@ from any2rwkv.zero_step_probe import (
     probability_taylor_hazards,
     query_input_bases,
     qwen35_l2_normalize,
-    rope_aligned_two_state_bases,
     rollout_hazards,
+    rope_aligned_two_state_bases,
     select_bias_free_projection,
-    tensor_sha256,
     tensor_metrics,
-    two_state_projection,
+    tensor_sha256,
     two_state_outputs,
+    two_state_projection,
     verify_gdn_mapping,
 )
 
@@ -794,7 +794,7 @@ def materialization_report(
 
 def frozen_mapped_baseline_tensors(
     checkpoint,
-    target_config: Any2RWKV7Config,
+    target_config: AnyToRWKVConfig,
     *,
     layer_index: int,
 ) -> dict[str, Tensor]:
@@ -1183,7 +1183,7 @@ def run_materialized_native_gate(
     signals: dict[str, Tensor],
     positions: Tensor,
     v_first: Tensor,
-    target_config: Any2RWKV7Config,
+    target_config: AnyToRWKVConfig,
     layer_index: int,
     source_head_dim: int,
     rotary_dim: int,
@@ -2237,7 +2237,7 @@ def main() -> int:
             final_gdn_signals["beta"].unsqueeze(-1)
             * final_gdn_signals["value"]
         ).flatten(2)
-        target_config = Any2RWKV7Config(
+        target_config = AnyToRWKVConfig(
             **build_target_config(
                 checkpoint.config,
                 require_final_layers=False,

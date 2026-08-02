@@ -18,15 +18,17 @@ from any2rwkv.cli import build_parser
 from any2rwkv.errors import ContractError
 
 
-def test_contract_uses_transformers_without_serving_or_quantization() -> None:
+def test_contract_uses_independent_model_identity_without_serving_or_quantization() -> None:
     lock = default_contract_lock()
     assert lock["inference"]["backend"] == "transformers"
     assert lock["canonical"]["state_orientation"] == "batch,head,value,key"
     boundaries = lock["artifact_boundaries"]
-    assert boundaries["private_conversion"]["trust_remote_code"] is True
-    assert boundaries["public_transformers"]["trust_remote_code"] is False
-    assert boundaries["public_transformers"]["state"] == "batch,head,key,value"
-    assert "[B,H,V,K] -> [B,H,K,V]" in boundaries["public_state_bridge"]
+    assert boundaries["model_artifact"]["trust_remote_code"] is False
+    assert boundaries["model_artifact"]["contract"] == "any-to-rwkv-v1"
+    assert boundaries["model_identity"] == "independent any_to_rwkv family"
+    assert lock["scope"] == "qwen3.5-source-to-any-to-rwkv"
+    assert "recurrent_rwkv7" in lock["canonical"]["operator"]
+    assert "checkpoint-local" not in lock["canonical"]["operator"]
     encoded = json.dumps(lock).lower()
     assert "vllm" not in encoded
     assert "nvfp4" not in encoded
@@ -243,15 +245,13 @@ def test_product_contract_has_no_serving_reference() -> None:
 
 
 def test_scale_gate_binds_transformers_inference_without_service_artifact(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path,
+    monkeypatch,
 ) -> None:
     student_sha = "a" * 64
     payloads = {
         "quality.json": {
-            "gates": {
-                gate: {"passed": True}
-                for gate in ("P0", "migration", "P1")
-            }
+            "gates": {gate: {"passed": True} for gate in ("P0", "migration", "P1")}
         },
         "p0-evidence.json": {"student_sha256": student_sha},
         "transformers-inference.json": {

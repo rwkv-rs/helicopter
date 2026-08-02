@@ -262,7 +262,6 @@ class ProjectionBoundaryRWKV7Attention(nn.Module):
         v_first: Tensor | None = None,
         initial_state: Tensor | None = None,
         cu_seqlens: Tensor | None = None,
-        cu_seqlens_cpu: Tensor | None = None,
         state_indices: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, dict[str, Tensor]]:
         """Run fixed or packed training through rwkv-rs FLA's public operator."""
@@ -344,7 +343,6 @@ class ProjectionBoundaryRWKV7Attention(nn.Module):
             *vectors,
             initial_state=initial_state,
             cu_seqlens=cu_seqlens,
-            cu_seqlens_cpu=cu_seqlens_cpu,
             state_indices=state_indices,
         )
         recurrent = recurrent.to(x.dtype).reshape(batch, tokens, recurrent_width)

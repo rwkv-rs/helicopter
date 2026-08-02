@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 
 from any2rwkv import kernel as kernel_module
-from any2rwkv.configuration_any2rwkv import Any2RWKV7Config
+from any2rwkv.configuration_any2rwkv import AnyToRWKVConfig
 from any2rwkv.contract import build_target_config
 from any2rwkv.errors import ContractError
 from any2rwkv.fixture import tiny_qwen35_config
@@ -29,13 +29,11 @@ class KernelAdapterTests(unittest.TestCase):
         initial_state,
         output_final_state,
         cu_seqlens=None,
-        cu_seqlens_cpu=None,
         state_indices=None,
         mode,
     ):
         assert output_final_state is True
         assert cu_seqlens is None
-        assert cu_seqlens_cpu is None
         assert state_indices is None
         assert mode == "fp32io16"
         _batch, tokens, _heads, _size = r.shape
@@ -77,13 +75,35 @@ class KernelAdapterTests(unittest.TestCase):
         self.assertEqual(adapter.last_provider, "fla")
 
     def test_loader_consumes_only_public_pinned_rwkv_rs_contract(self) -> None:
-        operation = lambda *args, **kwargs: (args[3], kwargs["initial_state"])
+        def operation(
+            r,
+            w,
+            k,
+            v,
+            a,
+            b,
+            scale=1.0,
+            initial_state=None,
+            output_final_state=False,
+            cu_seqlens=None,
+            state_indices=None,
+            mode="fp32io16",
+            **kwargs,
+        ):
+            del r, w, k, a, b, scale, output_final_state, cu_seqlens
+            del state_indices, mode, kwargs
+            return v, initial_state
+
         module = SimpleNamespace(
-            chunk_rwkv7=operation,
+            recurrent_rwkv7=operation,
             get_last_rwkv7_provider=lambda: "flash_rwkv",
         )
         kernel_module.load_rwkv7_operator_adapter.cache_clear()
         with (
+            patch(
+                "any2rwkv.preflight.require_rwkv7_runtime",
+                return_value={},
+            ),
             patch.object(
                 kernel_module, "_require_exact_vcs_distribution"
             ) as provenance,
@@ -189,7 +209,7 @@ class KernelAdapterTests(unittest.TestCase):
     def test_sequence_kernel_path_matches_token_recurrence(self) -> None:
         source = tiny_qwen35_config(layers=1, moe=False)
         source["mtp_num_hidden_layers"] = 0
-        config = Any2RWKV7Config(
+        config = AnyToRWKVConfig(
             **build_target_config(source, require_final_layers=False)
         )
         mixer = ProjectionBoundaryRWKV7Attention(
@@ -262,7 +282,7 @@ class KernelAdapterTests(unittest.TestCase):
                 "mtp_num_hidden_layers": 0,
             }
         )
-        config = Any2RWKV7Config(
+        config = AnyToRWKVConfig(
             **build_target_config(source, require_final_layers=False)
         )
         self.assertEqual(config.hidden_size, 32)
@@ -305,7 +325,7 @@ class KernelAdapterTests(unittest.TestCase):
                 "linear_value_head_dim": 4,
             }
         )
-        config = Any2RWKV7Config(
+        config = AnyToRWKVConfig(
             **build_target_config(source, require_final_layers=False)
         )
         mixer = ProjectionBoundaryRWKV7Attention(

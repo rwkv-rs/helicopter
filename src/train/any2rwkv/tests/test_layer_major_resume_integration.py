@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+
 from any2rwkv.artifacts import file_sha256, write_json
 from any2rwkv.checkpoint import read_checkpoint
 from any2rwkv.contract import build_target_config
@@ -2500,9 +2501,9 @@ def test_fully_recurrent_global_corrective_runs_reverse_sweep_and_exports(
             encoding="utf-8"
         )
     )
-    assert config["any2rwkv"]["training_stage"] == "fully-recurrent-global-corrective"
+    assert config["any_to_rwkv"]["training_stage"] == "fully-recurrent-global-corrective"
     assert (
-        config["any2rwkv"]["mixer_overlay_fingerprint"]
+        config["any_to_rwkv"]["mixer_overlay_fingerprint"]
         == result["selected_fingerprint"]
     )
     reload_result = subprocess.run(

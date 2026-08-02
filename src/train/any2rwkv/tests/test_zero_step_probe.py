@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 import torch
 
-from any2rwkv.configuration_any2rwkv import Any2RWKV7Config
+from any2rwkv.configuration_any2rwkv import AnyToRWKVConfig
 from any2rwkv.contract import build_target_config
 from any2rwkv.fixture import tiny_qwen35_config
 from any2rwkv.kernel import Rwkv7OperatorAdapter
@@ -65,13 +65,11 @@ def reference_rwkv7_operator(
     initial_state,
     output_final_state,
     cu_seqlens=None,
-    cu_seqlens_cpu=None,
     state_indices=None,
     mode,
 ):
     assert output_final_state is True
     assert cu_seqlens is None
-    assert cu_seqlens_cpu is None
     assert state_indices is None
     assert mode == "fp32io16"
     _batch, tokens, _heads, _head_dim = r.shape
@@ -1079,7 +1077,7 @@ def test_native_signal_rollout_replays_exact_rwkv7_signals() -> None:
 def test_native_projection_materialization_is_complete_atomic_and_hash_bound() -> None:
     source = tiny_qwen35_config(layers=2, moe=False)
     source["mtp_num_hidden_layers"] = 0
-    config = Any2RWKV7Config(
+    config = AnyToRWKVConfig(
         **build_target_config(source, require_final_layers=False)
     )
     mixer = ProjectionBoundaryRWKV7Attention(
@@ -1138,7 +1136,7 @@ def test_native_projection_materialization_is_complete_atomic_and_hash_bound() -
 def test_materialized_nonfirst_native_projection_runs_real_bf16_sequence() -> None:
     source = tiny_qwen35_config(layers=2, moe=False)
     source["mtp_num_hidden_layers"] = 0
-    config = Any2RWKV7Config(
+    config = AnyToRWKVConfig(
         **build_target_config(source, require_final_layers=False)
     )
     mixer = ProjectionBoundaryRWKV7Attention(
@@ -1232,7 +1230,7 @@ def test_gqa_native_fit_materializes_exact_module_shapes_and_runs_bf16() -> None
             "mtp_num_hidden_layers": 0,
         }
     )
-    config = Any2RWKV7Config(
+    config = AnyToRWKVConfig(
         **build_target_config(source, require_final_layers=False)
     )
     mixer = ProjectionBoundaryRWKV7Attention(
@@ -1551,7 +1549,7 @@ def test_gqa_native_fit_two_uneven_shards_matches_unsharded() -> None:
             "mtp_num_hidden_layers": 0,
         }
     )
-    target_config = Any2RWKV7Config(
+    target_config = AnyToRWKVConfig(
         **build_target_config(source, require_final_layers=False)
     )
     mixer = ProjectionBoundaryRWKV7Attention(

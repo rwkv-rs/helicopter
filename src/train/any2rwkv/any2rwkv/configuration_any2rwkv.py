@@ -2,24 +2,32 @@ from __future__ import annotations
 
 from transformers import PretrainedConfig
 
+ANY_TO_RWKV_MODEL_TYPE = "any_to_rwkv"
+ANY_TO_RWKV_ARCHITECTURE = "AnyToRWKVForCausalLM"
 
-class Any2RWKVConfigBase(PretrainedConfig):
-    """Shared fields for final, proxy, and hybrid Any2RWKV checkpoints."""
 
-    model_type = "any2rwkv_base"
+class AnyToRWKVConfigBase(PretrainedConfig):
+    """Shared fields for independent Any-to-RWKV model artifacts."""
+
+    model_type = "any_to_rwkv_base"
 
     def __init__(self, **kwargs):
-        # ``PretrainedConfig`` is wrapped by huggingface_hub's strict
-        # dataclass validator.  Its validator runs before this subclass can
-        # install custom fields and rejects the RWKV-specific ``rwkv7`` layer
-        # marker.  Keep the marker out of the parent kwargs and restore it
-        # immediately after the parent initialization.
-        requested_layers = kwargs.pop("layer_types", None)
+        if kwargs.get("auto_map") is not None:
+            raise ValueError(
+                "Any-to-RWKV artifacts use a registered model family; auto_map is forbidden"
+            )
+        if "any2rwkv" in kwargs:
+            raise ValueError(
+                "legacy any2rwkv metadata is not an Any-to-RWKV model identity"
+            )
+        requested_mixers = kwargs.pop("mixer_types", None)
         kwargs.setdefault("tie_word_embeddings", False)
         super().__init__(**kwargs)
         self.vocab_size = int(kwargs.get("vocab_size", 248320))
         self.hidden_size = int(kwargs.get("hidden_size", 4096))
-        self.intermediate_size = int(kwargs.get("intermediate_size", self.hidden_size * 4))
+        self.intermediate_size = int(
+            kwargs.get("intermediate_size", self.hidden_size * 4)
+        )
         self.num_hidden_layers = int(kwargs.get("num_hidden_layers", 60))
         self.head_dim = int(kwargs.get("head_dim", 64))
         self.head_size = int(kwargs.get("head_size", self.head_dim))
@@ -35,11 +43,9 @@ class Any2RWKVConfigBase(PretrainedConfig):
         )
         self.attention_hidden_size = requested_attention_width
         if self.num_heads * self.head_dim != self.attention_hidden_size:
-            raise ValueError(
-                "attention_hidden_size must equal num_heads * head_dim"
-            )
+            raise ValueError("attention_hidden_size must equal num_heads * head_dim")
         self.num_attention_heads = self.num_heads
-        self.layer_types = list(requested_layers or ["rwkv7"] * self.num_hidden_layers)
+        self.mixer_types = list(requested_mixers or ["rwkv7"] * self.num_hidden_layers)
         self.decay_low_rank_dim = int(kwargs.get("decay_low_rank_dim", 64))
         self.gate_low_rank_dim = int(kwargs.get("gate_low_rank_dim", 128))
         self.a_low_rank_dim = int(kwargs.get("a_low_rank_dim", 64))
@@ -52,53 +58,58 @@ class Any2RWKVConfigBase(PretrainedConfig):
         self.native_mm4_policy = str(kwargs.get("native_mm4_policy", "memory"))
         self.rms_norm_eps = float(kwargs.get("rms_norm_eps", 1e-6))
         self.use_cache = bool(kwargs.get("use_cache", True))
-        self.any2rwkv = dict(kwargs.get("any2rwkv", {}))
+        self.any_to_rwkv = dict(kwargs.get("any_to_rwkv", {}))
         self.rope_parameters = dict(kwargs.get("rope_parameters", {}))
         self.mtp_num_hidden_layers = int(kwargs.get("mtp_num_hidden_layers", 0))
-        self.mtp_use_dedicated_embeddings = bool(kwargs.get("mtp_use_dedicated_embeddings", False))
-        if getattr(self, "auto_map", None) is None:
-            self.auto_map = {
-                "AutoConfig": f"configuration_any2rwkv.{type(self).__name__}",
-                "AutoModelForCausalLM": "modeling_any2rwkv.Any2RWKV7ForCausalLM",
-            }
-
-
-class Any2RWKV7Config(Any2RWKVConfigBase):
-    """Final 60-layer, fully recurrent Qwen3.5 text-backbone identity."""
-
-    # FLA registers model_type="rwkv7" locally, so the final artifact needs a
-    # unique identity to force Transformers through this checkpoint's code.
-    model_type = "any2rwkv_qwen35_rwkv7"
-
-    def __init__(self, **kwargs):
-        # Transformers 5's strict config machinery synthesizes an initializer
-        # for a subclass that does not define one.  That synthesized method
-        # skips fields owned by our base class, so keep this explicit delegate.
-        kwargs.setdefault("architectures", ["Any2RWKV7ForCausalLM"])
-        super().__init__(**kwargs)
-
-
-class Any2RWKVProxyConfig(Any2RWKVConfigBase):
-    """Fully recurrent but non-60-layer experimental proxy identity."""
-
-    model_type = "any2rwkv_proxy"
-
-    def __init__(self, **kwargs):
-        kwargs.setdefault("architectures", ["Any2RWKVProxyForCausalLM"])
-        super().__init__(**kwargs)
-        self.auto_map["AutoModelForCausalLM"] = (
-            "modeling_any2rwkv.Any2RWKVProxyForCausalLM"
+        self.mtp_use_dedicated_embeddings = bool(
+            kwargs.get("mtp_use_dedicated_embeddings", False)
+        )
+        self.hidden_act = str(kwargs.get("hidden_act", "silu"))
+        self.num_experts = int(kwargs.get("num_experts", 0))
+        self.num_experts_per_tok = int(kwargs.get("num_experts_per_tok", 0))
+        self.moe_intermediate_size = int(
+            kwargs.get("moe_intermediate_size", self.intermediate_size)
+        )
+        self.shared_expert_intermediate_size = int(
+            kwargs.get("shared_expert_intermediate_size", self.intermediate_size)
         )
 
 
-class Any2RWKVHybridConfig(Any2RWKVConfigBase):
-    """Partially replaced teacher/student checkpoint identity."""
+class AnyToRWKVConfig(AnyToRWKVConfigBase):
+    """Independent, fully recurrent Any-to-RWKV model family."""
 
-    model_type = "any2rwkv_hybrid"
+    model_type = ANY_TO_RWKV_MODEL_TYPE
 
     def __init__(self, **kwargs):
-        kwargs.setdefault("architectures", ["Any2RWKVHybridForCausalLM"])
+        kwargs.setdefault("architectures", [ANY_TO_RWKV_ARCHITECTURE])
         super().__init__(**kwargs)
-        self.auto_map["AutoModelForCausalLM"] = (
-            "modeling_any2rwkv.Any2RWKVHybridForCausalLM"
-        )
+
+
+class AnyToRWKVProxyConfig(AnyToRWKVConfigBase):
+    """Independent fully recurrent pilot identity."""
+
+    model_type = "any_to_rwkv_proxy"
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault("architectures", ["AnyToRWKVProxyForCausalLM"])
+        super().__init__(**kwargs)
+
+
+class AnyToRWKVHybridConfig(AnyToRWKVConfigBase):
+    """Progressive conversion checkpoint identity, never a final model."""
+
+    model_type = "any_to_rwkv_hybrid"
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault("architectures", ["AnyToRWKVHybridForCausalLM"])
+        super().__init__(**kwargs)
+
+
+__all__ = [
+    "ANY_TO_RWKV_ARCHITECTURE",
+    "ANY_TO_RWKV_MODEL_TYPE",
+    "AnyToRWKVConfig",
+    "AnyToRWKVConfigBase",
+    "AnyToRWKVHybridConfig",
+    "AnyToRWKVProxyConfig",
+]

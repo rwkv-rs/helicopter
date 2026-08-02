@@ -1,46 +1,194 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 import torch
 from torch import Tensor, nn
 from transformers import PreTrainedModel
+from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from .configuration_any2rwkv import (
-    Any2RWKV7Config,
-    Any2RWKVHybridConfig,
-    Any2RWKVProxyConfig,
+    AnyToRWKVConfig,
+    AnyToRWKVHybridConfig,
+    AnyToRWKVProxyConfig,
 )
 from .mixer import ProjectionBoundaryRWKV7Attention
 
 
-def _source_classes(config: Any2RWKV7Config):
-    source = config.any2rwkv.get("source_text_config")
-    if not isinstance(source, dict):
-        raise ValueError("any2rwkv.source_text_config is required for the preserved Qwen3.5 shell")
-    model_type = str(source.get("model_type", ""))
-    if model_type == "qwen3_5_moe_text":
-        from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeTextConfig
-        from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
-            Qwen3_5MoeDecoderLayer,
-            Qwen3_5MoeRMSNorm,
+class AnyToRWKVRMSNorm(nn.Module):
+    """RMSNorm owned by the independent Any-to-RWKV model family."""
+
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.zeros(dim))
+
+    def forward(self, value: Tensor) -> Tensor:
+        normalized = value.float() * torch.rsqrt(
+            value.float().pow(2).mean(-1, keepdim=True) + self.eps
         )
+        return (normalized * (1.0 + self.weight.float())).type_as(value)
 
-        return Qwen3_5MoeTextConfig, Qwen3_5MoeDecoderLayer, Qwen3_5MoeRMSNorm
-    if model_type == "qwen3_5_text":
-        from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
-        from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5DecoderLayer, Qwen3_5RMSNorm
 
-        return Qwen3_5TextConfig, Qwen3_5DecoderLayer, Qwen3_5RMSNorm
-    raise ValueError(f"unsupported preserved Qwen3.5 text shell: {model_type!r}")
+class AnyToRWKVDenseMLP(nn.Module):
+    def __init__(self, config: AnyToRWKVConfig):
+        super().__init__()
+        self.gate_proj = nn.Linear(
+            config.hidden_size, config.intermediate_size, bias=False
+        )
+        self.up_proj = nn.Linear(
+            config.hidden_size, config.intermediate_size, bias=False
+        )
+        self.down_proj = nn.Linear(
+            config.intermediate_size, config.hidden_size, bias=False
+        )
+        self.act_fn = ACT2FN[config.hidden_act]
+
+    def forward(self, value: Tensor) -> Tensor:
+        return self.down_proj(self.act_fn(self.gate_proj(value)) * self.up_proj(value))
+
+
+class AnyToRWKVExperts(nn.Module):
+    """Independent expert weights with the source-compatible tensor layout."""
+
+    def __init__(self, config: AnyToRWKVConfig):
+        super().__init__()
+        self.num_experts = config.num_experts
+        self.hidden_size = config.hidden_size
+        self.intermediate_size = config.moe_intermediate_size
+        self.gate_up_proj = nn.Parameter(
+            torch.empty(
+                self.num_experts,
+                2 * self.intermediate_size,
+                self.hidden_size,
+            )
+        )
+        self.down_proj = nn.Parameter(
+            torch.empty(
+                self.num_experts,
+                self.hidden_size,
+                self.intermediate_size,
+            )
+        )
+        self.act_fn = ACT2FN[config.hidden_act]
+
+    def forward(
+        self,
+        hidden_states: Tensor,
+        selected_experts: Tensor,
+        routing_weights: Tensor,
+    ) -> Tensor:
+        output = torch.zeros_like(hidden_states)
+        expert_mask = nn.functional.one_hot(
+            selected_experts, num_classes=self.num_experts
+        ).permute(2, 1, 0)
+        for expert_index in range(self.num_experts):
+            top_k_position, token_index = torch.where(expert_mask[expert_index])
+            if token_index.numel() == 0:
+                continue
+            current = hidden_states[token_index]
+            gate, up = nn.functional.linear(
+                current, self.gate_up_proj[expert_index]
+            ).chunk(2, dim=-1)
+            current = self.act_fn(gate) * up
+            current = nn.functional.linear(current, self.down_proj[expert_index])
+            current = current * routing_weights[token_index, top_k_position, None]
+            output.index_add_(0, token_index, current.to(output.dtype))
+        return output
+
+
+class AnyToRWKVTopKRouter(nn.Module):
+    def __init__(self, config: AnyToRWKVConfig):
+        super().__init__()
+        if config.num_experts <= 0 or config.num_experts_per_tok <= 0:
+            raise ValueError("Any-to-RWKV MoE routing requires positive expert counts")
+        self.top_k = config.num_experts_per_tok
+        self.num_experts = config.num_experts
+        self.hidden_size = config.hidden_size
+        self.weight = nn.Parameter(torch.zeros(self.num_experts, self.hidden_size))
+
+    def forward(self, hidden_states: Tensor) -> tuple[Tensor, Tensor]:
+        flattened = hidden_states.reshape(-1, self.hidden_size)
+        probabilities = nn.functional.softmax(
+            nn.functional.linear(flattened, self.weight), dtype=torch.float, dim=-1
+        )
+        routing_weights, selected_experts = torch.topk(
+            probabilities, self.top_k, dim=-1
+        )
+        routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+        return routing_weights.to(flattened.dtype), selected_experts
+
+
+class AnyToRWKVSparseMoEBlock(nn.Module):
+    def __init__(self, config: AnyToRWKVConfig):
+        super().__init__()
+        self.gate = AnyToRWKVTopKRouter(config)
+        self.experts = AnyToRWKVExperts(config)
+        self.shared_expert = AnyToRWKVDenseMLP(
+            _feed_forward_config(
+                config,
+                intermediate_size=config.shared_expert_intermediate_size,
+            )
+        )
+        self.shared_expert_gate = nn.Linear(config.hidden_size, 1, bias=False)
+
+    def forward(self, hidden_states: Tensor) -> Tensor:
+        batch_size, sequence_length, hidden_size = hidden_states.shape
+        flattened = hidden_states.reshape(-1, hidden_size)
+        shared = self.shared_expert(flattened)
+        routing_weights, selected_experts = self.gate(flattened)
+        expert = self.experts(flattened, selected_experts, routing_weights)
+        shared = torch.sigmoid(self.shared_expert_gate(flattened)) * shared
+        return (expert + shared).reshape(batch_size, sequence_length, hidden_size)
+
+
+def _feed_forward_config(
+    config: AnyToRWKVConfig,
+    *,
+    intermediate_size: int,
+) -> AnyToRWKVConfig:
+    payload = config.to_dict()
+    payload["intermediate_size"] = intermediate_size
+    payload.pop("auto_map", None)
+    return type(config)(**payload)
+
+
+def _feed_forward(config: AnyToRWKVConfig) -> nn.Module:
+    if config.num_experts:
+        return AnyToRWKVSparseMoEBlock(config)
+    return AnyToRWKVDenseMLP(config)
+
+
+class AnyToRWKVPreservedAttention(nn.Module):
+    """Own the preserved MTP tensor layout without importing a Qwen model."""
+
+    def __init__(self, config: AnyToRWKVConfig):
+        super().__init__()
+        source = config.any_to_rwkv.get("source_text_config", {})
+        source_heads = int(source.get("num_attention_heads", config.num_heads))
+        source_kv_heads = int(source.get("num_key_value_heads", source_heads))
+        source_head_dim = int(source.get("head_dim", config.head_dim))
+        hidden_size = config.hidden_size
+        self.q_proj = nn.Linear(
+            hidden_size, source_heads * source_head_dim * 2, bias=False
+        )
+        self.k_proj = nn.Linear(
+            hidden_size, source_kv_heads * source_head_dim, bias=False
+        )
+        self.v_proj = nn.Linear(
+            hidden_size, source_kv_heads * source_head_dim, bias=False
+        )
+        self.o_proj = nn.Linear(source_heads * source_head_dim, hidden_size, bias=False)
+        self.q_norm = AnyToRWKVRMSNorm(source_head_dim, eps=config.rms_norm_eps)
+        self.k_norm = AnyToRWKVRMSNorm(source_head_dim, eps=config.rms_norm_eps)
 
 
 @dataclass
-class Any2RWKV7Cache(Cache):
+class AnyToRWKVCache(Cache):
     states: list[Tensor]
     previous: list[Tensor]
     seen_tokens: int = 0
@@ -66,75 +214,89 @@ class Any2RWKV7Cache(Cache):
     def get_batch_size(self) -> int:
         return int(self.states[0].shape[0]) if self.states else 0
 
-    def get_mask_sizes(self, cache_position: Tensor | int | None, layer_idx: int = 0) -> tuple[int, int]:
-        query_len = int(cache_position.numel()) if isinstance(cache_position, Tensor) else int(cache_position or 0)
-        return self.seen_tokens + query_len, 0
+    def get_mask_sizes(
+        self, cache_position: Tensor | int | None, layer_idx: int = 0
+    ) -> tuple[int, int]:
+        query_length = (
+            int(cache_position.numel())
+            if isinstance(cache_position, Tensor)
+            else int(cache_position or 0)
+        )
+        return self.seen_tokens + query_length, 0
 
     def reset(self) -> None:
         for value in (*self.states, *self.previous):
             value.zero_()
         self.seen_tokens = 0
 
-    def batch_repeat_interleave(self, repeats: int) -> "Any2RWKV7Cache":
+    def batch_repeat_interleave(self, repeats: int) -> AnyToRWKVCache:
         if repeats <= 0:
             raise ValueError("cache repeat count must be positive")
         self.states = [value.repeat_interleave(repeats, dim=0) for value in self.states]
-        self.previous = [value.repeat_interleave(repeats, dim=0) for value in self.previous]
+        self.previous = [
+            value.repeat_interleave(repeats, dim=0) for value in self.previous
+        ]
         return self
 
-    def batch_select_indices(self, indices: Tensor) -> "Any2RWKV7Cache":
-        self.states = [value.index_select(0, indices.to(value.device)) for value in self.states]
-        self.previous = [value.index_select(0, indices.to(value.device)) for value in self.previous]
+    def batch_select_indices(self, indices: Tensor) -> AnyToRWKVCache:
+        self.states = [
+            value.index_select(0, indices.to(value.device)) for value in self.states
+        ]
+        self.previous = [
+            value.index_select(0, indices.to(value.device)) for value in self.previous
+        ]
         return self
 
     def crop(self, max_length: int) -> None:
         target = self.seen_tokens + max_length if max_length < 0 else max_length
         if target >= self.seen_tokens:
-            return self
+            return
         if target <= 0:
             self.reset()
-            return self
+            return
         raise NotImplementedError(
-            "RWKV7 recurrent state cannot be cropped to an earlier positive length; "
-            "assisted/speculative rollback requires recomputation"
+            "Any-to-RWKV recurrent state cannot be cropped to an earlier positive "
+            "length; assisted/speculative rollback requires recomputation"
         )
 
     def update(self, *args, **kwargs):
-        raise NotImplementedError("update Any2RWKV recurrent state through model.forward")
-
-    def reorder(self, beam_idx: Tensor) -> "Any2RWKV7Cache":
-        return self.batch_select_indices(beam_idx)
-
-    def reorder_cache(self, beam_idx: Tensor) -> "Any2RWKV7Cache":
-        return self.batch_select_indices(beam_idx)
-
-
-class Any2RWKV7DecoderLayer(nn.Module):
-    def __init__(self, config: Any2RWKV7Config, source_config, decoder_cls, layer_idx: int):
-        super().__init__()
-        shell = decoder_cls(source_config, layer_idx)
-        self.input_layernorm = shell.input_layernorm
-        self.post_attention_layernorm = shell.post_attention_layernorm
-        self.mlp = shell.mlp
-        source_types = config.any2rwkv["source_layer_types"]
-        source_used_rope = source_types[layer_idx] == "full_attention"
-        source_head_dim = int(config.any2rwkv["source_text_config"].get("head_dim", config.head_dim))
-        source_num_heads = int(
-            config.any2rwkv["source_text_config"].get(
-                "num_attention_heads", config.num_heads
-            )
+        raise NotImplementedError(
+            "update Any-to-RWKV recurrent state through model.forward"
         )
-        rope = config.rope_parameters
+
+    def reorder(self, beam_index: Tensor) -> AnyToRWKVCache:
+        return self.batch_select_indices(beam_index)
+
+    def reorder_cache(self, beam_index: Tensor) -> AnyToRWKVCache:
+        return self.batch_select_indices(beam_index)
+
+
+class AnyToRWKVDecoderLayer(nn.Module):
+    def __init__(self, config: AnyToRWKVConfig, layer_index: int):
+        super().__init__()
+        self.input_layernorm = AnyToRWKVRMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
+        self.post_attention_layernorm = AnyToRWKVRMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
+        self.mlp = _feed_forward(config)
+        source_types = config.any_to_rwkv["source_layer_types"]
+        source_text = config.any_to_rwkv["source_text_config"]
+        source_used_rope = source_types[layer_index] == "full_attention"
+        source_head_dim = int(source_text.get("head_dim", config.head_dim))
+        source_num_heads = int(source_text.get("num_attention_heads", config.num_heads))
         rotary_dim = int(
-            source_head_dim * float(rope.get("partial_rotary_factor", 1.0))
+            source_head_dim
+            * float(config.rope_parameters.get("partial_rotary_factor", 1.0))
         )
         rotary_dim -= rotary_dim % 2
         self.attn = ProjectionBoundaryRWKV7Attention(
             config,
-            layer_idx,
+            layer_index,
             source_used_rope=source_used_rope,
             rotary_dim=rotary_dim,
-            rope_theta=float(rope.get("rope_theta", 10_000.0)),
+            rope_theta=float(config.rope_parameters.get("rope_theta", 10_000.0)),
             rope_num_heads=source_num_heads,
             rope_head_dim=source_head_dim,
         )
@@ -149,11 +311,16 @@ class Any2RWKV7DecoderLayer(nn.Module):
         valid: Tensor,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, dict[str, Tensor]]:
         residual = hidden
-        normalized = self.input_layernorm(hidden)
         old_state = state
         old_previous = previous
-        mixed, candidate_previous, candidate_state, candidate_v_first, signals = self.attn(
-            normalized, previous, v_first, state, positions=positions
+        mixed, candidate_previous, candidate_state, candidate_v_first, signals = (
+            self.attn(
+                self.input_layernorm(hidden),
+                previous,
+                v_first,
+                state,
+                positions=positions,
+            )
         )
         state_mask = valid[:, None, None, None]
         vector_mask = valid[:, None]
@@ -162,78 +329,77 @@ class Any2RWKV7DecoderLayer(nn.Module):
         v_first = torch.where(vector_mask, candidate_v_first, v_first)
         mixed = torch.where(vector_mask, mixed, torch.zeros_like(mixed))
         hidden = residual + mixed
-        # Qwen3.5 MoE dispatchers require an explicit sequence dimension even
-        # though the recurrent backbone advances one token at a time.
-        mlp_input = self.post_attention_layernorm(hidden).unsqueeze(1)
-        hidden = hidden + self.mlp(mlp_input).squeeze(1)
+        hidden = hidden + self.mlp(
+            self.post_attention_layernorm(hidden).unsqueeze(1)
+        ).squeeze(1)
         return hidden, previous, state, v_first, signals
 
 
-class Any2RWKV7MTP(nn.Module):
-    """Preserve Qwen3.5 MTP parameters without changing the 60-layer backbone."""
-
-    def __init__(self, config: Any2RWKV7Config, source_config, decoder_cls, norm_cls):
+class AnyToRWKVMTPDecoderLayer(nn.Module):
+    def __init__(self, config: AnyToRWKVConfig):
         super().__init__()
-        hidden = config.hidden_size
-        self.fc = nn.Linear(hidden * 2, hidden, bias=False)
-        mtp_dict = source_config.to_dict()
-        mtp_dict["num_hidden_layers"] = max(config.mtp_num_hidden_layers, 1)
-        mtp_dict["layer_types"] = ["full_attention"] * mtp_dict["num_hidden_layers"]
-        mtp_config = type(source_config)(**mtp_dict)
-        self.layers = nn.ModuleList(
-            decoder_cls(mtp_config, index) for index in range(config.mtp_num_hidden_layers)
+        self.input_layernorm = AnyToRWKVRMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
         )
-        self.norm = norm_cls(hidden, eps=config.rms_norm_eps)
-        self.pre_fc_norm_hidden = norm_cls(hidden, eps=config.rms_norm_eps)
-        self.pre_fc_norm_embedding = norm_cls(hidden, eps=config.rms_norm_eps)
-        if config.mtp_use_dedicated_embeddings:
-            self.embed_tokens = nn.Embedding(config.vocab_size, hidden)
+        self.post_attention_layernorm = AnyToRWKVRMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
+        self.self_attn = AnyToRWKVPreservedAttention(config)
+        self.mlp = _feed_forward(config)
 
 
-class Any2RWKV7Model(nn.Module):
-    def __init__(self, config: Any2RWKV7Config):
+class AnyToRWKVMTP(nn.Module):
+    """Preserve optional MTP tensors under an Any-to-RWKV-owned module tree."""
+
+    def __init__(self, config: AnyToRWKVConfig):
         super().__init__()
-        config_cls, decoder_cls, norm_cls = _source_classes(config)
-        source_config = config_cls(**config.any2rwkv["source_text_config"])
+        hidden_size = config.hidden_size
+        self.fc = nn.Linear(hidden_size * 2, hidden_size, bias=False)
+        self.layers = nn.ModuleList(
+            AnyToRWKVMTPDecoderLayer(config)
+            for _ in range(config.mtp_num_hidden_layers)
+        )
+        self.norm = AnyToRWKVRMSNorm(hidden_size, eps=config.rms_norm_eps)
+        self.pre_fc_norm_hidden = AnyToRWKVRMSNorm(hidden_size, eps=config.rms_norm_eps)
+        self.pre_fc_norm_embedding = AnyToRWKVRMSNorm(
+            hidden_size, eps=config.rms_norm_eps
+        )
+        if config.mtp_use_dedicated_embeddings:
+            self.embed_tokens = nn.Embedding(config.vocab_size, hidden_size)
+
+
+class AnyToRWKVModel(nn.Module):
+    def __init__(self, config: AnyToRWKVConfig):
+        super().__init__()
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         self.layers = nn.ModuleList(
-            Any2RWKV7DecoderLayer(config, source_config, decoder_cls, index)
-            for index in range(config.num_hidden_layers)
+            AnyToRWKVDecoderLayer(config, layer_index)
+            for layer_index in range(config.num_hidden_layers)
         )
-        self.norm = norm_cls(config.hidden_size, eps=config.rms_norm_eps)
-        self.source_config = source_config
-        self.decoder_cls = decoder_cls
-        self.norm_cls = norm_cls
+        self.norm = AnyToRWKVRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
 
-class Any2RWKV7ForCausalLM(PreTrainedModel, GenerationMixin):
-    config_class = Any2RWKV7Config
+class AnyToRWKVForCausalLM(PreTrainedModel, GenerationMixin):
+    config_class = AnyToRWKVConfig
     base_model_prefix = "model"
     main_input_name = "input_ids"
-    _no_split_modules = ["Any2RWKV7DecoderLayer"]
+    _no_split_modules: ClassVar[list[str]] = ["AnyToRWKVDecoderLayer"]
     supports_gradient_checkpointing = False
     accepts_loss_kwargs = False
-    # Qwen3.5 checkpoints may preserve the language-model head by tying it to
-    # the token embedding and therefore omit ``lm_head.weight`` from the
-    # serialized state dict.  Advertise the exact HF tying relation so strict
-    # loading restores that semantic instead of reporting a missing weight.
-    _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
+    _tied_weights_keys: ClassVar[dict[str, str]] = {
+        "lm_head.weight": "model.embed_tokens.weight"
+    }
 
     @classmethod
     def _supports_default_dynamic_cache(cls) -> bool:
         return False
 
-    def __init__(self, config: Any2RWKV7Config):
+    def __init__(self, config: AnyToRWKVConfig):
         super().__init__(config)
-        self.model = Any2RWKV7Model(config)
+        self.model = AnyToRWKVModel(config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         if config.mtp_num_hidden_layers:
-            self.mtp = Any2RWKV7MTP(
-                config,
-                self.model.source_config,
-                self.model.decoder_cls,
-                self.model.norm_cls,
-            )
+            self.mtp = AnyToRWKVMTP(config)
         self.post_init()
 
     def get_input_embeddings(self):
@@ -248,10 +414,12 @@ class Any2RWKV7ForCausalLM(PreTrainedModel, GenerationMixin):
     def set_output_embeddings(self, value):
         self.lm_head = value
 
-    def _new_cache(self, batch: int, device: torch.device, dtype: torch.dtype) -> Any2RWKV7Cache:
+    def _new_cache(
+        self, batch_size: int, device: torch.device, dtype: torch.dtype
+    ) -> AnyToRWKVCache:
         states = [
             torch.zeros(
-                batch,
+                batch_size,
                 layer.attn.num_heads,
                 layer.attn.head_dim,
                 layer.attn.head_dim,
@@ -261,17 +429,22 @@ class Any2RWKV7ForCausalLM(PreTrainedModel, GenerationMixin):
             for layer in self.model.layers
         ]
         previous = [
-            torch.zeros(batch, self.config.hidden_size, device=device, dtype=dtype)
+            torch.zeros(
+                batch_size,
+                self.config.hidden_size,
+                device=device,
+                dtype=dtype,
+            )
             for _ in self.model.layers
         ]
-        return Any2RWKV7Cache(states, previous)
+        return AnyToRWKVCache(states, previous)
 
     def forward(
         self,
         input_ids: Tensor | None = None,
         attention_mask: Tensor | None = None,
         position_ids: Tensor | None = None,
-        past_key_values: Any2RWKV7Cache | None = None,
+        past_key_values: AnyToRWKVCache | None = None,
         inputs_embeds: Tensor | None = None,
         labels: Tensor | None = None,
         use_cache: bool | None = None,
@@ -282,48 +455,88 @@ class Any2RWKV7ForCausalLM(PreTrainedModel, GenerationMixin):
     ) -> CausalLMOutputWithPast | tuple[Tensor, ...]:
         if (input_ids is None) == (inputs_embeds is None):
             raise ValueError("specify exactly one of input_ids or inputs_embeds")
-        hidden_sequence = self.model.embed_tokens(input_ids) if inputs_embeds is None else inputs_embeds
-        batch, length, _ = hidden_sequence.shape
+        hidden_sequence = (
+            self.model.embed_tokens(input_ids)
+            if inputs_embeds is None
+            else inputs_embeds
+        )
+        batch_size, sequence_length, _ = hidden_sequence.shape
         cache = (
             past_key_values
             if past_key_values is not None
-            else self._new_cache(batch, hidden_sequence.device, hidden_sequence.dtype)
+            else self._new_cache(
+                batch_size, hidden_sequence.device, hidden_sequence.dtype
+            )
         )
-        if len(cache.states) != len(self.model.layers) or cache.states[0].shape[0] != batch:
-            raise ValueError("RWKV7 cache does not match model layer count or batch size")
-        return_dict = self.config.use_return_dict if return_dict is None else return_dict
-        output_hidden_states = self.config.output_hidden_states if output_hidden_states is None else output_hidden_states
-        output_attentions = self.config.output_attentions if output_attentions is None else output_attentions
+        if (
+            len(cache.states) != len(self.model.layers)
+            or cache.states[0].shape[0] != batch_size
+        ):
+            raise ValueError(
+                "Any-to-RWKV cache does not match model layer count or batch size"
+            )
+        return_dict = (
+            self.config.use_return_dict if return_dict is None else return_dict
+        )
+        output_hidden_states = (
+            self.config.output_hidden_states
+            if output_hidden_states is None
+            else output_hidden_states
+        )
+        output_attentions = (
+            self.config.output_attentions
+            if output_attentions is None
+            else output_attentions
+        )
         if output_hidden_states or output_attentions:
-            raise NotImplementedError("Any2RWKV7 currently exposes logits/cache only; hidden states and attentions are unsupported")
+            raise NotImplementedError(
+                "Any-to-RWKV exposes logits and recurrent cache only"
+            )
         full_attention_mask = attention_mask
         if position_ids is None and full_attention_mask is not None:
             position_ids = full_attention_mask.to(torch.long).cumsum(-1) - 1
             position_ids.masked_fill_(full_attention_mask == 0, 0)
-            position_ids = position_ids[:, -length:]
+            position_ids = position_ids[:, -sequence_length:]
         elif position_ids is None:
-            position_ids = torch.arange(
-                cache.seen_tokens, cache.seen_tokens + length, device=hidden_sequence.device
-            ).view(1, length).expand(batch, -1)
+            position_ids = (
+                torch.arange(
+                    cache.seen_tokens,
+                    cache.seen_tokens + sequence_length,
+                    device=hidden_sequence.device,
+                )
+                .view(1, sequence_length)
+                .expand(batch_size, -1)
+            )
         else:
-            position_ids = position_ids[:, -length:]
+            position_ids = position_ids[:, -sequence_length:]
         if attention_mask is None:
-            attention_mask = torch.ones(batch, length, dtype=torch.bool, device=hidden_sequence.device)
+            attention_mask = torch.ones(
+                batch_size,
+                sequence_length,
+                dtype=torch.bool,
+                device=hidden_sequence.device,
+            )
         else:
-            attention_mask = attention_mask[:, -length:].to(torch.bool)
+            attention_mask = attention_mask[:, -sequence_length:].to(torch.bool)
 
         outputs: list[Tensor] = []
-        for token_index in range(length):
+        for token_index in range(sequence_length):
             hidden = hidden_sequence[:, token_index]
             v_first = torch.zeros(
-                batch,
+                batch_size,
                 self.config.attention_hidden_size,
                 device=hidden.device,
                 dtype=hidden.dtype,
             )
             valid = attention_mask[:, token_index]
             for layer_index, layer in enumerate(self.model.layers):
-                hidden, cache.previous[layer_index], cache.states[layer_index], v_first, _ = layer.step(
+                (
+                    hidden,
+                    cache.previous[layer_index],
+                    cache.states[layer_index],
+                    v_first,
+                    _,
+                ) = layer.step(
                     hidden,
                     cache.previous[layer_index],
                     cache.states[layer_index],
@@ -337,13 +550,22 @@ class Any2RWKV7ForCausalLM(PreTrainedModel, GenerationMixin):
         loss = None
         if labels is not None:
             loss = nn.functional.cross_entropy(
-                logits[:, :-1].reshape(-1, logits.shape[-1]), labels[:, 1:].reshape(-1)
+                logits[:, :-1].reshape(-1, logits.shape[-1]),
+                labels[:, 1:].reshape(-1),
             )
-        cache.seen_tokens += length
+        cache.seen_tokens += sequence_length
         use_cache = self.config.use_cache if use_cache is None else use_cache
-        result = CausalLMOutputWithPast(loss=loss, logits=logits, past_key_values=cache if use_cache else None)
+        result = CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=cache if use_cache else None,
+        )
         if not return_dict:
-            return tuple(value for value in (loss, logits, result.past_key_values) if value is not None)
+            return tuple(
+                value
+                for value in (loss, logits, result.past_key_values)
+                if value is not None
+            )
         return result
 
     def prepare_inputs_for_generation(
@@ -370,38 +592,47 @@ class Any2RWKV7ForCausalLM(PreTrainedModel, GenerationMixin):
             model_inputs["inputs_embeds"] = inputs_embeds
         else:
             model_inputs["input_ids"] = input_ids
-        model_inputs.update({
-            "past_key_values": past_key_values,
-            "attention_mask": attention_mask,
-            "use_cache": kwargs.get("use_cache", True),
-        })
+        model_inputs.update(
+            {
+                "past_key_values": past_key_values,
+                "attention_mask": attention_mask,
+                "use_cache": kwargs.get("use_cache", True),
+            }
+        )
         if position_ids is not None:
-            take = model_inputs.get("input_ids", model_inputs.get("inputs_embeds")).shape[1]
-            model_inputs["position_ids"] = position_ids[:, -take:]
+            values = model_inputs.get("input_ids", model_inputs.get("inputs_embeds"))
+            model_inputs["position_ids"] = position_ids[:, -values.shape[1] :]
         for name in ("return_dict", "output_hidden_states", "output_attentions"):
             if name in kwargs:
                 model_inputs[name] = kwargs[name]
         return model_inputs
 
-    def _reorder_cache(self, past_key_values: Any2RWKV7Cache, beam_idx: Tensor):
-        return past_key_values.reorder(beam_idx)
+    def _reorder_cache(
+        self, past_key_values: AnyToRWKVCache, beam_index: Tensor
+    ) -> AnyToRWKVCache:
+        return past_key_values.reorder(beam_index)
 
 
-class Any2RWKVProxyForCausalLM(Any2RWKV7ForCausalLM):
-    """Loadable identity for a fully recurrent, non-60-layer pilot model."""
-
-    config_class = Any2RWKVProxyConfig
+class AnyToRWKVProxyForCausalLM(AnyToRWKVForCausalLM):
+    config_class = AnyToRWKVProxyConfig
 
 
-class Any2RWKVHybridForCausalLM(Any2RWKV7ForCausalLM):
-    """Guard rail for a progressive checkpoint that still contains source mixers."""
+class AnyToRWKVHybridForCausalLM(AnyToRWKVForCausalLM):
+    config_class = AnyToRWKVHybridConfig
 
-    config_class = Any2RWKVHybridConfig
-
-    def __init__(self, config: Any2RWKVHybridConfig):
-        if any(layer_type != "rwkv7" for layer_type in config.layer_types):
+    def __init__(self, config: AnyToRWKVHybridConfig):
+        if any(mixer_type != "rwkv7" for mixer_type in config.mixer_types):
             raise ValueError(
-                "hybrid Any2RWKV checkpoints are training intermediates; resume "
-                "distillation instead of loading them as fully recurrent models"
+                "hybrid Any-to-RWKV checkpoints are training intermediates; resume "
+                "conversion instead of loading them as final models"
             )
         super().__init__(config)
+
+
+__all__ = [
+    "AnyToRWKVCache",
+    "AnyToRWKVForCausalLM",
+    "AnyToRWKVHybridForCausalLM",
+    "AnyToRWKVModel",
+    "AnyToRWKVProxyForCausalLM",
+]

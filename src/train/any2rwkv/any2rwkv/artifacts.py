@@ -57,7 +57,7 @@ def default_contract_lock(product_root: Path | None = None) -> dict[str, Any]:
     lock = {
         "schema_version": 1,
         "change": "qwen35-rwkv7-conversion",
-        "scope": "qwen3.5-text-only-to-rwkv7",
+        "scope": "qwen3.5-source-to-any-to-rwkv",
         "layers": 60,
         "canonical": {
             "equation": "S_t = S_{t-1} A_t + B_t",
@@ -68,8 +68,8 @@ def default_contract_lock(product_root: Path | None = None) -> dict[str, Any]:
                 "Qwen3.5-2B resolves to 16x128"
             ),
             "operator": (
-                "checkpoint-local Any-to-RWKV conversion runtime through "
-                "fla.ops.rwkv7.chunk_rwkv7(provider=flash_rwkv)"
+                "installed Any-to-RWKV runtime through "
+                "fla.ops.rwkv7.recurrent_rwkv7(provider=flash_rwkv)"
             ),
             "gdn_condition": "Qwen3.5 head-scalar decay and normalized key with matching state/head geometry",
             "gdn_mapping": "w=d; a=-k; b=(d*beta)k; v'=beta*v; k'=k; r=q/sqrt(Dk)",
@@ -95,26 +95,26 @@ def default_contract_lock(product_root: Path | None = None) -> dict[str, Any]:
             "controls": "bound from the hash-locked distillation plan",
             "evidence": "same-structure pilot validation curves",
         },
-        "bootstrap": {"samples": 10000, "seed": 20260714, "method": "paired-percentile", "confidence": 0.95},
+        "bootstrap": {
+            "samples": 10000,
+            "seed": 20260714,
+            "method": "paired-percentile",
+            "confidence": 0.95,
+        },
         "inference": {
             "backend": "transformers",
             "loader": "AutoModelForCausalLM.from_pretrained",
-            "trust_remote_code": True,
+            "trust_remote_code": False,
             "full_chunked_logit_tolerance": "hash-bound numerical parity profile",
             "batch_isolation": True,
         },
         "artifact_boundaries": {
-            "private_conversion": {
-                "contract": "private-any2rwkv-qwen-shell-v1",
+            "model_artifact": {
+                "contract": "any-to-rwkv-v1",
                 "state": "batch,head,value,key",
-                "trust_remote_code": True,
-            },
-            "public_transformers": {
-                "contract": "transformers-rwkv7-v1",
-                "state": "batch,head,key,value",
                 "trust_remote_code": False,
             },
-            "public_state_bridge": "transpose the final two state axes: [B,H,V,K] -> [B,H,K,V]",
+            "model_identity": "independent any_to_rwkv family",
         },
     }
     if product_root is not None:
@@ -127,14 +127,19 @@ def default_contract_lock(product_root: Path | None = None) -> dict[str, Any]:
         if missing:
             raise FileNotFoundError(f"canonical reference files are missing: {missing}")
         lock["oracle"]["reference_files"] = {
-            name: {"path": str(path.relative_to(product_root)), "sha256": file_sha256(path)}
+            name: {
+                "path": str(path.relative_to(product_root)),
+                "sha256": file_sha256(path),
+            }
             for name, path in references.items()
         }
     return lock
 
 
 def sha256_json(payload: Any) -> str:
-    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -189,7 +194,9 @@ def git_sha(path: Path) -> str:
     except (OSError, subprocess.CalledProcessError) as error:
         manifest = resolved / ".helicopter-dev/source-revisions.json"
         try:
-            revision = json.loads(manifest.read_text(encoding="utf-8"))["product_commit"]
+            revision = json.loads(manifest.read_text(encoding="utf-8"))[
+                "product_commit"
+            ]
         except (OSError, KeyError, json.JSONDecodeError) as manifest_error:
             raise RuntimeError(
                 f"cannot resolve product commit for {resolved}: {error}; "
@@ -204,11 +211,7 @@ def require_independent_run_output(output: Path, source: Path) -> None:
     """Keep generated checkpoints outside the immutable source tree."""
     output = output.resolve()
     source = source.resolve()
-    if (
-        output == source
-        or source in output.parents
-        or output in source.parents
-    ):
+    if output == source or source in output.parents or output in source.parents:
         raise ValueError(
             "run output and source checkpoint must use independent directory trees"
         )
@@ -259,7 +262,11 @@ def initialize_run(
 
 
 def verify_run_bundle(output: Path) -> list[str]:
-    missing = [name for name in ("metadata.json", *REQUIRED_RUN_FILES) if not (output / name).is_file()]
+    missing = [
+        name
+        for name in ("metadata.json", *REQUIRED_RUN_FILES)
+        if not (output / name).is_file()
+    ]
     if missing:
         raise ValueError(f"incomplete run artifact bundle: {missing}")
     json_names = [
@@ -292,7 +299,11 @@ def verify_run_bundle(output: Path) -> list[str]:
         ):
             raise ValueError(f"run artifact is not accepted or student-bound: {name}")
     trace_path = output / "active-layer-trace.jsonl"
-    rows = [line for line in trace_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    rows = [
+        line
+        for line in trace_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     if not rows:
         raise ValueError("active-layer-trace.jsonl is empty")
     for line in rows:
@@ -335,7 +346,9 @@ def verify_scale_gate(output: Path) -> dict[str, str]:
         raise ValueError("397B scale gate requires smoke-rubric.json")
     smoke = json.loads(smoke_path.read_text(encoding="utf-8"))
     if smoke.get("student_sha256") != student_sha or smoke.get("passed") is not True:
-        raise ValueError("397B scale gate smoke rubric is not accepted or student-bound")
+        raise ValueError(
+            "397B scale gate smoke rubric is not accepted or student-bound"
+        )
     return {
         "student_sha256": student_sha,
         "quality_sha256": file_sha256(quality_path),

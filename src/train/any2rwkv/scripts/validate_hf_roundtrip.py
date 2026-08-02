@@ -11,6 +11,7 @@ import torch
 import transformers
 from transformers import AutoModelForCausalLM
 
+from any2rwkv import register_any_to_rwkv_auto_classes
 from any2rwkv.artifacts import checkpoint_sha256, write_json
 from any2rwkv.roundtrip import validate_sharded_checkpoint
 
@@ -108,11 +109,12 @@ def main() -> int:
             "128 new tokens and non-negative tolerances"
         )
     checkpoint = Path(args.checkpoint).resolve()
+    register_any_to_rwkv_auto_classes()
     runtime = runtime_binding(require_rwkv7_runtime())
     shard_report = validate_sharded_checkpoint(checkpoint)
     model, loading = AutoModelForCausalLM.from_pretrained(
         checkpoint,
-        trust_remote_code=True,
+        trust_remote_code=False,
         dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
         output_loading_info=True,
     )

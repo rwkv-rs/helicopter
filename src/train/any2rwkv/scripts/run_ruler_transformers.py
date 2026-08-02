@@ -11,6 +11,8 @@ from pathlib import Path
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from any2rwkv import register_any_to_rwkv_auto_classes
+
 
 def _prompt(row: dict, tokenizer) -> str:
     if isinstance(row.get("input"), str):
@@ -59,16 +61,17 @@ def main() -> None:
         raise SystemExit(f"RULER data directory has no JSONL files: {args.data_dir}")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.bfloat16 if device == "cuda" else torch.float32
+    register_any_to_rwkv_auto_classes()
     tokenizer = AutoTokenizer.from_pretrained(
         args.tokenizer,
         local_files_only=True,
-        trust_remote_code=True,
+        trust_remote_code=False,
         fix_mistral_regex=True,
     )
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
         local_files_only=True,
-        trust_remote_code=True,
+        trust_remote_code=False,
         torch_dtype=dtype,
         device_map=device,
     ).eval()

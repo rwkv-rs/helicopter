@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.metadata
+import inspect
 import json
 import platform
 import sys
@@ -123,53 +124,106 @@ def _require_module_ownership(
 
 
 def require_rwkv7_runtime() -> dict[str, Any]:
-    """Fail closed unless the full public RWKV-7 runtime chain is exact."""
-    distribution = _distribution_binding(
+    """Fail closed unless the independent model and recurrent operator chain is exact."""
+    transformers_distribution = _distribution_binding(
         "transformers",
         expected_url=TRANSFORMERS_SOURCE_URL,
         expected_revision=TRANSFORMERS_REVISION,
     )
-    if not distribution["requirement_satisfied"]:
+    if not transformers_distribution["requirement_satisfied"]:
         raise ContractError(
             "Transformers does not satisfy the exact Any-to-RWKV runtime "
             f"requirement: {TRANSFORMERS_REQUIREMENT}"
         )
-    ownership = _require_module_ownership("transformers", "transformers")
+    fla_distribution = _distribution_binding(
+        "flash-linear-attention",
+        expected_url=FLA_RWKV7_SOURCE_URL,
+        expected_revision=FLA_RWKV7_REVISION,
+    )
+    flash_distribution = _distribution_binding(
+        "flash-rwkv",
+        expected_url=FLASH_RWKV_SOURCE_URL,
+        expected_revision=FLASH_RWKV_REVISION,
+    )
+    if not fla_distribution["requirement_satisfied"]:
+        raise ContractError(
+            "fla-rwkv does not satisfy the exact recurrent operator pin"
+        )
+    if not flash_distribution["requirement_satisfied"]:
+        raise ContractError("FlashRWKV does not satisfy the exact recurrent kernel pin")
+    transformers_ownership = _require_module_ownership("transformers", "transformers")
+    fla_ownership = _require_module_ownership("flash-linear-attention", "fla.ops.rwkv7")
     try:
-        rwkv7 = importlib.import_module("transformers.models.rwkv7")
-        config_class = rwkv7.Rwkv7Config
-        model_class = rwkv7.Rwkv7ForCausalLM
-        validate_runtime = rwkv7.validate_rwkv7_runtime_provenance
+        rwkv7 = importlib.import_module("fla.ops.rwkv7")
+        recurrent = rwkv7.recurrent_rwkv7
+        provider = rwkv7.get_last_rwkv7_provider
+        validate_runtime = rwkv7.validate_flash_rwkv_installation
     except (AttributeError, ImportError) as error:
         raise ContractError(
-            "Transformers does not expose the public RWKV-7 runtime contract"
+            "fla-rwkv does not expose the public recurrent_rwkv7 contract"
         ) from error
-    if not (
-        config_class.model_type == "rwkv7"
-        and model_class.base_model_prefix == "model"
-        and callable(validate_runtime)
-    ):
+    if not all(callable(value) for value in (recurrent, provider, validate_runtime)):
         raise ContractError(
-            "Transformers does not expose the expected public RWKV-7 interface"
+            "fla-rwkv recurrent operator/provider/provenance interface is incomplete"
+        )
+    required_parameters = {
+        "r",
+        "w",
+        "k",
+        "v",
+        "a",
+        "b",
+        "scale",
+        "initial_state",
+        "output_final_state",
+        "cu_seqlens",
+        "state_indices",
+        "mode",
+    }
+    try:
+        parameters = inspect.signature(recurrent).parameters
+    except (TypeError, ValueError) as error:
+        raise ContractError(
+            "fla-rwkv recurrent_rwkv7 signature is not inspectable"
+        ) from error
+    missing = sorted(required_parameters - parameters.keys())
+    if missing:
+        raise ContractError(
+            f"fla-rwkv recurrent_rwkv7 signature is incompatible: missing={missing}"
         )
     try:
-        operators = validate_runtime()
+        flash_provenance = validate_runtime()
     except (RuntimeError, TypeError, ValueError) as error:
-        raise ContractError(f"RWKV-7 operator provenance rejected: {error}") from error
-    if not isinstance(operators, dict):
         raise ContractError(
-            "validate_rwkv7_runtime_provenance() did not return a manifest"
-        )
-    expected_operator_fields = {
+            f"RWKV-7 recurrent operator provenance rejected: {error}"
+        ) from error
+    operators = {
         "repository": FLA_RWKV7_SOURCE_URL,
         "revision": FLA_RWKV7_REVISION,
+        "flash_rwkv_repository": getattr(
+            flash_provenance,
+            "repository",
+            flash_provenance.get("repository")
+            if isinstance(flash_provenance, dict)
+            else None,
+        ),
+        "flash_rwkv_revision": getattr(
+            flash_provenance,
+            "revision",
+            flash_provenance.get("revision")
+            if isinstance(flash_provenance, dict)
+            else None,
+        ),
+        "operation": "fla.ops.rwkv7.recurrent_rwkv7",
+    }
+    expected_flash = {
         "flash_rwkv_repository": FLASH_RWKV_SOURCE_URL,
         "flash_rwkv_revision": FLASH_RWKV_REVISION,
     }
     mismatches = {
-        name: {"expected": expected, "actual": operators.get(name)}
-        for name, expected in expected_operator_fields.items()
-        if operators.get(name) != expected
+        name: {"expected": expected, "actual": operators[name]}
+        for name, expected in expected_flash.items()
+        if operators[name] != expected
     }
     if mismatches:
         raise ContractError(
@@ -179,13 +233,18 @@ def require_rwkv7_runtime() -> dict[str, Any]:
         "schema_version": 1,
         "transformers": {
             "distribution": "transformers",
-            "version": distribution["version"],
+            "version": transformers_distribution["version"],
             "repository": TRANSFORMERS_SOURCE_URL,
             "revision": TRANSFORMERS_REVISION,
             "requirement": TRANSFORMERS_REQUIREMENT,
-            "module_ownership": ownership,
+            "module_ownership": transformers_ownership,
         },
-        "operators": operators,
+        "operators": {
+            **operators,
+            "fla_distribution": fla_distribution,
+            "flash_distribution": flash_distribution,
+            "fla_module_ownership": fla_ownership,
+        },
     }
 
 
@@ -406,7 +465,9 @@ def collect_full_loop_preflight(
             f"{environment['transformers']}"
         )
     if not environment["torch"]["cuda_available"]:
-        blockers.append("CUDA is unavailable for the Any-to-RWKV architecture conversion")
+        blockers.append(
+            "CUDA is unavailable for the Any-to-RWKV architecture conversion"
+        )
 
     source_result: dict[str, Any] | None = None
     try:

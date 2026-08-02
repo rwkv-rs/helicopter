@@ -59,7 +59,21 @@ class QualityCommandPlanTests(unittest.TestCase):
             self.assertEqual(len(ruler_eval), 4)
             self.assertEqual(len(downstream), 6)
             self.assertTrue(all("--log_samples" in row["argv"] for row in downstream))
+            self.assertTrue(
+                all(
+                    row["argv"][:4]
+                    == ["python", "-m", "any2rwkv.lm_eval_entrypoint", "run"]
+                    for row in downstream
+                )
+            )
             self.assertTrue(all(row["argv"][row["argv"].index("--model") + 1] == "hf" for row in downstream))
+            self.assertTrue(
+                all(
+                    "trust_remote_code=False"
+                    in row["argv"][row["argv"].index("--model_args") + 1]
+                    for row in downstream
+                )
+            )
             encoded = json.dumps(plan).lower()
             self.assertNotIn("vllm", encoded)
             self.assertNotIn("base_url", encoded)
