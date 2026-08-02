@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from ...artifacts import write_json
 from ...core import (
     ArchitectureInspection,
     DistillationExecutionRequest,
@@ -10,6 +11,64 @@ from ...core import (
 )
 from ...errors import ContractError
 from ...mapping import is_locally_trainable
+
+_OBSERVABLE_COMPARISONS = (
+    "logits",
+    "block_output",
+    "token_kl",
+    "shifted_ce",
+    "ppl",
+    "long_context_tail",
+    "input_gradients",
+    "parameter_gradients",
+)
+
+
+def _publish_evaluation_policy(request: DistillationExecutionRequest) -> None:
+    """Bind the corrective sweep to disjoint development data and observables."""
+    calibration_ids = {
+        sample_id
+        for row in request.train_row_source_sample_ids
+        for sample_id in row
+    }
+    development_ids = {
+        sample_id
+        for row in request.validation_row_source_sample_ids
+        for sample_id in row
+    }
+    overlap = sorted(calibration_ids & development_ids)
+    if overlap:
+        raise ContractError(
+            "calibration and development source samples must be disjoint: "
+            + ", ".join(overlap[:8])
+        )
+    write_json(
+        request.run_dir / "evaluation-policy.json",
+        {
+            "schema_version": 1,
+            "calibration": {
+                "role": "optimizer updates",
+                "source_sample_count": len(calibration_ids),
+            },
+            "development": {
+                "role": "candidate selection and rollback",
+                "source_sample_count": len(development_ids),
+            },
+            "final": {
+                "role": "held out from conversion and corrective selection",
+                "consumed": False,
+            },
+            "allowed_cross_architecture_comparisons": list(
+                _OBSERVABLE_COMPARISONS
+            ),
+            "forbidden_cross_architecture_comparisons": ["recurrent_state_mse"],
+            "candidate_policy": {
+                "frozen_baseline": "global-snapshots/pre-sweep",
+                "acceptance_metric": "development.token_kl",
+                "degradation_action": "restore-frozen-best-candidate",
+            },
+        },
+    )
 
 
 class Qwen35ToRWKV7Recipe:
@@ -33,9 +92,10 @@ class Qwen35ToRWKV7Recipe:
     def run_layerwise_distillation(
         self, request: DistillationExecutionRequest
     ) -> dict[str, object]:
-        from .layer_major_runner import run_suffix_free_layer_major
         from .global_corrective_runner import run_global_corrective
+        from .layer_major_runner import run_suffix_free_layer_major
 
+        _publish_evaluation_policy(request)
         layer_count = request.source_checkpoint.contract.num_hidden_layers
         local = run_suffix_free_layer_major(
             source_manifest=request.source_checkpoint,

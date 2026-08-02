@@ -134,7 +134,9 @@ class Qwen35TeacherLayerLoader:
                 modeling = importlib.import_module(type(module).__module__)
                 linear_attention.causal_conv1d_fn = None
                 linear_attention.causal_conv1d_update = getattr(
-                    modeling, "torch_causal_conv1d_update"
+                    modeling,
+                    "torch_causal_conv1d_update",
+                    modeling.causal_conv1d_update,
                 )
                 linear_attention.chunk_gated_delta_rule = getattr(
                     modeling, "torch_chunk_gated_delta_rule"

@@ -1,22 +1,36 @@
 from __future__ import annotations
 
+import gc
 import json
 import math
 import shutil
-import gc
 import subprocess
+import sys
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
-import weakref
 
 import pytest
 import torch
-
+from any2rwkv.artifacts import file_sha256, write_json
 from any2rwkv.checkpoint import read_checkpoint
 from any2rwkv.contract import build_target_config
-from any2rwkv.export import export_hf_checkpoint
+from any2rwkv.core import DistillationExecutionRequest
+from any2rwkv.distill_runner import (
+    _binding_sha256,
+    _checkpoint_binding,
+    _materialize_corrective_base,
+    _prepare_or_validate_corrective_output,
+    _select_parent_recurrent_checkpoint,
+    _validate_initialized_run_binding,
+    _validate_parent_run,
+    _zero_step_checkpoint_binding,
+)
+from any2rwkv.distributed import DistributedContext
 from any2rwkv.errors import ContractError
+from any2rwkv.export import export_hf_checkpoint
 from any2rwkv.fixture import write_fixture
+from any2rwkv.mapping import is_locally_trainable
 from any2rwkv.migration_init import (
     WarmStartTensorProvider,
     WarmStartVariant,
@@ -24,60 +38,86 @@ from any2rwkv.migration_init import (
     plan_warm_start,
 )
 from any2rwkv.mixer_store import RWKV7MixerLayerStore
-from any2rwkv.mapping import is_locally_trainable
-from any2rwkv.recipes.qwen35_to_rwkv7.layer_major_runner import (
-    _activation_fit_full_attention,
-    _activation_fit_gqa_native_zero_step_transaction,
-    _commit_distributed_generation,
-    _dependency_transaction_improves,
-    _frozen_parameter_sha256,
-    _formal_gqa_code_binding,
-    _generation_mixer_state_sha256,
-    _gqa_native_validation_improves,
-    _module_state_hashes,
-    _load_generation_state,
-    _profile_advance_prefix_fingerprint,
-    _profile_initial_prefix_fingerprint,
-    _require_independent_activation_fit_caches,
-    _require_frozen_parameter_sha256,
-    _retain_gate_fit_candidate,
-    _resolve_best_generation,
-    _split_gqa_validation_protocol,
-    _sha256_json,
-    _write_generation_integrity,
-    prepare_performance_profile_caches,
-    run_gqa_zero_step_validation,
-    run_suffix_free_layer_major,
-)
+from any2rwkv.recipes import resolve_recipe
 from any2rwkv.recipes.qwen35_to_rwkv7 import (
     layer_major_runner as layer_major_runner_module,
 )
-from any2rwkv.artifacts import file_sha256, write_json
 from any2rwkv.recipes.qwen35_to_rwkv7.global_corrective_runner import (
     _commit_distributed_layer_generation,
     _next_token_prediction_window,
     run_global_corrective,
 )
-from any2rwkv.distributed import DistributedContext
-from any2rwkv.streaming_training import ActiveLayerOptimizerSnapshot
-from any2rwkv.streaming_training import ActiveLayerOptimizer
-from any2rwkv.streamed_teacher import Qwen35TeacherLayerLoader
-from any2rwkv.target import build_zero_step_ledger, rwkv7_mixer_specs
-from any2rwkv.distill_runner import (
-    _binding_sha256,
-    _checkpoint_binding,
-    _materialize_corrective_base,
-    _prepare_or_validate_corrective_output,
-    _select_parent_recurrent_checkpoint,
-    _validate_parent_run,
-    _validate_initialized_run_binding,
-    _zero_step_checkpoint_binding,
+from any2rwkv.recipes.qwen35_to_rwkv7.layer_major_runner import (
+    _activation_fit_full_attention,
+    _commit_distributed_generation,
+    _dependency_transaction_improves,
+    _formal_gqa_code_binding,
+    _frozen_parameter_sha256,
+    _generation_mixer_state_sha256,
+    _gqa_native_validation_improves,
+    _load_generation_state,
+    _module_state_hashes,
+    _profile_advance_prefix_fingerprint,
+    _profile_initial_prefix_fingerprint,
+    _require_frozen_parameter_sha256,
+    _require_independent_activation_fit_caches,
+    _resolve_best_generation,
+    _retain_gate_fit_candidate,
+    _sha256_json,
+    _split_gqa_validation_protocol,
+    _write_generation_integrity,
+    prepare_performance_profile_caches,
+    run_gqa_zero_step_validation,
+    run_suffix_free_layer_major,
 )
-from any2rwkv.recipes import resolve_recipe
+from any2rwkv.recipes.qwen35_to_rwkv7.recipe import _publish_evaluation_policy
+from any2rwkv.streamed_teacher import Qwen35TeacherLayerLoader
+from any2rwkv.streaming_training import (
+    ActiveLayerOptimizer,
+    ActiveLayerOptimizerSnapshot,
+)
+from any2rwkv.target import build_zero_step_ledger, rwkv7_mixer_specs
 
 
 class PlannedInterruption(RuntimeError):
     pass
+
+
+def test_corrective_policy_rejects_split_overlap_and_forbids_state_mse(
+    tmp_path: Path,
+) -> None:
+    request = DistillationExecutionRequest(
+        source_checkpoint=object(),
+        run_dir=tmp_path,
+        zero_step_dir=tmp_path,
+        token_rows=((1, 2),),
+        validation_rows=((3, 4),),
+        train_row_source_sample_ids=(("shared",),),
+        validation_row_source_sample_ids=(("shared",),),
+        plan=object(),
+        training_config=tmp_path / "training.json",
+        dataset_manifest=tmp_path / "dataset.json",
+        resume=None,
+    )
+    with pytest.raises(ContractError, match="must be disjoint"):
+        _publish_evaluation_policy(request)
+
+    request = DistillationExecutionRequest(
+        **{
+            **request.__dict__,
+            "train_row_source_sample_ids": (("calibration",),),
+            "validation_row_source_sample_ids": (("development",),),
+        }
+    )
+    _publish_evaluation_policy(request)
+    policy = json.loads((tmp_path / "evaluation-policy.json").read_text())
+    assert policy["final"]["consumed"] is False
+    assert policy["forbidden_cross_architecture_comparisons"] == [
+        "recurrent_state_mse"
+    ]
+    assert policy["candidate_policy"]["degradation_action"] == (
+        "restore-frozen-best-candidate"
+    )
 
 
 def test_new_synchronized_generation_uses_one_optimizer_copy_without_reload(
@@ -2315,12 +2355,21 @@ def test_epoch_validation_commit_resume_matches_uninterrupted(tmp_path: Path) ->
 def test_fully_recurrent_global_corrective_runs_reverse_sweep_and_exports(
     tmp_path: Path,
 ) -> None:
-    source, zero_step, trainable = _prepare_fixture(tmp_path, layers=2)
+    source, zero_step, trainable = _prepare_fixture(
+        tmp_path,
+        layers=2,
+        config_overrides={
+            "layer_types": ["linear_attention", "full_attention"]
+        },
+    )
+    assert source.config["layer_types"] == ["linear_attention", "full_attention"]
     training_config = tmp_path / "training.json"
     dataset_manifest = tmp_path / "dataset.json"
     training_config.write_text(json.dumps({"fixture": "training"}), encoding="utf-8")
     dataset_manifest.write_text(json.dumps({"fixture": "dataset"}), encoding="utf-8")
     run_dir = tmp_path / "run"
+    plan = _plan()
+    plan.layer_min_delta = 0.7
     torch.manual_seed(321)
     local = _run(
         source=source,
@@ -2329,6 +2378,7 @@ def test_fully_recurrent_global_corrective_runs_reverse_sweep_and_exports(
         run_dir=run_dir,
         training_config=training_config,
         dataset_manifest=dataset_manifest,
+        plan=plan,
     )
     assert local["status"] == "layerwise-local-complete"
     local_fingerprint = RWKV7MixerLayerStore(
@@ -2340,7 +2390,7 @@ def test_fully_recurrent_global_corrective_runs_reverse_sweep_and_exports(
         zero_step_dir=zero_step,
         token_rows=((1, 2, 3, 4), (5, 6, 7, 8), (9, 10, 11, 12)),
         validation_rows=((13, 14, 15, 16), (17, 18, 19, 20)),
-        plan=_plan(),
+        plan=plan,
         training_config=training_config,
         dataset_manifest=dataset_manifest,
         device=torch.device("cpu"),
@@ -2368,6 +2418,34 @@ def test_fully_recurrent_global_corrective_runs_reverse_sweep_and_exports(
         config["any2rwkv"]["mixer_overlay_fingerprint"]
         == result["selected_fingerprint"]
     )
+    reload_result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import json, sys
+from pathlib import Path
+from safetensors.torch import load_file
+checkpoint = Path(sys.argv[1])
+config = json.loads((checkpoint / 'config.json').read_text())
+index = json.loads((checkpoint / 'model.safetensors.index.json').read_text())
+tensors = {}
+for shard in sorted(set(index['weight_map'].values())):
+    tensors.update(load_file(checkpoint / shard, device='cpu'))
+print(json.dumps({
+    'layers': config['num_hidden_layers'],
+    'tensor_count': len(tensors),
+}))
+""",
+            str(run_dir / "checkpoint-global-corrective"),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    reloaded = json.loads(reload_result.stdout)
+    assert reloaded["layers"] == 2
+    assert reloaded["tensor_count"] > 0
     if result["selected_checkpoint"] == "global-sweeps/pre-sweep":
         assert result["selected_fingerprint"] == local_fingerprint
     residency = json.loads((run_dir / "corrective-residency.json").read_text())
