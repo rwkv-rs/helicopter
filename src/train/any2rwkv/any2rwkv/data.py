@@ -155,10 +155,8 @@ def directory_sha256(path: Path) -> str:
     if not files:
         raise DataPreparationError(f"tokenizer directory contains no regular files: {path}")
     for item in files:
-        relative = item.relative_to(path).as_posix().encode("utf-8")
-        digest.update(len(relative).to_bytes(8, "big"))
-        digest.update(relative)
-        digest.update(bytes.fromhex(file_sha256(item)))
+        digest.update(item.relative_to(path).as_posix().encode("utf-8"))
+        digest.update(file_sha256(item).encode("ascii"))
     return digest.hexdigest()
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -11,6 +12,8 @@ from any2rwkv.data import (
     DuplicateSampleError,
     SPLIT_NAMES,
     _minhash_signature,
+    directory_sha256,
+    file_sha256,
     prepare_jsonl_dataset,
     prepare_rows,
     stable_split,
@@ -32,6 +35,17 @@ class TinyTokenizer:
 
 
 class DataPreparationTests(unittest.TestCase):
+    def test_tokenizer_tree_digest_matches_raw_materializer_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "b.json").write_text("second\n", encoding="utf-8")
+            (root / "a.json").write_text("first\n", encoding="utf-8")
+            expected = hashlib.sha256()
+            for path in sorted(root.iterdir()):
+                expected.update(path.name.encode("utf-8"))
+                expected.update(file_sha256(path).encode("ascii"))
+            self.assertEqual(directory_sha256(root), expected.hexdigest())
+
     def test_minhash_has_one_real_value_per_permutation_for_short_documents(self) -> None:
         left = _minhash_signature(frozenset({"alpha beta gamma"}), 112)
         right = _minhash_signature(frozenset({"unrelated words here"}), 112)

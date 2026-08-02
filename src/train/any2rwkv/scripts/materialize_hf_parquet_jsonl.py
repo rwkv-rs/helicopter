@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -15,7 +14,7 @@ from huggingface_hub import hf_hub_url
 from transformers import AutoTokenizer
 
 from any2rwkv.artifacts import file_sha256
-from any2rwkv.data import normalize_text
+from any2rwkv.data import directory_sha256, normalize_text
 
 
 def _write_json_atomic(path: Path, payload: object) -> None:
@@ -40,14 +39,6 @@ def _binding(args: argparse.Namespace, tokenizer_tree: str) -> dict[str, object]
         "text_field": args.text_field,
         "id_field": args.id_field,
     }
-
-
-def _tree_sha256(root: Path) -> str:
-    digest = hashlib.sha256()
-    for path in sorted(candidate for candidate in root.rglob("*") if candidate.is_file()):
-        digest.update(path.relative_to(root).as_posix().encode())
-        digest.update(file_sha256(path).encode())
-    return digest.hexdigest()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -79,7 +70,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if output.exists() or manifest_path.exists():
         raise SystemExit(f"refusing to overwrite completed materialization: {output}")
 
-    tokenizer_tree = _tree_sha256(tokenizer_path)
+    tokenizer_tree = directory_sha256(tokenizer_path)
     binding = _binding(args, tokenizer_tree)
     rows_written = 0
     source_rows_consumed = 0
