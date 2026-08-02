@@ -13,6 +13,12 @@ from .contracts import (
     TargetArchitectureAdapter,
 )
 from .experiment_tracking import ExperimentTracker, write_experiment_report
+from .layer_major_contract import (
+    LayerMajorResumeContract,
+    activate_layer_major_training,
+    assert_layer_major_isolation,
+    canonical_digest,
+)
 from .registry import AdapterRecipeRegistry, ResolvedRecipe
 
 if TYPE_CHECKING:
@@ -72,11 +78,15 @@ __all__ = [
     "LayerInputBatch",
     "LayerInputCacheEstimate",
     "LayerInputCacheReader",
+    "LayerMajorResumeContract",
     "PerformanceProfileCacheRequest",
     "ResolvedRecipe",
     "SourceArchitectureAdapter",
     "TargetArchitectureAdapter",
+    "activate_layer_major_training",
+    "assert_layer_major_isolation",
     "build_migration_baseline_matrix",
+    "canonical_digest",
     "estimate_layer_input_cache_bytes",
     "prepare_distributed_layer_input_cache",
     "publish_distributed_layer_input_cache",
