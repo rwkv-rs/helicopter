@@ -12,6 +12,24 @@ dependencies = []
 helicopter = "helicopter_cli.__main__:main"
 
 [dependency-groups]
+flash-rwkv = [
+  "flash-rwkv",
+]
+
+fla-rwkv = [
+  "flash-linear-attention[cuda]",
+]
+
+lighteval = [
+  { include-group = "vllm-rwkv" },
+  "httpx[socks]",
+  "langcodes[data]",
+  "lighteval[extended-tasks,math,multilingual] @ git+https://github.com/huggingface/lighteval.git@64f4f5ae173626509fad6e477ca4ee56ebb26129",
+  "more-itertools",
+  "pyarrow>=19.0.0",
+  "ray",
+]
+
 vllm-rwkv = [
   "aiohttp>=3.13.3",
   "blake3",
@@ -23,6 +41,7 @@ vllm-rwkv = [
   "filelock>=3.16.1",
   "jinja2>=3.1.6",
   "msgspec",
+  "model-hosting-container-standards>=0.1.14,<1.0.0",
   "ninja",
   "numpy",
   "openai>=2.0.0",
@@ -45,6 +64,7 @@ vllm-rwkv = [
   "safetensors>=0.6.2",
   "setproctitle",
   "setuptools>=77.0.3,<81.0.0",
+  "setuptools-rust>=1.9.0",
   "setuptools-scm>=8.0",
   "starlette>=1.0.1",
   "tokenizers>=0.21.1",
@@ -63,10 +83,11 @@ verl-rwkv = [
   "dill",
   "fastapi",
   "hydra-core",
-  "latex2sympy2-extended",
-  "math-verify",
-  "numpy>=2.0.0",
-  "nvtx==0.2.15",
+    "latex2sympy2-extended",
+    "math-verify",
+    "numpy>=2.0.0",
+    "nvidia-ml-py>=12.560.30",
+    "nvtx==0.2.15",
   "packaging>=20.0",
   "pandas",
   "peft",
@@ -79,7 +100,7 @@ verl-rwkv = [
   "torch==2.11.0",
   "torchdata",
   "transferqueue==0.1.8",
-  "transformers>=5.5.3,!=5.6.0",
+  "transformers>=5.5.3,!=5.6.0,<5.11",
   "uvicorn",
   "wandb",
   "zstandard",
@@ -92,24 +113,19 @@ rwkv-lm = [
   "torch==2.11.0",
 ]
 
-any2rwkv = [
-  "causal-conv1d==1.6.2.post1",
-  "datasets>=5.0.0",
-  "flash-linear-attention[flash-rwkv] @ git+https://github.com/rwkv-rs/fla-rwkv.git@a4a8aa98df6ec5322f194a80ec57363dd045adfc",
-  "huggingface-hub",
-  "ninja",
-  "numpy>=2.0.0",
-  "safetensors>=0.6.2",
-  "tokenizers>=0.21.1",
-  "torch==2.11.0",
-  "transformers @ git+https://github.com/rwkv-rs/transformers-rwkv.git@2696927df9363b5fa175076bb827ba4da2c4e581",
-  "wandb>=0.28,<0.29",
-]
-
 dev = [
+  "anthropic>=0.71.0",
   "pre-commit",
+  "pyarrow>=19.0.0",
   "pytest",
   "pytest-asyncio",
+  "tblib",
+]
+
+test = [
+  { include-group = "dev" },
+  "datasets",
+  "pyarrow>=19.0.0",
 ]
 
 verl-liger = [
@@ -119,13 +135,23 @@ verl-liger = [
 [tool.uv]
 package = true
 default-groups = []
+conflicts = [
+  [
+    { group = "lighteval" },
+    { group = "verl-rwkv" },
+  ],
+]
 
-[tool.uv.extra-build-dependencies]
-causal-conv1d = [{ requirement = "torch", match-runtime = true }]
+[tool.uv.sources]
+flash-rwkv = { path = "src/kernel/flash-rwkv", editable = true }
+flash-linear-attention = { path = "src/kernel/fla-rwkv", editable = true }
 
-[tool.uv.extra-build-variables]
-causal-conv1d = { CAUSAL_CONV1D_FORCE_BUILD = "TRUE" }
+[tool.setuptools]
+packages = ["helicopter_cli", "helicopter_lighteval"]
 
-[tool.setuptools.packages.find]
-where = ["src/cli"]
-include = ["helicopter_cli*"]
+[tool.setuptools.package-dir]
+helicopter_cli = "src/cli/helicopter_cli"
+helicopter_lighteval = "src/eval/lighteval"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

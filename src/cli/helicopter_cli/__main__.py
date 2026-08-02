@@ -1,27 +1,30 @@
 from __future__ import annotations
 
 import argparse
+import os
+import stat
+from pathlib import Path
 
 from .commands import (
     EMB_DEVICES,
     WKV_MODES,
-    ANY2RWKV_ACTIONS,
-    ANY2RWKV_PRECISIONS,
-    build_any2rwkv_plan,
     build_infer_plan,
     build_takeoff_plan,
     prepend_venv_path,
 )
 from .config import load_config
-from .env import DEFAULT_ENV_FILE, load_env
+from .env import DEFAULT_ENV_FILE, find_env_path, load_env
 from .paths import find_root
 from .runner import run_command
 
 
-def add_common_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--config", help="TOML config path; defaults to the newest configs/local/*.toml")
-    parser.add_argument("--env-file", default=DEFAULT_ENV_FILE, help="dotenv file to load first")
-    parser.add_argument("--dry-run", action="store_true", help="print the command without executing it")
+def add_runtime_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--env-file", default=DEFAULT_ENV_FILE, help="dotenv file to load first"
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="print the command without executing it"
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -29,10 +32,19 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     infer = subparsers.add_parser("infer", help="start vLLM for an RWKV model")
-    add_common_options(infer)
+    add_runtime_options(infer)
+    infer.add_argument(
+        "--config",
+        help="serving TOML; defaults to configs/example.toml",
+    )
     infer.add_argument("model", help="model alias from configs")
     infer.add_argument("--wkv-mode", choices=WKV_MODES)
     infer.add_argument("--emb-device", choices=EMB_DEVICES)
+    infer.add_argument(
+        "--allow-fp16-accumulation",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
     infer.add_argument("--host")
     infer.add_argument("--port")
     infer.add_argument("--served-model-name")
@@ -44,41 +56,31 @@ def build_parser() -> argparse.ArgumentParser:
     infer.add_argument("--enable-auto-tool-choice", action="store_true", default=None)
     infer.set_defaults(plan_builder=build_infer_plan)
 
-    takeoff = subparsers.add_parser("takeoff", help="start verl training for an RWKV model")
-    add_common_options(takeoff)
-    takeoff.add_argument("model", help="model alias from configs")
-    takeoff.add_argument("algorithm", choices=("grpo",))
-    takeoff.add_argument("--dataset", required=True, help="dataset alias from configs")
-    takeoff.add_argument("--num-nodes", type=int)
-    takeoff.add_argument("--num-devices", type=int)
-    takeoff.add_argument("--wkv-mode", choices=WKV_MODES)
-    takeoff.add_argument("--emb-device", choices=EMB_DEVICES)
-    takeoff.add_argument("--override", action="append", help="extra Hydra override passed to verl")
+    takeoff = subparsers.add_parser(
+        "takeoff", help="launch a MaxRL experiment through Verl"
+    )
+    add_runtime_options(takeoff)
+    takeoff.add_argument("--config", required=True, help="MaxRL experiment TOML")
+    takeoff.add_argument(
+        "--override", action="append", help="operational override validated by Verl"
+    )
     takeoff.set_defaults(plan_builder=build_takeoff_plan)
 
-    any2rwkv = subparsers.add_parser("any2rwkv", help="run a registered heterogeneous distillation recipe")
-    add_common_options(any2rwkv)
-    any2rwkv.add_argument("action", choices=ANY2RWKV_ACTIONS)
-    any2rwkv.add_argument("--recipe", required=True, help="registered source-to-target distillation recipe id")
-    any2rwkv.add_argument("--source", required=True, help="read-only HF checkpoint directory, or frozen source manifest for fetch/verify")
-    any2rwkv.add_argument("--output", required=True, help="independent run output directory, or frozen source destination for fetch/verify")
-    any2rwkv.add_argument("--precision", choices=ANY2RWKV_PRECISIONS)
-    any2rwkv.add_argument("--contract", help="frozen contract.lock.json")
-    any2rwkv.add_argument("--dataset-manifest")
-    any2rwkv.add_argument("--training-config")
-    any2rwkv.add_argument("--resume")
-    any2rwkv.add_argument("--kernel-oracle", help="JSON from the managed native RWKV7 kernel validation")
-    any2rwkv.add_argument("--teacher")
-    any2rwkv.add_argument("--evaluation-manifest")
-    any2rwkv.add_argument("--p0-evidence")
-    any2rwkv.add_argument("--migration-baselines")
-    any2rwkv.add_argument("--quality-threshold-profile")
-    any2rwkv.add_argument("--ruler-scores")
-    any2rwkv.add_argument("--downstream-scores")
-    any2rwkv.add_argument("--scale-gate", help="accepted real-proxy run directory required before 397B fetch")
-    any2rwkv.add_argument("--run-id")
-    any2rwkv.add_argument("--allow-proxy-layers", action="store_true", help="permit a non-60-layer real proxy; never marks it final")
-    any2rwkv.set_defaults(plan_builder=build_any2rwkv_plan)
+    evaluate = subparsers.add_parser(
+        "eval",
+        help="run configured LightEval benchmarks",
+    )
+    evaluate.add_argument("--config", required=True, help="LightEval TOML")
+    evaluate.add_argument(
+        "--env-file",
+        default=DEFAULT_ENV_FILE,
+        help="private dotenv file; defaults to .env.local",
+    )
+    evaluate.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="validate, resolve selectors, and print a redacted plan",
+    )
 
     return parser
 
@@ -87,17 +89,79 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     root = find_root()
-    env, _ = load_env(root, args.env_file)
-    config, _ = load_config(root, args.config)
-    prepend_venv_path(env, root, config)
+    if args.command == "eval":
+        env_path = find_env_path(root, args.env_file, use_fallbacks=False)
+        if env_path is not None:
+            try:
+                env_status = env_path.lstat()
+            except OSError as error:
+                parser.error(f"cannot inspect eval private environment file: {error}")
+            if (
+                not stat.S_ISREG(env_status.st_mode)
+                or stat.S_IMODE(env_status.st_mode) != 0o600
+                or env_status.st_uid != os.geteuid()
+            ):
+                parser.error(
+                    "eval private environment file must be owned by the current "
+                    "user, have mode 0600, and be a regular non-symlink file: "
+                    f"{env_path}"
+                )
+        try:
+            eval_env, _ = load_env(
+                root,
+                args.env_file,
+                use_fallbacks=False,
+                require_private=True,
+            )
+        except (OSError, UnicodeError) as error:
+            parser.error(f"cannot securely read eval private environment file: {error}")
+        config_path = Path(args.config).expanduser()
+        if not config_path.is_absolute():
+            config_path = Path.cwd() / config_path
+        configured_python = eval_env.get("HELICOPTER_EVAL_PYTHON")
+        eval_python = (
+            Path(configured_python).expanduser()
+            if configured_python
+            else root / ".venv-lighteval/bin/python"
+        )
+        if not eval_python.is_absolute():
+            eval_python = root / eval_python
+        if not os.access(eval_python, os.X_OK):
+            parser.error(
+                f"LightEval Python executable not found: {eval_python}; "
+                "prepare the lighteval component"
+            )
+        command = [
+            str(eval_python),
+            "-m",
+            "helicopter_lighteval",
+            "--config",
+            str(config_path),
+        ]
+        if args.dry_run:
+            command.append("--dry-run")
+        return run_command(
+            command,
+            cwd=root,
+            env=eval_env,
+            shown_env={},
+            dry_run=False,
+        )
 
-    plan = args.plan_builder(args, root=root, env=env, config=config)
+    env, _ = load_env(root, args.env_file)
+    prepend_venv_path(env, root)
+
+    if args.command == "takeoff":
+        plan = args.plan_builder(args, root=root, env=env)
+    else:
+        config, _ = load_config(root, args.config)
+        plan = args.plan_builder(args, root=root, env=env, config=config)
     return run_command(
         plan.command,
         cwd=plan.cwd,
         env=plan.env,
         shown_env=plan.shown_env,
-        dry_run=args.dry_run,
+        dry_run=args.dry_run and args.command != "takeoff",
     )
 
 

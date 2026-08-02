@@ -1,28 +1,23 @@
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 from typing import Any
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover
-    import tomli as tomllib  # type: ignore[no-redef]
 
 from .env import env_value, pick
 from .paths import resolve_path
 
 
-DEFAULT_LOCAL_CONFIG_DIR = Path("configs/local")
 DEFAULT_EXAMPLE_CONFIG = Path("configs/example.toml")
 
 
 def default_config_path(root: Path) -> Path:
-    local_dir = root / DEFAULT_LOCAL_CONFIG_DIR
-    if local_dir.exists():
-        local_configs = sorted(path for path in local_dir.glob("*.toml") if path.is_file())
-        if local_configs:
-            return local_configs[-1]
     return root / DEFAULT_EXAMPLE_CONFIG
+
+
+def table(config: dict[str, Any], name: str) -> dict[str, Any]:
+    value = config.get(name, {})
+    return value if isinstance(value, dict) else {}
 
 
 def load_config(
@@ -32,22 +27,16 @@ def load_config(
     path = Path(config_path) if config_path else default_config_path(root)
     if not path.is_absolute():
         path = root / path
-    if not path.exists():
+    if not path.is_file():
         raise SystemExit(f"config file not found: {path}")
-    with path.open("rb") as file:
-        return tomllib.load(file), path
-
-
-def table(config: dict[str, Any], name: str) -> dict[str, Any]:
-    value = config.get(name, {})
-    return value if isinstance(value, dict) else {}
+    with path.open("rb") as handle:
+        return tomllib.load(handle), path
 
 
 def resolve_model_entry(config: dict[str, Any], model_name: str) -> dict[str, Any]:
     models = table(config, "models")
     seen: list[str] = []
     current_name = model_name
-
     while True:
         entry = models.get(current_name)
         if not isinstance(entry, dict):
@@ -75,43 +64,24 @@ def resolve_model_path(
     entry = resolve_model_entry(config, model_name)
     paths = table(config, "paths")
 
+    strict_checkpoint_path = env_value(env, "HELICOPTER_CHECKPOINT_PATH")
+    if strict_checkpoint_path:
+        return resolve_path(strict_checkpoint_path, root=root, env=env), entry
     if "path" in entry:
         return resolve_path(str(entry["path"]), root=root, env=env), entry
 
     filename = entry.get("file")
     if not filename:
         raise SystemExit(f"model {model_name} needs either path or file in config")
-
     base_value = pick(
         entry.get("weight_path"),
         paths.get("weight_path"),
         env_value(env, "WEIGHT_PATH", "HELICOPTER_WEIGHT_PATH"),
     )
     if not base_value:
-        raise SystemExit("WEIGHT_PATH is not set and config paths.weight_path is missing")
-
+        raise SystemExit(
+            "WEIGHT_PATH is not set and config paths.weight_path is missing"
+        )
     base = resolve_path(str(base_value), root=root, env=env)
     base_dir = base.parent if base.suffix == ".pth" else base
     return base_dir / str(filename), entry
-
-
-def dataset_root(
-    config: dict[str, Any],
-    dataset_name: str,
-    *,
-    root: Path,
-    env: dict[str, str],
-) -> Path:
-    datasets = table(config, "datasets")
-    entry = datasets.get(dataset_name)
-    paths = table(config, "paths")
-
-    if isinstance(entry, dict) and entry.get("root"):
-        return resolve_path(str(entry["root"]), root=root, env=env)
-
-    base_value = pick(
-        paths.get("datasets_path"),
-        env_value(env, "DATASETS_PATH", "HELICOPTER_DATASETS_PATH"),
-        "/workspace/Datasets",
-    )
-    return resolve_path(str(base_value), root=root, env=env) / dataset_name

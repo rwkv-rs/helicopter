@@ -1,61 +1,30 @@
-# Environment-specific values live in .env.local or .env.remote:
-# WEIGHT_PATH, DATASETS_PATH, GPU counts, venv paths, and machine-local paths.
-# Select experiments with --config; without --config, the CLI uses the newest
-# configs/local/*.toml file.
+# Helicopter only owns serving launch settings. Training configs live with
+# their implementation in src/train/verl-rwkv.
 
-[infer]
-enable_auto_tool_choice = false
-
-[any2rwkv]
-recipe = "qwen35_to_rwkv7"
-rwkv_hf_sha = "15cd7d7e896efe852f6994a22c34fd14cb60c2c6"
-rwkv_lm_sha = "81908e5e3ad9ee45a57149758f7ef92a1b50b11d"
-precision = "fp32io16"
-
-[paths]
-rwkv_hf_path = "src/train/rwkv-hf"
-rwkv_lm_path = "src/train/rwkv-lm"
-
-[takeoff.grpo]
-project_name = "verl_rwkv_grpo"
-experiment_name = "rwkv7_grpo_vllm"
-wkv_mode = "fp32io16"
-emb_device = "gpu"
-train_batch_size = 56
-ppo_mini_batch_size = 56
-ppo_micro_batch_size = 1
-max_prompt_length = 1024
-max_response_length = 7168
-ppo_max_token_len_per_gpu = 8192
-rwkv_use_dynamic_bsz = false
-actor_lr = "1e-5"
-reward_function = "math_verify"
-rollout_n = 8
-trainer_n_gpus_per_node = 7
-rollout_n_gpus_per_node = 1
-rollout_mode = "async"
-rollout_tensor_parallel_size = 1
-rollout_data_parallel_size = 1
-rollout_pipeline_parallel_size = 1
-rollout_checkpoint_engine_backend = "nccl"
-rollout_correction_bypass_mode = true
-total_epochs = 2
-save_freq = 20
-test_freq = -1
-val_n = 4
-val_before_train = true
-rwkv_generation_prompt = "open_think"
-val_rwkv_generation_prompt = "open_think"
-
-[datasets.gsm8k]
-# When root is omitted, the CLI uses ${DATASETS_PATH}/gsm8k.
+[models."g1h-1.5b"]
+path = "${WEIGHT_PATH}/rwkv7/pth/rwkv7-g1h-1.5b-20260710-ctx10240.pth"
+served_model_name = "g1h-1.5b"
+max_model_len = 10240
+max_num_seqs = 2560
+max_num_batched_tokens = 2560
 
 [models."g1g-1.5b"]
-file = "rwkv7-g1g-1.5b-20260526-ctx8192.pth"
+path = "${WEIGHT_PATH}/rwkv7-g1g-1.5b-20260526-ctx8192.pth"
 served_model_name = "g1g-1.5b"
 max_model_len = 8192
+max_num_seqs = 2560
+max_num_batched_tokens = 2560
 
 [models."g1g-7.2b"]
-file = "rwkv7-g1g-7.2b-20260523-ctx8192.pth"
+path = "${WEIGHT_PATH}/rwkv7-g1g-7.2b-20260603-ctx8192.pth"
 served_model_name = "g1g-7.2b"
 max_model_len = 8192
+max_num_seqs = 1280
+max_num_batched_tokens = 1280
+
+[infer]
+wkv_mode = "fp32io16"
+
+[runtime]
+host = "0.0.0.0"
+port = 8000

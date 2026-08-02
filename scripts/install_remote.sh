@@ -56,16 +56,17 @@ REMOTE_SSH_HOST="${REMOTE_SSH_HOST:-$REMOTE_WORKSPACE_ID.devpod}"
 REMOTE_ROOT="${REMOTE_ROOT:-/workspace/Projects/MachineLearning/helicopter}"
 REMOTE_VENV="${REMOTE_VENV:-$REMOTE_ROOT/.venv}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
-INSTALL_COMPONENTS="${INSTALL_COMPONENTS:-any2rwkv,dev}"
+INSTALL_COMPONENTS="${INSTALL_COMPONENTS:-rwkv-lm,vllm-rwkv,verl-rwkv,lighteval,dev}"
 UPDATE_UV="${UPDATE_UV:-0}"
 UV_UPGRADE="${UV_UPGRADE:-0}"
 RUN_PIP_CHECK="${RUN_PIP_CHECK:-1}"
 UV_SYNC_INEXACT="${UV_SYNC_INEXACT:-1}"
 VLLM_TARGET_DEVICE="${VLLM_TARGET_DEVICE:-cuda}"
 VLLM_BUILD_PROFILE="${VLLM_BUILD_PROFILE:-rwkv}"
-VLLM_VERSION_OVERRIDE="${VLLM_VERSION_OVERRIDE:-0.11.2.dev278+gdbc3d9991}"
+VLLM_VERSION_OVERRIDE="${VLLM_VERSION_OVERRIDE:-}"
 VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED:-0}"
 VLLM_REBUILD="${VLLM_REBUILD:-auto}"
+FLASH_RWKV_REBUILD="${FLASH_RWKV_REBUILD:-auto}"
 VERL_REINSTALL="${VERL_REINSTALL:-auto}"
 CMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-RelWithDebInfo}"
 BUILD_TMPDIR="${BUILD_TMPDIR:-$REMOTE_ROOT/.tmp}"
@@ -104,15 +105,24 @@ validate_install_components() {
   ((${#components[@]} > 0)) || die "INSTALL_COMPONENTS must select at least one dependency group"
   for component in "${components[@]}"; do
     case "$component" in
-      any2rwkv | dev | vllm-rwkv | verl-rwkv | rwkv-lm | verl-liger) ;;
+      dev | flash-rwkv | fla-rwkv | vllm-rwkv | verl-rwkv | rwkv-lm | verl-liger | lighteval | scoreboard-server | scoreboard-client) ;;
       full)
         die "INSTALL_COMPONENTS=full is disabled; select explicit dependency groups"
         ;;
       *)
-        die "unknown INSTALL_COMPONENTS entry '$component'; use a comma-separated subset of any2rwkv,dev,vllm-rwkv,verl-rwkv,rwkv-lm,verl-liger"
+        die "unknown INSTALL_COMPONENTS entry '$component'; use a comma-separated subset of dev,flash-rwkv,fla-rwkv,vllm-rwkv,verl-rwkv,rwkv-lm,verl-liger,lighteval,scoreboard-server,scoreboard-client"
         ;;
     esac
   done
+}
+
+validate_uv_upgrade() {
+  case "$UV_UPGRADE" in
+    0 | lock | 1) ;;
+    *)
+      die "UV_UPGRADE=$UV_UPGRADE is invalid; use 0 for locked sync, lock to refresh lockfiles without a broad upgrade, or 1 for a broad upgrade"
+      ;;
+  esac
 }
 
 case "${INSTALL_PROFILE:-}" in
@@ -128,6 +138,7 @@ esac
 [[ "$VLLM_BUILD_PROFILE" == "rwkv" ]] ||
   die "VLLM_BUILD_PROFILE=$VLLM_BUILD_PROFILE is disabled; only rwkv is supported"
 validate_install_components
+validate_uv_upgrade
 
 have() {
   command -v "$1" >/dev/null 2>&1
@@ -265,6 +276,7 @@ sync_remote_repo() {
     --exclude '.git/' \
     --exclude '.git' \
     --exclude '.venv/' \
+    --exclude '.venv-lighteval/' \
     --exclude '.env' \
     --exclude '.env.local' \
     --exclude '__pycache__/' \
@@ -308,6 +320,7 @@ remote_env_args() {
     "VLLM_VERSION_OVERRIDE=$VLLM_VERSION_OVERRIDE"
     "VLLM_USE_PRECOMPILED=$VLLM_USE_PRECOMPILED"
     "VLLM_REBUILD=$VLLM_REBUILD"
+    "FLASH_RWKV_REBUILD=$FLASH_RWKV_REBUILD"
     "VERL_REINSTALL=$VERL_REINSTALL"
     "CMAKE_BUILD_TYPE=$CMAKE_BUILD_TYPE"
     "BUILD_TMPDIR=$BUILD_TMPDIR"

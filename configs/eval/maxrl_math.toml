@@ -1,0 +1,17 @@
+schema_version = 1
+backend = "vllm_http"
+prompt_template = "bot"
+
+# Training validation is local: do not call the Scoreboard API or publish to its
+# backend. Verl supplies both paths for the current checkpoint invocation.
+publish = false
+result_path = "${MAXRL_EVAL_RESULT_PATH}"
+weights = ["${MAXRL_EVAL_WEIGHT}"]
+wkv_modes = ["fp32io16"]
+
+benchmarks = [
+  "aime25",
+  "gsm8k",
+  "asdiv",
+  "math_500",
+]

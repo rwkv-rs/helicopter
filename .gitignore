@@ -14,9 +14,11 @@ __pycache__/
 htmlcov/
 
 .venv/
+.venv-lighteval/
 venv/
 env/
 .uv/
+.tmp/
 
 .agents/skills/
 
@@ -24,7 +26,6 @@ build/
 dist/
 *.egg-info/
 
-configs/local/
 
 /logs/
 /runs/

@@ -1,0 +1,299 @@
+:root {
+  color-scheme: dark;
+  --background: #080b10;
+  --surface: #10161f;
+  --surface-raised: #172130;
+  --border: #2b394d;
+  --text: #f3f6fb;
+  --muted: #a8b5c7;
+  --accent: #80adff;
+  --danger: #ff8197;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  background: var(--background);
+  color: var(--text);
+  margin: 0;
+}
+
+button,
+select {
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font: inherit;
+  padding: 7px 10px;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.app-shell {
+  margin: 0 auto;
+  max-width: 1800px;
+  padding: 24px;
+}
+
+.app-header,
+.section-head,
+.sample-card > header,
+.pager {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.app-header {
+  margin-bottom: 20px;
+}
+
+.app-header h1,
+.section-head h2,
+.card h2 {
+  margin: 0;
+}
+
+.subtitle,
+.section-head p,
+.missing,
+.completion-flags,
+.metadata-grid {
+  color: var(--muted);
+}
+
+.page-nav {
+  display: flex;
+  gap: 8px;
+}
+
+.page-nav a {
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--muted);
+  padding: 8px 12px;
+  text-decoration: none;
+}
+
+.page-nav a.active {
+  background: var(--surface-raised);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.stack {
+  display: grid;
+  gap: 18px;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px;
+}
+
+.filters {
+  display: flex;
+  gap: 12px;
+}
+
+.filters label,
+.outcome-filter {
+  color: var(--muted);
+  display: grid;
+  font-size: 12px;
+  gap: 4px;
+}
+
+.tag-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 14px;
+}
+
+.tag-tab {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  padding: 5px 10px;
+}
+
+.tag-tab.active {
+  background: var(--surface-raised);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.table-scroll {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-top: 16px;
+  max-height: 68vh;
+  overflow: auto;
+}
+
+table {
+  border-collapse: collapse;
+  font-size: 13px;
+  width: 100%;
+}
+
+th,
+td {
+  border-bottom: 1px solid var(--border);
+  padding: 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+th {
+  background: var(--surface-raised);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.task-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  max-width: 340px;
+  overflow-wrap: anywhere;
+}
+
+.metric-button,
+.link-button {
+  background: transparent;
+  border: 0;
+  color: var(--accent);
+  padding: 0;
+}
+
+.metric-button {
+  display: grid;
+  gap: 5px;
+  min-width: 100px;
+  text-align: left;
+}
+
+.native-metrics {
+  display: grid;
+  gap: 5px;
+}
+
+.native-metric {
+  display: grid;
+  gap: 1px;
+}
+
+.native-metric small {
+  color: var(--muted);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.metadata-grid {
+  display: grid;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  gap: 6px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  margin: 14px 0;
+}
+
+.outcome-filter {
+  margin: 12px 0;
+  width: 220px;
+}
+
+.sample-card {
+  border-top: 1px solid var(--border);
+  padding: 18px 0;
+}
+
+.sample-card dl,
+.completion dl {
+  display: grid;
+  grid-template-columns: 140px minmax(0, 1fr);
+  margin: 12px 0;
+}
+
+dt {
+  color: var(--muted);
+  padding: 7px 0;
+}
+
+dd {
+  margin: 0;
+  min-width: 0;
+}
+
+pre {
+  background: #070a0e;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin: 3px 0;
+  max-height: 320px;
+  overflow: auto;
+  padding: 9px;
+  white-space: pre-wrap;
+}
+
+.completion {
+  background: var(--surface-raised);
+  border-radius: 8px;
+  margin: 10px 0;
+  padding: 12px;
+}
+
+.completion h4 {
+  margin: 0;
+}
+
+.completion-flags {
+  display: flex;
+  font-size: 12px;
+  gap: 14px;
+  margin-top: 4px;
+}
+
+.pager {
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
+
+.error-bar {
+  color: var(--danger);
+}
+
+.empty {
+  color: var(--muted);
+  padding: 32px;
+  text-align: center;
+}
+
+@media (max-width: 800px) {
+  .app-header,
+  .section-head {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .sample-card dl,
+  .completion dl {
+    display: block;
+  }
+}
