@@ -1,16 +1,24 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 
-from any2rwkv.configuration_any2rwkv import AnyToRWKVConfig
+from any2rwkv.configuration_any2rwkv import (
+    AnyToRWKVConfig,
+    AnyToRWKVHybridConfig,
+)
 from any2rwkv.contract import build_target_config
 from any2rwkv.fixture import tiny_qwen35_config
 from any2rwkv.kernel import Rwkv7OperatorAdapter
 from any2rwkv.mixer import apply_partial_rope
-from any2rwkv.modeling_any2rwkv import AnyToRWKVForCausalLM
+from any2rwkv.modeling_any2rwkv import (
+    AnyToRWKVForCausalLM,
+    AnyToRWKVHybridForCausalLM,
+    AnyToRWKVPreservedGDN,
+)
 
 
 class ModelingTests(unittest.TestCase):
@@ -98,6 +106,100 @@ class ModelingTests(unittest.TestCase):
                 pieces.append(output.logits)
         torch.testing.assert_close(full, torch.cat(pieces, dim=1), rtol=1e-5, atol=1e-5)
         self.assertGreater(self.operator_calls, 0)
+
+    def test_product_training_loss_backward_preserves_recurrent_cache_storage(
+        self,
+    ) -> None:
+        torch.manual_seed(9)
+        model = AnyToRWKVForCausalLM(self.config()).train()
+        input_ids = torch.tensor([[1, 2, 3, 4]])
+
+        output = model(input_ids, labels=input_ids, use_cache=False)
+        self.assertIsNotNone(output.loss)
+        assert output.loss is not None
+        output.loss.backward()
+
+        gradients = [
+            parameter.grad
+            for parameter in model.parameters()
+            if parameter.requires_grad and parameter.grad is not None
+        ]
+        self.assertTrue(gradients)
+        self.assertTrue(all(torch.isfinite(gradient).all() for gradient in gradients))
+
+    def test_preserved_gdn_matches_qwen_source_and_cached_continuation(
+        self,
+    ) -> None:
+        from transformers.models.qwen3_5.modeling_qwen3_5 import (
+            Qwen3_5GatedDeltaNet,
+            torch_chunk_gated_delta_rule,
+            torch_recurrent_gated_delta_rule,
+        )
+
+        source_config = tiny_qwen35_config(layers=1, moe=False)
+        source_config["mtp_num_hidden_layers"] = 0
+        target_payload = build_target_config(
+            source_config,
+            converted_layers=0,
+            require_final_layers=False,
+        )
+        target_config = AnyToRWKVHybridConfig(**target_payload)
+        source = Qwen3_5GatedDeltaNet(SimpleNamespace(**source_config), 0).eval()
+        source.chunk_gated_delta_rule = torch_chunk_gated_delta_rule
+        source.recurrent_gated_delta_rule = torch_recurrent_gated_delta_rule
+        preserved = AnyToRWKVPreservedGDN(target_config).eval()
+        preserved.load_state_dict(source.state_dict(), strict=True)
+        torch.manual_seed(13)
+        hidden = torch.randn(2, 5, target_config.hidden_size)
+
+        with torch.no_grad():
+            expected = source(hidden)
+            actual = preserved.forward_sequence(hidden)
+        torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-5)
+
+        model = AnyToRWKVHybridForCausalLM(target_config).eval()
+        model.model.layers[0].linear_attn.load_state_dict(
+            source.state_dict(), strict=True
+        )
+        input_ids = torch.tensor([[1, 2, 3, 4, 5]])
+        with torch.no_grad():
+            complete = model(input_ids, use_cache=True).logits
+            first = model(input_ids[:, :2], use_cache=True)
+            resumed_output = model(
+                input_ids[:, 2:],
+                past_key_values=first.past_key_values,
+                use_cache=True,
+            )
+        torch.testing.assert_close(
+            torch.cat((first.logits, resumed_output.logits), dim=1),
+            complete,
+            rtol=2e-5,
+            atol=2e-5,
+        )
+
+        cache = resumed_output.past_key_values
+        cache.reset()
+        self.assertEqual(cache.histories[0][0].shape, (1, 0, target_config.hidden_size))
+        self.assertEqual(cache.history_positions[0][0].shape, (1, 0))
+        with torch.no_grad():
+            after_reset = model(
+                input_ids,
+                past_key_values=cache,
+                use_cache=True,
+            )
+        torch.testing.assert_close(after_reset.logits, complete, rtol=2e-5, atol=2e-5)
+
+        cache = after_reset.past_key_values
+        cache.crop(0)
+        self.assertEqual(cache.histories[0][0].shape, (1, 0, target_config.hidden_size))
+        self.assertEqual(cache.history_positions[0][0].shape, (1, 0))
+        with torch.no_grad():
+            after_crop = model(
+                input_ids,
+                past_key_values=cache,
+                use_cache=True,
+            )
+        torch.testing.assert_close(after_crop.logits, complete, rtol=2e-5, atol=2e-5)
 
     def test_product_forward_fails_closed_when_recurrent_contract_is_missing(
         self,

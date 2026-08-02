@@ -221,6 +221,12 @@ def test_distribution_binding_requires_exact_vcs_url_and_revision(
         "https://github.com/rwkv-rs/transformers-rwkv.git?ref=main",
         "https://github.com/rwkv-rs/transformers-rwkv.git#main",
         "https://gitlab.com/rwkv-rs/transformers-rwkv.git",
+        " https://github.com/rwkv-rs/transformers-rwkv.git",
+        "https://github.com/rwkv-rs/transformers-rwkv.git ",
+        "https://github.com/rwkv-rs/transformers-\trwkv.git",
+        "https://github.com/rwkv-rs/transformers-rwkv.git\nignored",
+        "https://github.com/rwkv-rs/transformers-rwkv.git\x00ignored",
+        "https://github.com/rwkv-rs/transformers-rwkv.git\x7f",
     ],
 )
 def test_github_repository_canonicalizer_rejects_hostile_urls(url: str) -> None:

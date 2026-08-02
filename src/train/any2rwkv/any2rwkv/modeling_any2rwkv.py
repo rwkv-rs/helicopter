@@ -35,6 +35,24 @@ class AnyToRWKVRMSNorm(nn.Module):
         return (normalized * (1.0 + self.weight.float())).type_as(value)
 
 
+class AnyToRWKVPreservedRMSNormGated(nn.Module):
+    """Preserve Qwen3.5's gated RMSNorm parameter and operation semantics."""
+
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, value: Tensor, gate: Tensor) -> Tensor:
+        input_dtype = value.dtype
+        normalized = value.float()
+        variance = normalized.pow(2).mean(-1, keepdim=True)
+        normalized = normalized * torch.rsqrt(variance + self.eps)
+        normalized = self.weight * normalized.to(input_dtype)
+        normalized = normalized * nn.functional.silu(gate.float())
+        return normalized.to(input_dtype)
+
+
 class AnyToRWKVDenseMLP(nn.Module):
     def __init__(self, config: AnyToRWKVConfig):
         super().__init__()
@@ -260,6 +278,7 @@ class AnyToRWKVPreservedGDN(nn.Module):
         self.value_dim = self.num_value_heads * self.value_head_dim
         self.conv_dim = self.key_dim * 2 + self.value_dim
         self.conv_kernel_size = int(source.get("linear_conv_kernel_dim", 4))
+        self.activation = ACT2FN[config.hidden_act]
         self.in_proj_qkv = nn.Linear(hidden, self.conv_dim, bias=False)
         self.in_proj_z = nn.Linear(hidden, self.value_dim, bias=False)
         self.in_proj_b = nn.Linear(hidden, self.num_value_heads, bias=False)
@@ -273,7 +292,9 @@ class AnyToRWKVPreservedGDN(nn.Module):
         )
         self.dt_bias = nn.Parameter(torch.zeros(self.num_value_heads))
         self.A_log = nn.Parameter(torch.zeros(self.num_value_heads))
-        self.norm = AnyToRWKVRMSNorm(self.value_head_dim, eps=config.rms_norm_eps)
+        self.norm = AnyToRWKVPreservedRMSNormGated(
+            self.value_head_dim, eps=config.rms_norm_eps
+        )
         self.out_proj = nn.Linear(self.value_dim, hidden, bias=False)
 
     def forward_sequence(self, hidden: Tensor) -> Tensor:
@@ -286,7 +307,7 @@ class AnyToRWKVPreservedGDN(nn.Module):
             groups=self.conv_dim,
         )[:, :, :tokens]
         query, key, value = torch.split(
-            nn.functional.silu(projected.transpose(1, 2)),
+            self.activation(projected.transpose(1, 2)),
             [self.key_dim, self.key_dim, self.value_dim],
             dim=-1,
         )
@@ -298,9 +319,12 @@ class AnyToRWKVPreservedGDN(nn.Module):
             raise ValueError("preserved GDN key heads do not divide value heads")
         query = query.repeat_interleave(groups, dim=2)
         key = key.repeat_interleave(groups, dim=2)
-        query = nn.functional.normalize(query.float(), dim=-1)
-        key = nn.functional.normalize(key.float(), dim=-1)
-        beta = torch.sigmoid(self.in_proj_b(hidden).float())
+        query = query.float()
+        query = query * torch.rsqrt(query.square().sum(dim=-1, keepdim=True) + 1e-6)
+        query = query * self.key_head_dim**-0.5
+        key = key.float()
+        key = key * torch.rsqrt(key.square().sum(dim=-1, keepdim=True) + 1e-6)
+        beta = torch.sigmoid(self.in_proj_b(hidden))
         decay = torch.exp(
             -self.A_log.float().exp()
             * nn.functional.softplus(self.in_proj_a(hidden).float() + self.dt_bias)
@@ -317,16 +341,15 @@ class AnyToRWKVPreservedGDN(nn.Module):
         for token in range(tokens):
             current_key = key[:, token]
             current_value = value[:, token].float()
+            state = decay[:, token, :, None, None] * state
             prediction = torch.einsum("bhk,bhkv->bhv", current_key, state)
-            correction = beta[:, token, :, None] * (current_value - prediction)
-            state = decay[:, token, :, None, None] * state + torch.einsum(
-                "bhk,bhv->bhkv", current_key, correction
-            )
+            correction = beta[:, token, :, None].float() * (current_value - prediction)
+            state = state + torch.einsum("bhk,bhv->bhkv", current_key, correction)
             rows.append(torch.einsum("bhk,bhkv->bhv", query[:, token], state))
         output = torch.stack(rows, dim=1).to(hidden.dtype)
-        output = self.norm(output)
-        gate = nn.functional.silu(self.in_proj_z(hidden)).view_as(output)
-        return self.out_proj((output * gate).reshape(batch, tokens, self.value_dim))
+        gate = self.in_proj_z(hidden).view_as(output)
+        output = self.norm(output, gate)
+        return self.out_proj(output.reshape(batch, tokens, self.value_dim))
 
 
 @dataclass
@@ -372,10 +395,10 @@ class AnyToRWKVCache(Cache):
         for value in (*self.states, *self.previous):
             value.zero_()
         self.histories = [
-            [row[:0] for row in layer_rows] for layer_rows in self.histories
+            [row[:, :0] for row in layer_rows] for layer_rows in self.histories
         ]
         self.history_positions = [
-            [row[:0] for row in layer_rows] for layer_rows in self.history_positions
+            [row[:, :0] for row in layer_rows] for layer_rows in self.history_positions
         ]
         self.seen_tokens = 0
 
@@ -504,6 +527,8 @@ class AnyToRWKVDecoderLayer(nn.Module):
                     device=hidden.device,
                     dtype=hidden.dtype,
                 )
+            next_state = cache.states[self.layer_index].detach().clone()
+            next_previous = cache.previous[self.layer_index].detach().clone()
             for row in range(hidden.shape[0]):
                 indices = torch.nonzero(valid[row], as_tuple=False).flatten()
                 if not indices.numel():
@@ -528,10 +553,10 @@ class AnyToRWKVDecoderLayer(nn.Module):
                 mixed[row].index_copy_(0, indices, output[0])
                 if self.layer_index == 0:
                     next_v_first[row].index_copy_(0, indices, candidate_v_first[0])
-                cache.states[self.layer_index][row : row + 1].copy_(
-                    final_state.detach()
-                )
-                cache.previous[self.layer_index][row].copy_(row_input[0, -1].detach())
+                next_state[row : row + 1].copy_(final_state.detach())
+                next_previous[row].copy_(row_input[0, -1].detach())
+            cache.states[self.layer_index] = next_state
+            cache.previous[self.layer_index] = next_previous
         else:
             for row in range(hidden.shape[0]):
                 indices = torch.nonzero(valid[row], as_tuple=False).flatten()

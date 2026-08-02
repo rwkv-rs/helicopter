@@ -124,6 +124,23 @@ class ContractTests(unittest.TestCase):
         self.assertFalse(target["any_to_rwkv"]["final_recurrent"])
         self.assertEqual(target["mixer_types"].count("rwkv7"), 17)
 
+    def test_final_and_proxy_configs_reject_preserved_source_mixers(self) -> None:
+        payload = {
+            "num_hidden_layers": 1,
+            "mixer_types": ["full_attention"],
+        }
+        for config_class in (AnyToRWKVConfig, AnyToRWKVProxyConfig):
+            with (
+                self.subTest(config_class=config_class.__name__),
+                self.assertRaisesRegex(
+                    ValueError, "requires every mixer_type to be rwkv7"
+                ),
+            ):
+                config_class(**payload)
+
+        hybrid = AnyToRWKVHybridConfig(**payload)
+        self.assertEqual(hybrid.mixer_types, ["full_attention"])
+
     def test_multimodal_unknown_and_non_60_layouts_are_rejected(self) -> None:
         source = tiny_qwen35_config()
         source["vision_config"] = {"depth": 1}
@@ -438,19 +455,21 @@ class ContractTests(unittest.TestCase):
                     injected = True
                     raise RuntimeError("injected export crash")
 
-            with mock.patch(
-                "any2rwkv.export.write_json", side_effect=crash_after_progress
+            with (
+                mock.patch(
+                    "any2rwkv.export.write_json", side_effect=crash_after_progress
+                ),
+                self.assertRaisesRegex(RuntimeError, "injected"),
             ):
-                with self.assertRaisesRegex(RuntimeError, "injected"):
-                    export_hf_checkpoint(
-                        source,
-                        interrupted,
-                        target_config=target_config,
-                        target_specs=specs,
-                        max_shard_bytes=64 * 1024,
-                        resume_partial=True,
-                        external_resume_binding={"mixer_fingerprint": "a" * 64},
-                    )
+                export_hf_checkpoint(
+                    source,
+                    interrupted,
+                    target_config=target_config,
+                    target_specs=specs,
+                    max_shard_bytes=64 * 1024,
+                    resume_partial=True,
+                    external_resume_binding={"mixer_fingerprint": "a" * 64},
+                )
             self.assertTrue((interrupted / ".export-progress.json").is_file())
             with self.assertRaisesRegex(ContractError, "resume binding differs"):
                 export_hf_checkpoint(

@@ -11,6 +11,7 @@ import torch
 
 from any2rwkv.checkpoint import read_checkpoint
 from any2rwkv.configuration_any2rwkv import (
+    AnyToRWKVConfig,
     AnyToRWKVHybridConfig,
     AnyToRWKVProxyConfig,
 )
@@ -342,3 +343,51 @@ def test_config_rejects_checkpoint_local_loader() -> None:
                 "AutoModelForCausalLM": ("modeling_any2rwkv.AnyToRWKVProxyForCausalLM")
             }
         )
+
+
+@pytest.mark.parametrize(
+    ("config_class", "model_type", "architecture"),
+    (
+        (AnyToRWKVConfig, "any_to_rwkv", "AnyToRWKVForCausalLM"),
+        (
+            AnyToRWKVProxyConfig,
+            "any_to_rwkv_proxy",
+            "AnyToRWKVProxyForCausalLM",
+        ),
+    ),
+)
+def test_fresh_config_load_rejects_preserved_mixer_under_recurrent_identity(
+    tmp_path: Path,
+    config_class,
+    model_type: str,
+    architecture: str,
+) -> None:
+    artifact = tmp_path / model_type
+    artifact.mkdir()
+    payload = config_class(num_hidden_layers=1, mixer_types=["rwkv7"]).to_dict()
+    payload.update(
+        {
+            "model_type": model_type,
+            "architectures": [architecture],
+            "mixer_types": ["full_attention"],
+        }
+    )
+    (artifact / "config.json").write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+    script = """
+import sys
+
+import any2rwkv
+from transformers import AutoConfig
+
+any2rwkv.register_any_to_rwkv_auto_classes()
+try:
+    AutoConfig.from_pretrained(sys.argv[1])
+except ValueError as error:
+    assert "requires every mixer_type to be rwkv7" in str(error), error
+else:
+    raise AssertionError("hostile recurrent identity was accepted")
+"""
+    subprocess.run([sys.executable, "-c", script, str(artifact)], check=True)

@@ -2,11 +2,19 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit
 
+_ASCII_WHITESPACE = " \t\n\r\v\f"
+
 
 def canonical_github_repository(value: object) -> str:
     """Canonicalize one strict ASCII GitHub owner/repository URL."""
     if not isinstance(value, str) or not value or not value.isascii():
         raise ValueError("GitHub repository URL must be non-empty ASCII text")
+    if value != value.strip(_ASCII_WHITESPACE) or any(
+        ord(character) < 0x20 or ord(character) == 0x7F for character in value
+    ):
+        raise ValueError(
+            "GitHub repository URL contains ASCII whitespace or control text"
+        )
     raw = value
     if raw.startswith("git+"):
         raw = raw.removeprefix("git+")

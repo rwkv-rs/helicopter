@@ -90,6 +90,11 @@ class AnyToRWKVConfig(AnyToRWKVConfigBase):
     def __init__(self, **kwargs):
         kwargs.setdefault("architectures", [ANY_TO_RWKV_ARCHITECTURE])
         super().__init__(**kwargs)
+        if any(mixer_type != "rwkv7" for mixer_type in self.mixer_types):
+            raise ValueError(
+                "final Any-to-RWKV config requires every mixer_type to be rwkv7; "
+                "preserved source mixers require AnyToRWKVHybridConfig"
+            )
 
 
 class AnyToRWKVProxyConfig(AnyToRWKVConfigBase):
@@ -100,6 +105,11 @@ class AnyToRWKVProxyConfig(AnyToRWKVConfigBase):
     def __init__(self, **kwargs):
         kwargs.setdefault("architectures", ["AnyToRWKVProxyForCausalLM"])
         super().__init__(**kwargs)
+        if any(mixer_type != "rwkv7" for mixer_type in self.mixer_types):
+            raise ValueError(
+                "proxy Any-to-RWKV config requires every mixer_type to be rwkv7; "
+                "preserved source mixers require AnyToRWKVHybridConfig"
+            )
 
 
 class AnyToRWKVHybridConfig(AnyToRWKVConfigBase):
