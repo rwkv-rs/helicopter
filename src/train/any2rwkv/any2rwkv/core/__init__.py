@@ -19,6 +19,13 @@ from .layer_major_contract import (
     assert_layer_major_isolation,
     canonical_digest,
 )
+from .mapping_contract import (
+    CalibrationDevelopmentFinalSplit,
+    CandidateSelection,
+    MaterializedTarget,
+    SourceConsumption,
+    StrictMappingLedger,
+)
 from .registry import AdapterRecipeRegistry, ResolvedRecipe
 
 if TYPE_CHECKING:
@@ -71,6 +78,8 @@ def __getattr__(name: str) -> object:
 __all__ = [
     "AdapterRecipeRegistry",
     "ArchitectureInspection",
+    "CalibrationDevelopmentFinalSplit",
+    "CandidateSelection",
     "DistillationExecutionRequest",
     "DistillationRecipe",
     "ExperimentTracker",
@@ -79,9 +88,12 @@ __all__ = [
     "LayerInputCacheEstimate",
     "LayerInputCacheReader",
     "LayerMajorResumeContract",
+    "MaterializedTarget",
     "PerformanceProfileCacheRequest",
     "ResolvedRecipe",
     "SourceArchitectureAdapter",
+    "SourceConsumption",
+    "StrictMappingLedger",
     "TargetArchitectureAdapter",
     "activate_layer_major_training",
     "assert_layer_major_isolation",
