@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 import torch
-
 from any2rwkv.checkpoint import read_checkpoint
 from any2rwkv.contract import build_target_config
 from any2rwkv.errors import ContractError
@@ -43,6 +42,25 @@ def _tiny_config() -> dict[str, object]:
         head_size=4,
         dtype="float32",
     )
+
+
+def test_public_builder_fails_closed_without_rwkv7_interface(monkeypatch) -> None:
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers.models.rwkv7.configuration_rwkv7",
+        None,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers.models.rwkv7.modeling_rwkv7",
+        None,
+    )
+
+    with pytest.raises(
+        ContractError,
+        match="public Rwkv7Config/Rwkv7ForCausalLM interface",
+    ):
+        _tiny_config()
 
 
 def test_private_qwen_shell_export_cannot_claim_public_rwkv7(
@@ -137,9 +155,11 @@ def test_community_export_lists_missing_private_pipeline_weights_before_writing(
         )
 
     message = str(raised.value)
-    assert "missing=" in message
+    assert "public Rwkv7ForCausalLM strict state_dict load failed" in message
+    assert "Missing key(s) in state_dict" in message
     assert "model.embeddings.weight" in message
-    assert "unexpected=['model.layers.0.attn.r_k']" in message
+    assert "Unexpected key(s) in state_dict" in message
+    assert "model.layers.0.attn.r_k" in message
     assert not output.exists()
 
 
@@ -148,6 +168,8 @@ def test_community_export_fresh_auto_model_strict_weight_and_logits_roundtrip(
 ) -> None:
     Rwkv7Config, Rwkv7ForCausalLM = _community_classes()
     config_payload = _tiny_config()
+    public_config = Rwkv7Config.from_dict(config_payload)
+    assert config_payload == public_config.to_diff_dict()
     torch.manual_seed(20260801)
     source = Rwkv7ForCausalLM(Rwkv7Config.from_dict(config_payload)).eval()
     input_ids = torch.tensor([[1, 2, 3, 4]])
@@ -189,10 +211,16 @@ from transformers import AutoModelForCausalLM
 
 artifact, expected_path = sys.argv[1:]
 expected = torch.load(expected_path, map_location="cpu", weights_only=True)
-model = AutoModelForCausalLM.from_pretrained(artifact).eval()
+model, loading_info = AutoModelForCausalLM.from_pretrained(
+    artifact,
+    output_loading_info=True,
+)
+model = model.eval()
 
 assert model.__class__.__name__ == "Rwkv7ForCausalLM"
 assert model.base_model_prefix == "model"
+for name in ("missing_keys", "unexpected_keys", "mismatched_keys", "error_msgs"):
+    assert not loading_info.get(name), (name, loading_info.get(name))
 actual_state = model.state_dict()
 assert actual_state.keys() == expected["state_dict"].keys()
 for name, tensor in expected["state_dict"].items():

@@ -20,8 +20,7 @@ from .transformers_rwkv7 import (
     TRANSFORMERS_RWKV7_ARCHITECTURE,
     TRANSFORMERS_RWKV7_ARTIFACT_CONTRACT,
     TRANSFORMERS_RWKV7_MODEL_TYPE,
-    validate_transformers_rwkv7_config,
-    validate_transformers_rwkv7_state_dict,
+    materialize_transformers_rwkv7_model,
 )
 
 HF_RUNTIME_MODULES = (
@@ -200,63 +199,32 @@ def export_transformers_rwkv7_checkpoint(
         raise ContractError(
             f"Transformers RWKV-7 export directory must be empty: {output}"
         )
-    validated_config = validate_transformers_rwkv7_config(config)
-    expected_shapes = validate_transformers_rwkv7_state_dict(
-        validated_config, state_dict
+    validated_config, model, expected_shapes = materialize_transformers_rwkv7_model(
+        config, state_dict
     )
 
     output.mkdir(parents=True, exist_ok=True)
-    weight_map: dict[str, str] = {}
-    shard_files: list[str] = []
-    buffer: dict[str, torch.Tensor] = {}
-    buffer_bytes = 0
-    total_weight_bytes = 0
-
-    def flush() -> None:
-        nonlocal buffer, buffer_bytes
-        if not buffer:
-            return
-        filename, entries = _flush_shard(output, len(shard_files) + 1, buffer)
-        shard_files.append(filename)
-        weight_map.update(entries)
-        buffer = {}
-        buffer_bytes = 0
-
-    for name in sorted(expected_shapes):
-        tensor = state_dict[name]
-        size = tensor.numel() * tensor.element_size()
-        if buffer and buffer_bytes + size > max_shard_bytes:
-            flush()
-        buffer[name] = tensor.detach().cpu().contiguous().clone()
-        buffer_bytes += size
-        total_weight_bytes += size
-    flush()
-
-    total = len(shard_files)
-    renamed: dict[str, str] = {}
-    for index, old in enumerate(shard_files, start=1):
-        new = f"model-{index:05d}-of-{total:05d}.safetensors"
-        (output / old).rename(output / new)
-        renamed[old] = new
-    weight_map = {
-        name: renamed[filename] for name, filename in weight_map.items()
-    }
-    write_json(
-        output / "model.safetensors.index.json",
-        {
-            "metadata": {"total_size": total_weight_bytes},
-            "weight_map": dict(sorted(weight_map.items())),
-        },
+    try:
+        model.save_pretrained(
+            output,
+            safe_serialization=True,
+            max_shard_size=max_shard_bytes,
+        )
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        raise ContractError(
+            f"public Rwkv7ForCausalLM save_pretrained failed: {error}"
+        ) from error
+    persisted_config = json.loads(
+        (output / "config.json").read_text(encoding="utf-8")
     )
-    write_json(output / "config.json", validated_config)
-    write_json(
-        output / "generation_config.json",
-        {
-            "_from_model_config": True,
-            "do_sample": False,
-            "bos_token_id": validated_config.get("bos_token_id"),
-            "eos_token_id": validated_config.get("eos_token_id"),
-        },
+    if persisted_config != validated_config:
+        raise ContractError(
+            "public Rwkv7ForCausalLM save_pretrained changed the validated config"
+        )
+
+    shard_files = sorted(output.glob("*.safetensors"))
+    total_weight_bytes = sum(
+        tensor.numel() * tensor.element_size() for tensor in state_dict.values()
     )
     files = sorted(path for path in output.iterdir() if path.is_file())
     manifest = {
@@ -265,8 +233,8 @@ def export_transformers_rwkv7_checkpoint(
         "model_type": TRANSFORMERS_RWKV7_MODEL_TYPE,
         "architecture": TRANSFORMERS_RWKV7_ARCHITECTURE,
         "base_model_prefix": "model",
-        "tensor_count": len(weight_map),
-        "shard_count": total,
+        "tensor_count": len(expected_shapes),
+        "shard_count": len(shard_files),
         "total_weight_bytes": total_weight_bytes,
         "files": {path.name: sha256_file(path) for path in files},
     }
