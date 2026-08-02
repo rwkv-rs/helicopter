@@ -16,9 +16,29 @@ from any2rwkv.preflight import (
 PRODUCT_ROOT = Path(__file__).resolve().parents[4]
 
 
-def test_preflight_binds_both_native_checkouts_and_imported_adapter() -> None:
+def test_preflight_fails_closed_for_explicitly_uninitialized_backend(
+    tmp_path: Path,
+) -> None:
+    product_root = tmp_path / "product"
+    (product_root / "src/train/rwkv-lm").mkdir(parents=True)
+
+    result = collect_preflight(
+        product_root,
+        expected_rwkv_hf_sha="f" * 40,
+        expected_rwkv_lm_sha="0" * 40,
+    )
+
+    assert result["rwkv_lm"]["checkout_commit"] is None
+    assert result["rwkv_lm"]["commit_matches"] is False
+    assert result["rwkv_lm"]["kernel_loader_sha256"] is None
+    assert result["rwkv_lm"]["kernel_source_sha256"] is None
+    assert result["rwkv_lm"]["kernel_binding_sha256"] is None
+    assert result["passed"] is False
+
+
+def test_preflight_binds_initialized_native_checkouts_and_kernel_contract() -> None:
     rwkv_hf_sha = git_sha(PRODUCT_ROOT / "src/train/rwkv-hf")
-    rwkv_lm_sha = "0" * 40
+    rwkv_lm_sha = git_sha(PRODUCT_ROOT / "src/train/rwkv-lm")
 
     result = collect_preflight(
         PRODUCT_ROOT,
@@ -29,12 +49,11 @@ def test_preflight_binds_both_native_checkouts_and_imported_adapter() -> None:
     assert result["rwkv_hf"]["checkout_commit"] == rwkv_hf_sha
     assert result["rwkv_hf"]["commit_matches"] is True
     assert result["rwkv_hf"]["module_in_checkout"] is True
-    assert result["rwkv_lm"]["checkout_commit"] is None
-    assert result["rwkv_lm"]["commit_matches"] is False
-    assert result["rwkv_lm"]["kernel_loader_sha256"] is None
-    assert result["rwkv_lm"]["kernel_source_sha256"] is None
-    assert result["rwkv_lm"]["kernel_binding_sha256"] is None
-    assert result["passed"] is False
+    assert result["rwkv_lm"]["checkout_commit"] == rwkv_lm_sha
+    assert result["rwkv_lm"]["commit_matches"] is True
+    assert len(result["rwkv_lm"]["kernel_loader_sha256"]) == 64
+    assert len(result["rwkv_lm"]["kernel_source_sha256"]) == 64
+    assert len(result["rwkv_lm"]["kernel_binding_sha256"]) == 64
 
 
 def test_preflight_rejects_a_stale_rwkv_lm_commit() -> None:
