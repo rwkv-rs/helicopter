@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import json
 import math
+import os
 import shutil
 import subprocess
 import sys
@@ -346,6 +347,7 @@ def _prepare_fixture(
     *,
     layers: int = 1,
     config_overrides: dict[str, object] | None = None,
+    max_shard_bytes: int = 2 * 1024**3,
 ):
     source = read_checkpoint(
         write_fixture(
@@ -368,6 +370,7 @@ def _prepare_fixture(
         zero_step,
         target_config=target_config,
         target_specs=specs,
+        max_shard_bytes=max_shard_bytes,
         target_tensor_provider=WarmStartTensorProvider(source, specs, warm_start),
     )
     source_names = tuple(source.tensor_names())
@@ -2322,6 +2325,167 @@ def test_layer_transition_resume_matches_uninterrupted_and_cleans_old_cache(
     assert resumed_store.fingerprint() == reference_store.fingerprint()
     assert resumed["optimizer_steps"] == uninterrupted["optimizer_steps"]
     assert resumed["history"] == uninterrupted["history"]
+
+
+def test_two_layer_checkpoint_resumes_and_strictly_generates_in_fresh_processes(
+    tmp_path: Path,
+) -> None:
+    source, zero_step, trainable = _prepare_fixture(
+        tmp_path,
+        layers=2,
+        max_shard_bytes=64 * 1024,
+    )
+    training_config = tmp_path / "training.json"
+    dataset_manifest = tmp_path / "dataset.json"
+    training_config.write_text(json.dumps({"fixture": "training"}), encoding="utf-8")
+    dataset_manifest.write_text(json.dumps({"fixture": "dataset"}), encoding="utf-8")
+    run_dir = tmp_path / "fresh-process-resume"
+
+    def interrupt_at_second_layer(phase: str, _path: Path) -> None:
+        if phase == "layer-ready":
+            raise PlannedInterruption("restart before the second layer")
+
+    torch.manual_seed(456)
+    with pytest.raises(PlannedInterruption, match="second layer"):
+        _run(
+            source=source,
+            zero_step=zero_step,
+            trainable=trainable,
+            run_dir=run_dir,
+            training_config=training_config,
+            dataset_manifest=dataset_manifest,
+            callback=interrupt_at_second_layer,
+        )
+
+    progress_path = run_dir / "layer-major-progress.json"
+    interrupted = json.loads(progress_path.read_text(encoding="utf-8"))
+    assert interrupted["phase"] == "layer-ready"
+    assert interrupted["active_layer"] == 1
+    assert interrupted["completed_optimizer_steps"] > 0
+    assert (run_dir / "mixer-overlays/layer-000.safetensors").is_file()
+    assert not (run_dir / "checkpoint-layerwise-local").exists()
+
+    worker = r"""
+import json
+import sys
+from pathlib import Path
+
+import torch
+
+import any2rwkv.hybrid as hybrid
+import any2rwkv.modeling_any2rwkv as modeling
+from any2rwkv.checkpoint import read_checkpoint
+from any2rwkv.modeling_any2rwkv import AnyToRWKVProxyForCausalLM
+from any2rwkv.recipes import resolve_recipe
+from conftest import _explicit_test_recurrent_adapter
+from test_layer_major_resume_integration import _run
+
+
+def load_and_generate(checkpoint: Path) -> dict[str, object]:
+    model, loading_info = AnyToRWKVProxyForCausalLM.from_pretrained(
+        checkpoint,
+        local_files_only=True,
+        output_loading_info=True,
+    )
+    for name in ("missing_keys", "unexpected_keys", "mismatched_keys", "error_msgs"):
+        assert not loading_info.get(name), (name, loading_info.get(name))
+    input_ids = torch.tensor([[1, 3, 4, 5]])
+    generated = model.eval().generate(
+        input_ids,
+        do_sample=False,
+        max_new_tokens=3,
+        use_cache=True,
+    )
+    return {
+        "architecture": model.config.architectures[0],
+        "model_type": model.config.model_type,
+        "generated": generated.tolist(),
+    }
+
+
+hybrid.load_rwkv7_operator_adapter = _explicit_test_recurrent_adapter
+modeling.load_rwkv7_operator_adapter = _explicit_test_recurrent_adapter
+mode, source_path, zero_step_path, run_path, training_path, dataset_path = sys.argv[1:]
+run_dir = Path(run_path)
+if mode == "resume":
+    source = read_checkpoint(Path(source_path), require_final_layers=False)
+    trainable = resolve_recipe(
+        "qwen35_to_rwkv7"
+    ).recipe._initial_trainable_names(run_dir, source.contract.num_hidden_layers)
+    torch.manual_seed(456)
+    result = _run(
+        source=source,
+        zero_step=Path(zero_step_path),
+        trainable=trainable,
+        run_dir=run_dir,
+        training_config=Path(training_path),
+        dataset_manifest=Path(dataset_path),
+        resume=run_dir / "layer-major-progress.json",
+    )
+    assert result["status"] == "layerwise-local-complete"
+checkpoint = run_dir / "checkpoint-layerwise-local"
+payload = load_and_generate(checkpoint)
+payload["mode"] = mode
+print(json.dumps(payload, sort_keys=True))
+"""
+    environment = os.environ.copy()
+    test_root = str(Path(__file__).resolve().parent)
+    environment["PYTHONPATH"] = os.pathsep.join(
+        filter(None, (test_root, environment.get("PYTHONPATH")))
+    )
+    arguments = (
+        str(source.path),
+        str(zero_step),
+        str(run_dir),
+        str(training_config),
+        str(dataset_manifest),
+    )
+
+    resumed_process = subprocess.run(
+        [sys.executable, "-c", worker, "resume", *arguments],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        env=environment,
+    )
+    first = json.loads(resumed_process.stdout.splitlines()[-1])
+    completed = json.loads(progress_path.read_text(encoding="utf-8"))
+    checkpoint = run_dir / "checkpoint-layerwise-local"
+    index = json.loads(
+        (checkpoint / "model.safetensors.index.json").read_text(encoding="utf-8")
+    )
+    coverage = json.loads(
+        (checkpoint / "mapping-coverage.json").read_text(encoding="utf-8")
+    )
+    materialization = json.loads(
+        (checkpoint / "materialization.json").read_text(encoding="utf-8")
+    )
+    assert completed["phase"] == "local-complete"
+    assert completed["active_layer"] == 2
+    assert len(completed["history"]) >= 2
+    assert (run_dir / "mixer-overlays/layer-001.safetensors").is_file()
+    assert len(set(index["weight_map"].values())) > 1
+    assert coverage["source_coverage"] == 1.0
+    assert coverage["target_coverage"] == 1.0
+    assert coverage["provenance"]["fitted"] > 0
+    assert materialization["status"] == "materialized"
+    assert materialization["training_stage"] == "layerwise-local-complete"
+    assert first["architecture"] == "AnyToRWKVProxyForCausalLM"
+    assert first["model_type"] == "any_to_rwkv_proxy"
+
+    reload_process = subprocess.run(
+        [sys.executable, "-c", worker, "reload", *arguments],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        env=environment,
+    )
+    second = json.loads(reload_process.stdout.splitlines()[-1])
+    assert second["architecture"] == "AnyToRWKVProxyForCausalLM"
+    assert second["model_type"] == "any_to_rwkv_proxy"
+    assert second["generated"] == first["generated"]
 
 
 def test_layer_transition_releases_old_source_and_target_before_next_load(

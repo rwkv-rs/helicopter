@@ -31,17 +31,6 @@ def _project_requirements(pyproject: Path) -> dict[str, Requirement]:
     return {requirement.name: requirement for requirement in requirements}
 
 
-def _dependency_group_requirements(
-    pyproject: Path,
-    group: str,
-) -> dict[str, Requirement]:
-    document = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-    requirements = (
-        Requirement(value) for value in document["dependency-groups"][group]
-    )
-    return {requirement.name: requirement for requirement in requirements}
-
-
 def _assert_exact_vcs_requirements(requirements: dict[str, Requirement]) -> None:
     transformers = requirements["transformers"]
     assert transformers.url == f"git+{TRANSFORMERS_SOURCE_URL}@{TRANSFORMERS_REVISION}"
@@ -68,13 +57,12 @@ def test_manifest_pins_standalone_runtime_revisions() -> None:
     )
 
 
-def test_root_runtime_group_pins_the_same_rwkv_rs_revisions() -> None:
-    requirements = _dependency_group_requirements(
-        PRODUCT_ROOT / "pyproject.toml",
-        "any2rwkv",
+def test_product_root_does_not_duplicate_standalone_runtime_dependencies() -> None:
+    document = tomllib.loads(
+        (PRODUCT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     )
 
-    _assert_exact_vcs_requirements(requirements)
+    assert "any2rwkv" not in document.get("dependency-groups", {})
 
 
 def test_standalone_wheel_metadata_retains_exact_runtime_revisions(
