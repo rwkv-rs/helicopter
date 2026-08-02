@@ -4,8 +4,8 @@ import hashlib
 import json
 import math
 import shutil
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
-from typing import Callable, Iterator, Mapping
 
 import torch
 from safetensors import safe_open
@@ -13,9 +13,16 @@ from safetensors.torch import save_file
 
 from .artifacts import write_json
 from .checkpoint import CheckpointManifest, sha256_file
+from .contract import PRIVATE_ANY2RWKV_ARTIFACT_CONTRACT
 from .errors import ContractError
 from .target import TensorSpec, canonical_text_name, is_sequence_mixer, is_vision_tensor
-
+from .transformers_rwkv7 import (
+    TRANSFORMERS_RWKV7_ARCHITECTURE,
+    TRANSFORMERS_RWKV7_ARTIFACT_CONTRACT,
+    TRANSFORMERS_RWKV7_MODEL_TYPE,
+    validate_transformers_rwkv7_config,
+    validate_transformers_rwkv7_state_dict,
+)
 
 HF_RUNTIME_MODULES = (
     "configuration_any2rwkv.py",
@@ -25,10 +32,50 @@ HF_RUNTIME_MODULES = (
     "errors.py",
 )
 
+_PRIVATE_ANY2RWKV_CONTRACTS = {
+    "any2rwkv_qwen35_rwkv7": "Any2RWKV7ForCausalLM",
+    "any2rwkv_hybrid": "Any2RWKVHybridForCausalLM",
+    "any2rwkv_proxy": "Any2RWKVProxyForCausalLM",
+}
+
 BF16_VALUE_RESIDUAL_EPSILON = float(torch.finfo(torch.bfloat16).eps) ** 2
 BF16_VALUE_RESIDUAL_DISABLED_LOGIT = math.log(
     BF16_VALUE_RESIDUAL_EPSILON / (1.0 - BF16_VALUE_RESIDUAL_EPSILON)
 )
+
+
+def _require_private_any2rwkv_config(config: Mapping[str, object]) -> None:
+    architectures = config.get("architectures")
+    architecture = (
+        architectures[0]
+        if isinstance(architectures, list) and len(architectures) == 1
+        else None
+    )
+    if (
+        config.get("model_type") == TRANSFORMERS_RWKV7_MODEL_TYPE
+        or architecture == TRANSFORMERS_RWKV7_ARCHITECTURE
+    ):
+        raise ContractError(
+            "the private Any2RWKV Qwen-shell exporter cannot declare the public "
+            "Transformers Rwkv7ForCausalLM contract"
+        )
+    auto_map = config.get("auto_map")
+    model_type = config.get("model_type")
+    expected_architecture = _PRIVATE_ANY2RWKV_CONTRACTS.get(model_type)
+    expected_loader = f"modeling_any2rwkv.{expected_architecture}"
+    private_metadata = config.get("any2rwkv")
+    if (
+        architecture != expected_architecture
+        or not isinstance(auto_map, Mapping)
+        or auto_map.get("AutoModelForCausalLM") != expected_loader
+        or not isinstance(private_metadata, Mapping)
+        or private_metadata.get("artifact_contract")
+        != PRIVATE_ANY2RWKV_ARTIFACT_CONTRACT
+    ):
+        raise ContractError(
+            "private Any2RWKV export requires a matching private model_type, "
+            "architecture, checkpoint-local loader, and artifact contract marker"
+        )
 
 
 def refresh_hf_runtime_files(output: Path) -> dict[str, str]:
@@ -37,6 +84,13 @@ def refresh_hf_runtime_files(output: Path) -> dict[str, str]:
         output / "model.safetensors.index.json"
     ).is_file():
         raise ContractError(f"cannot refresh incomplete HF checkpoint: {output}")
+    try:
+        config = json.loads((output / "config.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ContractError(f"cannot read HF checkpoint config: {output}") from error
+    if not isinstance(config, dict):
+        raise ContractError(f"HF checkpoint config must be an object: {output}")
+    _require_private_any2rwkv_config(config)
     package_root = Path(__file__).resolve().parent
     hashes: dict[str, str] = {}
     for module_name in HF_RUNTIME_MODULES:
@@ -122,6 +176,104 @@ def _flush_shard(
     return filename, {name: filename for name in tensors}
 
 
+def export_transformers_rwkv7_checkpoint(
+    output: Path,
+    *,
+    config: Mapping[str, object],
+    state_dict: Mapping[str, torch.Tensor],
+    max_shard_bytes: int = 2 * 1024**3,
+) -> dict[str, object]:
+    """Export a complete public ``Rwkv7ForCausalLM`` state dictionary.
+
+    Unlike :func:`export_hf_checkpoint`, this seam never copies the private
+    Qwen shell or checkpoint-local Python loader. All metadata, keys, shapes,
+    and dtypes are validated against the installed community model before the
+    destination directory is created.
+    """
+    if max_shard_bytes <= 0:
+        raise ContractError("Transformers RWKV-7 max_shard_bytes must be positive")
+    if output.exists() and not output.is_dir():
+        raise ContractError(
+            f"Transformers RWKV-7 export path must be a directory: {output}"
+        )
+    if output.exists() and any(output.iterdir()):
+        raise ContractError(
+            f"Transformers RWKV-7 export directory must be empty: {output}"
+        )
+    validated_config = validate_transformers_rwkv7_config(config)
+    expected_shapes = validate_transformers_rwkv7_state_dict(
+        validated_config, state_dict
+    )
+
+    output.mkdir(parents=True, exist_ok=True)
+    weight_map: dict[str, str] = {}
+    shard_files: list[str] = []
+    buffer: dict[str, torch.Tensor] = {}
+    buffer_bytes = 0
+    total_weight_bytes = 0
+
+    def flush() -> None:
+        nonlocal buffer, buffer_bytes
+        if not buffer:
+            return
+        filename, entries = _flush_shard(output, len(shard_files) + 1, buffer)
+        shard_files.append(filename)
+        weight_map.update(entries)
+        buffer = {}
+        buffer_bytes = 0
+
+    for name in sorted(expected_shapes):
+        tensor = state_dict[name]
+        size = tensor.numel() * tensor.element_size()
+        if buffer and buffer_bytes + size > max_shard_bytes:
+            flush()
+        buffer[name] = tensor.detach().cpu().contiguous().clone()
+        buffer_bytes += size
+        total_weight_bytes += size
+    flush()
+
+    total = len(shard_files)
+    renamed: dict[str, str] = {}
+    for index, old in enumerate(shard_files, start=1):
+        new = f"model-{index:05d}-of-{total:05d}.safetensors"
+        (output / old).rename(output / new)
+        renamed[old] = new
+    weight_map = {
+        name: renamed[filename] for name, filename in weight_map.items()
+    }
+    write_json(
+        output / "model.safetensors.index.json",
+        {
+            "metadata": {"total_size": total_weight_bytes},
+            "weight_map": dict(sorted(weight_map.items())),
+        },
+    )
+    write_json(output / "config.json", validated_config)
+    write_json(
+        output / "generation_config.json",
+        {
+            "_from_model_config": True,
+            "do_sample": False,
+            "bos_token_id": validated_config.get("bos_token_id"),
+            "eos_token_id": validated_config.get("eos_token_id"),
+        },
+    )
+    files = sorted(path for path in output.iterdir() if path.is_file())
+    manifest = {
+        "schema_version": 1,
+        "artifact_contract": TRANSFORMERS_RWKV7_ARTIFACT_CONTRACT,
+        "model_type": TRANSFORMERS_RWKV7_MODEL_TYPE,
+        "architecture": TRANSFORMERS_RWKV7_ARCHITECTURE,
+        "base_model_prefix": "model",
+        "tensor_count": len(weight_map),
+        "shard_count": total,
+        "total_weight_bytes": total_weight_bytes,
+        "files": {path.name: sha256_file(path) for path in files},
+    }
+    write_json(output / "roundtrip-manifest.json", manifest)
+    return manifest
+
+
 def export_hf_checkpoint(
     source: CheckpointManifest,
     output: Path,
@@ -135,12 +287,14 @@ def export_hf_checkpoint(
     resume_partial: bool = False,
     external_resume_binding: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    """Stream a deterministic structural target checkpoint in standard HF layout.
+    """Stream the private Any2RWKV Qwen-shell compatibility artifact.
 
     This stage copies the Qwen text shell exactly and initializes only the new
     RWKV7 mixers. Fitted/algebraic values overwrite these tensors in subsequent
-    migration stages; this exporter never silently claims trained quality.
+    migration stages. It uses checkpoint-local model code and must never claim
+    the public ``Rwkv7ForCausalLM`` architecture.
     """
+    _require_private_any2rwkv_config(target_config)
     progress_path = output / ".export-progress.json"
     if output.exists() and any(output.iterdir()) and not (
         resume_partial and progress_path.is_file()
@@ -290,6 +444,7 @@ def export_hf_checkpoint(
     files = sorted(path for path in output.iterdir() if path.is_file())
     manifest = {
         "schema_version": 1,
+        "artifact_contract": PRIVATE_ANY2RWKV_ARTIFACT_CONTRACT,
         "stage": (
             "mapped-zero-step"
             if target_tensors is not None or target_tensor_provider is not None

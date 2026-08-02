@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any
 
 from .errors import ContractError
 
@@ -14,6 +15,7 @@ SUPPORTED_ARCHITECTURES = frozenset({
 })
 SUPPORTED_LAYER_TYPES = frozenset({"linear_attention", "full_attention"})
 FINAL_LAYER_COUNT = 60
+PRIVATE_ANY2RWKV_ARTIFACT_CONTRACT = "private-any2rwkv-qwen-shell-v1"
 
 
 def _text_config(config: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -242,6 +244,7 @@ def build_target_config(
         "text_config_model_type": source_text.get("model_type"),
     }
     target["any2rwkv"] = {
+        "artifact_contract": PRIVATE_ANY2RWKV_ARTIFACT_CONTRACT,
         "source_model_type": source.model_type,
         "source_architecture": source.architecture,
         "source_was_multimodal": source.extracted_text_backbone,
