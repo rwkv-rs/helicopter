@@ -861,10 +861,25 @@ def run_suffix_free_layer_major(
     training_config: Path,
     dataset_manifest: Path,
     resume: Path | None,
+    stop_after_optimizer_steps: int | None = None,
     device: torch.device | None = None,
     dtype: torch.dtype | None = None,
     progress_callback: Callable[[str, Path], None] | None = None,
 ) -> dict[str, object]:
+    if stop_after_optimizer_steps is not None:
+        if (
+            type(stop_after_optimizer_steps) is not int
+            or stop_after_optimizer_steps <= 0
+        ):
+            raise ContractError("stop_after_optimizer_steps must be positive")
+        if getattr(plan, "evidence_tier", None) != "exploratory":
+            raise ContractError(
+                "stop_after_optimizer_steps is only allowed for exploratory evidence"
+            )
+        if int(getattr(plan, "activation_fit_rows", 0)) <= 0:
+            raise ContractError(
+                "stop_after_optimizer_steps requires activation_fit_rows to be positive"
+            )
     if plan.cache_teacher_layers:
         raise ContractError(
             "layer-major training keeps only the current source layer resident"
@@ -995,6 +1010,35 @@ def run_suffix_free_layer_major(
     completed_optimizer_steps = (
         int(progress.get("completed_optimizer_steps", 0)) if progress else 0
     )
+    if (
+        progress is not None
+        and stop_after_optimizer_steps is not None
+        and progress.get("phase") == "train"
+    ):
+        active_optimizer_steps = int(progress.get("active_optimizer_steps", 0))
+        if active_optimizer_steps > stop_after_optimizer_steps:
+            raise ContractError(
+                "stop_after_optimizer_steps must exceed the persisted active-layer "
+                "optimizer step"
+            )
+        if active_optimizer_steps == stop_after_optimizer_steps:
+            active_layer = int(progress["active_layer"])
+            return _optimizer_step_slice_completion(
+                run_dir=run_dir,
+                progress_path=progress_path,
+                generation=_resolve_progress_generation(run_dir, progress),
+                cursor=dict(progress["generation_cursor"]),
+                active_layer=active_layer,
+                source_mixer_kind=(
+                    source_layer_types[active_layer]
+                    if active_layer < len(source_layer_types)
+                    else None
+                ),
+                optimizer_step_limit=stop_after_optimizer_steps,
+                active_optimizer_steps=active_optimizer_steps,
+                completed_optimizer_steps=completed_optimizer_steps,
+                distributed=distributed,
+            )
     prefix_fingerprint = (
         str(progress["prefix_fingerprint"]) if progress else initial_prefix_fingerprint
     )
@@ -1238,6 +1282,7 @@ def run_suffix_free_layer_major(
             plan.activation_fit_functional_learning_rate
         )
         gqa_activation_fit = None
+        activation_fit_binding = None
         if (
             activation_fit_rows
             and source_layer_type in {"linear_attention", "full_attention"}
@@ -1397,6 +1442,21 @@ def run_suffix_free_layer_major(
                     distributed=distributed,
                 )
         distributed.synchronize_module_parameters(mixer)
+        if resumed_active_generation and activation_fit_rows:
+            activation_fit_binding = _resume_activation_fit_binding(
+                run_dir=run_dir,
+                layer_index=layer_index,
+                cursor=dict(progress["generation_cursor"]),
+            )
+        elif activation_fit_rows:
+            activation_fit_binding = _publish_activation_fit_ledger(
+                run_dir=run_dir,
+                layer_index=layer_index,
+                source_mixer_kind=source_layer_type,
+                fit_rows=activation_fit_rows,
+                mixer=mixer,
+                distributed=distributed,
+            )
         _require_frozen_parameter_sha256(
             mixer,
             frozen_parameter_sha256,
@@ -1457,7 +1517,7 @@ def run_suffix_free_layer_major(
                 consumed_rows=(),
                 train_cache_manifest_sha256=train_cache_manifest_sha256,
                 validation_cache_manifest_sha256=validation_cache_manifest_sha256,
-                activation_fit_binding=gqa_activation_fit,
+                activation_fit_binding=activation_fit_binding,
             )
             best_generation = _commit_distributed_generation(
                 distributed,
@@ -1512,7 +1572,8 @@ def run_suffix_free_layer_major(
                         "generation_manifest_sha256": file_sha256(
                             best_generation / "integrity.json"
                         ),
-                        "activation_fit": gqa_activation_fit,
+                        "activation_fit": activation_fit_binding,
+                        "gqa_native_fit": gqa_activation_fit,
                     },
                 )
             frozen_pre_epoch_validation = pre_epoch_validation
@@ -1589,12 +1650,19 @@ def run_suffix_free_layer_major(
                     active_mixer=mixer,
                     loaded_layer=loaded_layer,
                 )
+                will_reach_optimizer_step_limit = (
+                    stop_after_optimizer_steps is not None
+                    and optimizer.optimizer_step + 1
+                    >= stop_after_optimizer_steps
+                    and optimizer.accumulation_step + 1
+                    >= plan.accumulation_steps
+                )
                 will_checkpoint = (
                     plan.checkpoint_interval_micro_batches > 0
                     and (micro_batch_index + 1) % plan.checkpoint_interval_micro_batches
                     == 0
                     and row_stop < len(permutation)
-                )
+                ) or will_reach_optimizer_step_limit
                 loss, metrics = _local_loss(
                     output,
                     plan.burn_in_tokens,
@@ -1604,13 +1672,80 @@ def run_suffix_free_layer_major(
                 loss_scale = (
                     len(row_indices) * distributed.world_size / len(global_row_indices)
                 )
-                optimizer.backward(
+                optimizer_stepped = optimizer.backward(
                     loss * loss_scale,
                     accumulation_steps=plan.accumulation_steps,
                     sample_weight=len(global_row_indices),
                 )
                 row_position = row_stop
                 micro_batch_index += 1
+                if (
+                    optimizer_stepped
+                    and stop_after_optimizer_steps is not None
+                    and optimizer.optimizer_step >= stop_after_optimizer_steps
+                ):
+                    _require_frozen_parameter_sha256(
+                        mixer,
+                        frozen_parameter_sha256,
+                        boundary="optimizer-step-limited-checkpoint",
+                    )
+                    metrics = distributed.aggregate_metrics(metrics, len(row_indices))
+                    cursor = _cursor(
+                        layer_index,
+                        epoch_index,
+                        row_position,
+                        permutation_sha,
+                        consumed_rows=permutation[:row_position],
+                        train_cache_manifest_sha256=train_cache_manifest_sha256,
+                        validation_cache_manifest_sha256=(
+                            validation_cache_manifest_sha256
+                        ),
+                        activation_fit_binding=activation_fit_binding,
+                    )
+                    current_generation = _commit_distributed_generation(
+                        distributed, run_dir, store, mixer, optimizer, cursor
+                    )
+                    _rank0_filesystem_step(
+                        distributed,
+                        "publish optimizer-step-limited progress",
+                        lambda: (
+                            _write_progress(
+                                progress_path,
+                                phase="train",
+                                active_layer=layer_index,
+                                epoch_index=epoch_index,
+                                next_train_row=row_position,
+                                prefix_fingerprint=prefix_fingerprint,
+                                generation=current_generation,
+                                best_generation=best_generation,
+                                generation_cursor=cursor,
+                                convergence=layer_state,
+                                completed_optimizer_steps=completed_optimizer_steps,
+                                active_optimizer_steps=optimizer.optimizer_step,
+                                history=histories,
+                                base_binding=base_binding,
+                                last_train_metrics=metrics,
+                            ),
+                            _notify_progress(progress_callback, "train", progress_path),
+                        ),
+                    )
+                    _prune_generations_distributed(
+                        run_dir,
+                        keep=(current_generation, best_generation),
+                        distributed=distributed,
+                    )
+                    return _optimizer_step_slice_completion(
+                        run_dir=run_dir,
+                        progress_path=progress_path,
+                        generation=current_generation,
+                        cursor=cursor,
+                        active_layer=layer_index,
+                        source_mixer_kind=source_layer_type,
+                        optimizer_step_limit=stop_after_optimizer_steps,
+                        active_optimizer_steps=optimizer.optimizer_step,
+                        completed_optimizer_steps=completed_optimizer_steps,
+                        distributed=distributed,
+                    )
                 if (
                     plan.checkpoint_interval_micro_batches > 0
                     and micro_batch_index % plan.checkpoint_interval_micro_batches == 0
@@ -1633,6 +1768,7 @@ def run_suffix_free_layer_major(
                         validation_cache_manifest_sha256=(
                             validation_cache_manifest_sha256
                         ),
+                        activation_fit_binding=activation_fit_binding,
                     )
                     current_generation = _commit_distributed_generation(
                         distributed, run_dir, store, mixer, optimizer, cursor
@@ -1681,6 +1817,7 @@ def run_suffix_free_layer_major(
                 consumed_rows=permutation,
                 train_cache_manifest_sha256=train_cache_manifest_sha256,
                 validation_cache_manifest_sha256=validation_cache_manifest_sha256,
+                activation_fit_binding=activation_fit_binding,
             )
             checkpoint_started = time.perf_counter()
             current_generation = _commit_distributed_generation(
@@ -2126,6 +2263,198 @@ def run_suffix_free_layer_major(
     completion = _local_completion(num_layers, completed_optimizer_steps, histories)
     completion["checkpoint"] = str(checkpoint)
     return completion
+
+
+def _activation_fit_ledger_path(run_dir: Path, layer_index: int) -> Path:
+    return run_dir / "activation-fit" / f"layer-{layer_index:03d}-ledger.json"
+
+
+def _publish_activation_fit_ledger(
+    *,
+    run_dir: Path,
+    layer_index: int,
+    source_mixer_kind: str | None,
+    fit_rows: int,
+    mixer,
+    distributed,
+) -> dict[str, str]:
+    selected_module_state_sha256 = _sha256_json(_module_state_hashes(mixer))
+    selected_states = distributed.all_gather_objects(
+        {
+            "rank": distributed.rank,
+            "selected_module_state_sha256": selected_module_state_sha256,
+        }
+    )
+    if any(
+        row["selected_module_state_sha256"] != selected_module_state_sha256
+        for row in selected_states
+    ):
+        raise ContractError(
+            "post-activation-fit mixer state differs across distributed ranks"
+        )
+    ledger_path = _activation_fit_ledger_path(run_dir, layer_index)
+
+    def publish() -> None:
+        report_rows: list[dict[str, object]] = []
+        fit_root = ledger_path.parent
+        for report_path in sorted(fit_root.glob("*.json")):
+            if report_path == ledger_path:
+                continue
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+            if payload.get("layer") != layer_index:
+                continue
+            status = payload.get("status")
+            boundary = payload.get("boundary")
+            if not isinstance(status, str) or not isinstance(boundary, str):
+                raise ContractError(
+                    f"activation-fit report lacks status or boundary: {report_path}"
+                )
+            report_rows.append(
+                {
+                    "path": str(report_path.resolve().relative_to(run_dir.resolve())),
+                    "sha256": file_sha256(report_path),
+                    "status": status,
+                    "boundary": boundary,
+                }
+            )
+        if not report_rows:
+            raise ContractError(
+                f"activation fitting produced no reports for layer {layer_index}"
+            )
+        report_set_sha256 = _sha256_json(report_rows)
+        write_json(
+            ledger_path,
+            {
+                "schema_version": 1,
+                "status": "activation-fit-ledger-recorded",
+                "completed_layer_distillation": False,
+                "mapping_provenance_updated": False,
+                "layer": layer_index,
+                "source_mixer_kind": source_mixer_kind,
+                "fit_rows": fit_rows,
+                "world_size": distributed.world_size,
+                "axes": {
+                    "evidence_reports": {
+                        "count": len(report_rows),
+                        "report_set_sha256": report_set_sha256,
+                    },
+                    "selected_module_state": {
+                        "sha256": selected_module_state_sha256,
+                    },
+                },
+                "reports": report_rows,
+                "selected_module_state_sha256": selected_module_state_sha256,
+                "selected_state_by_rank": list(selected_states),
+            },
+        )
+
+    _rank0_filesystem_step(
+        distributed,
+        "publish activation-fit ledger",
+        publish,
+    )
+    return {
+        "report_sha256": file_sha256(ledger_path),
+        "selected_module_state_sha256": selected_module_state_sha256,
+    }
+
+
+def _resume_activation_fit_binding(
+    *,
+    run_dir: Path,
+    layer_index: int,
+    cursor: dict[str, object],
+) -> dict[str, str]:
+    binding = cursor.get("activation_fit_binding")
+    if not isinstance(binding, dict):
+        raise ContractError(
+            "resumed activation-fitted generation lacks its ledger binding"
+        )
+    report_sha256 = str(binding.get("report_sha256", ""))
+    selected_module_state_sha256 = str(
+        binding.get("selected_module_state_sha256", "")
+    )
+    ledger_path = _activation_fit_ledger_path(run_dir, layer_index)
+    if not ledger_path.is_file() or file_sha256(ledger_path) != report_sha256:
+        raise ContractError("resumed activation-fit ledger SHA-256 mismatch")
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    if (
+        ledger.get("schema_version") != 1
+        or ledger.get("status") != "activation-fit-ledger-recorded"
+        or int(ledger.get("layer", -1)) != layer_index
+        or ledger.get("selected_module_state_sha256")
+        != selected_module_state_sha256
+    ):
+        raise ContractError("resumed activation-fit ledger binding is invalid")
+    return {
+        "report_sha256": report_sha256,
+        "selected_module_state_sha256": selected_module_state_sha256,
+    }
+
+
+def _optimizer_step_slice_completion(
+    *,
+    run_dir: Path,
+    progress_path: Path,
+    generation: Path,
+    cursor: dict[str, object],
+    active_layer: int,
+    source_mixer_kind: str | None,
+    optimizer_step_limit: int,
+    active_optimizer_steps: int,
+    completed_optimizer_steps: int,
+    distributed,
+) -> dict[str, object]:
+    activation_fit_binding = _resume_activation_fit_binding(
+        run_dir=run_dir,
+        layer_index=active_layer,
+        cursor=cursor,
+    )
+    artifact_path = run_dir / "activation-fit-slice.json"
+    payload = {
+        "schema_version": 1,
+        "status": "exploratory-optimizer-step-limit-reached",
+        "completed": False,
+        "full_layer_distillation_completed": False,
+        "mapping_provenance_updated": False,
+        "active_layer": active_layer,
+        "source_mixer_kind": source_mixer_kind,
+        "optimizer_step_limit": optimizer_step_limit,
+        "active_layer_optimizer_steps": active_optimizer_steps,
+        "completed_previous_layer_optimizer_steps": completed_optimizer_steps,
+        "optimizer_steps": completed_optimizer_steps + active_optimizer_steps,
+        "progress": str(progress_path.resolve()),
+        "progress_sha256": file_sha256(progress_path),
+        "generation": str(generation.resolve().relative_to(run_dir.resolve())),
+        "generation_manifest_sha256": file_sha256(generation / "integrity.json"),
+        "generation_cursor_sha256": _sha256_json(cursor),
+        "activation_fit_binding": activation_fit_binding,
+        "resume": {
+            "progress": str(progress_path.resolve()),
+            "minimum_next_stop_after_optimizer_steps": active_optimizer_steps + 1,
+        },
+    }
+    _rank0_filesystem_step(
+        distributed,
+        "publish activation-fit optimizer-step slice",
+        lambda: write_json(artifact_path, payload),
+    )
+    return {
+        "status": payload["status"],
+        "completed": False,
+        "execution_mode": "rolling_layer_input_cache",
+        "active_layer": active_layer,
+        "source_mixer_kind": source_mixer_kind,
+        "optimizer_steps": payload["optimizer_steps"],
+        "active_layer_optimizer_steps": active_optimizer_steps,
+        "progress": str(progress_path),
+        "activation_fit_ledger": str(
+            _activation_fit_ledger_path(run_dir, active_layer)
+        ),
+        "artifact": str(artifact_path),
+        "artifact_sha256": file_sha256(artifact_path),
+        "next_stage": "resume-active-layer",
+    }
 
 
 def _local_completion(num_layers, optimizer_steps, histories):
@@ -8024,6 +8353,28 @@ def _read_progress(path: Path) -> dict[str, object]:
         or len(str(cursor.get("consumed_rows_sha256", ""))) != 64
         or len(str(cursor.get("train_cache_manifest_sha256", ""))) != 64
         or len(str(cursor.get("validation_cache_manifest_sha256", ""))) != 64
+        or (
+            cursor.get("activation_fit_binding") is not None
+            and (
+                not isinstance(cursor.get("activation_fit_binding"), dict)
+                or len(
+                    str(
+                        cursor["activation_fit_binding"].get(
+                            "report_sha256", ""
+                        )
+                    )
+                )
+                != 64
+                or len(
+                    str(
+                        cursor["activation_fit_binding"].get(
+                            "selected_module_state_sha256", ""
+                        )
+                    )
+                )
+                != 64
+            )
+        )
         or len(str(payload.get("generation_manifest_sha256", ""))) != 64
         or int(payload.get("active_layer", -1)) < 0
         or int(payload.get("epoch_index", -1)) < 0

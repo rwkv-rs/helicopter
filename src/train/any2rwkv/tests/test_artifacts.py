@@ -65,6 +65,37 @@ def test_cli_exposes_formal_gqa_validation_as_an_explicit_stage() -> None:
     assert args.evidence_output == "/runs/gqa-evidence"
 
 
+def test_distill_cli_exposes_positive_resumable_optimizer_step_limit() -> None:
+    argv = [
+        "distill",
+        "--source",
+        "/weights/source",
+        "--recipe",
+        "qwen35_to_rwkv7",
+        "--output",
+        "/runs/converted",
+        "--dataset-manifest",
+        "/data/splits.json",
+        "--training-config",
+        "/plans/first-layer.json",
+        "--precision",
+        "fp32io16",
+        "--rwkv-hf-sha",
+        "a" * 40,
+        "--rwkv-lm-sha",
+        "b" * 40,
+        "--stop-after-optimizer-steps",
+        "2",
+    ]
+
+    args = build_parser().parse_args(argv)
+
+    assert args.stop_after_optimizer_steps == 2
+    invalid = [*argv[:-1], "0"]
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(invalid)
+
+
 def test_gqa_metadata_publish_failure_propagates_without_barrier(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

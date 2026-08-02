@@ -938,6 +938,7 @@ def run_distillation(
     recipe_id: str,
     allow_proxy_layers: bool,
     resume: Path | None = None,
+    stop_after_optimizer_steps: int | None = None,
 ) -> dict[str, object]:
     resolved = resolve_recipe(recipe_id)
     if not torch.cuda.is_available():
@@ -1059,6 +1060,7 @@ def run_distillation(
                 training_config=training_config,
                 dataset_manifest=dataset_manifest,
                 resume=resume,
+                stop_after_optimizer_steps=stop_after_optimizer_steps,
                 progress_callback=tracker.log_progress,
             )
         )

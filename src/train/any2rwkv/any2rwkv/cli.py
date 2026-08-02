@@ -39,6 +39,13 @@ from .source import fetch_source, verify_source
 from .target import build_zero_step_ledger
 
 
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be a positive integer")
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="any2rwkv")
     subparsers = parser.add_subparsers(dest="action", required=True)
@@ -66,6 +73,14 @@ def build_parser() -> argparse.ArgumentParser:
     commands["distill"].add_argument("--dataset-manifest", required=True)
     commands["distill"].add_argument("--training-config", required=True)
     commands["distill"].add_argument("--resume")
+    commands["distill"].add_argument(
+        "--stop-after-optimizer-steps",
+        type=_positive_int,
+        help=(
+            "persist a resumable exploratory slice after this many optimizer "
+            "steps in the active layer"
+        ),
+    )
     commands["validate-gqa-zero-step"].add_argument("--dataset-manifest", required=True)
     commands["validate-gqa-zero-step"].add_argument("--training-config", required=True)
     commands["validate-gqa-zero-step"].add_argument("--evidence-output", required=True)
@@ -342,6 +357,7 @@ def run_existing_stage(args: argparse.Namespace) -> int:
                 recipe_id=resolved.recipe.recipe_id,
                 allow_proxy_layers=args.allow_proxy_layers,
                 resume=Path(args.resume) if args.resume else None,
+                stop_after_optimizer_steps=args.stop_after_optimizer_steps,
             )
             distributed = DistributedContext.initialize()
             if distributed.is_primary:

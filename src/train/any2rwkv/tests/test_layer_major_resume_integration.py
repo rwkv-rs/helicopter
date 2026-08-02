@@ -1134,6 +1134,7 @@ def _run(
     resume: Path | None = None,
     callback=None,
     plan=None,
+    stop_after_optimizer_steps: int | None = None,
 ):
     run_dir.mkdir(parents=True, exist_ok=True)
     warm_start_plan = run_dir / "warm-start-plan.json"
@@ -1150,10 +1151,96 @@ def _run(
         training_config=training_config,
         dataset_manifest=dataset_manifest,
         resume=resume,
+        stop_after_optimizer_steps=stop_after_optimizer_steps,
         device=torch.device("cpu"),
         dtype=torch.float32,
         progress_callback=callback,
     )
+
+
+def test_activation_fit_optimizer_step_slice_is_bound_and_resumable(
+    tmp_path: Path,
+) -> None:
+    source, zero_step, trainable = _prepare_fixture(tmp_path)
+    training_config = tmp_path / "training.json"
+    dataset_manifest = tmp_path / "dataset.json"
+    training_config.write_text(json.dumps({"fixture": "training"}), encoding="utf-8")
+    dataset_manifest.write_text(json.dumps({"fixture": "dataset"}), encoding="utf-8")
+    plan = _plan()
+    plan.evidence_tier = "exploratory"
+    plan.accumulation_steps = 1
+    plan.activation_fit_rows = 3
+    plan.activation_fit_ridge = 0.001
+    run_dir = tmp_path / "activation-fit-step-slice"
+
+    first = _run(
+        source=source,
+        zero_step=zero_step,
+        trainable=trainable,
+        run_dir=run_dir,
+        training_config=training_config,
+        dataset_manifest=dataset_manifest,
+        plan=plan,
+        stop_after_optimizer_steps=1,
+    )
+
+    ledger_path = run_dir / "activation-fit" / "layer-000-ledger.json"
+    progress_path = run_dir / "layer-major-progress.json"
+    artifact_path = run_dir / "activation-fit-slice.json"
+    ledger = json.loads(ledger_path.read_text())
+    progress = json.loads(progress_path.read_text())
+    artifact = json.loads(artifact_path.read_text())
+    first_cursor_sha256 = _sha256_json(progress["generation_cursor"])
+    first_next_row = progress["next_train_row"]
+
+    assert first["status"] == "exploratory-optimizer-step-limit-reached"
+    assert first["completed"] is False
+    assert ledger["status"] == "activation-fit-ledger-recorded"
+    assert ledger["completed_layer_distillation"] is False
+    assert ledger["mapping_provenance_updated"] is False
+    assert ledger["source_mixer_kind"] == "linear_attention"
+    assert ledger["axes"]["evidence_reports"]["count"] == len(
+        ledger["reports"]
+    )
+    assert ledger["reports"]
+    assert all(len(row["sha256"]) == 64 for row in ledger["reports"])
+    assert progress["phase"] == "train"
+    assert progress["active_optimizer_steps"] == 1
+    assert progress["next_train_row"] > 0
+    assert progress["generation_cursor"]["activation_fit_binding"] == {
+        "report_sha256": file_sha256(ledger_path),
+        "selected_module_state_sha256": ledger[
+            "selected_module_state_sha256"
+        ],
+    }
+    assert artifact["completed"] is False
+    assert artifact["full_layer_distillation_completed"] is False
+    assert artifact["generation_cursor_sha256"] == first_cursor_sha256
+    assert not (run_dir / "checkpoint-layerwise-local").exists()
+
+    resumed = _run(
+        source=source,
+        zero_step=zero_step,
+        trainable=trainable,
+        run_dir=run_dir,
+        training_config=training_config,
+        dataset_manifest=dataset_manifest,
+        resume=progress_path,
+        plan=plan,
+        stop_after_optimizer_steps=2,
+    )
+    resumed_progress = json.loads(progress_path.read_text())
+    resumed_ledger = json.loads(ledger_path.read_text())
+
+    assert resumed["status"] == "exploratory-optimizer-step-limit-reached"
+    assert resumed_progress["active_optimizer_steps"] == 2
+    assert resumed_progress["next_train_row"] > first_next_row
+    assert _sha256_json(resumed_progress["generation_cursor"]) != first_cursor_sha256
+    assert resumed_progress["generation_cursor"]["activation_fit_binding"] == (
+        progress["generation_cursor"]["activation_fit_binding"]
+    )
+    assert resumed_ledger == ledger
+    assert not (run_dir / "checkpoint-layerwise-local").exists()
 
 
 def test_exhausted_layer_persists_final_validation_before_failing(

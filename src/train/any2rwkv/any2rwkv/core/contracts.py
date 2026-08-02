@@ -26,6 +26,7 @@ class DistillationExecutionRequest:
     training_config: Path
     dataset_manifest: Path
     resume: Path | None
+    stop_after_optimizer_steps: int | None = None
     progress_callback: Callable[[str, Path], None] | None = None
 
 

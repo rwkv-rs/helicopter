@@ -116,9 +116,13 @@ class Qwen35ToRWKV7Recipe:
             training_config=request.training_config,
             dataset_manifest=request.dataset_manifest,
             resume=request.resume,
+            stop_after_optimizer_steps=request.stop_after_optimizer_steps,
             progress_callback=request.progress_callback,
         )
-        if local.get("status") == "exploratory-layer-calibration-complete":
+        if local.get("status") in {
+            "exploratory-layer-calibration-complete",
+            "exploratory-optimizer-step-limit-reached",
+        }:
             return local
         if local.get("status") != "layerwise-local-complete":
             raise ContractError("layerwise local stage did not produce a complete checkpoint")
