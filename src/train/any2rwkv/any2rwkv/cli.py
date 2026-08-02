@@ -8,6 +8,7 @@ from pathlib import Path
 import torch.distributed as dist
 
 from .artifacts import file_sha256, initialize_run, verify_run_bundle, write_json
+from .core.tiny_pipeline import run_tiny_pipeline
 from .distill_runner import (
     _binding_sha256,
     _checkpoint_binding,
@@ -25,8 +26,8 @@ from .evaluator_runner import (
 from .export import export_hf_checkpoint
 from .fixture import write_fixture
 from .migration_init import (
-    WarmStartVariant,
     WarmStartTensorProvider,
+    WarmStartVariant,
     apply_warm_start_plan,
     plan_warm_start,
 )
@@ -65,22 +66,12 @@ def build_parser() -> argparse.ArgumentParser:
     commands["distill"].add_argument("--dataset-manifest", required=True)
     commands["distill"].add_argument("--training-config", required=True)
     commands["distill"].add_argument("--resume")
-    commands["validate-gqa-zero-step"].add_argument(
-        "--dataset-manifest", required=True
-    )
-    commands["validate-gqa-zero-step"].add_argument(
-        "--training-config", required=True
-    )
-    commands["validate-gqa-zero-step"].add_argument(
-        "--evidence-output", required=True
-    )
-    commands["validate-gqa-zero-step"].add_argument(
-        "--layer", required=True, type=int
-    )
+    commands["validate-gqa-zero-step"].add_argument("--dataset-manifest", required=True)
+    commands["validate-gqa-zero-step"].add_argument("--training-config", required=True)
+    commands["validate-gqa-zero-step"].add_argument("--evidence-output", required=True)
+    commands["validate-gqa-zero-step"].add_argument("--layer", required=True, type=int)
     commands["corrective"].add_argument("--parent-run", required=True)
-    commands["corrective"].add_argument(
-        "--parent-checkpoint-sha256", required=True
-    )
+    commands["corrective"].add_argument("--parent-checkpoint-sha256", required=True)
     commands["corrective"].add_argument("--dataset-manifest", required=True)
     commands["corrective"].add_argument("--training-config", required=True)
     commands["validate-p0"].add_argument("--kernel-oracle", required=True)
@@ -91,14 +82,18 @@ def build_parser() -> argparse.ArgumentParser:
     commands["evaluate"].add_argument("--quality-threshold-profile", required=True)
     commands["evaluate"].add_argument("--ruler-scores")
     commands["evaluate"].add_argument("--downstream-scores")
-    fixture = subparsers.add_parser("fixture", help="write deterministic 60-layer Qwen3.5-like test input")
+    fixture = subparsers.add_parser(
+        "fixture", help="write deterministic 60-layer Qwen3.5-like test input"
+    )
     fixture.add_argument("--output", required=True)
     fixture.add_argument("--layers", type=int, default=60)
     binding = subparsers.add_parser(
         "checkpoint-binding", help="print the immutable recurrent checkpoint binding"
     )
     binding.add_argument("--checkpoint", required=True)
-    oracle = subparsers.add_parser("oracle", help="run the frozen 32-case FP64 GDN/RWKV7 oracle")
+    oracle = subparsers.add_parser(
+        "oracle", help="run the frozen 32-case FP64 GDN/RWKV7 oracle"
+    )
     oracle.add_argument("--output", required=True)
     oracle.add_argument("--seed", type=int, default=20260714)
     baseline = subparsers.add_parser(
@@ -112,6 +107,12 @@ def build_parser() -> argparse.ArgumentParser:
     baseline.add_argument("--evidence")
     baseline.add_argument("--precision", required=True)
     baseline.add_argument("--output", required=True)
+    tiny = subparsers.add_parser(
+        "tiny-pipeline", help="run the resumable tiny contract pipeline"
+    )
+    tiny.add_argument("--source", required=True)
+    tiny.add_argument("--output", required=True)
+    tiny.add_argument("--interrupt-after-optimizer-steps", type=int)
     for action in ("fetch-source", "verify-source"):
         source_command = subparsers.add_parser(action)
         source_command.add_argument("--manifest", required=True)
@@ -147,7 +148,9 @@ def prepare_conversion(args: argparse.Namespace) -> int:
             "path": str(source.path),
             "files": source.file_hashes,
             "classification": (
-                "real-60-layer-source" if source.contract.num_hidden_layers == 60 else "real-non-isomorphic-proxy"
+                "real-60-layer-source"
+                if source.contract.num_hidden_layers == 60
+                else "real-non-isomorphic-proxy"
             ),
             "layers": source.contract.num_hidden_layers,
             "extracted_text_backbone": source.contract.extracted_text_backbone,
@@ -192,7 +195,9 @@ def prepare_conversion(args: argparse.Namespace) -> int:
     write_json(output / "warm-start-plan.json", warm_start.to_dict())
     for variant in WarmStartVariant:
         plan = plan_warm_start(source, specs, variant=variant)
-        write_json(output / "warm-start-plans" / f"{variant.value}.json", plan.to_dict())
+        write_json(
+            output / "warm-start-plans" / f"{variant.value}.json", plan.to_dict()
+        )
     write_json(
         output / "source-manifest.json",
         {
@@ -212,13 +217,9 @@ def prepare_conversion(args: argparse.Namespace) -> int:
         target_tensor_provider=WarmStartTensorProvider(source, specs, warm_start),
     )
     ledger.write(output / "checkpoint-zero-step" / "mapping.json")
-    write_json(
-        output / "checkpoint-zero-step" / "mapping-coverage.json", coverage
-    )
+    write_json(output / "checkpoint-zero-step" / "mapping-coverage.json", coverage)
     write_json(output / "roundtrip-manifest.json", roundtrip)
-    zero_step_binding = _zero_step_checkpoint_binding(
-        output / "checkpoint-zero-step"
-    )
+    zero_step_binding = _zero_step_checkpoint_binding(output / "checkpoint-zero-step")
     metadata["zero_step"] = {
         "binding": zero_step_binding,
         "sha256": _binding_sha256(zero_step_binding),
@@ -230,7 +231,11 @@ def prepare_conversion(args: argparse.Namespace) -> int:
     metadata["status"] = "structural-zero-step"
     metadata["next_stage"] = "zero-step-baselines"
     write_json(output / "metadata.json", metadata)
-    print(json.dumps({"status": metadata["status"], "output": str(output)}, sort_keys=True))
+    print(
+        json.dumps(
+            {"status": metadata["status"], "output": str(output)}, sort_keys=True
+        )
+    )
     return 0
 
 
@@ -279,7 +284,9 @@ def run_preflight(args: argparse.Namespace) -> int:
 def run_existing_stage(args: argparse.Namespace) -> int:
     output = Path(args.output).resolve()
     if not (output / "metadata.json").is_file():
-        raise ContractError(f"run metadata not found: {output / 'metadata.json'}; run convert first")
+        raise ContractError(
+            f"run metadata not found: {output / 'metadata.json'}; run convert first"
+        )
     metadata = json.loads((output / "metadata.json").read_text(encoding="utf-8"))
     recipe_binding = metadata.get("recipe")
     if not isinstance(recipe_binding, dict):
@@ -293,7 +300,9 @@ def run_existing_stage(args: argparse.Namespace) -> int:
     source_adapter_id = recipe_binding.get("source_adapter")
     target_adapter_id = recipe_binding.get("target_adapter")
     if not isinstance(source_adapter_id, str) or not isinstance(target_adapter_id, str):
-        raise ContractError("initialized run metadata has an incomplete adapter binding")
+        raise ContractError(
+            "initialized run metadata has an incomplete adapter binding"
+        )
     resolved = resolve_recipe(
         args.recipe,
         source_adapter_id=source_adapter_id,
@@ -360,8 +369,7 @@ def run_existing_stage(args: argparse.Namespace) -> int:
             publish_status = distributed.broadcast_object(publish_status)
             if publish_status["status"] != "ok":
                 raise ContractError(
-                    "GQA validation metadata publish failed: "
-                    + publish_status["error"]
+                    "GQA validation metadata publish failed: " + publish_status["error"]
                 )
             if distributed.is_primary:
                 print(json.dumps(result, sort_keys=True))
@@ -383,7 +391,11 @@ def run_existing_stage(args: argparse.Namespace) -> int:
         metadata["p0_evidence"] = "p0-evidence.json"
         metadata["status"] = "p0-passed"
         write_json(output / "metadata.json", metadata)
-        print(json.dumps({"status": metadata["status"], "evidence": result}, sort_keys=True))
+        print(
+            json.dumps(
+                {"status": metadata["status"], "evidence": result}, sort_keys=True
+            )
+        )
         return 0
     if args.action == "evaluate":
         distributed = DistributedContext.initialize()
@@ -396,7 +408,9 @@ def run_existing_stage(args: argparse.Namespace) -> int:
                 migration_baselines_path=Path(args.migration_baselines),
                 quality_threshold_profile_path=Path(args.quality_threshold_profile),
                 output_path=output / "quality.json",
-                ruler_scores_path=Path(args.ruler_scores) if args.ruler_scores else None,
+                ruler_scores_path=Path(args.ruler_scores)
+                if args.ruler_scores
+                else None,
                 downstream_scores_path=(
                     Path(args.downstream_scores) if args.downstream_scores else None
                 ),
@@ -424,8 +438,7 @@ def run_existing_stage(args: argparse.Namespace) -> int:
             publish_status = distributed.broadcast_object(publish_status)
             if publish_status["status"] != "ok":
                 raise ContractError(
-                    "distributed evaluation publish failed: "
-                    + publish_status["error"]
+                    "distributed evaluation publish failed: " + publish_status["error"]
                 )
             if distributed.is_primary:
                 print(
@@ -444,7 +457,12 @@ def run_existing_stage(args: argparse.Namespace) -> int:
             distributed.close()
     else:
         raise ContractError(f"unsupported existing stage: {args.action}")
-    print(json.dumps({"status": "validated", "action": args.action, "output": str(output)}, sort_keys=True))
+    print(
+        json.dumps(
+            {"status": "validated", "action": args.action, "output": str(output)},
+            sort_keys=True,
+        )
+    )
     return 0
 
 
@@ -453,6 +471,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.action == "fixture":
             write_fixture(Path(args.output), layers=args.layers)
+            return 0
+        if args.action == "tiny-pipeline":
+            result = run_tiny_pipeline(
+                Path(args.source),
+                Path(args.output),
+                interrupt_after_optimizer_steps=args.interrupt_after_optimizer_steps,
+            )
+            print(json.dumps(result, sort_keys=True))
             return 0
         if args.action == "checkpoint-binding":
             binding = _checkpoint_binding(Path(args.checkpoint).resolve())
@@ -466,7 +492,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.action == "oracle":
             result = run_gdn_oracle(seed=args.seed)
             write_json(Path(args.output), result)
-            print(json.dumps({"status": "passed" if result["passed"] else "failed", "fixture_count": result["fixture_count"]}, sort_keys=True))
+            print(
+                json.dumps(
+                    {
+                        "status": "passed" if result["passed"] else "failed",
+                        "fixture_count": result["fixture_count"],
+                    },
+                    sort_keys=True,
+                )
+            )
             return 0 if result["passed"] else 1
         if args.action == "evaluate-baseline":
             distributed = DistributedContext.initialize()

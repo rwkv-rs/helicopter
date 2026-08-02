@@ -60,6 +60,7 @@ _LAZY_EXPORT_MODULES = {
     "build_migration_baseline_matrix": ".migration_baselines",
     "read_migration_baseline_stage": ".migration_baselines",
     "write_migration_baseline_stage": ".migration_baselines",
+    "run_tiny_pipeline": ".tiny_pipeline",
 }
 
 
@@ -104,6 +105,7 @@ __all__ = [
     "publish_distributed_layer_input_cache",
     "read_migration_baseline_stage",
     "require_layer_input_cache_capacity",
+    "run_tiny_pipeline",
     "write_distributed_layer_input_cache_partition",
     "write_experiment_report",
     "write_layer_input_cache",
