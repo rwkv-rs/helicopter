@@ -1341,8 +1341,6 @@ def run_corrective_continuation(args) -> int:
                     dataset_manifest=Path(args.dataset_manifest),
                     precision=args.precision,
                     run_id=args.run_id or output.name,
-                    rwkv_hf_sha=args.rwkv_hf_sha,
-                    rwkv_lm_sha=args.rwkv_lm_sha,
                 )
             except BaseException as error:
                 raise ContractError(
@@ -1651,11 +1649,12 @@ def _prepare_or_validate_corrective_output(
     dataset_manifest: Path,
     precision: str,
     run_id: str,
-    rwkv_hf_sha: str,
-    rwkv_lm_sha: str,
 ) -> None:
     """Atomically publish a derived base, or validate it for deterministic resume."""
     from .artifacts import initialize_run
+    from .preflight import require_rwkv7_runtime, runtime_binding
+
+    runtime = runtime_binding(require_rwkv7_runtime())
 
     source = {
         "path": str(source_manifest.path),
@@ -1688,8 +1687,7 @@ def _prepare_or_validate_corrective_output(
             or metadata.get("precision") != precision
             or metadata.get("recipe") != expected_recipe
             or metadata.get("corrective_continuation") != continuation
-            or metadata.get("submodules")
-            != {"rwkv-hf": rwkv_hf_sha, "rwkv-lm": rwkv_lm_sha}
+            or metadata.get("runtime") != runtime
         ):
             raise ContractError(
                 "existing corrective continuation output binding mismatch"
@@ -1717,8 +1715,7 @@ def _prepare_or_validate_corrective_output(
             precision=precision,
             command=sys.argv,
             product_root=Path(__file__).resolve().parents[4],
-            rwkv_hf_sha=rwkv_hf_sha,
-            rwkv_lm_sha=rwkv_lm_sha,
+            runtime_manifest=runtime["manifest"],
         )
         metadata["recipe"] = {
             "id": recipe.recipe.recipe_id,

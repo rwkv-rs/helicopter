@@ -13,6 +13,9 @@ TRANSFORMERS_RWKV7_ARTIFACT_CONTRACT = "transformers-rwkv7-v1"
 
 
 def _community_classes():
+    from .preflight import require_rwkv7_runtime
+
+    require_rwkv7_runtime()
     try:
         from transformers import AutoConfig, AutoModelForCausalLM
         from transformers.models.rwkv7.configuration_rwkv7 import Rwkv7Config

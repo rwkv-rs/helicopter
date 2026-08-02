@@ -14,7 +14,7 @@ class CanonicalStateContract:
     readout: str = "S_t r_t"
     reset: str = "zero state at document boundary"
     rope_boundary: str = "source projection boundary before native RWKV7 mixer"
-    native_kernel: str = "rwkv-lm/rwkv7"
+    native_kernel: str = "rwkv-rs/fla-rwkv/FlashRWKV"
 
 
 def rwkv7_step(
@@ -99,7 +99,7 @@ def reset_state(batch: int, heads: int, head_size: int, *, dtype: torch.dtype = 
 
 
 def native_decay_from_logit(logit: Tensor) -> Tensor:
-    """Decay parameterization used by rwkv-lm's clamp-w state-passing kernel."""
+    """Decay parameterization used by the self-owned FlashRWKV operator."""
     return torch.exp(-torch.exp(logit.new_tensor(-0.5)) * torch.sigmoid(logit))
 
 

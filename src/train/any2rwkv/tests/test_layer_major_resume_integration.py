@@ -2604,8 +2604,6 @@ print(json.dumps({
         dataset_manifest=dataset_manifest,
         precision="bf16",
         run_id="atomic-corrective-continuation",
-        rwkv_hf_sha="1" * 40,
-        rwkv_lm_sha="2" * 40,
     )
     # Identical bindings resume the atomically published base without rewriting it.
     _prepare_or_validate_corrective_output(
@@ -2619,8 +2617,6 @@ print(json.dumps({
         dataset_manifest=dataset_manifest,
         precision="bf16",
         run_id="atomic-corrective-continuation",
-        rwkv_hf_sha="1" * 40,
-        rwkv_lm_sha="2" * 40,
     )
     assert not (
         tmp_path / ".atomic-corrective-continuation.corrective-base.tmp"

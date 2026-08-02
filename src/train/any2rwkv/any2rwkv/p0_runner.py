@@ -56,7 +56,7 @@ def run_p0_validation(inputs: P0ValidationInputs) -> dict[str, object]:
     kernel_payload = json.loads(inputs.kernel_oracle.read_text(encoding="utf-8"))
     kernel_passed = (
         kernel_payload.get("status") == "pass"
-        and kernel_payload.get("kernel") == "rwkv-lm/RWKV7_STATEPASSING_CLAMPW_CUDA"
+        and kernel_payload.get("kernel") == "rwkv-rs/fla-rwkv/FlashRWKV"
         and all(kernel_payload.get("gradient_finite", ()))
     )
     kernel_artifact = inputs.run_dir / "kernel-oracle.json"

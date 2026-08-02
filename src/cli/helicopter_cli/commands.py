@@ -825,22 +825,6 @@ def build_any2rwkv_plan(
             shown_env={},
             env=strip_vllm_env(env),
         )
-    rwkv_hf = resolve_path(str(paths.get("rwkv_hf_path", "src/train/rwkv-hf")), root=root, env=env)
-    rwkv_lm = resolve_path(str(paths.get("rwkv_lm_path", "src/train/rwkv-lm")), root=root, env=env)
-    expected_hf_sha = str(pick(args.rwkv_hf_sha, settings.get("rwkv_hf_sha"), default=""))
-    expected_lm_sha = str(pick(args.rwkv_lm_sha, settings.get("rwkv_lm_sha"), default=""))
-    if len(expected_hf_sha) != 40 or len(expected_lm_sha) != 40:
-        raise SystemExit("any2rwkv requires full 40-character rwkv_hf_sha and rwkv_lm_sha before workload launch")
-    for checkout, expected, label in (
-        (rwkv_hf, expected_hf_sha, "rwkv-hf"),
-        (rwkv_lm, expected_lm_sha, "rwkv-lm"),
-    ):
-        if not checkout.is_dir():
-            raise SystemExit(f"{label} checkout not found: {checkout}")
-        actual = _checkout_sha(checkout, root=root)
-        if actual != expected:
-            raise SystemExit(f"{label} SHA mismatch: expected {expected}, found {actual}")
-
     source = resolve_path(str(args.source), root=root, env=env)
     output = resolve_path(str(args.output), root=root, env=env)
     if not args.dry_run and not source.is_dir():
@@ -919,10 +903,6 @@ def build_any2rwkv_plan(
         str(output),
         "--precision",
         precision,
-        "--rwkv-hf-sha",
-        expected_hf_sha,
-        "--rwkv-lm-sha",
-        expected_lm_sha,
     ]
     if args.action == "evaluate":
         torchrun = str(Path(python).with_name("torchrun"))
@@ -954,8 +934,8 @@ def build_any2rwkv_plan(
         command.append("--allow-proxy-layers")
     shown_env = {
         "WKV_MODE": "fp32io16",
-        # fp32io16 is the recurrent-state/kernel policy; rwkv-lm's model I/O
-        # dtype remains BF16 on the correctness path.
+        # fp32io16 is the recurrent-state/kernel policy; model I/O remains
+        # BF16 on the correctness path.
         "RWKV_FLOAT_MODE": (
             "bf16" if precision in {"bf16", "fp32io16"} else precision
         ),

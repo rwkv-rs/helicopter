@@ -8,11 +8,13 @@ from types import SimpleNamespace
 import pytest
 
 from any2rwkv.checkpoint import read_checkpoint
+from any2rwkv.errors import ContractError
 from any2rwkv.fixture import write_fixture
 from any2rwkv.preflight import (
     TRANSFORMERS_REVISION,
     TRANSFORMERS_SOURCE_URL,
     _distribution_binding,
+    _require_module_ownership,
     collect_full_loop_preflight,
     collect_preflight,
 )
@@ -48,6 +50,7 @@ def test_preflight_calls_public_transformers_rwkv7_provenance(monkeypatch) -> No
     runtime_manifest = {
         "repository": "https://github.com/rwkv-rs/fla-rwkv.git",
         "revision": "a4a8aa98df6ec5322f194a80ec57363dd045adfc",
+        "flash_rwkv_repository": "https://github.com/rwkv-rs/FlashRWKV.git",
         "flash_rwkv_revision": "866aafd2eed146b0eda1ce03444009ae030f89e3",
     }
     public_rwkv7 = SimpleNamespace(
@@ -60,6 +63,10 @@ def test_preflight_calls_public_transformers_rwkv7_provenance(monkeypatch) -> No
     monkeypatch.setattr(
         "any2rwkv.preflight._distribution_binding",
         _exact_distribution,
+    )
+    monkeypatch.setattr(
+        "any2rwkv.preflight._require_module_ownership",
+        lambda *_args: {"verified": True},
     )
     monkeypatch.setattr(
         "any2rwkv.preflight.importlib.import_module",
@@ -99,6 +106,10 @@ def test_preflight_fails_closed_when_public_runtime_provenance_rejects(
     monkeypatch.setattr(
         "any2rwkv.preflight._distribution_binding",
         _exact_distribution,
+    )
+    monkeypatch.setattr(
+        "any2rwkv.preflight._require_module_ownership",
+        lambda *_args: {"verified": True},
     )
     monkeypatch.setattr(
         "any2rwkv.preflight.importlib.import_module",
@@ -190,6 +201,35 @@ def test_distribution_binding_diagnoses_a_missing_distribution(monkeypatch) -> N
     assert binding["version"] is None
     assert binding["direct_url_error"] == "distribution is not installed"
     assert binding["requirement_satisfied"] is False
+
+
+def test_module_ownership_rejects_a_shadow_transformers_package(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    owned = tmp_path / "owned" / "transformers" / "__init__.py"
+    shadow = tmp_path / "shadow" / "transformers" / "__init__.py"
+    owned.parent.mkdir(parents=True)
+    shadow.parent.mkdir(parents=True)
+    owned.write_text("", encoding="utf-8")
+    shadow.write_text("", encoding="utf-8")
+
+    class Distribution:
+        @staticmethod
+        def locate_file(_relative: str) -> Path:
+            return owned
+
+    monkeypatch.setattr(
+        "any2rwkv.preflight.importlib.metadata.distribution",
+        lambda _name: Distribution(),
+    )
+    monkeypatch.setattr(
+        "any2rwkv.preflight.importlib.import_module",
+        lambda _name: SimpleNamespace(__file__=str(shadow)),
+    )
+
+    with pytest.raises(ContractError, match="module ownership mismatch"):
+        _require_module_ownership("transformers", "transformers")
 
 
 def test_full_loop_preflight_reports_every_missing_gate(

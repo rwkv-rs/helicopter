@@ -62,13 +62,13 @@ def default_contract_lock(product_root: Path | None = None) -> dict[str, Any]:
         "canonical": {
             "equation": "S_t = S_{t-1} A_t + B_t",
             "rwkv7_update": "S=diag(decay)*S + b*(a^T*S) + k*v^T; y=r^T*S",
-            "state_orientation": "batch,head,key,value",
+            "state_orientation": "batch,head,value,key",
             "head_size_policy": (
                 "preserve source GDN key/value head count and head size; "
                 "Qwen3.5-2B resolves to 16x128"
             ),
             "operator": (
-                "transformers.models.rwkv7 through "
+                "checkpoint-local Any-to-RWKV conversion runtime through "
                 "fla.ops.rwkv7.chunk_rwkv7(provider=flash_rwkv)"
             ),
             "gdn_condition": "Qwen3.5 head-scalar decay and normalized key with matching state/head geometry",
@@ -99,9 +99,22 @@ def default_contract_lock(product_root: Path | None = None) -> dict[str, Any]:
         "inference": {
             "backend": "transformers",
             "loader": "AutoModelForCausalLM.from_pretrained",
-            "trust_remote_code": False,
+            "trust_remote_code": True,
             "full_chunked_logit_tolerance": "hash-bound numerical parity profile",
             "batch_isolation": True,
+        },
+        "artifact_boundaries": {
+            "private_conversion": {
+                "contract": "private-any2rwkv-qwen-shell-v1",
+                "state": "batch,head,value,key",
+                "trust_remote_code": True,
+            },
+            "public_transformers": {
+                "contract": "transformers-rwkv7-v1",
+                "state": "batch,head,key,value",
+                "trust_remote_code": False,
+            },
+            "public_state_bridge": "transpose the final two state axes: [B,H,V,K] -> [B,H,K,V]",
         },
     }
     if product_root is not None:
@@ -209,8 +222,7 @@ def initialize_run(
     precision: str,
     command: list[str],
     product_root: Path,
-    rwkv_hf_sha: str | None = None,
-    rwkv_lm_sha: str | None = None,
+    runtime_manifest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     source_path = source.get("path")
     if not isinstance(source_path, str) or not source_path:
@@ -219,8 +231,6 @@ def initialize_run(
     output.mkdir(parents=True, exist_ok=False)
     lock = default_contract_lock(product_root)
     write_json(output / "contract.lock.json", lock)
-    if (rwkv_hf_sha is None) != (rwkv_lm_sha is None):
-        raise ValueError("rwkv-hf and rwkv-lm revisions must be provided together")
     metadata = {
         "schema_version": 1,
         "run_id": run_id,
@@ -239,10 +249,10 @@ def initialize_run(
         "platform": platform.platform(),
         "contract_sha256": sha256_json(lock),
     }
-    if rwkv_hf_sha is not None and rwkv_lm_sha is not None:
-        metadata["submodules"] = {
-            "rwkv-hf": rwkv_hf_sha,
-            "rwkv-lm": rwkv_lm_sha,
+    if runtime_manifest is not None:
+        metadata["runtime"] = {
+            "manifest": runtime_manifest,
+            "sha256": sha256_json(runtime_manifest),
         }
     write_json(output / "metadata.json", metadata)
     return metadata

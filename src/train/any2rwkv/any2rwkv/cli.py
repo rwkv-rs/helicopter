@@ -33,7 +33,12 @@ from .migration_init import (
 )
 from .oracle import run_gdn_oracle
 from .p0_runner import P0ValidationInputs, run_p0_validation
-from .preflight import collect_full_loop_preflight, collect_preflight
+from .preflight import (
+    collect_full_loop_preflight,
+    collect_preflight,
+    require_matching_rwkv7_runtime,
+    require_rwkv7_runtime,
+)
 from .recipes import resolve_recipe
 from .source import fetch_source, verify_source
 from .target import build_zero_step_ledger
@@ -65,9 +70,6 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--recipe", required=True)
         command.add_argument("--output", required=True)
         command.add_argument("--precision", required=True, choices=("bf16", "fp32io16"))
-        if action != "preflight":
-            command.add_argument("--rwkv-hf-sha", required=True)
-            command.add_argument("--rwkv-lm-sha", required=True)
         command.add_argument("--contract")
         command.add_argument("--run-id")
         command.add_argument("--allow-proxy-layers", action="store_true")
@@ -165,6 +167,7 @@ def _quality_gate_passed(path: Path, level: str) -> bool:
 
 
 def prepare_conversion(args: argparse.Namespace) -> int:
+    runtime_manifest = require_rwkv7_runtime()
     resolved = resolve_recipe(args.recipe)
     source = resolved.source.load_checkpoint(
         Path(args.source), require_final_layout=not args.allow_proxy_layers
@@ -191,8 +194,7 @@ def prepare_conversion(args: argparse.Namespace) -> int:
         precision=args.precision,
         command=sys.argv,
         product_root=_product_root(),
-        rwkv_hf_sha=args.rwkv_hf_sha,
-        rwkv_lm_sha=args.rwkv_lm_sha,
+        runtime_manifest=runtime_manifest,
     )
     metadata["recipe"] = {
         "id": resolved.recipe.recipe_id,
@@ -282,6 +284,8 @@ def run_preflight(args: argparse.Namespace) -> int:
     )
     resolved.recipe.validate_source(inspection)
     output = Path(args.output).resolve()
+    result = collect_preflight()
+    runtime_manifest = result["transformers"].get("runtime_manifest")
     metadata = initialize_run(
         output,
         run_id=args.run_id or output.name,
@@ -293,8 +297,8 @@ def run_preflight(args: argparse.Namespace) -> int:
         precision=args.precision,
         command=sys.argv,
         product_root=_product_root(),
+        runtime_manifest=runtime_manifest,
     )
-    result = collect_preflight()
     result["recipe"] = {
         "id": resolved.recipe.recipe_id,
         "source_adapter": resolved.source.adapter_id,
@@ -315,6 +319,7 @@ def run_existing_stage(args: argparse.Namespace) -> int:
             f"run metadata not found: {output / 'metadata.json'}; run convert first"
         )
     metadata = json.loads((output / "metadata.json").read_text(encoding="utf-8"))
+    require_matching_rwkv7_runtime(metadata)
     recipe_binding = metadata.get("recipe")
     if not isinstance(recipe_binding, dict):
         raise ContractError("initialized run metadata has no recipe binding")
@@ -335,10 +340,6 @@ def run_existing_stage(args: argparse.Namespace) -> int:
         source_adapter_id=source_adapter_id,
         target_adapter_id=target_adapter_id,
     )
-    if metadata.get("submodules", {}).get("rwkv-hf") != args.rwkv_hf_sha:
-        raise ContractError("rwkv-hf SHA differs from initialized run metadata")
-    if metadata.get("submodules", {}).get("rwkv-lm") != args.rwkv_lm_sha:
-        raise ContractError("rwkv-lm SHA differs from initialized run metadata")
     if args.action == "distill":
         distributed: DistributedContext | None = None
         try:
@@ -581,6 +582,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.action == "convert":
             return prepare_conversion(args)
         if args.action == "corrective":
+            require_rwkv7_runtime()
             return run_corrective_continuation(args)
         return run_existing_stage(args)
     except (ContractError, ValueError) as error:

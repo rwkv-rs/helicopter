@@ -21,6 +21,12 @@ from any2rwkv.errors import ContractError
 def test_contract_uses_transformers_without_serving_or_quantization() -> None:
     lock = default_contract_lock()
     assert lock["inference"]["backend"] == "transformers"
+    assert lock["canonical"]["state_orientation"] == "batch,head,value,key"
+    boundaries = lock["artifact_boundaries"]
+    assert boundaries["private_conversion"]["trust_remote_code"] is True
+    assert boundaries["public_transformers"]["trust_remote_code"] is False
+    assert boundaries["public_transformers"]["state"] == "batch,head,key,value"
+    assert "[B,H,V,K] -> [B,H,K,V]" in boundaries["public_state_bridge"]
     encoded = json.dumps(lock).lower()
     assert "vllm" not in encoded
     assert "nvfp4" not in encoded
@@ -72,10 +78,6 @@ def test_cli_exposes_formal_gqa_validation_as_an_explicit_stage() -> None:
             "3",
             "--precision",
             "bf16",
-            "--rwkv-hf-sha",
-            "a" * 40,
-            "--rwkv-lm-sha",
-            "b" * 40,
         ]
     )
 
@@ -99,10 +101,6 @@ def test_distill_cli_exposes_positive_resumable_optimizer_step_limit() -> None:
         "/plans/first-layer.json",
         "--precision",
         "fp32io16",
-        "--rwkv-hf-sha",
-        "a" * 40,
-        "--rwkv-lm-sha",
-        "b" * 40,
         "--stop-after-optimizer-steps",
         "2",
     ]
@@ -123,10 +121,6 @@ def test_gqa_metadata_publish_failure_propagates_without_barrier(
     output.mkdir()
     metadata = {
         "precision": "bf16",
-        "submodules": {
-            "rwkv-hf": "a" * 40,
-            "rwkv-lm": "b" * 40,
-        },
         "recipe": {
             "id": "qwen35_to_rwkv7",
             "source_adapter": "qwen35",
@@ -159,6 +153,11 @@ def test_gqa_metadata_publish_failure_propagates_without_barrier(
     )
     monkeypatch.setattr(
         cli_module,
+        "require_matching_rwkv7_runtime",
+        lambda _metadata: {"sha256": "runtime-fixture"},
+    )
+    monkeypatch.setattr(
+        cli_module,
         "run_gqa_zero_step_validation",
         lambda **_kwargs: {"status": "accepted"},
     )
@@ -184,8 +183,6 @@ def test_gqa_metadata_publish_failure_propagates_without_barrier(
         training_config="/plans/gqa.json",
         layer=3,
         precision="bf16",
-        rwkv_hf_sha="a" * 40,
-        rwkv_lm_sha="b" * 40,
         allow_proxy_layers=False,
     )
 
@@ -205,10 +202,6 @@ def test_existing_stage_resolves_persisted_adapter_binding_before_work(
     (output / "metadata.json").write_text(
         json.dumps(
             {
-                "submodules": {
-                    "rwkv-hf": "a" * 40,
-                    "rwkv-lm": "b" * 40,
-                },
                 "recipe": {
                     "id": "qwen35_to_rwkv7",
                     "source_adapter": "unknown-source",
@@ -226,12 +219,15 @@ def test_existing_stage_resolves_persisted_adapter_binding_before_work(
             AssertionError("binding failure must precede distillation work")
         ),
     )
+    monkeypatch.setattr(
+        cli_module,
+        "require_matching_rwkv7_runtime",
+        lambda _metadata: {"sha256": "runtime-fixture"},
+    )
     args = SimpleNamespace(
         action="distill",
         recipe="qwen35_to_rwkv7",
         output=str(output),
-        rwkv_hf_sha="a" * 40,
-        rwkv_lm_sha="b" * 40,
     )
 
     with pytest.raises(ContractError, match="unknown source adapter"):

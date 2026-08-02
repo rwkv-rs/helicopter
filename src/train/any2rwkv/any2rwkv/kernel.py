@@ -165,6 +165,9 @@ def load_rwkv7_operator_adapter(
     head_size: int,
 ) -> Rwkv7OperatorAdapter:
     """Load the pinned rwkv-rs operator chain and require FlashRWKV."""
+    from .preflight import require_rwkv7_runtime
+
+    require_rwkv7_runtime()
     _require_exact_vcs_distribution(
         "flash-linear-attention",
         expected_url=FLA_RWKV7_SOURCE_URL,

@@ -798,12 +798,7 @@ version = "0.1.0"
 source = { editable = "." }
 
 [package.dev-dependencies]
-dev = [
-    { name = "pre-commit" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-]
-rwkv-hf = [
+any2rwkv = [
     { name = "causal-conv1d" },
     { name = "datasets" },
     { name = "flash-linear-attention", extra = ["flash-rwkv"] },
@@ -815,6 +810,11 @@ rwkv-hf = [
     { name = "torch" },
     { name = "transformers" },
     { name = "wandb" },
+]
+dev = [
+    { name = "pre-commit" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
 ]
 rwkv-lm = [
     { name = "deepspeed" },
@@ -900,12 +900,7 @@ vllm-rwkv = [
 [package.metadata]
 
 [package.metadata.requires-dev]
-dev = [
-    { name = "pre-commit" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-]
-rwkv-hf = [
+any2rwkv = [
     { name = "causal-conv1d", specifier = "==1.6.2.post1" },
     { name = "datasets", specifier = ">=5.0.0" },
     { name = "flash-linear-attention", extras = ["flash-rwkv"], git = "https://github.com/rwkv-rs/fla-rwkv.git?rev=a4a8aa98df6ec5322f194a80ec57363dd045adfc" },
@@ -917,6 +912,11 @@ rwkv-hf = [
     { name = "torch", specifier = "==2.11.0" },
     { name = "transformers", git = "https://github.com/rwkv-rs/transformers-rwkv.git?rev=2696927df9363b5fa175076bb827ba4da2c4e581" },
     { name = "wandb", specifier = ">=0.28,<0.29" },
+]
+dev = [
+    { name = "pre-commit" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
 ]
 rwkv-lm = [
     { name = "deepspeed" },

@@ -64,8 +64,6 @@ def any2rwkv_args(**overrides: object) -> Namespace:
         "output": "/outputs/any2rwkv/run-1",
         "dry_run": True,
         "precision": None,
-        "rwkv_hf_sha": None,
-        "rwkv_lm_sha": None,
         "contract": None,
         "dataset_manifest": None,
         "training_config": None,
@@ -684,6 +682,18 @@ class CommandPlanTests(unittest.TestCase):
 
 
 class Any2RWKVPlanTests(unittest.TestCase):
+    def test_preflight_uses_only_the_self_owned_runtime_contract(self) -> None:
+        plan = commands.build_any2rwkv_plan(
+            any2rwkv_args(action="preflight"),
+            root=ROOT,
+            env={},
+            config=load_example_config(),
+        )
+
+        self.assertEqual(plan.command[3], "preflight")
+        self.assertNotIn("--rwkv-hf-sha", plan.command)
+        self.assertNotIn("--rwkv-lm-sha", plan.command)
+
     def test_source_fetch_is_a_managed_explicit_plan(self) -> None:
         plan = commands.build_any2rwkv_plan(
             any2rwkv_args(
@@ -724,15 +734,15 @@ class Any2RWKVPlanTests(unittest.TestCase):
             str(ROOT / "artifacts/feat-any2rwkv/proxy-p1"), plan.command
         )
 
-    def test_conversion_plan_is_explicit_and_pins_both_native_dependencies(self) -> None:
+    def test_conversion_plan_uses_the_any_to_rwkv_runtime_contract(self) -> None:
         loaded = load_example_config()
         plan = commands.build_any2rwkv_plan(
             any2rwkv_args(), root=ROOT, env={}, config=loaded
         )
         self.assertEqual(plan.command[1:3], ["-m", "any2rwkv.cli"])
         self.assertEqual(plan.command[3], "convert")
-        self.assertIn("15cd7d7e896efe852f6994a22c34fd14cb60c2c6", plan.command)
-        self.assertIn("81908e5e3ad9ee45a57149758f7ef92a1b50b11d", plan.command)
+        self.assertNotIn("--rwkv-hf-sha", plan.command)
+        self.assertNotIn("--rwkv-lm-sha", plan.command)
         self.assertEqual(plan.env["WKV_MODE"], "fp32io16")
         self.assertEqual(command_options(plan.command)["--recipe"], "qwen35_to_rwkv7")
 
@@ -808,15 +818,6 @@ class Any2RWKVPlanTests(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "read-only source"):
             commands.build_any2rwkv_plan(
                 any2rwkv_args(source="/tmp/source", output="/tmp/source/output"),
-                root=ROOT,
-                env={},
-                config=load_example_config(),
-            )
-
-    def test_sha_mismatch_fails_before_gpu_workload(self) -> None:
-        with self.assertRaisesRegex(SystemExit, "rwkv-hf SHA mismatch"):
-            commands.build_any2rwkv_plan(
-                any2rwkv_args(rwkv_hf_sha="0" * 40),
                 root=ROOT,
                 env={},
                 config=load_example_config(),

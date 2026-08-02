@@ -85,6 +85,8 @@ def _max_abs(left: torch.Tensor, right: torch.Tensor) -> float:
 
 
 def main() -> int:
+    from any2rwkv.preflight import require_rwkv7_runtime, runtime_binding
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--output", required=True)
@@ -106,6 +108,7 @@ def main() -> int:
             "128 new tokens and non-negative tolerances"
         )
     checkpoint = Path(args.checkpoint).resolve()
+    runtime = runtime_binding(require_rwkv7_runtime())
     shard_report = validate_sharded_checkpoint(checkpoint)
     model, loading = AutoModelForCausalLM.from_pretrained(
         checkpoint,
@@ -195,6 +198,7 @@ def main() -> int:
         "model_sha256": checkpoint_sha256(checkpoint),
         "backend": "transformers",
         "transformers_version": transformers.__version__,
+        "runtime": runtime,
         "strict_reload": not any(normalized_loading.values()),
         "shards": shard_report,
         "loading_info": normalized_loading,

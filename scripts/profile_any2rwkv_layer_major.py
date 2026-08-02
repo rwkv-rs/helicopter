@@ -478,6 +478,9 @@ def _write_selection_report(
 
 
 def main() -> None:
+    from any2rwkv.preflight import require_rwkv7_runtime
+
+    require_rwkv7_runtime()
     parser = argparse.ArgumentParser(
         description=(
             "Aggregate short, ephemeral 8-GPU Nsight candidate runs into the only "

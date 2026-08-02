@@ -562,6 +562,9 @@ def _execute_and_finalize_profile(
 
 
 def main() -> int:
+    from any2rwkv.preflight import require_rwkv7_runtime
+
+    require_rwkv7_runtime()
     parser = argparse.ArgumentParser(
         description=(
             "Run one exact 8-rank Any2RWKV profile, export its Nsight report to "

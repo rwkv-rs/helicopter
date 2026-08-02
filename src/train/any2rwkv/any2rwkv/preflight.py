@@ -10,7 +10,7 @@ from typing import Any
 
 import torch
 
-from .artifacts import file_sha256
+from .artifacts import file_sha256, sha256_json
 from .errors import ContractError
 
 TRANSFORMERS_REVISION = "2696927df9363b5fa175076bb827ba4da2c4e581"
@@ -18,6 +18,10 @@ TRANSFORMERS_SOURCE_URL = "https://github.com/rwkv-rs/transformers-rwkv.git"
 TRANSFORMERS_REQUIREMENT = (
     f"transformers @ git+{TRANSFORMERS_SOURCE_URL}@{TRANSFORMERS_REVISION}"
 )
+FLA_RWKV7_SOURCE_URL = "https://github.com/rwkv-rs/fla-rwkv.git"
+FLA_RWKV7_REVISION = "a4a8aa98df6ec5322f194a80ec57363dd045adfc"
+FLASH_RWKV_SOURCE_URL = "https://github.com/rwkv-rs/FlashRWKV.git"
+FLASH_RWKV_REVISION = "866aafd2eed146b0eda1ce03444009ae030f89e3"
 
 
 def _distribution_binding(
@@ -90,6 +94,114 @@ def _read_json_object(path: Path, *, label: str) -> dict[str, Any]:
     return payload
 
 
+def _require_module_ownership(
+    distribution_name: str,
+    module_name: str,
+) -> dict[str, Any]:
+    """Require the imported package to be owned by the pinned distribution."""
+    try:
+        distribution = importlib.metadata.distribution(distribution_name)
+        module = importlib.import_module(module_name)
+        module_file = Path(module.__file__).resolve()
+        expected_file = Path(
+            distribution.locate_file(module_name.replace(".", "/") + "/__init__.py")
+        ).resolve()
+    except (AttributeError, ImportError, TypeError) as error:
+        raise ContractError(
+            f"cannot establish {module_name} module ownership: {error}"
+        ) from error
+    if module_file != expected_file:
+        raise ContractError(
+            f"{module_name} module ownership mismatch: "
+            f"distribution={expected_file} imported={module_file}"
+        )
+    return {
+        "distribution": distribution_name,
+        "module": module_name,
+        "verified": True,
+    }
+
+
+def require_rwkv7_runtime() -> dict[str, Any]:
+    """Fail closed unless the full public RWKV-7 runtime chain is exact."""
+    distribution = _distribution_binding(
+        "transformers",
+        expected_url=TRANSFORMERS_SOURCE_URL,
+        expected_revision=TRANSFORMERS_REVISION,
+    )
+    if not distribution["requirement_satisfied"]:
+        raise ContractError(
+            "Transformers does not satisfy the exact Any-to-RWKV runtime "
+            f"requirement: {TRANSFORMERS_REQUIREMENT}"
+        )
+    ownership = _require_module_ownership("transformers", "transformers")
+    try:
+        rwkv7 = importlib.import_module("transformers.models.rwkv7")
+        config_class = rwkv7.Rwkv7Config
+        model_class = rwkv7.Rwkv7ForCausalLM
+        validate_runtime = rwkv7.validate_rwkv7_runtime_provenance
+    except (AttributeError, ImportError) as error:
+        raise ContractError(
+            "Transformers does not expose the public RWKV-7 runtime contract"
+        ) from error
+    if not (
+        config_class.model_type == "rwkv7"
+        and model_class.base_model_prefix == "model"
+        and callable(validate_runtime)
+    ):
+        raise ContractError(
+            "Transformers does not expose the expected public RWKV-7 interface"
+        )
+    try:
+        operators = validate_runtime()
+    except (RuntimeError, TypeError, ValueError) as error:
+        raise ContractError(f"RWKV-7 operator provenance rejected: {error}") from error
+    if not isinstance(operators, dict):
+        raise ContractError(
+            "validate_rwkv7_runtime_provenance() did not return a manifest"
+        )
+    expected_operator_fields = {
+        "repository": FLA_RWKV7_SOURCE_URL,
+        "revision": FLA_RWKV7_REVISION,
+        "flash_rwkv_repository": FLASH_RWKV_SOURCE_URL,
+        "flash_rwkv_revision": FLASH_RWKV_REVISION,
+    }
+    mismatches = {
+        name: {"expected": expected, "actual": operators.get(name)}
+        for name, expected in expected_operator_fields.items()
+        if operators.get(name) != expected
+    }
+    if mismatches:
+        raise ContractError(
+            f"RWKV-7 operator manifest differs from the self-owned chain: {mismatches}"
+        )
+    return {
+        "schema_version": 1,
+        "transformers": {
+            "distribution": "transformers",
+            "version": distribution["version"],
+            "repository": TRANSFORMERS_SOURCE_URL,
+            "revision": TRANSFORMERS_REVISION,
+            "requirement": TRANSFORMERS_REQUIREMENT,
+            "module_ownership": ownership,
+        },
+        "operators": operators,
+    }
+
+
+def runtime_binding(manifest: dict[str, Any]) -> dict[str, Any]:
+    return {"manifest": manifest, "sha256": sha256_json(manifest)}
+
+
+def require_matching_rwkv7_runtime(metadata: dict[str, Any]) -> dict[str, Any]:
+    current = runtime_binding(require_rwkv7_runtime())
+    if metadata.get("runtime") != current:
+        raise ContractError(
+            "current RWKV-7 runtime manifest differs from initialized run metadata"
+        )
+    return current
+
+
 def collect_preflight() -> dict[str, Any]:
     transformers_distribution = _distribution_binding(
         "transformers",
@@ -97,26 +209,20 @@ def collect_preflight() -> dict[str, Any]:
         expected_revision=TRANSFORMERS_REVISION,
     )
     transformers_public_interface = False
+    runtime_manifest: dict[str, Any] | None = None
     runtime_provenance: dict[str, str] | None = None
     runtime_provenance_error: str | None = None
     try:
-        rwkv7 = importlib.import_module("transformers.models.rwkv7")
-        Rwkv7Config = rwkv7.Rwkv7Config
-        Rwkv7ForCausalLM = rwkv7.Rwkv7ForCausalLM
-        validate_runtime = rwkv7.validate_rwkv7_runtime_provenance
-        transformers_public_interface = bool(
-            Rwkv7Config.model_type == "rwkv7"
-            and Rwkv7ForCausalLM.base_model_prefix == "model"
-            and callable(validate_runtime)
-        )
-        if not transformers_public_interface:
-            raise RuntimeError("Transformers does not expose the public RWKV7 contract")
-        runtime_provenance = validate_runtime()
-        if not isinstance(runtime_provenance, dict):
-            raise TypeError(
-                "validate_rwkv7_runtime_provenance() did not return a manifest"
-            )
-    except (AttributeError, ImportError, RuntimeError, TypeError) as error:
+        runtime_manifest = require_rwkv7_runtime()
+        transformers_public_interface = True
+        runtime_provenance = runtime_manifest["operators"]
+    except (
+        AttributeError,
+        ContractError,
+        ImportError,
+        RuntimeError,
+        TypeError,
+    ) as error:
         runtime_provenance = None
         runtime_provenance_error = f"{type(error).__name__}: {error}"
     devices = []
@@ -147,6 +253,7 @@ def collect_preflight() -> dict[str, Any]:
             "public_interface": transformers_public_interface,
             "runtime_provenance": runtime_provenance,
             "runtime_provenance_error": runtime_provenance_error,
+            "runtime_manifest": runtime_manifest,
             "requirement_satisfied": bool(
                 transformers_distribution["requirement_satisfied"]
                 and transformers_public_interface

@@ -63,8 +63,6 @@ def build_parser() -> argparse.ArgumentParser:
     any2rwkv.add_argument("--source", required=True, help="read-only HF checkpoint directory, or frozen source manifest for fetch/verify")
     any2rwkv.add_argument("--output", required=True, help="independent run output directory, or frozen source destination for fetch/verify")
     any2rwkv.add_argument("--precision", choices=ANY2RWKV_PRECISIONS)
-    any2rwkv.add_argument("--rwkv-hf-sha")
-    any2rwkv.add_argument("--rwkv-lm-sha")
     any2rwkv.add_argument("--contract", help="frozen contract.lock.json")
     any2rwkv.add_argument("--dataset-manifest")
     any2rwkv.add_argument("--training-config")

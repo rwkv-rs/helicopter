@@ -521,6 +521,9 @@ def _finalize_profile_tracking(
 
 
 def main() -> None:
+    from any2rwkv.preflight import require_rwkv7_runtime
+
+    require_rwkv7_runtime()
     parser = argparse.ArgumentParser(
         description="Profile one ephemeral, end-to-end Any2RWKV batch candidate."
     )

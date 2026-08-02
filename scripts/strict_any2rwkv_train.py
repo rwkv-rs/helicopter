@@ -54,14 +54,6 @@ TRAINING_SOURCE_FILES = (
     "scripts/profile_any2rwkv_layer_major.py",
 )
 
-TRAINING_SOURCE_ROOTS = (
-    "src/train/rwkv-hf/rwkv7_hf",
-    "src/train/rwkv-lm/src",
-    "src/train/rwkv-lm/cuda",
-)
-
-TRAINING_SOURCE_SUFFIXES = {".py", ".cu", ".cuh", ".cpp", ".h"}
-
 PROFILER_CAPTURE_CONTRACT = (
     "nsys-full-process-exact-nvtx-rank-transition-and-input-bindings-v5"
 )
@@ -300,19 +292,6 @@ def _finite_number(value: object) -> bool:
 def training_source_files() -> dict[str, str]:
     paths = {Path(raw_path) for raw_path in TRAINING_SOURCE_FILES}
     paths.update(Path("src/train/any2rwkv/any2rwkv").rglob("*.py"))
-    paths.update(
-        path
-        for raw_root in TRAINING_SOURCE_ROOTS
-        for path in Path(raw_root).rglob("*")
-        if path.is_file() and path.suffix in TRAINING_SOURCE_SUFFIXES
-    )
-    paths.update(
-        {
-            Path("src/train/rwkv-hf/pyproject.toml"),
-            Path("src/train/rwkv-lm/train.py"),
-            Path("src/train/rwkv-lm/rwkv7_train_simplified.py"),
-        }
-    )
     result: dict[str, str] = {}
     for path in sorted(paths):
         if not path.is_file():
@@ -2174,6 +2153,9 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def main(argv: list[str]) -> int:
+    from any2rwkv.preflight import require_rwkv7_runtime, runtime_binding
+
+    runtime = runtime_binding(require_rwkv7_runtime())
     command = parse_command(argv)
     missing = [name for name in REQUIRED_ENV if not os.environ.get(name)]
     if missing:
@@ -2453,6 +2435,7 @@ def main(argv: list[str]) -> int:
         "distributed": {"backend": "nccl", "world_size": 8, "data_parallel": True},
         "gpu_inventory": inventory,
         "source_revisions": revisions,
+        "rwkv7_runtime": runtime,
         "training_source_files": training_source_files(),
         "started_unix": started,
     }

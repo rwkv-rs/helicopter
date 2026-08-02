@@ -13,6 +13,9 @@ from any2rwkv.distill_runner import prepare_performance_profile_caches
 
 
 def main() -> None:
+    from any2rwkv.preflight import require_rwkv7_runtime
+
+    require_rwkv7_runtime()
     parser = argparse.ArgumentParser(
         description=(
             "Prepare the frozen embedding/recurrent-prefix cache cases required "

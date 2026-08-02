@@ -199,6 +199,9 @@ def export_transformers_rwkv7_checkpoint(
         raise ContractError(
             f"Transformers RWKV-7 export directory must be empty: {output}"
         )
+    from .preflight import require_rwkv7_runtime, runtime_binding
+
+    runtime = runtime_binding(require_rwkv7_runtime())
     validated_config, model, expected_shapes = materialize_transformers_rwkv7_model(
         config, state_dict
     )
@@ -233,9 +236,12 @@ def export_transformers_rwkv7_checkpoint(
         "model_type": TRANSFORMERS_RWKV7_MODEL_TYPE,
         "architecture": TRANSFORMERS_RWKV7_ARCHITECTURE,
         "base_model_prefix": "model",
+        "state_contract": "batch,head,key,value",
+        "conversion_state_bridge": "transpose [B,H,V,K] to [B,H,K,V]",
         "tensor_count": len(expected_shapes),
         "shard_count": len(shard_files),
         "total_weight_bytes": total_weight_bytes,
+        "runtime": runtime,
         "files": {path.name: sha256_file(path) for path in files},
     }
     write_json(output / "roundtrip-manifest.json", manifest)
