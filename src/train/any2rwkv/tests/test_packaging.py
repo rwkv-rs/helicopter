@@ -22,11 +22,21 @@ from any2rwkv.preflight import (
 )
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+PRODUCT_ROOT = PACKAGE_ROOT.parents[2]
 
 
 def _project_requirements(pyproject: Path) -> dict[str, Requirement]:
     project = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]
     requirements = (Requirement(value) for value in project["dependencies"])
+    return {requirement.name: requirement for requirement in requirements}
+
+
+def _dependency_group_requirements(
+    pyproject: Path,
+    group: str,
+) -> dict[str, Requirement]:
+    document = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    requirements = (Requirement(value) for value in document["dependency-groups"][group])
     return {requirement.name: requirement for requirement in requirements}
 
 
@@ -54,6 +64,15 @@ def test_manifest_pins_standalone_runtime_revisions() -> None:
     assert Requirement(FLA_RWKV7_REQUIREMENT).url == (
         f"git+{FLA_RWKV7_SOURCE_URL}@{FLA_RWKV7_REVISION}"
     )
+
+
+def test_root_runtime_group_pins_the_same_rwkv_rs_revisions() -> None:
+    requirements = _dependency_group_requirements(
+        PRODUCT_ROOT / "pyproject.toml",
+        "rwkv-hf",
+    )
+
+    _assert_exact_vcs_requirements(requirements)
 
 
 def test_standalone_wheel_metadata_retains_exact_runtime_revisions(

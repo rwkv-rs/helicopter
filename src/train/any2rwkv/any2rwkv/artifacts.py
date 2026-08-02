@@ -6,10 +6,9 @@ import os
 import platform
 import subprocess
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-
 
 REQUIRED_RUN_FILES = (
     "contract.lock.json",
@@ -58,17 +57,20 @@ def default_contract_lock(product_root: Path | None = None) -> dict[str, Any]:
     lock = {
         "schema_version": 1,
         "change": "qwen35-rwkv7-conversion",
-        "scope": "qwen3.5-text-only-to-native-rwkv7",
+        "scope": "qwen3.5-text-only-to-rwkv7",
         "layers": 60,
         "canonical": {
             "equation": "S_t = S_{t-1} A_t + B_t",
-            "native_update": "S= S*diag(decay) + (S*a)b^T + v*k^T; y=S*r",
-            "state_orientation": "batch,head,value,key",
-            "native_head_size_policy": (
+            "rwkv7_update": "S=diag(decay)*S + b*(a^T*S) + k*v^T; y=r^T*S",
+            "state_orientation": "batch,head,key,value",
+            "head_size_policy": (
                 "preserve source GDN key/value head count and head size; "
                 "Qwen3.5-2B resolves to 16x128"
             ),
-            "kernel": "rwkv-lm/RWKV7_STATEPASSING_CLAMPW_CUDA",
+            "operator": (
+                "transformers.models.rwkv7 through "
+                "fla.ops.rwkv7.chunk_rwkv7(provider=flash_rwkv)"
+            ),
             "gdn_condition": "Qwen3.5 head-scalar decay and normalized key with matching state/head geometry",
             "gdn_mapping": "w=d; a=-k; b=(d*beta)k; v'=beta*v; k'=k; r=q/sqrt(Dk)",
         },
@@ -97,7 +99,7 @@ def default_contract_lock(product_root: Path | None = None) -> dict[str, Any]:
         "inference": {
             "backend": "transformers",
             "loader": "AutoModelForCausalLM.from_pretrained",
-            "trust_remote_code": True,
+            "trust_remote_code": False,
             "full_chunked_logit_tolerance": "hash-bound numerical parity profile",
             "batch_isolation": True,
         },
@@ -207,8 +209,8 @@ def initialize_run(
     precision: str,
     command: list[str],
     product_root: Path,
-    rwkv_hf_sha: str,
-    rwkv_lm_sha: str,
+    rwkv_hf_sha: str | None = None,
+    rwkv_lm_sha: str | None = None,
 ) -> dict[str, Any]:
     source_path = source.get("path")
     if not isinstance(source_path, str) or not source_path:
@@ -217,16 +219,17 @@ def initialize_run(
     output.mkdir(parents=True, exist_ok=False)
     lock = default_contract_lock(product_root)
     write_json(output / "contract.lock.json", lock)
+    if (rwkv_hf_sha is None) != (rwkv_lm_sha is None):
+        raise ValueError("rwkv-hf and rwkv-lm revisions must be provided together")
     metadata = {
         "schema_version": 1,
         "run_id": run_id,
         "workspace": "feat-any2rwkv",
         "change": "qwen35-rwkv7-conversion",
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "status": "initialized",
         "source": source,
         "product_commit": git_sha(product_root),
-        "submodules": {"rwkv-hf": rwkv_hf_sha, "rwkv-lm": rwkv_lm_sha},
         "precision": precision,
         "wkv_mode": "fp32io16",
         "state_dtype": "fp32",
@@ -236,6 +239,11 @@ def initialize_run(
         "platform": platform.platform(),
         "contract_sha256": sha256_json(lock),
     }
+    if rwkv_hf_sha is not None and rwkv_lm_sha is not None:
+        metadata["submodules"] = {
+            "rwkv-hf": rwkv_hf_sha,
+            "rwkv-lm": rwkv_lm_sha,
+        }
     write_json(output / "metadata.json", metadata)
     return metadata
 

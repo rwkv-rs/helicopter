@@ -65,8 +65,9 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--recipe", required=True)
         command.add_argument("--output", required=True)
         command.add_argument("--precision", required=True, choices=("bf16", "fp32io16"))
-        command.add_argument("--rwkv-hf-sha", required=True)
-        command.add_argument("--rwkv-lm-sha", required=True)
+        if action != "preflight":
+            command.add_argument("--rwkv-hf-sha", required=True)
+            command.add_argument("--rwkv-lm-sha", required=True)
         command.add_argument("--contract")
         command.add_argument("--run-id")
         command.add_argument("--allow-proxy-layers", action="store_true")
@@ -148,8 +149,6 @@ def build_parser() -> argparse.ArgumentParser:
     loop_preflight.add_argument(
         "--precision", required=True, choices=("bf16", "fp32io16")
     )
-    loop_preflight.add_argument("--rwkv-hf-sha", required=True)
-    loop_preflight.add_argument("--rwkv-lm-sha", required=True)
     loop_preflight.add_argument("--allow-proxy-layers", action="store_true")
     loop_preflight.add_argument("--output", required=True)
     return parser
@@ -294,14 +293,8 @@ def run_preflight(args: argparse.Namespace) -> int:
         precision=args.precision,
         command=sys.argv,
         product_root=_product_root(),
-        rwkv_hf_sha=args.rwkv_hf_sha,
-        rwkv_lm_sha=args.rwkv_lm_sha,
     )
-    result = collect_preflight(
-        _product_root(),
-        expected_rwkv_hf_sha=args.rwkv_hf_sha,
-        expected_rwkv_lm_sha=args.rwkv_lm_sha,
-    )
+    result = collect_preflight()
     result["recipe"] = {
         "id": resolved.recipe.recipe_id,
         "source_adapter": resolved.source.adapter_id,
@@ -569,7 +562,6 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.action == "preflight-loop":
             result = collect_full_loop_preflight(
-                _product_root(),
                 recipe_id=args.recipe,
                 source_manifest_path=Path(args.source_manifest).resolve(),
                 source_path=Path(args.source).resolve(),
@@ -578,8 +570,6 @@ def main(argv: list[str] | None = None) -> int:
                 training_config_path=Path(args.training_config).resolve(),
                 lighteval_config_path=Path(args.lighteval_config).resolve(),
                 evalscope_config_path=Path(args.evalscope_config).resolve(),
-                expected_rwkv_hf_sha=args.rwkv_hf_sha,
-                expected_rwkv_lm_sha=args.rwkv_lm_sha,
                 allow_proxy_layers=args.allow_proxy_layers,
                 precision=args.precision,
             )

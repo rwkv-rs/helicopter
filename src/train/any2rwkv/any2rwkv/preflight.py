@@ -10,13 +10,10 @@ from typing import Any
 
 import torch
 
-from .artifacts import file_sha256, git_sha
+from .artifacts import file_sha256
 from .errors import ContractError
 
-RWKV_HF_REVISION = "15cd7d7e896efe852f6994a22c34fd14cb60c2c6"
-RWKV_HF_SOURCE_URL = "https://github.com/rwkv-rs/hf-adapter.git"
-RWKV_HF_REQUIREMENT = f"rwkv7-hf-adapter @ git+{RWKV_HF_SOURCE_URL}@{RWKV_HF_REVISION}"
-TRANSFORMERS_REVISION = "eb8248eb9083288e7769518077a1be9c0f7cf7b8"
+TRANSFORMERS_REVISION = "2696927df9363b5fa175076bb827ba4da2c4e581"
 TRANSFORMERS_SOURCE_URL = "https://github.com/rwkv-rs/transformers-rwkv.git"
 TRANSFORMERS_REQUIREMENT = (
     f"transformers @ git+{TRANSFORMERS_SOURCE_URL}@{TRANSFORMERS_REVISION}"
@@ -83,15 +80,6 @@ def _distribution_binding(
     }
 
 
-def _git_sha_or_none(path: Path) -> str | None:
-    if not (path / ".git").exists():
-        return None
-    try:
-        return git_sha(path)
-    except (OSError, RuntimeError, ValueError):
-        return None
-
-
 def _read_json_object(path: Path, *, label: str) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -102,48 +90,35 @@ def _read_json_object(path: Path, *, label: str) -> dict[str, Any]:
     return payload
 
 
-def collect_preflight(
-    product_root: Path,
-    *,
-    expected_rwkv_hf_sha: str,
-    expected_rwkv_lm_sha: str,
-) -> dict[str, Any]:
+def collect_preflight() -> dict[str, Any]:
     transformers_distribution = _distribution_binding(
         "transformers",
         expected_url=TRANSFORMERS_SOURCE_URL,
         expected_revision=TRANSFORMERS_REVISION,
     )
-    rwkv_hf_distribution = _distribution_binding(
-        "rwkv7-hf-adapter",
-        expected_url=RWKV_HF_SOURCE_URL,
-        expected_revision=RWKV_HF_REVISION,
-    )
-    rwkv_lm_checkout = (product_root / "src/train/rwkv-lm").resolve()
+    transformers_public_interface = False
+    runtime_provenance: dict[str, str] | None = None
+    runtime_provenance_error: str | None = None
     try:
-        rwkv_hf = importlib.import_module("rwkv7_hf")
-        rwkv_hf_file = getattr(rwkv_hf, "__file__", None)
-        rwkv_hf_module = Path(rwkv_hf_file).resolve() if rwkv_hf_file else None
-    except ImportError:
-        rwkv_hf_module = None
-    try:
-        from transformers.models.rwkv7.configuration_rwkv7 import Rwkv7Config
-        from transformers.models.rwkv7.modeling_rwkv7 import Rwkv7ForCausalLM
-
+        rwkv7 = importlib.import_module("transformers.models.rwkv7")
+        Rwkv7Config = rwkv7.Rwkv7Config
+        Rwkv7ForCausalLM = rwkv7.Rwkv7ForCausalLM
+        validate_runtime = rwkv7.validate_rwkv7_runtime_provenance
         transformers_public_interface = bool(
             Rwkv7Config.model_type == "rwkv7"
             and Rwkv7ForCausalLM.base_model_prefix == "model"
+            and callable(validate_runtime)
         )
-    except ImportError:
-        transformers_public_interface = False
-    rwkv_lm_commit = _git_sha_or_none(rwkv_lm_checkout)
-    kernel_loader = rwkv_lm_checkout / "src/infctx_kernel.py"
-    kernel_source = rwkv_lm_checkout / "cuda/rwkv7_statepassing_clampw.cu"
-    kernel_binding = rwkv_lm_checkout / "cuda/rwkv7_statepassing_pybind.cpp"
-    rwkv_hf_commit_matches = bool(
-        expected_rwkv_hf_sha == RWKV_HF_REVISION
-        and rwkv_hf_distribution["requirement_satisfied"]
-    )
-    rwkv_lm_commit_matches = rwkv_lm_commit == expected_rwkv_lm_sha
+        if not transformers_public_interface:
+            raise RuntimeError("Transformers does not expose the public RWKV7 contract")
+        runtime_provenance = validate_runtime()
+        if not isinstance(runtime_provenance, dict):
+            raise TypeError(
+                "validate_rwkv7_runtime_provenance() did not return a manifest"
+            )
+    except (AttributeError, ImportError, RuntimeError, TypeError) as error:
+        runtime_provenance = None
+        runtime_provenance_error = f"{type(error).__name__}: {error}"
     devices = []
     if torch.cuda.is_available():
         for index in range(torch.cuda.device_count()):
@@ -166,54 +141,25 @@ def collect_preflight(
             "cuda_available": torch.cuda.is_available(),
         },
         "cuda_devices": devices,
-        "rwkv_hf": {
-            "import_name": "rwkv7_hf",
-            "module_file": str(rwkv_hf_module) if rwkv_hf_module else None,
-            "distribution": rwkv_hf_distribution,
-            "requirement": RWKV_HF_REQUIREMENT,
-            "expected_commit": expected_rwkv_hf_sha,
-            "commit_matches": rwkv_hf_commit_matches,
-        },
-        "rwkv_lm": {
-            "checkout_commit": rwkv_lm_commit,
-            "expected_commit": expected_rwkv_lm_sha,
-            "commit_matches": rwkv_lm_commit_matches,
-            "kernel_loader": str(kernel_loader),
-            "kernel_loader_sha256": (
-                file_sha256(kernel_loader) if kernel_loader.is_file() else None
-            ),
-            "kernel_source": str(kernel_source),
-            "kernel_source_sha256": (
-                file_sha256(kernel_source) if kernel_source.is_file() else None
-            ),
-            "kernel_binding": str(kernel_binding),
-            "kernel_binding_sha256": (
-                file_sha256(kernel_binding) if kernel_binding.is_file() else None
-            ),
-            "loader": "any2rwkv.kernel.load_rwkv_lm_kernel",
-        },
         "transformers": {
             "distribution": transformers_distribution,
             "requirement": TRANSFORMERS_REQUIREMENT,
             "public_interface": transformers_public_interface,
+            "runtime_provenance": runtime_provenance,
+            "runtime_provenance_error": runtime_provenance_error,
             "requirement_satisfied": bool(
                 transformers_distribution["requirement_satisfied"]
                 and transformers_public_interface
+                and runtime_provenance is not None
             ),
-            "loader": "AutoModelForCausalLM.from_pretrained",
+            "loader": "transformers.models.rwkv7.validate_rwkv7_runtime_provenance",
             "trust_remote_code": False,
         },
         "passed": bool(
             torch.cuda.is_available()
-            and rwkv_hf_module is not None
-            and rwkv_hf_module.is_file()
-            and rwkv_hf_commit_matches
-            and rwkv_lm_commit_matches
-            and kernel_loader.is_file()
-            and kernel_source.is_file()
-            and kernel_binding.is_file()
             and transformers_distribution["requirement_satisfied"]
             and transformers_public_interface
+            and runtime_provenance is not None
         ),
     }
 
@@ -327,7 +273,6 @@ def _validate_prepared_data_manifest(
 
 
 def collect_full_loop_preflight(
-    product_root: Path,
     *,
     recipe_id: str,
     source_manifest_path: Path,
@@ -337,8 +282,6 @@ def collect_full_loop_preflight(
     training_config_path: Path,
     lighteval_config_path: Path,
     evalscope_config_path: Path,
-    expected_rwkv_hf_sha: str,
-    expected_rwkv_lm_sha: str,
     allow_proxy_layers: bool,
     precision: str,
 ) -> dict[str, Any]:
@@ -348,23 +291,15 @@ def collect_full_loop_preflight(
     from .source import verify_source
 
     blockers: list[str] = []
-    environment = collect_preflight(
-        product_root,
-        expected_rwkv_hf_sha=expected_rwkv_hf_sha,
-        expected_rwkv_lm_sha=expected_rwkv_lm_sha,
-    )
+    environment = collect_preflight()
     if not environment["transformers"]["requirement_satisfied"]:
         blockers.append(
             "transformers distribution does not satisfy exact requirement "
             f"{TRANSFORMERS_REQUIREMENT}: "
-            f"{environment['transformers']['distribution']}"
+            f"{environment['transformers']}"
         )
-    if not environment["rwkv_hf"]["commit_matches"]:
-        blockers.append("rwkv-hf backend is missing or at the wrong commit")
-    if not environment["rwkv_lm"]["commit_matches"]:
-        blockers.append("rwkv-lm backend is uninitialized or at the wrong commit")
-    if not environment["rwkv_lm"]["kernel_loader_sha256"]:
-        blockers.append("rwkv-lm kernel loader is missing")
+    if not environment["torch"]["cuda_available"]:
+        blockers.append("CUDA is unavailable for the Any-to-RWKV architecture conversion")
 
     source_result: dict[str, Any] | None = None
     try:
@@ -522,10 +457,7 @@ def collect_full_loop_preflight(
                 else None
             ),
         },
-        "backends": {
-            "rwkv_hf_commit": expected_rwkv_hf_sha,
-            "rwkv_lm_commit": expected_rwkv_lm_sha,
-        },
+        "runtime": environment["transformers"],
     }
     return {
         "schema_version": 1,

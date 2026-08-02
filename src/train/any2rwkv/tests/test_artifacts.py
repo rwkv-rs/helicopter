@@ -33,6 +33,25 @@ def test_cli_exposes_only_bf16_conversion_training_and_evaluation() -> None:
     assert "vllm" not in help_text
 
 
+def test_preflight_cli_uses_public_runtime_provenance_without_sibling_shas() -> None:
+    args = build_parser().parse_args(
+        [
+            "preflight",
+            "--source",
+            "/weights/source",
+            "--recipe",
+            "qwen35_to_rwkv7",
+            "--output",
+            "/runs/preflight",
+            "--precision",
+            "fp32io16",
+        ]
+    )
+
+    assert not hasattr(args, "rwkv_hf_sha")
+    assert not hasattr(args, "rwkv_lm_sha")
+
+
 def test_cli_exposes_formal_gqa_validation_as_an_explicit_stage() -> None:
     args = build_parser().parse_args(
         [

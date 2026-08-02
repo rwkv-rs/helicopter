@@ -183,7 +183,7 @@ requires-dist = [
     { name = "safetensors", specifier = ">=0.6.2" },
     { name = "tokenizers", specifier = ">=0.21.1" },
     { name = "torch", specifier = "==2.11.0" },
-    { name = "transformers", git = "https://github.com/rwkv-rs/transformers-rwkv.git?rev=eb8248eb9083288e7769518077a1be9c0f7cf7b8" },
+    { name = "transformers", git = "https://github.com/rwkv-rs/transformers-rwkv.git?rev=2696927df9363b5fa175076bb827ba4da2c4e581" },
     { name = "wandb", specifier = ">=0.28,<0.29" },
 ]
 
@@ -1878,7 +1878,7 @@ wheels = [
 [[package]]
 name = "transformers"
 version = "5.15.0.dev0"
-source = { git = "https://github.com/rwkv-rs/transformers-rwkv.git?rev=eb8248eb9083288e7769518077a1be9c0f7cf7b8#eb8248eb9083288e7769518077a1be9c0f7cf7b8" }
+source = { git = "https://github.com/rwkv-rs/transformers-rwkv.git?rev=2696927df9363b5fa175076bb827ba4da2c4e581#2696927df9363b5fa175076bb827ba4da2c4e581" }
 dependencies = [
     { name = "huggingface-hub" },
     { name = "numpy" },

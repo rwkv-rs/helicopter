@@ -7,12 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from any2rwkv.artifacts import git_sha
 from any2rwkv.checkpoint import read_checkpoint
 from any2rwkv.fixture import write_fixture
 from any2rwkv.preflight import (
-    RWKV_HF_REVISION,
-    RWKV_HF_SOURCE_URL,
     TRANSFORMERS_REVISION,
     TRANSFORMERS_SOURCE_URL,
     _distribution_binding,
@@ -23,62 +20,59 @@ from any2rwkv.preflight import (
 PRODUCT_ROOT = Path(__file__).resolve().parents[4]
 
 
-def test_preflight_fails_closed_for_explicitly_uninitialized_backend(
-    tmp_path: Path,
-) -> None:
-    product_root = tmp_path / "product"
-    (product_root / "src/train/rwkv-lm").mkdir(parents=True)
+def _exact_distribution(
+    name: str,
+    *,
+    expected_url: str,
+    expected_revision: str,
+) -> dict[str, object]:
+    return {
+        "name": name,
+        "version": "test",
+        "direct_url": expected_url,
+        "direct_url_error": None,
+        "vcs": "git",
+        "requested_revision": expected_revision,
+        "commit_id": expected_revision,
+        "expected_url": expected_url,
+        "expected_revision": expected_revision,
+        "source_matches": True,
+        "requested_revision_matches": True,
+        "revision_matches": True,
+        "requirement_satisfied": True,
+    }
 
-    result = collect_preflight(
-        product_root,
-        expected_rwkv_hf_sha="f" * 40,
-        expected_rwkv_lm_sha="0" * 40,
+
+def test_preflight_calls_public_transformers_rwkv7_provenance(monkeypatch) -> None:
+    calls = []
+    runtime_manifest = {
+        "repository": "https://github.com/rwkv-rs/fla-rwkv.git",
+        "revision": "a4a8aa98df6ec5322f194a80ec57363dd045adfc",
+        "flash_rwkv_revision": "866aafd2eed146b0eda1ce03444009ae030f89e3",
+    }
+    public_rwkv7 = SimpleNamespace(
+        Rwkv7Config=SimpleNamespace(model_type="rwkv7"),
+        Rwkv7ForCausalLM=SimpleNamespace(base_model_prefix="model"),
+        validate_rwkv7_runtime_provenance=lambda: (
+            calls.append("validated") or runtime_manifest
+        ),
     )
-
-    assert result["rwkv_lm"]["checkout_commit"] is None
-    assert result["rwkv_lm"]["commit_matches"] is False
-    assert result["rwkv_lm"]["kernel_loader_sha256"] is None
-    assert result["rwkv_lm"]["kernel_source_sha256"] is None
-    assert result["rwkv_lm"]["kernel_binding_sha256"] is None
-    assert result["passed"] is False
-
-
-def test_preflight_binds_exact_distributions_and_native_kernel_contract(
-    monkeypatch,
-) -> None:
-    rwkv_lm_sha = git_sha(PRODUCT_ROOT / "src/train/rwkv-lm")
-
-    def exact_distribution(name: str, *, expected_url: str, expected_revision: str):
-        return {
-            "name": name,
-            "version": "test",
-            "direct_url": expected_url,
-            "direct_url_error": None,
-            "vcs": "git",
-            "requested_revision": expected_revision,
-            "commit_id": expected_revision,
-            "expected_url": expected_url,
-            "expected_revision": expected_revision,
-            "source_matches": True,
-            "requested_revision_matches": True,
-            "revision_matches": True,
-            "requirement_satisfied": True,
-        }
-
     monkeypatch.setattr(
         "any2rwkv.preflight._distribution_binding",
-        exact_distribution,
+        _exact_distribution,
+    )
+    monkeypatch.setattr(
+        "any2rwkv.preflight.importlib.import_module",
+        lambda name: public_rwkv7
+        if name == "transformers.models.rwkv7"
+        else pytest.fail(f"unexpected import: {name}"),
     )
 
-    result = collect_preflight(
-        PRODUCT_ROOT,
-        expected_rwkv_hf_sha=RWKV_HF_REVISION,
-        expected_rwkv_lm_sha=rwkv_lm_sha,
-    )
+    result = collect_preflight()
 
-    assert result["rwkv_hf"]["commit_matches"] is True
-    assert result["rwkv_hf"]["distribution"]["expected_url"] == RWKV_HF_SOURCE_URL
-    assert result["rwkv_hf"]["distribution"]["commit_id"] == RWKV_HF_REVISION
+    assert calls == ["validated"]
+    assert "rwkv_hf" not in result
+    assert "rwkv_lm" not in result
     assert result["transformers"]["distribution"]["expected_url"] == (
         TRANSFORMERS_SOURCE_URL
     )
@@ -86,21 +80,38 @@ def test_preflight_binds_exact_distributions_and_native_kernel_contract(
         TRANSFORMERS_REVISION
     )
     assert result["transformers"]["public_interface"] is True
-    assert result["rwkv_lm"]["checkout_commit"] == rwkv_lm_sha
-    assert result["rwkv_lm"]["commit_matches"] is True
-    assert len(result["rwkv_lm"]["kernel_loader_sha256"]) == 64
-    assert len(result["rwkv_lm"]["kernel_source_sha256"]) == 64
-    assert len(result["rwkv_lm"]["kernel_binding_sha256"]) == 64
+    assert result["transformers"]["runtime_provenance"] == runtime_manifest
+    assert result["transformers"]["runtime_provenance_error"] is None
+    assert result["transformers"]["requirement_satisfied"] is True
 
 
-def test_preflight_rejects_a_stale_rwkv_lm_commit() -> None:
-    result = collect_preflight(
-        PRODUCT_ROOT,
-        expected_rwkv_hf_sha=git_sha(PRODUCT_ROOT / "src/train/rwkv-hf"),
-        expected_rwkv_lm_sha="0" * 40,
+def test_preflight_fails_closed_when_public_runtime_provenance_rejects(
+    monkeypatch,
+) -> None:
+    def reject_runtime() -> None:
+        raise RuntimeError("FlashRWKV revision provenance mismatch")
+
+    public_rwkv7 = SimpleNamespace(
+        Rwkv7Config=SimpleNamespace(model_type="rwkv7"),
+        Rwkv7ForCausalLM=SimpleNamespace(base_model_prefix="model"),
+        validate_rwkv7_runtime_provenance=reject_runtime,
+    )
+    monkeypatch.setattr(
+        "any2rwkv.preflight._distribution_binding",
+        _exact_distribution,
+    )
+    monkeypatch.setattr(
+        "any2rwkv.preflight.importlib.import_module",
+        lambda _name: public_rwkv7,
     )
 
-    assert result["rwkv_lm"]["commit_matches"] is False
+    result = collect_preflight()
+
+    assert result["transformers"]["runtime_provenance"] is None
+    assert "FlashRWKV revision provenance mismatch" in result["transformers"][
+        "runtime_provenance_error"
+    ]
+    assert result["transformers"]["requirement_satisfied"] is False
     assert result["passed"] is False
 
 
@@ -183,7 +194,18 @@ def test_distribution_binding_diagnoses_a_missing_distribution(monkeypatch) -> N
 
 def test_full_loop_preflight_reports_every_missing_gate(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
+    monkeypatch.setattr(
+        "any2rwkv.preflight.collect_preflight",
+        lambda: {
+            "torch": {"cuda_available": False},
+            "transformers": {
+                "distribution": {"direct_url_error": "not installed"},
+                "requirement_satisfied": False,
+            },
+        },
+    )
     source_manifest = tmp_path / "source.json"
     source_manifest.write_text(
         '{"remote_read_only_path":"/missing/frozen-source"}\n',
@@ -192,7 +214,6 @@ def test_full_loop_preflight_reports_every_missing_gate(
     raw_manifest = tmp_path / "raw.json"
     raw_manifest.write_text("{}\n", encoding="utf-8")
     result = collect_full_loop_preflight(
-        PRODUCT_ROOT,
         recipe_id="qwen35_to_rwkv7",
         source_manifest_path=source_manifest,
         source_path=Path("/missing/frozen-source"),
@@ -201,8 +222,6 @@ def test_full_loop_preflight_reports_every_missing_gate(
         training_config_path=tmp_path / "training.json",
         lighteval_config_path=tmp_path / "lighteval.toml",
         evalscope_config_path=tmp_path / "evalscope.yaml",
-        expected_rwkv_hf_sha=git_sha(PRODUCT_ROOT / "src/train/rwkv-hf"),
-        expected_rwkv_lm_sha="0" * 40,
         allow_proxy_layers=True,
         precision="fp32io16",
     )
@@ -210,7 +229,8 @@ def test_full_loop_preflight_reports_every_missing_gate(
     assert result["passed"] is False
     assert result["status"] == "blocked"
     blockers = "\n".join(result["blockers"])
-    assert "rwkv-lm backend is uninitialized or at the wrong commit" in blockers
+    assert "transformers distribution does not satisfy exact requirement" in blockers
+    assert "CUDA is unavailable for the Any-to-RWKV architecture conversion" in blockers
     assert "source:" in blockers
     assert "raw_data:" in blockers
     assert "training_config:" in blockers
@@ -280,7 +300,6 @@ def test_full_loop_preflight_accepts_portable_source_and_positive_world_size(
     )
 
     result = collect_full_loop_preflight(
-        PRODUCT_ROOT,
         recipe_id="qwen35_to_rwkv7",
         source_manifest_path=source_manifest,
         source_path=source,
@@ -289,8 +308,6 @@ def test_full_loop_preflight_accepts_portable_source_and_positive_world_size(
         training_config_path=training_config,
         lighteval_config_path=tmp_path / "lighteval.toml",
         evalscope_config_path=tmp_path / "evalscope.yaml",
-        expected_rwkv_hf_sha=git_sha(PRODUCT_ROOT / "src/train/rwkv-hf"),
-        expected_rwkv_lm_sha="0" * 40,
         allow_proxy_layers=True,
         precision="fp32io16",
     )

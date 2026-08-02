@@ -102,7 +102,7 @@ rwkv-hf = [
   "safetensors>=0.6.2",
   "tokenizers>=0.21.1",
   "torch==2.11.0",
-  "transformers>=5.5.3,<5.14,!=5.6.0",
+  "transformers @ git+https://github.com/rwkv-rs/transformers-rwkv.git@2696927df9363b5fa175076bb827ba4da2c4e581",
   "wandb>=0.28,<0.29",
 ]
 
