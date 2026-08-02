@@ -13,12 +13,6 @@ from .contracts import (
     TargetArchitectureAdapter,
 )
 from .experiment_tracking import ExperimentTracker, write_experiment_report
-from .layer_major_contract import (
-    LayerMajorResumeContract,
-    activate_layer_major_training,
-    assert_layer_major_isolation,
-    canonical_digest,
-)
 from .mapping_contract import (
     CalibrationDevelopmentFinalSplit,
     CandidateSelection,
@@ -29,6 +23,12 @@ from .mapping_contract import (
 from .registry import AdapterRecipeRegistry, ResolvedRecipe
 
 if TYPE_CHECKING:
+    from .layer_major_contract import (
+        LayerMajorResumeContract,
+        activate_layer_major_training,
+        assert_layer_major_isolation,
+        canonical_digest,
+    )
     from .layer_input_cache import (
         LayerInputBatch,
         LayerInputCacheEstimate,
@@ -48,6 +48,10 @@ if TYPE_CHECKING:
 
 
 _LAZY_EXPORT_MODULES = {
+    "LayerMajorResumeContract": ".layer_major_contract",
+    "activate_layer_major_training": ".layer_major_contract",
+    "assert_layer_major_isolation": ".layer_major_contract",
+    "canonical_digest": ".layer_major_contract",
     "LayerInputBatch": ".layer_input_cache",
     "LayerInputCacheEstimate": ".layer_input_cache",
     "LayerInputCacheReader": ".layer_input_cache",
