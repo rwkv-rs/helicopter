@@ -33,7 +33,7 @@ from .migration_init import (
 )
 from .oracle import run_gdn_oracle
 from .p0_runner import P0ValidationInputs, run_p0_validation
-from .preflight import collect_preflight
+from .preflight import collect_full_loop_preflight, collect_preflight
 from .recipes import resolve_recipe
 from .source import fetch_source, verify_source
 from .target import build_zero_step_ledger
@@ -118,6 +118,25 @@ def build_parser() -> argparse.ArgumentParser:
         source_command.add_argument("--manifest", required=True)
         source_command.add_argument("--destination", required=True)
         source_command.add_argument("--scale-gate")
+    loop_preflight = subparsers.add_parser(
+        "preflight-loop",
+        help="bind all real source, data, backend, training and evaluator inputs",
+    )
+    loop_preflight.add_argument("--recipe", required=True)
+    loop_preflight.add_argument("--source-manifest", required=True)
+    loop_preflight.add_argument("--source", required=True)
+    loop_preflight.add_argument("--raw-data-manifest", required=True)
+    loop_preflight.add_argument("--dataset-manifest", required=True)
+    loop_preflight.add_argument("--training-config", required=True)
+    loop_preflight.add_argument("--lighteval-config", required=True)
+    loop_preflight.add_argument("--evalscope-config", required=True)
+    loop_preflight.add_argument(
+        "--precision", required=True, choices=("bf16", "fp32io16")
+    )
+    loop_preflight.add_argument("--rwkv-hf-sha", required=True)
+    loop_preflight.add_argument("--rwkv-lm-sha", required=True)
+    loop_preflight.add_argument("--allow-proxy-layers", action="store_true")
+    loop_preflight.add_argument("--output", required=True)
     return parser
 
 
@@ -532,6 +551,25 @@ def main(argv: list[str] | None = None) -> int:
             result = function(Path(args.manifest), Path(args.destination), **kwargs)
             print(json.dumps(result, sort_keys=True))
             return 0
+        if args.action == "preflight-loop":
+            result = collect_full_loop_preflight(
+                _product_root(),
+                recipe_id=args.recipe,
+                source_manifest_path=Path(args.source_manifest).resolve(),
+                source_path=Path(args.source).resolve(),
+                raw_data_manifest_path=Path(args.raw_data_manifest).resolve(),
+                dataset_manifest_path=Path(args.dataset_manifest).resolve(),
+                training_config_path=Path(args.training_config).resolve(),
+                lighteval_config_path=Path(args.lighteval_config).resolve(),
+                evalscope_config_path=Path(args.evalscope_config).resolve(),
+                expected_rwkv_hf_sha=args.rwkv_hf_sha,
+                expected_rwkv_lm_sha=args.rwkv_lm_sha,
+                allow_proxy_layers=args.allow_proxy_layers,
+                precision=args.precision,
+            )
+            write_json(Path(args.output).resolve(), result)
+            print(json.dumps(result, sort_keys=True))
+            return 0 if result["passed"] else 1
         if args.action == "preflight":
             return run_preflight(args)
         if args.action == "convert":
