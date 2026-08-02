@@ -4,7 +4,6 @@ import importlib
 import importlib.metadata
 import json
 import platform
-import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -14,31 +13,74 @@ import torch
 from .artifacts import file_sha256, git_sha
 from .errors import ContractError
 
-TRANSFORMERS_REQUIREMENT = ">=5.5.3,<5.14,!=5.6.0"
-_TRANSFORMERS_VERSION_RE = re.compile(
-    r"^(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)(?P<suffix>.*)$"
+RWKV_HF_REVISION = "15cd7d7e896efe852f6994a22c34fd14cb60c2c6"
+RWKV_HF_SOURCE_URL = "https://github.com/rwkv-rs/hf-adapter.git"
+RWKV_HF_REQUIREMENT = f"rwkv7-hf-adapter @ git+{RWKV_HF_SOURCE_URL}@{RWKV_HF_REVISION}"
+TRANSFORMERS_REVISION = "eb8248eb9083288e7769518077a1be9c0f7cf7b8"
+TRANSFORMERS_SOURCE_URL = "https://github.com/rwkv-rs/transformers-rwkv.git"
+TRANSFORMERS_REQUIREMENT = (
+    f"transformers @ git+{TRANSFORMERS_SOURCE_URL}@{TRANSFORMERS_REVISION}"
 )
 
 
-def _distribution_version(name: str) -> str | None:
+def _distribution_binding(
+    name: str,
+    *,
+    expected_url: str,
+    expected_revision: str,
+) -> dict[str, Any]:
+    direct_url_error: str | None = None
     try:
-        return importlib.metadata.version(name)
+        distribution = importlib.metadata.distribution(name)
     except importlib.metadata.PackageNotFoundError:
-        return None
-
-
-def transformers_version_supported(version: str | None) -> bool:
-    """Implement the package's narrow Transformers contract without guessing."""
-    if version is None:
-        return False
-    match = _TRANSFORMERS_VERSION_RE.match(version)
-    if match is None:
-        return False
-    parsed = tuple(int(match.group(name)) for name in ("major", "minor", "patch"))
-    suffix = match.group("suffix")
-    if parsed == (5, 5, 3) and suffix.startswith(".dev"):
-        return False
-    return (5, 5, 3) <= parsed < (5, 14, 0) and parsed != (5, 6, 0)
+        distribution = None
+        direct_url_error = "distribution is not installed"
+    direct_url: dict[str, Any] = {}
+    if distribution is not None:
+        raw_direct_url = distribution.read_text("direct_url.json")
+        if raw_direct_url:
+            try:
+                decoded = json.loads(raw_direct_url)
+                if isinstance(decoded, dict):
+                    direct_url = decoded
+                else:
+                    direct_url_error = "direct_url.json is not a JSON object"
+            except json.JSONDecodeError as error:
+                direct_url_error = str(error)
+        else:
+            direct_url_error = "direct_url.json is missing"
+    vcs_info = direct_url.get("vcs_info")
+    if not isinstance(vcs_info, dict):
+        vcs_info = {}
+    actual_url = direct_url.get("url")
+    commit_id = vcs_info.get("commit_id")
+    requested_revision = vcs_info.get("requested_revision")
+    vcs = vcs_info.get("vcs")
+    source_matches = actual_url == expected_url
+    requested_revision_matches = requested_revision == expected_revision
+    revision_matches = commit_id == expected_revision
+    return {
+        "name": name,
+        "version": distribution.version if distribution is not None else None,
+        "direct_url": actual_url,
+        "direct_url_error": direct_url_error,
+        "vcs": vcs,
+        "requested_revision": requested_revision,
+        "commit_id": commit_id,
+        "expected_url": expected_url,
+        "expected_revision": expected_revision,
+        "source_matches": source_matches,
+        "requested_revision_matches": requested_revision_matches,
+        "revision_matches": revision_matches,
+        "requirement_satisfied": bool(
+            distribution is not None
+            and direct_url_error is None
+            and vcs == "git"
+            and source_matches
+            and requested_revision_matches
+            and revision_matches
+        ),
+    }
 
 
 def _git_sha_or_none(path: Path) -> str | None:
@@ -66,9 +108,16 @@ def collect_preflight(
     expected_rwkv_hf_sha: str,
     expected_rwkv_lm_sha: str,
 ) -> dict[str, Any]:
-    transformers_version = _distribution_version("transformers")
-    transformers_supported = transformers_version_supported(transformers_version)
-    rwkv_hf_checkout = (product_root / "src/train/rwkv-hf").resolve()
+    transformers_distribution = _distribution_binding(
+        "transformers",
+        expected_url=TRANSFORMERS_SOURCE_URL,
+        expected_revision=TRANSFORMERS_REVISION,
+    )
+    rwkv_hf_distribution = _distribution_binding(
+        "rwkv7-hf-adapter",
+        expected_url=RWKV_HF_SOURCE_URL,
+        expected_revision=RWKV_HF_REVISION,
+    )
     rwkv_lm_checkout = (product_root / "src/train/rwkv-lm").resolve()
     try:
         rwkv_hf = importlib.import_module("rwkv7_hf")
@@ -76,15 +125,24 @@ def collect_preflight(
         rwkv_hf_module = Path(rwkv_hf_file).resolve() if rwkv_hf_file else None
     except ImportError:
         rwkv_hf_module = None
-    rwkv_hf_commit = _git_sha_or_none(rwkv_hf_checkout)
+    try:
+        from transformers.models.rwkv7.configuration_rwkv7 import Rwkv7Config
+        from transformers.models.rwkv7.modeling_rwkv7 import Rwkv7ForCausalLM
+
+        transformers_public_interface = bool(
+            Rwkv7Config.model_type == "rwkv7"
+            and Rwkv7ForCausalLM.base_model_prefix == "model"
+        )
+    except ImportError:
+        transformers_public_interface = False
     rwkv_lm_commit = _git_sha_or_none(rwkv_lm_checkout)
     kernel_loader = rwkv_lm_checkout / "src/infctx_kernel.py"
     kernel_source = rwkv_lm_checkout / "cuda/rwkv7_statepassing_clampw.cu"
     kernel_binding = rwkv_lm_checkout / "cuda/rwkv7_statepassing_pybind.cpp"
-    rwkv_hf_module_in_checkout = bool(
-        rwkv_hf_module is not None and rwkv_hf_module.is_relative_to(rwkv_hf_checkout)
+    rwkv_hf_commit_matches = bool(
+        expected_rwkv_hf_sha == RWKV_HF_REVISION
+        and rwkv_hf_distribution["requirement_satisfied"]
     )
-    rwkv_hf_commit_matches = rwkv_hf_commit == expected_rwkv_hf_sha
     rwkv_lm_commit_matches = rwkv_lm_commit == expected_rwkv_lm_sha
     devices = []
     if torch.cuda.is_available():
@@ -111,9 +169,8 @@ def collect_preflight(
         "rwkv_hf": {
             "import_name": "rwkv7_hf",
             "module_file": str(rwkv_hf_module) if rwkv_hf_module else None,
-            "module_in_checkout": rwkv_hf_module_in_checkout,
-            "distribution_version": _distribution_version("rwkv-hf-adapter"),
-            "checkout_commit": rwkv_hf_commit,
+            "distribution": rwkv_hf_distribution,
+            "requirement": RWKV_HF_REQUIREMENT,
             "expected_commit": expected_rwkv_hf_sha,
             "commit_matches": rwkv_hf_commit_matches,
         },
@@ -136,23 +193,27 @@ def collect_preflight(
             "loader": "any2rwkv.kernel.load_rwkv_lm_kernel",
         },
         "transformers": {
-            "transformers_version": transformers_version,
+            "distribution": transformers_distribution,
             "requirement": TRANSFORMERS_REQUIREMENT,
-            "requirement_satisfied": transformers_supported,
+            "public_interface": transformers_public_interface,
+            "requirement_satisfied": bool(
+                transformers_distribution["requirement_satisfied"]
+                and transformers_public_interface
+            ),
             "loader": "AutoModelForCausalLM.from_pretrained",
-            "trust_remote_code": True,
+            "trust_remote_code": False,
         },
         "passed": bool(
             torch.cuda.is_available()
             and rwkv_hf_module is not None
             and rwkv_hf_module.is_file()
-            and rwkv_hf_module_in_checkout
             and rwkv_hf_commit_matches
             and rwkv_lm_commit_matches
             and kernel_loader.is_file()
             and kernel_source.is_file()
             and kernel_binding.is_file()
-            and transformers_supported
+            and transformers_distribution["requirement_satisfied"]
+            and transformers_public_interface
         ),
     }
 
@@ -294,9 +355,9 @@ def collect_full_loop_preflight(
     )
     if not environment["transformers"]["requirement_satisfied"]:
         blockers.append(
-            "transformers version violates "
+            "transformers distribution does not satisfy exact requirement "
             f"{TRANSFORMERS_REQUIREMENT}: "
-            f"{environment['transformers']['transformers_version']}"
+            f"{environment['transformers']['distribution']}"
         )
     if not environment["rwkv_hf"]["commit_matches"]:
         blockers.append("rwkv-hf backend is missing or at the wrong commit")

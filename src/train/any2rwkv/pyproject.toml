@@ -12,20 +12,17 @@ dependencies = [
   "datasets>=5.0.0",
   "flash-linear-attention==0.5.1",
   "huggingface-hub",
-    "numpy>=2.0.0",
-  "rwkv7-hf-adapter==0.5.0",
+  "numpy>=2.0.0",
+  "rwkv7-hf-adapter @ git+https://github.com/rwkv-rs/hf-adapter.git@15cd7d7e896efe852f6994a22c34fd14cb60c2c6",
   "safetensors>=0.6.2",
   "tokenizers>=0.21.1",
   "torch==2.11.0",
-  "transformers>=5.5.3,<5.14,!=5.6.0",
+  "transformers @ git+https://github.com/rwkv-rs/transformers-rwkv.git@eb8248eb9083288e7769518077a1be9c0f7cf7b8",
   "wandb>=0.28,<0.29",
 ]
 
 [project.scripts]
 any2rwkv = "any2rwkv.cli:main"
-
-[tool.uv.sources]
-rwkv7-hf-adapter = { path = "../rwkv-hf", editable = true }
 
 [[tool.uv.index]]
 name = "tuna"

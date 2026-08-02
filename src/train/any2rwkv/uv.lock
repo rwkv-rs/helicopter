@@ -180,12 +180,12 @@ requires-dist = [
     { name = "datasets", specifier = ">=5.0.0" },
     { name = "flash-linear-attention", specifier = "==0.5.1" },
     { name = "huggingface-hub" },
-    { name = "numpy", specifier = ">=2.0.0,<2.3" },
-    { name = "rwkv7-hf-adapter", editable = "../rwkv-hf" },
+    { name = "numpy", specifier = ">=2.0.0" },
+    { name = "rwkv7-hf-adapter", git = "https://github.com/rwkv-rs/hf-adapter.git?rev=15cd7d7e896efe852f6994a22c34fd14cb60c2c6" },
     { name = "safetensors", specifier = ">=0.6.2" },
     { name = "tokenizers", specifier = ">=0.21.1" },
     { name = "torch", specifier = "==2.11.0" },
-    { name = "transformers", specifier = ">=5.5.3,!=5.6.0,<5.14" },
+    { name = "transformers", git = "https://github.com/rwkv-rs/transformers-rwkv.git?rev=eb8248eb9083288e7769518077a1be9c0f7cf7b8" },
     { name = "wandb", specifier = ">=0.28,<0.29" },
 ]
 
@@ -1726,40 +1726,12 @@ wheels = [
 [[package]]
 name = "rwkv7-hf-adapter"
 version = "0.5.0"
-source = { editable = "../rwkv-hf" }
+source = { git = "https://github.com/rwkv-rs/hf-adapter.git?rev=15cd7d7e896efe852f6994a22c34fd14cb60c2c6#15cd7d7e896efe852f6994a22c34fd14cb60c2c6" }
 dependencies = [
     { name = "safetensors" },
     { name = "torch" },
     { name = "transformers" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "accelerate", marker = "extra == 'test'" },
-    { name = "accelerate", marker = "extra == 'train'" },
-    { name = "bitsandbytes", marker = "extra == 'quant'" },
-    { name = "datasets", marker = "extra == 'test'" },
-    { name = "datasets", marker = "extra == 'train'" },
-    { name = "deepspeed", marker = "extra == 'train'" },
-    { name = "flash-linear-attention", marker = "extra == 'cuda'" },
-    { name = "flash-linear-attention", marker = "extra == 'fla'" },
-    { name = "mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'mlx'" },
-    { name = "mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'test'" },
-    { name = "numpy", marker = "extra == 'test'" },
-    { name = "peft", marker = "extra == 'test'" },
-    { name = "peft", marker = "extra == 'train'" },
-    { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0" },
-    { name = "safetensors" },
-    { name = "tomli", marker = "python_full_version < '3.11' and extra == 'test'", specifier = ">=2.0" },
-    { name = "torch" },
-    { name = "torchao", marker = "sys_platform == 'linux' and extra == 'torchao'" },
-    { name = "transformers" },
-    { name = "triton", marker = "sys_platform == 'linux' and extra == 'cuda'", specifier = ">=3.3.0" },
-    { name = "triton", marker = "sys_platform == 'linux' and extra == 'quant'", specifier = ">=3.3.0" },
-    { name = "trl", marker = "extra == 'test'" },
-    { name = "trl", marker = "extra == 'train'" },
-]
-provides-extras = ["fla", "cuda", "test", "train", "quant", "torchao", "mlx"]
 
 [[package]]
 name = "safetensors"
@@ -1920,8 +1892,8 @@ wheels = [
 
 [[package]]
 name = "transformers"
-version = "5.13.1"
-source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
+version = "5.15.0.dev0"
+source = { git = "https://github.com/rwkv-rs/transformers-rwkv.git?rev=eb8248eb9083288e7769518077a1be9c0f7cf7b8#eb8248eb9083288e7769518077a1be9c0f7cf7b8" }
 dependencies = [
     { name = "huggingface-hub" },
     { name = "numpy" },
@@ -1932,10 +1904,6 @@ dependencies = [
     { name = "tokenizers" },
     { name = "tqdm" },
     { name = "typer" },
-]
-sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/6e/f7/418169401560cec2b61512e6bf37b0cfb4c8e27700cfa868a1de073cb65d/transformers-5.13.1.tar.gz", hash = "sha256:1e2452d6778a7482158df5d5dacf6bf775d5b2fdcfce33caaf7f6b0e5f3e3397", size = 9196891, upload-time = "2026-07-11T09:15:50.845Z" }
-wheels = [
-    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/29/47/54eacf96b5c835bbd6ca631aa2740e7705ed63d9e3a8afd2d2cc6d09cae5/transformers-5.13.1-py3-none-any.whl", hash = "sha256:53f0ea8aa397e29244c2377ba981bcaf0c87adcf44fbdd447ef6306522afcacd", size = 11503977, upload-time = "2026-07-11T09:15:46.801Z" },
 ]
 
 [[package]]
